@@ -1,0 +1,17 @@
+# Normalize line endings: LF in repo and working tree
+* text=auto eol=lf
+
+# Language-aware diffs
+*.py text diff=python
+*.md text diff=markdown
+
+# Binary files — never diff or normalize
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.sqlite binary
+*.db binary
