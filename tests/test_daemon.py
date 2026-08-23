@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import sidecar.daemon as daemon_module
 from sidecar import bus
 from sidecar.adapters.base import Adapter
 from sidecar.adapters.cursor import CursorAdapter
@@ -147,6 +148,183 @@ def make_session(
         title="fake session",
         status=status,
     )
+
+
+class DaemonValidationTests(unittest.TestCase):
+    def test_runtime_paths_bounds_and_http_ports_are_validated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with mock.patch.dict(
+                os.environ,
+                {daemon_module.RUNTIME_ENV: "$HOME/custom-sidecar"},
+            ):
+                self.assertEqual(
+                    Path(os.path.expandvars("$HOME/custom-sidecar")).expanduser(),
+                    daemon_module.default_runtime_dir(),
+                )
+
+            invalid = (
+                {"active_interval": 0},
+                {"idle_interval": 2, "max_idle_interval": 1},
+                {"idle_backoff": 0.5},
+                {"client_timeout": 0},
+                {"request_bytes": 0},
+                {"shutdown_timeout": "invalid"},
+                {"shutdown_timeout": float("inf")},
+                {"tail_recent_seconds": -1},
+                {"max_event_polls": 0},
+                {"http_port": True},
+                {"http_port": -1},
+                {"http_port": 65536},
+            )
+            for arguments in invalid:
+                with self.subTest(arguments=arguments):
+                    with self.assertRaises(ValueError):
+                        SidecarDaemon(runtime_dir=root, **arguments)
+
+            socket_path = root / "nested" / "sidecar.sock"
+            daemon = SidecarDaemon(socket_path=socket_path)
+            self.assertEqual(socket_path.parent, daemon.runtime_dir)
+            self.assertEqual(socket_path, daemon.socket_path)
+
+    def test_lifecycle_helpers_report_bounded_errors_and_http_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=Path(temporary),
+                shutdown_timeout=0.1,
+            )
+            self.assertGreater(daemon.current_interval, 0)
+            self.assertEqual([], daemon.sessions)
+            self.assertEqual([], daemon.scan_errors)
+            self.assertEqual([], daemon.tail_errors)
+            self.assertIsNone(daemon.shutdown_diagnostic)
+            self.assertEqual({"enabled": False}, daemon._http_ping_payload())
+            daemon._http_bound_port = 43123
+            self.assertEqual(
+                {"enabled": True, "host": "127.0.0.1", "port": 43123},
+                daemon._http_ping_payload(),
+            )
+            self.assertEqual(
+                {"ok": False, "error": {"code": "bad", "message": "request"}},
+                daemon._error("bad", "request"),
+            )
+            self.assertEqual("safe.code-1", daemon._safe_log_error_code("safe.code-1"))
+            for value in (None, "", "../unsafe", "x" * 129):
+                self.assertEqual("log_error", daemon._safe_log_error_code(value))
+
+            with mock.patch("sidecar.daemon.sys.stderr", new=object()):
+                daemon._record_log_error("../unsafe")
+                daemon._record_log_error("ignored-second-error")
+            self.assertEqual("log_error", daemon.log_error)
+            self.assertIn("daemon log unavailable", daemon.shutdown_diagnostic)
+            self.assertEqual("log_error", daemon._status_response()["diagnostics"][0]["code"])
+
+            with self.assertRaises(ValueError):
+                daemon.stop(timeout="invalid")
+            with self.assertRaises(ValueError):
+                daemon.stop(timeout=float("nan"))
+            self.assertFalse(daemon._wait_for_stop(0, None))
+            external_stop = threading.Event()
+            external_stop.set()
+            self.assertTrue(daemon._wait_for_stop(1, external_stop))
+
+            failing_logger = mock.Mock()
+            failing_logger.append.side_effect = OSError("write failed")
+            failing_logger.error_code = "disk_full"
+            daemon._daemon_log = failing_logger
+            daemon._logging_disabled = False
+            with mock.patch.object(daemon, "_record_log_error") as record_error:
+                daemon._log_event("event", durable=True)
+            self.assertTrue(daemon._logging_disabled)
+            record_error.assert_called_once_with("disk_full")
+
+            failing_logger.close.side_effect = OSError("close failed")
+            daemon._daemon_log = failing_logger
+            with mock.patch.object(daemon, "_record_log_error") as record_error:
+                daemon._close_daemon_log()
+            record_error.assert_called_once_with("log_close_failed")
+
+            self.assertTrue(daemon._claim_log_diagnostic(("kind", "one")))
+            self.assertFalse(daemon._claim_log_diagnostic(("kind", "one")))
+            with mock.patch.object(daemon, "_log_event") as log_event:
+                daemon._log_scan_errors(
+                    [{"adapter": "fake", "stage": "discover", "exception_type": "Boom"}]
+                )
+                daemon._log_tail_errors(
+                    [{"agent": "fake", "session_id": "one", "code": "read"}]
+                )
+            self.assertEqual(2, log_event.call_count)
+
+    def test_http_close_success_failure_and_json_wire_encoding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=Path(temporary),
+            )
+            self.assertTrue(daemon._close_http_server())
+
+            healthy = mock.Mock()
+            daemon._http_server = healthy
+            daemon._http_bound_port = 1
+            self.assertTrue(daemon._close_http_server())
+            healthy.close.assert_called_once_with()
+            self.assertIsNone(daemon._http_server)
+
+            broken = mock.Mock()
+            broken.close.side_effect = RuntimeError("close failed")
+            daemon._http_server = broken
+            with mock.patch.object(daemon, "_log_event") as log_event:
+                self.assertFalse(daemon._close_http_server())
+            self.assertTrue(daemon.shutdown_timed_out)
+            log_event.assert_called_once()
+
+            connection = mock.Mock()
+            daemon._write_json(connection, {"value": Path("/safe")})
+            payload = connection.sendall.call_args.args[0]
+            self.assertEqual({"value": "/safe"}, json.loads(payload))
+
+            broken_client = mock.Mock()
+            broken_client.shutdown.side_effect = OSError("shutdown failed")
+            broken_client.close.side_effect = OSError("close failed")
+            daemon._client_sockets.add(broken_client)
+            daemon._close_clients()
+            broken_client.shutdown.assert_called_once()
+            broken_client.close.assert_called_once()
+            daemon._join_scan_thread()
+            daemon._remove_owned_paths()
+
+    def test_client_protocol_read_size_type_and_disconnect_failures_are_bounded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=Path(temporary),
+                request_bytes=16,
+            )
+
+            def handle(reads, close_error=False):
+                connection = mock.MagicMock()
+                stream = mock.Mock()
+                stream.readline.side_effect = reads
+                if close_error:
+                    stream.close.side_effect = OSError("close failed")
+                connection.makefile.return_value = stream
+                daemon._handle_client(connection)
+                return connection
+
+            handle([OSError("read failed")])
+            oversized = handle([b"x" * 17])
+            self.assertTrue(oversized.sendall.called)
+            non_object = handle([b"[]\n", b""], close_error=True)
+            response = json.loads(non_object.sendall.call_args_list[0].args[0])
+            self.assertEqual("invalid_request", response["error"]["code"])
+
+            subscription = mock.Mock()
+            daemon.event_bus.subscribe = mock.Mock(return_value=subscription)
+            disconnected = mock.Mock()
+            disconnected.sendall.side_effect = OSError("disconnected")
+            daemon._serve_subscription(disconnected)
+            subscription.close.assert_called_once_with()
 
 
 class DaemonIntegrationTests(unittest.TestCase):

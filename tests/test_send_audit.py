@@ -167,6 +167,247 @@ class SendAuditStoreTests(unittest.TestCase):
                 if invalid:
                     self.assertNotIn(str(invalid), str(raised.exception))
 
+    def test_identity_hashing_covers_scalar_sequences_and_rejects_unsafe_values(self):
+        values = [
+            None,
+            True,
+            False,
+            42,
+            -7,
+            1.25,
+            "multilingual-雪",
+            b"bytes",
+            ("nested", [1, 2]),
+        ]
+        first = hashlib.sha256()
+        second = hashlib.sha256()
+        for value in values:
+            audit_module._hash_value(first, value)
+            audit_module._hash_value(second, value)
+        self.assertEqual(first.digest(), second.digest())
+
+        for invalid in (object(), "\ud800", [[[[[[[[[[None]]]]]]]]]]):
+            with self.subTest(invalid_type=type(invalid).__name__):
+                with self.assertRaises(AuditError) as raised:
+                    audit_module._hash_value(hashlib.sha256(), invalid)
+                self.assertEqual("audit_error", raised.exception.code)
+
+    def test_identity_and_record_depth_validation_fail_closed(self):
+        valid = {
+            "agent": "claude",
+            "session_id": "session",
+            "project": "/project",
+            "executable_basename": "claude",
+            "confirmation_mode": "allow_write",
+            "message": b"message",
+        }
+        invalid_updates = (
+            {"agent": "INVALID AGENT"},
+            {"session_id": ""},
+            {"project": ""},
+            {"executable_basename": "../claude"},
+            {"confirmation_mode": "implicit"},
+            {"message": "not-bytes"},
+        )
+        for update in invalid_updates:
+            with self.subTest(update=update):
+                with self.assertRaises(AuditError) as raised:
+                    make_audit_identity(**{**valid, **update})
+                self.assertEqual("audit_error", raised.exception.code)
+
+        with self.assertRaises(AuditError) as raised:
+            audit_module._record_depth({1: "non-string-key"})
+        self.assertEqual("audit_corrupt", raised.exception.code)
+        with self.assertRaises(AuditError) as raised:
+            audit_module._record_depth([[[[[[[[[[[None]]]]]]]]]]])
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+    def test_low_level_encoding_and_filesystem_failures_are_typed(self):
+        self.assertEqual(
+            "unsafe_audit",
+            audit_module._translate_filesystem_error(
+                OSError(audit_module.errno.ELOOP, "loop")
+            ).code,
+        )
+        unsafe_lock = RuntimeError("unsafe")
+        unsafe_lock.code = "unsafe_lock"
+        self.assertEqual(
+            "unsafe_audit",
+            audit_module._translate_filesystem_error(unsafe_lock).code,
+        )
+        self.assertEqual(
+            "audit_error",
+            audit_module._translate_filesystem_error(OSError(5, "io")).code,
+        )
+
+        malformed_payloads = (
+            b"{}",
+            b"\n",
+            b"\xff\n",
+            b'{"duplicate":1,"duplicate":2}\n',
+        )
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(AuditError) as raised:
+                    audit_module._parse_file(payload)
+                self.assertEqual("audit_corrupt", raised.exception.code)
+
+        with self.assertRaises(AuditError) as raised:
+            audit_module._encoded_record({"unsupported": object()})
+        self.assertEqual("audit_error", raised.exception.code)
+        with self.assertRaises(AuditError) as raised:
+            audit_module._encoded_record(
+                {"oversized": "x" * audit_module.MAX_AUDIT_LINE_BYTES}
+            )
+        self.assertEqual("audit_error", raised.exception.code)
+        with mock.patch("sidecar.send_audit.os.write", return_value=0):
+            with self.assertRaises(OSError):
+                audit_module._write_all(1, b"payload")
+
+        path = self.root / "descriptor"
+        path.write_bytes(b"payload")
+        descriptor = os.open(str(path), os.O_RDONLY)
+        try:
+            with self.assertRaises(AuditError) as raised:
+                audit_module._read_descriptor(descriptor, 1)
+            self.assertEqual("audit_corrupt", raised.exception.code)
+        finally:
+            os.close(descriptor)
+
+        helpers = mock.Mock()
+        with mock.patch("sidecar.send_audit._secure_helpers", return_value=helpers):
+            helpers._validate_lock_file.side_effect = AuditError("unsafe_audit")
+            with self.assertRaises(AuditError) as raised:
+                audit_module._validate_named_file(1, "audit", 2)
+            self.assertEqual("unsafe_audit", raised.exception.code)
+            helpers._validate_lock_file.side_effect = OSError(
+                audit_module.errno.EIO,
+                "validation failed",
+            )
+            with self.assertRaises(AuditError) as raised:
+                audit_module._validate_named_file(1, "audit", 2)
+            self.assertEqual("audit_error", raised.exception.code)
+
+        path = self.root / "short-read"
+        path.write_bytes(b"payload")
+        descriptor = os.open(str(path), os.O_RDONLY)
+        try:
+            with mock.patch(
+                "sidecar.send_audit._validate_named_file"
+            ), mock.patch("sidecar.send_audit.os.read", return_value=b""):
+                with self.assertRaises(AuditError) as raised:
+                    audit_module._read_file(1, "audit", descriptor)
+                self.assertEqual("audit_corrupt", raised.exception.code)
+        finally:
+            os.close(descriptor)
+
+    def test_record_and_marker_schema_semantics_reject_inconsistent_states(self):
+        with self.assertRaises(ValueError):
+            AuditError("not-a-public-code")
+        self.assertEqual(
+            {"code": "audit_busy"},
+            AuditError("audit_busy").to_dict(),
+        )
+
+        pending = {
+            "schema_version": audit_module.AUDIT_SCHEMA_VERSION,
+            "timestamp": 1.0,
+            "request_id": "request-1",
+            "namespace_epoch": "e_" + "a" * 32,
+            "agent": "claude",
+            "target_hmac": "b" * 64,
+            "request_hmac": "c" * 64,
+            "executable_basename": "claude",
+            "confirmation_mode": "allow_write",
+            "outcome": "pending",
+        }
+        self.assertEqual(pending, audit_module._validate_record(pending))
+        invalid_request = dict(pending, request_id="-invalid")
+        with self.assertRaises(AuditError) as raised:
+            audit_module._validate_record(invalid_request)
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+        failed = {
+            **pending,
+            "outcome": "failed",
+            "delivery": "unknown",
+            "returncode": 1,
+            "error": "native_failure",
+        }
+        self.assertEqual(failed, audit_module._validate_record(failed))
+        for update in (
+            {"outcome": "completed", "delivery": "unknown", "returncode": 0, "error": None},
+            {"outcome": "failed", "delivery": "delivered"},
+            {"returncode": True},
+            {"error": "../unsafe"},
+        ):
+            with self.subTest(update=update):
+                with self.assertRaises(AuditError) as raised:
+                    audit_module._validate_record({**failed, **update})
+                self.assertEqual("audit_corrupt", raised.exception.code)
+
+        marker = {
+            "schema_version": audit_module.AUDIT_SCHEMA_VERSION,
+            "namespace_epoch": "e_" + "d" * 32,
+            "key_fingerprint": "e" * 64,
+            "runtime_dev": 1,
+            "runtime_ino": 2,
+            "key_dev": 3,
+            "key_ino": 4,
+        }
+        encoded = json.dumps(marker).encode("ascii") + b"\n"
+        self.assertEqual(marker, audit_module._parse_marker(encoded))
+        for invalid in (
+            b"[]\n",
+            json.dumps({**marker, "runtime_dev": -1}).encode("ascii") + b"\n",
+            b"\xff\n",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(AuditError) as raised:
+                    audit_module._parse_marker(invalid)
+                self.assertEqual("audit_corrupt", raised.exception.code)
+
+        second_pending = dict(pending, timestamp=2.0)
+        with self.assertRaises(AuditError):
+            audit_module._validate_histories([pending, second_pending])
+        terminal = {**failed, "request_id": pending["request_id"]}
+        with self.assertRaises(AuditError):
+            audit_module._validate_histories([pending, terminal, pending])
+
+        namespace = audit_module.AuditNamespace(
+            mock.Mock(),
+            [],
+            [],
+            -1,
+            -1,
+            "runtime",
+            1,
+            "marker",
+            2,
+            "transaction",
+            marker,
+            (),
+            3,
+            b"key",
+            (),
+            True,
+        )
+        namespace.closed = True
+        with self.assertRaises(AuditError):
+            namespace.validate()
+        with self.assertRaises(AuditError):
+            namespace.downgrade_marker()
+        namespace.close()
+
+        namespace.closed = False
+        with mock.patch(
+            "sidecar.send_audit.fcntl.flock",
+            side_effect=OSError(audit_module.errno.EIO, "lock failed"),
+        ):
+            with self.assertRaises(AuditError) as raised:
+                namespace.downgrade_marker()
+        self.assertEqual("audit_error", raised.exception.code)
+
     def test_pending_terminal_and_replay_receipts(self):
         store = SendAuditStore(self.runtime)
 

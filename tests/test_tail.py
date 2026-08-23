@@ -679,6 +679,173 @@ class WatchSessionsCancellationTests(unittest.TestCase):
         self.assertIs(callback_error, raised.exception)
         self.assertTrue(tailers[0].closed)
 
+    def test_jsonl_follower_validation_and_malformed_lines_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for arguments in (
+                {"max_read_bytes": 0},
+                {"max_line_bytes": 0},
+                {"max_records": 0},
+            ):
+                with self.subTest(arguments=arguments):
+                    with self.assertRaises(ValueError):
+                        JSONLFollower(root / "missing", **arguments)
+
+            missing = JSONLFollower(
+                root / "missing",
+                from_start=True,
+                max_read_bytes=32,
+                max_line_bytes=8,
+                max_records=2,
+            )
+            self.assertTrue(missing.export_checkpoint()["missing_at_start"])
+            self.assertEqual([], missing.poll())
+
+            directory = JSONLFollower(root, from_start=True)
+            self.assertTrue(directory.export_checkpoint()["missing_at_start"])
+
+            path = root / "events.jsonl"
+            path.write_bytes(b"")
+            follower = JSONLFollower(
+                path,
+                from_start=True,
+                max_read_bytes=32,
+                max_line_bytes=8,
+                max_records=2,
+            )
+            for raw in (b"", b" " * 9, b"not-json", b"[]"):
+                follower._consume_line(raw)
+            self.assertFalse(follower.has_pending_records)
+
+            follower._consume_chunk(b"x" * 9)
+            self.assertTrue(follower.export_checkpoint()["dropping_line"])
+            follower._consume_chunk(b"discarded\n{\"a\":1}\n")
+            self.assertFalse(follower.export_checkpoint()["dropping_line"])
+            self.assertEqual([{"a": 1}], follower.poll())
+
+    def test_jsonl_checkpoint_rejects_each_untrusted_field_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events.jsonl"
+            path.write_text('{"event":1}\n', encoding="utf-8")
+            follower = JSONLFollower(path, from_start=True, max_line_bytes=32)
+            original = follower.export_checkpoint()
+            invalid_updates = (
+                {"version": 2},
+                {"kind": "other"},
+                {"path": "/different"},
+                {"offset": True},
+                {"offset": -1},
+                {"anchor": "text"},
+                {"pending": "text"},
+                {"dropping_line": 1},
+                {"records": "records"},
+                {"missing_at_start": 0},
+                {"identity": (1,)},
+                {"identity": (1, True)},
+                {"records": ("not-a-record",)},
+            )
+            for update in invalid_updates:
+                with self.subTest(update=update):
+                    checkpoint = dict(original)
+                    checkpoint.update(update)
+                    self.assertFalse(follower.restore_checkpoint(checkpoint))
+                    self.assertEqual(original, follower.export_checkpoint())
+
+    def test_session_tailer_rejects_untrusted_dsh_checkpoints_and_replay_errors(self):
+        class FailingReplayAdapter(PagedDSHAdapter):
+            def replay(self, session, after_seq=None, max_records=256):
+                del session, after_seq, max_records
+                raise RuntimeError("bounded replay failed")
+
+        session = make_dsh_session(2)
+        tailer = SessionTailer(session, adapter=PagedDSHAdapter([]))
+        valid = tailer.export_checkpoint()
+        invalid_updates = (
+            {"kind": "jsonl"},
+            {"last_seq": True},
+            {"initialized": 1},
+            {"page_pending": 1},
+            {"signature": (1, 2)},
+            {"signature": (1, 2, 3, 4, 5, True)},
+            {"force_replay": 1},
+        )
+        for update in invalid_updates:
+            with self.subTest(update=update):
+                self.assertFalse(tailer.restore_checkpoint({**valid, **update}))
+
+        failing = SessionTailer(session, adapter=FailingReplayAdapter([]))
+        self.assertEqual([], failing.poll())
+        self.assertIn("RuntimeError: bounded replay failed", failing.errors)
+        self.assertTrue(failing.export_checkpoint()["force_replay"])
+
+        class FailingNormalizeAdapter(PagedDSHAdapter):
+            def normalize(self, record, session):
+                del record, session
+                raise ValueError("normalize failed")
+
+        normalizer = SessionTailer(
+            session,
+            adapter=FailingNormalizeAdapter([{"seq": 3, "text": "event"}]),
+        )
+        self.assertEqual([], normalizer.poll())
+        self.assertIn("ValueError: normalize failed", normalizer.errors)
+
+        with self.assertRaises(ValueError):
+            list(watch_sessions([], poll_interval=0))
+
+    def test_jsonl_file_read_races_and_oversized_partial_rows_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "oversized.jsonl"
+            path.write_bytes(b"x" * 20)
+            follower = JSONLFollower(
+                path,
+                from_start=False,
+                max_line_bytes=8,
+            )
+            self.assertTrue(follower.export_checkpoint()["dropping_line"])
+            self.assertEqual(b"", follower._read_anchor(0))
+
+            with mock.patch(
+                "pathlib.Path.open",
+                side_effect=OSError("open failed"),
+            ):
+                self.assertEqual(b"", follower._read_anchor(1))
+                follower._capture_trailing_partial(1)
+                self.assertEqual([], follower.poll())
+
+            directory = JSONLFollower(root, from_start=True)
+            self.assertEqual([], directory.poll())
+
+    def test_tailer_missing_follower_and_watch_cleanup_errors_are_bounded(self):
+        session = make_cursor_session("/tmp/missing.db")
+        follower = FakeCursorChatFollower()
+        with mock.patch("sidecar.tail.CursorChatFollower", return_value=follower):
+            tailer = SessionTailer(session, adapter=CursorAdapterStub(), from_start=True)
+        tailer.follower = None
+        self.assertEqual([], tailer.poll())
+
+        created = []
+
+        class FailingCloser:
+            def __init__(self, session, from_start=False):
+                del session, from_start
+                created.append(self)
+
+            def poll(self):
+                return []
+
+            def close(self):
+                raise OSError("close failed")
+
+        with mock.patch("sidecar.tail.SessionTailer", FailingCloser), mock.patch(
+            "sidecar.tail.time.sleep",
+            side_effect=KeyboardInterrupt,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                list(watch_sessions([make_dsh_session(0)], poll_interval=0.01))
+        self.assertEqual(1, len(created))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,15 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Optional, Sequence, TextIO, Tuple
+from typing import Callable, Mapping, Optional, Sequence, TextIO, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGE_ORDER = ("lint", "tests", "pack", "cli", "skill")
+STAGE_ORDER = ("lint", "tests", "coverage", "pack", "cli", "skill")
 StageRunner = Callable[[str, bool], int]
 
 
@@ -27,11 +28,16 @@ def select_stages(only: Optional[Sequence[str]]) -> Tuple[str, ...]:
     return tuple(stage for stage in STAGE_ORDER if stage in requested)
 
 
-def _run_command(arguments: Sequence[str]) -> int:
+def _run_command(
+    arguments: Sequence[str],
+    *,
+    env: Optional[Mapping[str, str]] = None,
+) -> int:
     result = subprocess.run(
         list(arguments),
         cwd=str(ROOT),
         check=False,
+        env=None if env is None else dict(env),
     )
     return result.returncode
 
@@ -44,6 +50,53 @@ def _run_stage(stage: str, full_tests_ran: bool) -> int:
         return _run_command(
             (python, "-m", "unittest", "discover", "-s", "tests", "-v")
         )
+    if stage == "coverage":
+        with tempfile.TemporaryDirectory(
+            prefix="agent-sidecar-coverage-"
+        ) as temporary:
+            data_file = Path(temporary) / ".coverage"
+            report_file = Path(temporary) / "coverage.json"
+            environment = dict(os.environ)
+            environment["COVERAGE_FILE"] = str(data_file)
+            test_code = _run_command(
+                (
+                    python,
+                    "-m",
+                    "coverage",
+                    "run",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tests",
+                    "-v",
+                ),
+                env=environment,
+            )
+            if test_code:
+                return test_code
+            combine_code = _run_command(
+                (python, "-m", "coverage", "combine"),
+                env=environment,
+            )
+            if combine_code:
+                return combine_code
+            json_code = _run_command(
+                (
+                    python,
+                    "-m",
+                    "coverage",
+                    "json",
+                    "-o",
+                    str(report_file),
+                ),
+                env=environment,
+            )
+            if json_code:
+                return json_code
+            return _run_command(
+                (python, str(ROOT / "scripts" / "coverage_gate.py"), str(report_file))
+            )
     if stage == "pack":
         with tempfile.TemporaryDirectory(prefix="agent-sidecar-check-") as temporary:
             artifact = Path(temporary) / "agent-sidecar.pyz"

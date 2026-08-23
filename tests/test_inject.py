@@ -2027,6 +2027,321 @@ class NativeOutputTests(InjectionTestCase):
         self.assertEqual("invalid_plan", raised.exception.code)
         self.assertEqual([], calls)
 
+    def test_output_helpers_cover_nested_and_malformed_native_protocols(self):
+        self.assertEqual((b"text", False), inject_module._output_bytes("text", 8))
+        self.assertEqual((b"byt", True), inject_module._output_bytes(b"bytes", 3))
+        self.assertEqual((b"arr", True), inject_module._output_bytes(bytearray(b"array"), 3))
+        self.assertEqual((b"", False), inject_module._output_bytes(object(), 3))
+
+        nested = {
+            "ignored": "value",
+            "content": [
+                {"text": "first"},
+                {"message": {"output": "second"}},
+                b"ignored",
+            ],
+        }
+        self.assertEqual("first\nsecond", inject_module._content_text(nested))
+        self.assertEqual("", inject_module._content_text([[[[[[[[[["deep"]]]]]]]]]]))
+
+        self.assertEqual([{"one": 1}], inject_module._json_values('{"one":1}'))
+        self.assertEqual(
+            [{"one": 1}, {"two": 2}],
+            inject_module._json_values(
+                'invalid\n\n{"one":1}\nnot-json\n{"two":2}'
+            ),
+        )
+        self.assertEqual(
+            "",
+            inject_module._assistant_record_text("not-a-record"),
+        )
+        self.assertEqual(
+            "",
+            inject_module._assistant_record_text(
+                {"type": "user", "content": "not assistant"}
+            ),
+        )
+        self.assertEqual(
+            "final",
+            inject_module._assistant_record_text({"result": {"text": "final"}}),
+        )
+        self.assertEqual(
+            "nested",
+            inject_module._parse_claude_or_cursor(
+                json.dumps(
+                    [
+                        {"type": "user", "content": "skip"},
+                        {
+                            "type": "message",
+                            "message": {
+                                "role": "assistant",
+                                "content": {"text": "nested"},
+                            },
+                        },
+                    ]
+                )
+            ),
+        )
+
+        self.assertEqual(("", ""), inject_module._codex_record_text("invalid"))
+        message, final = inject_module._codex_record_text(
+            {
+                "payload": {
+                    "item": {"type": "agent-message", "message": "step"},
+                    "last_agent_message": "final",
+                }
+            }
+        )
+        self.assertEqual(("step", "final"), (message, final))
+        self.assertEqual(
+            "final",
+            inject_module._parse_codex(
+                '{"type":"agent_message","text":"step"}\n'
+                '{"last_agent_message":"final"}'
+            ),
+        )
+        self.assertEqual("raw payload", inject_module._parse_codex("raw payload"))
+
+    def test_result_helpers_enforce_utf8_bounds_and_integer_returncodes(self):
+        self.assertEqual("ab", inject_module._bounded_result_text("ab雪", 2))
+        self.assertEqual(7, inject_module._result_returncode(mock.Mock(returncode=7)))
+        self.assertIsNone(
+            inject_module._result_returncode(mock.Mock(returncode=True))
+        )
+        self.assertIsNone(inject_module._result_returncode(object()))
+
+    def test_plan_and_result_value_objects_reject_inconsistent_states(self):
+        with self.assertRaises(ValueError):
+            SendError("not-a-public-code")
+        self.assertEqual(
+            {"code": "invalid_plan"},
+            SendError("invalid_plan").to_dict(),
+        )
+
+        original = self.plan()
+        bytearray_plan = SendPlan(
+            agent=original.agent,
+            session_id=original.session_id,
+            executable=original.executable,
+            argv=list(original.argv),
+            cwd=original.cwd,
+            target=original.target,
+            input_data=bytearray(b"message"),
+        )
+        self.assertIsInstance(bytearray_plan.argv, tuple)
+        self.assertEqual(b"message", bytearray_plan.input_data)
+
+        invalid_results = (
+            {"request_id": "-invalid"},
+            {"replayed": 1},
+            {"returncode": True},
+            {"outcome": "unknown-outcome"},
+            {"delivery": "unknown-state"},
+            {"outcome": "failed", "delivery": "delivered", "returncode": 0},
+            {"outcome": "completed", "delivery": "unknown", "returncode": 0},
+        )
+        base = {
+            "agent": "claude",
+            "session_id": "session",
+            "outcome": "failed",
+            "delivery": "unknown",
+        }
+        for update in invalid_results:
+            with self.subTest(update=update):
+                with self.assertRaises(ValueError):
+                    SendResult(**{**base, **update})
+
+    def test_identity_boundary_helpers_map_filesystem_failures_to_stable_codes(self):
+        with self.assertRaises(SendError) as raised:
+            inject_module._validate_session_id("\ud800")
+        self.assertEqual("invalid_session_id", raised.exception.code)
+
+        for invalid in (object(), "", "relative", "nul\x00path"):
+            with self.subTest(project=invalid):
+                with self.assertRaises(SendError) as raised:
+                    inject_module._resolve_project(invalid)
+                self.assertEqual("invalid_project", raised.exception.code)
+
+        with self.assertRaises(SendError) as raised:
+            inject_module._directory_identity(str(self.root / "missing"))
+        self.assertEqual("invalid_project", raised.exception.code)
+        regular = self.root / "regular"
+        regular.write_text("not a directory", encoding="utf-8")
+        with self.assertRaises(SendError) as raised:
+            inject_module._directory_identity(str(regular))
+        self.assertEqual("invalid_project", raised.exception.code)
+
+        with self.assertRaises(SendError) as raised:
+            inject_module._transcript_path("relative")
+        self.assertEqual("session_unavailable", raised.exception.code)
+        optional = inject_module._stat_source(
+            str(self.root / "optional-missing"),
+            required=False,
+        )
+        self.assertFalse(optional[1])
+        with self.assertRaises(SendError) as raised:
+            inject_module._stat_source(str(self.root), required=True)
+        self.assertEqual("session_unavailable", raised.exception.code)
+
+        invalid_session = self.session(extra={"host": object()})
+        with self.assertRaises(SendError) as raised:
+            inject_module._critical_identity(invalid_session)
+        self.assertEqual("invalid_session", raised.exception.code)
+
+        with self.assertRaises(SendError) as raised:
+            inject_module._resolve_executable(
+                "claude",
+                mock.Mock(side_effect=OSError("resolver failed")),
+            )
+        self.assertEqual("executable_not_found", raised.exception.code)
+        with self.assertRaises(SendError) as raised:
+            inject_module._resolve_executable("claude", lambda _name: None)
+        self.assertEqual("executable_not_found", raised.exception.code)
+        with self.assertRaises(SendError) as raised:
+            inject_module._session_agent(mock.Mock(agent=42))
+        self.assertEqual("unsupported_agent", raised.exception.code)
+        with self.assertRaises(SendError) as raised:
+            inject_module._validate_session(object())
+        self.assertEqual("invalid_session", raised.exception.code)
+
+    def test_preflight_rejects_each_tampered_plan_field_before_filesystem_use(self):
+        original = self.plan()
+        tampered = (
+            object(),
+            dataclasses.replace(original, agent="unsupported"),
+            dataclasses.replace(original, target=object()),
+            dataclasses.replace(original, prompt_transport="argv"),
+            dataclasses.replace(original, cwd="relative"),
+            dataclasses.replace(original, executable="relative"),
+            dataclasses.replace(original, input_data=None),
+            dataclasses.replace(original, input_data=b"\xff"),
+            dataclasses.replace(
+                original,
+                target=dataclasses.replace(original.target, session_id="changed"),
+            ),
+        )
+        for plan in tampered:
+            with self.subTest(plan_type=type(plan).__name__):
+                with self.assertRaises(SendError) as raised:
+                    inject_module._preflight_plan(plan, filesystem=False)
+                self.assertEqual("invalid_plan", raised.exception.code)
+        with self.assertRaises(SendError) as raised:
+            inject_module._preflight_plan(
+                dataclasses.replace(original, input_data=b"   "),
+                filesystem=False,
+            )
+        self.assertEqual("blank_message", raised.exception.code)
+
+        cursor = self.plan("cursor-cli")
+        with self.assertRaises(SendError) as raised:
+            inject_module._plan_message(
+                dataclasses.replace(cursor, input_data=b"unexpected")
+            )
+        self.assertEqual("invalid_plan", raised.exception.code)
+        with self.assertRaises(SendError) as raised:
+            inject_module._plan_message(dataclasses.replace(original, agent="other"))
+        self.assertEqual("invalid_plan", raised.exception.code)
+
+    def test_runtime_directory_validation_rejects_unsafe_platform_boundaries(self):
+        for value in (object(), "relative", "/tmp/../unsafe"):
+            with self.subTest(value=value):
+                with self.assertRaises(SendError) as raised:
+                    inject_module._runtime_root(value)
+                self.assertEqual("unsafe_lock", raised.exception.code)
+
+        regular_details = os.stat(str(self.executable))
+        with self.assertRaises(SendError):
+            inject_module._validate_directory(regular_details, private=True)
+        os.chmod(str(self.root), 0o755)
+        try:
+            private_details = os.stat(str(self.root))
+            with self.assertRaises(SendError):
+                inject_module._validate_directory(private_details, private=True)
+        finally:
+            os.chmod(str(self.root), 0o700)
+        with mock.patch(
+            "sidecar.inject.os.stat",
+            side_effect=OSError("stat failed"),
+        ):
+            with self.assertRaises(SendError) as raised:
+                inject_module._entry_stat(1, "missing")
+            self.assertEqual("unsafe_lock", raised.exception.code)
+
+    def test_descriptor_boundary_failures_close_or_reject_before_mutation(self):
+        with mock.patch(
+            "sidecar.inject.os.open",
+            side_effect=FileNotFoundError(),
+        ):
+            with self.assertRaises(SendError):
+                inject_module._open_directory_at(
+                    1,
+                    "missing",
+                    create=False,
+                    private=True,
+                )
+
+        with mock.patch(
+            "sidecar.inject.os.open",
+            side_effect=FileNotFoundError(),
+        ), mock.patch(
+            "sidecar.inject.os.mkdir",
+            side_effect=OSError("mkdir failed"),
+        ):
+            with self.assertRaises(SendError):
+                inject_module._open_directory_at(
+                    1,
+                    "missing",
+                    create=True,
+                    private=True,
+                )
+
+        with mock.patch(
+            "sidecar.inject._open_runtime_parent",
+            return_value=([3, 4], [], 4, "runtime", "/runtime"),
+        ), mock.patch(
+            "sidecar.inject._open_directory_at",
+            side_effect=SendError("unsafe_lock"),
+        ), mock.patch("sidecar.inject.os.close") as close:
+            with self.assertRaises(SendError):
+                inject_module._open_runtime_directories("/runtime")
+        self.assertEqual([mock.call(4), mock.call(3)], close.call_args_list)
+
+        with self.assertRaises(SendError):
+            inject_module._open_runtime_parent("/")
+        with mock.patch(
+            "sidecar.inject.os.open",
+            side_effect=OSError("root open failed"),
+        ):
+            with self.assertRaises(SendError):
+                inject_module._open_runtime_parent("/tmp/runtime")
+
+        with mock.patch(
+            "sidecar.inject.os.fstat",
+            side_effect=OSError("fstat failed"),
+        ):
+            with self.assertRaises(SendError):
+                inject_module._validate_lock_file(1, "lock", 2)
+        with mock.patch(
+            "sidecar.inject.os.open",
+            side_effect=OSError("lock open failed"),
+        ):
+            with self.assertRaises(SendError):
+                inject_module._open_lock_file(1, "lock")
+
+        with mock.patch("sidecar.inject.fcntl", None):
+            with self.assertRaises(SendError):
+                with inject_module._session_lock("claude", "session", self.runtime):
+                    self.fail("unsafe lock unexpectedly opened")
+
+        with self.assertRaises(SendError) as raised:
+            inject_module._refreshed_send_plan(
+                self.plan(),
+                "message",
+                mock.Mock(side_effect=RuntimeError("refresh failed")),
+                lambda _name: str(self.executable),
+            )
+        self.assertEqual("session_unavailable", raised.exception.code)
+
 
 if __name__ == "__main__":
     unittest.main()

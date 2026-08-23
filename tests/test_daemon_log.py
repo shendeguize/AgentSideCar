@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import sidecar.daemon_log as daemon_log_module
 from sidecar.daemon_log import (
     DaemonLog,
     DaemonLogError,
@@ -326,6 +327,207 @@ print(callable(cli.main))
             ["unsupported_platform", "SidecarDaemon", "True"],
             result.stdout.splitlines(),
         )
+
+    def test_helper_and_constructor_validation_rejects_unsafe_values(self):
+        self.assertEqual(
+            "safe_code",
+            daemon_log_module._safe_code("safe_code", "fallback"),
+        )
+        self.assertEqual(
+            "fallback",
+            daemon_log_module._safe_code("../unsafe", "fallback"),
+        )
+        self.assertEqual(
+            "unknown",
+            daemon_log_module._safe_identifier(object(), 8),
+        )
+        self.assertEqual(
+            "unknown",
+            daemon_log_module._safe_identifier("too-long-value", 4),
+        )
+        invalid = (
+            {"max_bytes": True},
+            {"max_bytes": 0},
+            {"line_bytes": True},
+            {"line_bytes": 0},
+            {"line_bytes": MAX_LINE_BYTES + 1},
+            {"backups": True},
+            {"backups": -1},
+            {"backups": daemon_log_module.MAX_BACKUPS + 1},
+        )
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValueError):
+                    DaemonLog(self.runtime, **arguments)
+
+        with mock.patch("sidecar.daemon_log.os.write", return_value=0):
+            with self.assertRaises(OSError):
+                daemon_log_module._write_all(1, b"payload")
+
+    def test_record_validation_rejects_syntax_schema_and_optional_types(self):
+        logger = DaemonLog(self.runtime)
+        malformed = (
+            b"",
+            b"not-json",
+            json.dumps({"schema_version": 1}).encode("ascii"),
+            json.dumps(
+                {
+                    "schema_version": daemon_log_module.SCHEMA_VERSION,
+                    "ts": "time",
+                    "ts_epoch": 1.0,
+                    "pid": 1,
+                    "component": "daemon",
+                    "event": "event",
+                    "level": "info",
+                    "version": "0.4.0",
+                    "count": "not-an-int",
+                }
+            ).encode("ascii"),
+            json.dumps(
+                {
+                    "schema_version": daemon_log_module.SCHEMA_VERSION,
+                    "ts": "time",
+                    "ts_epoch": 1.0,
+                    "pid": 1,
+                    "component": 1,
+                    "event": "event",
+                    "level": "info",
+                    "version": "0.4.0",
+                }
+            ).encode("ascii"),
+            json.dumps(
+                {
+                    "schema_version": daemon_log_module.SCHEMA_VERSION,
+                    "ts": "time",
+                    "ts_epoch": 1.0,
+                    "pid": 1,
+                    "component": "daemon",
+                    "event": "event",
+                    "level": "info",
+                    "version": "0.4.0",
+                    "agent": 1,
+                }
+            ).encode("ascii"),
+        )
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                with self.assertRaises(DaemonLogError) as raised:
+                    logger._validate_record_line(raw)
+                self.assertEqual("invalid_log", raised.exception.code)
+
+    def test_open_is_idempotent_but_closed_logger_cannot_reopen(self):
+        logger = DaemonLog(self.runtime).open()
+        self.assertIs(logger, logger.open())
+        logger.close()
+        with self.assertRaises(DaemonLogError) as raised:
+            logger.open()
+        self.assertEqual("log_closed", raised.exception.code)
+
+    def test_directory_entry_and_open_failures_are_typed_without_paths(self):
+        descriptor = os.open(str(self.runtime), os.O_RDONLY)
+        try:
+            with mock.patch(
+                "sidecar.daemon_log.os.stat",
+                side_effect=OSError(errno.EIO, "stat failed"),
+            ):
+                with self.assertRaises(DaemonLogError) as raised:
+                    DaemonLog._entry_stat(descriptor, "entry")
+                self.assertEqual("unsafe_log", raised.exception.code)
+
+            oversized = self.runtime / "oversized"
+            oversized.write_bytes(b"x")
+            os.chmod(str(oversized), 0o600)
+            with self.assertRaises(DaemonLogError) as raised:
+                DaemonLog._validate_entry(descriptor, "oversized", maximum=0)
+            self.assertEqual("unsafe_log_size", raised.exception.code)
+
+            with mock.patch(
+                "sidecar.daemon_log.os.open",
+                side_effect=OSError(errno.EIO, "open failed"),
+            ):
+                with self.assertRaises(DaemonLogError) as raised:
+                    DaemonLog._open_private_file(descriptor, "new-log")
+                self.assertEqual("log_open_failed", raised.exception.code)
+        finally:
+            os.close(descriptor)
+
+    def test_record_normalization_clamps_optional_values_and_line_size(self):
+        logger = DaemonLog(self.runtime, max_bytes=128, line_bytes=128)
+        record = logger._record(
+            "event",
+            {
+                "level": "not-a-level",
+                "session_id": "",
+                "http_port": 99999,
+                "count": -1,
+                "http_enabled": "not-bool",
+            },
+        )
+        self.assertEqual("info", record["level"])
+        self.assertEqual("unknown", record["session_id"])
+        self.assertEqual(65535, record["http_port"])
+        self.assertEqual(0, record["count"])
+        self.assertNotIn("http_enabled", record)
+        with self.assertRaises(DaemonLogError) as raised:
+            logger._encode("x" * 128, {})
+        self.assertEqual("log_line_too_large", raised.exception.code)
+        logger._disabled = True
+        logger._error_code = "first"
+        logger._disable("second")
+        self.assertEqual("first", logger.error_code)
+
+    def test_closed_and_crash_repair_boundaries_fail_with_stable_codes(self):
+        logger = DaemonLog(self.runtime, line_bytes=32)
+        missing_logger = DaemonLog(self.runtime / "missing")
+        with self.assertRaises(DaemonLogError) as raised:
+            missing_logger._open_directory()
+        self.assertEqual("unsafe_runtime", raised.exception.code)
+
+        with self.assertRaises(DaemonLogError) as raised:
+            logger._validate_current()
+        self.assertEqual("log_closed", raised.exception.code)
+        with self.assertRaises(DaemonLogError) as raised:
+            logger._rotate()
+        self.assertEqual("log_closed", raised.exception.code)
+
+        existing = self.runtime / "existing"
+        existing.write_bytes(b"")
+        os.chmod(str(existing), 0o600)
+        directory_fd = os.open(str(self.runtime), os.O_RDONLY)
+        try:
+            with mock.patch(
+                "sidecar.daemon_log.os.open",
+                side_effect=(FileExistsError(), OSError(errno.EIO, "open failed")),
+            ):
+                with self.assertRaises(DaemonLogError) as raised:
+                    DaemonLog._open_private_file(directory_fd, "existing")
+            self.assertEqual("unsafe_log", raised.exception.code)
+        finally:
+            os.close(directory_fd)
+
+        oversized = self.runtime / "oversized-partial"
+        oversized.write_bytes(b"x" * 32)
+        descriptor = os.open(str(oversized), os.O_RDWR)
+        try:
+            with self.assertRaises(DaemonLogError) as raised:
+                logger._repair_current(descriptor)
+            self.assertEqual("invalid_log", raised.exception.code)
+        finally:
+            os.close(descriptor)
+
+        partial = self.runtime / "partial"
+        partial.write_bytes(b'{"partial"')
+        descriptor = os.open(str(partial), os.O_RDWR)
+        try:
+            with mock.patch(
+                "sidecar.daemon_log.os.ftruncate",
+                side_effect=OSError(errno.EIO, "truncate failed"),
+            ):
+                with self.assertRaises(DaemonLogError) as raised:
+                    logger._repair_current(descriptor)
+            self.assertEqual("log_repair_failed", raised.exception.code)
+        finally:
+            os.close(descriptor)
 
 
 if __name__ == "__main__":

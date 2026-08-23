@@ -503,6 +503,161 @@ class StateEngineTests(unittest.TestCase):
 
         self.assertFalse(terminal_metadata_is_active(metadata))
 
+    def test_terminal_metadata_edge_states_are_conservative(self):
+        self.assertEqual({}, parse_terminal_metadata("key: value", max_lines=0))
+        self.assertEqual(
+            {"process_status": "running", "current_command": "worker"},
+            parse_terminal_metadata(
+                "Process Status: running\nignored\nCurrent Command: 'worker'\n"
+            ),
+        )
+        self.assertTrue(terminal_metadata_is_active({"state": "busy"}))
+        self.assertTrue(terminal_metadata_is_active({"is running": "yes"}))
+        self.assertTrue(
+            terminal_metadata_is_active(
+                {"command": "worker", "running_for_ms": "0"}
+            )
+        )
+        self.assertTrue(terminal_metadata_is_active({"active_command": "worker"}))
+        self.assertTrue(
+            terminal_metadata_is_active(
+                {"last_command": "worker", "last_exit_code": "null"}
+            )
+        )
+        self.assertFalse(
+            terminal_metadata_is_active(
+                {"command": "worker", "running_for_ms": "not-a-number"}
+            )
+        )
+        self.assertFalse(
+            terminal_metadata_is_active(
+                {"status": "done", "running": "true"}
+            )
+        )
+
+    def test_terminal_file_and_root_boundaries_fail_closed(self):
+        missing = self.root / "missing-terminal.txt"
+        self.assertFalse(state_module.terminal_file_is_active(missing, now=self.now))
+        self.assertEqual("", state_module._bounded_text(missing, 32))
+
+        terminal = self.root / "terminal.txt"
+        terminal.write_text("running: true\n", encoding="utf-8")
+        os.utime(terminal, (self.now, self.now))
+        self.assertFalse(
+            state_module.terminal_file_is_active(
+                terminal,
+                now=self.now,
+                max_bytes=0,
+            )
+        )
+
+        session = self.session(self.root / "unused", agent="cursor-ide")
+        configured = self.root / "configured"
+        session = Session(
+            **{
+                **session.__dict__,
+                "extra": {
+                    "terminals_root": str(configured),
+                    "project_slug": "slug",
+                },
+            }
+        )
+        roots = state_module._cursor_terminal_roots(
+            session,
+            self.root,
+            configured,
+        )
+        self.assertEqual((configured,), roots)
+        discovered_roots = state_module._cursor_terminal_roots(
+            session,
+            self.root,
+            None,
+        )
+        self.assertIn(configured, discovered_roots)
+        self.assertIn(
+            self.root / ".cursor" / "projects" / "slug" / "terminals",
+            discovered_roots,
+        )
+        self.assertFalse(
+            cursor_terminal_active(
+                self.session(self.root / "unused", agent="claude"),
+                terminals_root=configured,
+            )
+        )
+        cli_session = Session(
+            **{
+                **session.__dict__,
+                "extra": {"source": "cli"},
+            }
+        )
+        self.assertFalse(cursor_terminal_active(cli_session, terminals_root=configured))
+        self.assertFalse(
+            cursor_terminal_active(session, terminals_root=configured, max_files=0)
+        )
+
+        transcript = self.write_transcript(
+            "signature-failure.jsonl",
+            [{"role": "assistant", "content": "done"}],
+        )
+        with mock.patch.object(state_module, "file_signature", return_value=None):
+            self.assertEqual(
+                Status.DEAD,
+                self.engine.infer_status(self.session(transcript), now=self.now),
+            )
+
+    def test_tail_state_tracks_named_anonymous_and_message_tool_calls(self):
+        tail = state_module._tail_state(
+            [
+                {"type": "tool_use", "id": "named", "timestamp": 1},
+                {"type": "tool_call", "timestamp": 2},
+                {
+                    "type": "assistant",
+                    "timestamp": 3,
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"tool_call_id": "message-call"},
+                            "ignored",
+                        ],
+                    },
+                },
+                {"type": "tool_result", "tool_use_id": "named", "timestamp": 4},
+                {"type": "tool_result", "timestamp": 5},
+                {
+                    "type": "assistant",
+                    "timestamp": 6,
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "thinking", "text": "reason"}],
+                    },
+                },
+                {"type": "tool_call_started", "timestamp": 7},
+                {"role": "tool", "timestamp": 8},
+            ]
+        )
+
+        self.assertEqual("tool_result", tail.last_kind)
+        self.assertEqual(8.0, tail.activity_at)
+        self.assertEqual(1, tail.unmatched_tools)
+
+    def test_state_constructor_rejects_each_invalid_bound(self):
+        invalid = (
+            {"fresh_seconds": -1},
+            {"fresh_seconds": 2, "idle_seconds": 1},
+            {"tail_bytes": 0},
+            {"tail_records": 0},
+            {"terminal_fresh_seconds": -1},
+            {"terminal_bytes": 0},
+            {"terminal_files": 0},
+        )
+        for arguments in invalid:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValueError):
+                    StateEngine(**arguments)
+        aliases = StateEngine(fresh_threshold=2, idle_threshold=3)
+        self.assertEqual(2.0, aliases.fresh_seconds)
+        self.assertEqual(3.0, aliases.idle_seconds)
+
 
 if __name__ == "__main__":
     unittest.main()
