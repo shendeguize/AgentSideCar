@@ -15,9 +15,12 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import tempfile
+import threading
 import time
-from dataclasses import dataclass
+from collections import OrderedDict
+from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import (
@@ -34,8 +37,27 @@ from typing import (
 )
 from urllib.parse import unquote_to_bytes, urlsplit
 
+from sidecar.json_limits import (
+    JSONLimitError,
+    JSONLimits,
+    JSONSyntaxError,
+    parse_json,
+    validate_json,
+)
+from sidecar.text_utils import extract_cursor_title
+
 
 SNAPSHOT_ATTEMPTS = 3
+SNAPSHOT_BACKOFF_INITIAL_SECONDS = 0.002
+SNAPSHOT_BACKOFF_MAX_SECONDS = 0.008
+DEFAULT_SNAPSHOT_CACHE_ENTRIES = 64
+DEFAULT_SNAPSHOT_CACHE_TTL_SECONDS = 2.0
+DEFAULT_SNAPSHOT_HARD_ENTRIES = 128
+DEFAULT_SNAPSHOT_CACHE_BYTES = 64 * 1024 * 1024
+DEFAULT_SNAPSHOT_HARD_BYTES = 128 * 1024 * 1024
+DEFAULT_SNAPSHOT_MAX_ENTRY_BYTES = 64 * 1024 * 1024
+DEFAULT_SNAPSHOT_MAX_IN_FLIGHT = 2
+DEFAULT_SNAPSHOT_MAX_IN_FLIGHT_SOURCE_BYTES = 640 * 1024 * 1024
 COPY_CHUNK_BYTES = 1024 * 1024
 MAX_DB_BYTES = 64 * 1024 * 1024
 MAX_WAL_BYTES = 256 * 1024 * 1024
@@ -55,21 +77,22 @@ DEFAULT_FOLLOW_RECORDS = 256
 MAX_PENDING_RECORDS = MAX_MESSAGE_REFERENCES + 1
 MAX_CHECKPOINT_BYTES = 16 * 1024
 
+_GLOBAL_SNAPSHOT_SLOTS = threading.BoundedSemaphore(
+    DEFAULT_SNAPSHOT_MAX_IN_FLIGHT
+)
+
 _HEX_ID = re.compile(r"^[0-9a-f]{64}$")
 _BAD_PERCENT_ESCAPE = re.compile(r"%(?![0-9a-fA-F]{2})")
-_USER_QUERY = re.compile(
-    r"<user_query>\s*(.*?)\s*</user_query>",
-    re.DOTALL | re.IGNORECASE,
-)
-_USER_INFO = re.compile(
-    r"<user_info>.*?</user_info>",
-    re.DOTALL | re.IGNORECASE,
-)
 _MAX_FIELD_NUMBER = (1 << 29) - 1
 _EMPTY_PREFIX_HASH = hashlib.sha256(b"").hexdigest()
 
 FileSignature = Tuple[int, int, int, int, int]
-SourceSignature = Tuple[FileSignature, Optional[FileSignature]]
+# Existence, inode, mtime_ns, size, device, and ctime_ns.  The first four
+# fields are the portable invalidation contract; device/ctime harden races.
+SourceFileSignature = Tuple[bool, int, int, int, int, int]
+SourceSignature = Tuple[SourceFileSignature, SourceFileSignature]
+StableCopySignature = Tuple[FileSignature, Optional[FileSignature]]
+SnapshotCacheKey = Tuple[str, SourceSignature]
 ReadResult = TypeVar("ReadResult")
 FrozenJSON = Union[
     None,
@@ -80,6 +103,10 @@ FrozenJSON = Union[
     Tuple["FrozenJSON", ...],
     Mapping[str, "FrozenJSON"],
 ]
+
+
+def _source_signature_bytes(signature: SourceSignature) -> int:
+    return sum(part[3] for part in signature if part[0])
 
 
 class CursorChatError(Exception):
@@ -145,12 +172,642 @@ class CursorChatState:
     created_at: float
     title: str
 
+
+_MAPPING_PROXY_TYPE = type(MappingProxyType({}))
+_EMPTY_DICT_BYTES = sys.getsizeof({})
+_DICT_SLOT_BYTES = max(1, sys.getsizeof({None: None}) - _EMPTY_DICT_BYTES)
+
+
+def _retained_size(value: object, seen: Optional[set] = None) -> int:
+    """Conservatively count recursively retained Python heap bytes."""
+
+    visited = set() if seen is None else seen
+    identity = id(value)
+    if identity in visited:
+        return 0
+    visited.add(identity)
+    size = sys.getsizeof(value)
+    if isinstance(value, Mapping):
+        if isinstance(value, _MAPPING_PROXY_TYPE):
+            # mappingproxy retains a separate underlying dict whose capacity
+            # is not included by getsizeof(mappingproxy).
+            size += _EMPTY_DICT_BYTES + len(value) * _DICT_SLOT_BYTES
+        for key, item in value.items():
+            size += _retained_size(key, visited)
+            size += _retained_size(item, visited)
+        return size
+    if isinstance(value, (tuple, list, set, frozenset)):
+        for item in value:
+            size += _retained_size(item, visited)
+        return size
+    if is_dataclass(value) and not isinstance(value, type):
+        try:
+            size += sys.getsizeof(vars(value))
+        except TypeError:
+            pass
+        for field in fields(value):
+            size += _retained_size(getattr(value, field.name), visited)
+    return size
+
+
+def cursor_chat_state_weight(state: CursorChatState) -> int:
+    """Return conservative retained bytes for one immutable decoded state."""
+
+    if not isinstance(state, CursorChatState):
+        raise TypeError("state must be CursorChatState")
+    return _retained_size(state)
+
+
+def _cache_entry_weight(key: SnapshotCacheKey, state: CursorChatState) -> int:
+    return (
+        _retained_size(key)
+        + cursor_chat_state_weight(state)
+        + sys.getsizeof(_SnapshotCacheEntry)
+    )
+
+
+@dataclass(frozen=True)
+class CursorChatSnapshotStats:
+    """Immutable performance counters for one bounded snapshot broker."""
+
+    signature_checks: int
+    cache_hits: int
+    cache_misses: int
+    snapshot_loads: int
+    coalesced_waits: int
+    evictions: int
+    expirations: int
+    errors: int
+    entries: int
+    in_flight: int
+    cache_bytes: int
+    peak_cache_bytes: int
+    oversized_states: int
+    in_flight_source_bytes: int
+    peak_in_flight_source_bytes: int
+    budget_waits: int
+    generation: int
+
+
+@dataclass(frozen=True)
+class _SnapshotCacheEntry:
+    state: CursorChatState
+    expires_at: float
+    generation: int
+    weight_bytes: int
+
+
+class _SnapshotFlight:
+    def __init__(self, generation: int, source_bytes: int) -> None:
+        self.generation = generation
+        self.source_bytes = source_bytes
+        self.event = threading.Event()
+        self.state: Optional[CursorChatState] = None
+        self.error: Optional[BaseException] = None
+
+
+class _ScanGenerationToken:
+    def __init__(self, broker: "CursorChatSnapshotBroker") -> None:
+        self._broker = broker
+        self._entered = False
+
+    def __enter__(self) -> int:
+        if self._entered:
+            raise RuntimeError("Cursor chat scan generation token was reused")
+        self._entered = True
+        return self._broker._enter_scan_generation()
+
+    def __exit__(
+        self,
+        exception_type: Optional[type],
+        _exception: Optional[BaseException],
+        _traceback: object,
+    ) -> bool:
+        if not self._entered:
+            return False
+        self._entered = False
+        try:
+            self._broker._exit_scan_generation()
+        except BaseException:
+            if exception_type is None:
+                raise
+        return False
+
+
+class CursorChatSnapshotBroker:
+    """Bounded, thread-safe cache and single-flight broker for decoded chats."""
+
+    def __init__(
+        self,
+        *,
+        max_entries: int = DEFAULT_SNAPSHOT_CACHE_ENTRIES,
+        hard_max_entries: Optional[int] = None,
+        max_cache_bytes: int = DEFAULT_SNAPSHOT_CACHE_BYTES,
+        hard_max_cache_bytes: int = DEFAULT_SNAPSHOT_HARD_BYTES,
+        max_entry_bytes: int = DEFAULT_SNAPSHOT_MAX_ENTRY_BYTES,
+        ttl_seconds: float = DEFAULT_SNAPSHOT_CACHE_TTL_SECONDS,
+        max_in_flight: int = DEFAULT_SNAPSHOT_MAX_IN_FLIGHT,
+        max_in_flight_source_bytes: int = (
+            DEFAULT_SNAPSHOT_MAX_IN_FLIGHT_SOURCE_BYTES
+        ),
+        clock: Callable[[], float] = time.monotonic,
+        publication_probe: Optional[Callable[[], None]] = None,
+    ) -> None:
+        if (
+            not isinstance(max_entries, int)
+            or isinstance(max_entries, bool)
+            or max_entries <= 0
+        ):
+            raise ValueError("snapshot cache size must be positive")
+        if not math.isfinite(float(ttl_seconds)) or ttl_seconds <= 0:
+            raise ValueError("snapshot cache TTL must be positive")
+        hard_bound = (
+            max(DEFAULT_SNAPSHOT_HARD_ENTRIES, max_entries)
+            if hard_max_entries is None
+            else hard_max_entries
+        )
+        if (
+            not isinstance(hard_bound, int)
+            or isinstance(hard_bound, bool)
+            or hard_bound < max_entries
+        ):
+            raise ValueError("snapshot hard bound must cover soft capacity")
+        if (
+            not isinstance(max_in_flight, int)
+            or isinstance(max_in_flight, bool)
+            or max_in_flight <= 0
+        ):
+            raise ValueError("snapshot in-flight bound must be positive")
+        byte_bounds = (
+            max_cache_bytes,
+            hard_max_cache_bytes,
+            max_entry_bytes,
+            max_in_flight_source_bytes,
+        )
+        if any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+            for value in byte_bounds
+        ):
+            raise ValueError("snapshot byte bounds must be positive integers")
+        if hard_max_cache_bytes < max_cache_bytes:
+            raise ValueError("snapshot hard bytes must cover soft bytes")
+        if max_entry_bytes > hard_max_cache_bytes:
+            raise ValueError("snapshot entry bytes exceed hard cache bytes")
+        self.max_entries = max_entries
+        self.hard_max_entries = hard_bound
+        self.max_cache_bytes = max_cache_bytes
+        self.hard_max_cache_bytes = hard_max_cache_bytes
+        self.max_entry_bytes = max_entry_bytes
+        self.ttl_seconds = float(ttl_seconds)
+        self.max_in_flight = max_in_flight
+        self.max_in_flight_source_bytes = max_in_flight_source_bytes
+        self.source_reservation_bytes = min(
+            MAX_DB_BYTES + MAX_WAL_BYTES,
+            max_in_flight_source_bytes,
+        )
+        self._clock = clock
+        self._publication_probe = publication_probe
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._entries: OrderedDict[SnapshotCacheKey, _SnapshotCacheEntry] = (
+            OrderedDict()
+        )
+        self._flights: Dict[Tuple[int, SnapshotCacheKey], _SnapshotFlight] = {}
+        self._generation = 0
+        self._scan_depth = 0
+        self._signature_checks = 0
+        self._cache_hits = 0
+        self._cache_misses = 0
+        self._snapshot_loads = 0
+        self._coalesced_waits = 0
+        self._evictions = 0
+        self._expirations = 0
+        self._errors = 0
+        self._cache_bytes = 0
+        self._peak_cache_bytes = 0
+        self._oversized_states = 0
+        self._in_flight_source_bytes = 0
+        self._peak_in_flight_source_bytes = 0
+        self._budget_waits = 0
+
+    def _expire_locked(self, now: float) -> None:
+        expired = [
+            key
+            for key, entry in self._entries.items()
+            if (
+                entry.expires_at <= now
+                and not (
+                    self._scan_depth > 0
+                    and entry.generation == self._generation
+                )
+            )
+        ]
+        for key in expired:
+            self._remove_entry_locked(key)
+        self._expirations += len(expired)
+
+    def _remove_entry_locked(
+        self,
+        key: SnapshotCacheKey,
+    ) -> Optional[_SnapshotCacheEntry]:
+        entry = self._entries.pop(key, None)
+        if entry is not None:
+            self._cache_bytes = max(
+                0,
+                self._cache_bytes - entry.weight_bytes,
+            )
+        return entry
+
+    def _over_soft_locked(self) -> bool:
+        return (
+            len(self._entries) > self.max_entries
+            or self._cache_bytes > self.max_cache_bytes
+        )
+
+    def _store_locked(
+        self,
+        key: SnapshotCacheKey,
+        state: CursorChatState,
+        weight_bytes: int,
+        now: float,
+        generation: int,
+    ) -> bool:
+        if generation != self._generation:
+            return False
+        self._remove_entry_locked(key)
+        if (
+            weight_bytes > self.max_entry_bytes
+            or weight_bytes > self.hard_max_cache_bytes
+        ):
+            self._oversized_states += 1
+            return False
+        while (
+            len(self._entries) + 1 > self.hard_max_entries
+            or self._cache_bytes + weight_bytes > self.hard_max_cache_bytes
+        ):
+            oldest = next(iter(self._entries))
+            self._remove_entry_locked(oldest)
+            self._evictions += 1
+        self._entries[key] = _SnapshotCacheEntry(
+            state=state,
+            expires_at=now + self.ttl_seconds,
+            generation=generation,
+            weight_bytes=weight_bytes,
+        )
+        self._cache_bytes += weight_bytes
+        self._peak_cache_bytes = max(
+            self._peak_cache_bytes,
+            self._cache_bytes,
+        )
+        self._entries.move_to_end(key)
+        while self._over_soft_locked():
+            evictable = next(
+                (
+                    candidate
+                    for candidate, entry in self._entries.items()
+                    if not (
+                        self._scan_depth > 0
+                        and entry.generation == self._generation
+                    )
+                ),
+                None,
+            )
+            if evictable is None:
+                break
+            self._remove_entry_locked(evictable)
+            self._evictions += 1
+        # An active generation pins its entries above the soft capacity.  The
+        # unconditional hard ceiling was enforced before insertion.
+        return key in self._entries
+
+    def _trim_soft_locked(self) -> None:
+        while self._over_soft_locked():
+            oldest = next(iter(self._entries))
+            self._remove_entry_locked(oldest)
+            self._evictions += 1
+
+    def _clock_value(self) -> float:
+        try:
+            value = float(self._clock())
+        except BaseException:
+            raise CursorChatSourceError("Cursor chat snapshot clock failed")
+        if not math.isfinite(value):
+            raise CursorChatSourceError("Cursor chat snapshot clock failed")
+        return value
+
+    @staticmethod
+    def _publication_error(error: BaseException) -> CursorChatError:
+        if isinstance(error, CursorChatError):
+            return error
+        return CursorChatSourceError("Cursor chat snapshot publication failed")
+
+    def _fail_flight_locked(
+        self,
+        flight_key: Tuple[int, SnapshotCacheKey],
+        flight: _SnapshotFlight,
+        error: BaseException,
+    ) -> None:
+        self._errors += 1
+        flight.state = None
+        flight.error = error
+        self._release_flight_locked(flight_key, flight)
+        flight.event.set()
+        self._condition.notify_all()
+
+    def _release_flight_locked(
+        self,
+        flight_key: Tuple[int, SnapshotCacheKey],
+        flight: _SnapshotFlight,
+    ) -> None:
+        current = self._flights.get(flight_key)
+        if current is not flight:
+            return
+        self._flights.pop(flight_key, None)
+        self._in_flight_source_bytes = max(
+            0,
+            self._in_flight_source_bytes - flight.source_bytes,
+        )
+
+    def _pin_entry_locked(
+        self,
+        key: SnapshotCacheKey,
+        entry: _SnapshotCacheEntry,
+        now: float,
+    ) -> CursorChatState:
+        pinned = _SnapshotCacheEntry(
+            state=entry.state,
+            expires_at=now + self.ttl_seconds,
+            generation=self._generation,
+            weight_bytes=entry.weight_bytes,
+        )
+        self._entries[key] = pinned
+        self._entries.move_to_end(key)
+        return pinned.state
+
+    def _cache_hit_locked(
+        self,
+        key: SnapshotCacheKey,
+        entry: _SnapshotCacheEntry,
+        now: float,
+    ) -> CursorChatState:
+        self._cache_hits += 1
+        return self._pin_entry_locked(key, entry, now)
+
+    def _enter_scan_generation(self) -> int:
+        now = self._clock_value()
+        with self._lock:
+            outermost = self._scan_depth == 0
+            if outermost:
+                self._generation += 1
+            self._scan_depth += 1
+            try:
+                self._expire_locked(now)
+            except BaseException:
+                self._scan_depth -= 1
+                if self._scan_depth == 0:
+                    self._trim_soft_locked()
+                raise
+            return self._generation
+
+    def _exit_scan_generation(self) -> None:
+        clock_error: Optional[BaseException] = None
+        try:
+            now = self._clock_value()
+        except BaseException as error:
+            clock_error = error
+            now = None
+        with self._lock:
+            if self._scan_depth <= 0:
+                return
+            self._scan_depth -= 1
+            if self._scan_depth == 0:
+                if now is not None:
+                    self._expire_locked(now)
+                self._trim_soft_locked()
+        if clock_error is not None:
+            raise clock_error
+
+    def scan_generation(self) -> _ScanGenerationToken:
+        """Return a nestable scope that pins this scan until final exit."""
+
+        return _ScanGenerationToken(self)
+
+    @property
+    def scan_depth(self) -> int:
+        with self._lock:
+            return self._scan_depth
+
+    def pin(self, key: SnapshotCacheKey) -> bool:
+        """Pin an already-decoded store while discovery reuses its metadata."""
+
+        now = self._clock_value()
+        with self._lock:
+            self._expire_locked(now)
+            entry = self._entries.get(key)
+            if entry is None:
+                return False
+            self._pin_entry_locked(key, entry, now)
+            return True
+
+    @staticmethod
+    def _raise_flight_error(error: BaseException) -> None:
+        try:
+            replacement = error.__class__(*error.args)
+        except Exception:
+            raise RuntimeError("Cursor chat snapshot flight failed")
+        raise replacement
+
+    def snapshot(
+        self,
+        path: Union[str, os.PathLike],
+        *,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> CursorChatState:
+        """Return shared immutable state for the current DB/WAL signature."""
+
+        source_path = _normalize_path(path)
+        with self._lock:
+            self._signature_checks += 1
+        cache_key = self.cache_key(source_path)
+        source_bytes = _source_signature_bytes(cache_key[1])
+        now = self._clock_value()
+
+        with self._lock:
+            self._expire_locked(now)
+            cached = self._entries.get(cache_key)
+            if cached is not None:
+                return self._cache_hit_locked(cache_key, cached, now)
+
+            while True:
+                generation = self._generation
+                flight_key = (generation, cache_key)
+                flight = self._flights.get(flight_key)
+                if flight is not None:
+                    self._coalesced_waits += 1
+                    leader = False
+                    break
+                if source_bytes > self.source_reservation_bytes:
+                    raise CursorChatLimitError(
+                        "Cursor chat source exceeds snapshot in-flight budget"
+                    )
+                if (
+                    len(self._flights) < self.max_in_flight
+                    and self._in_flight_source_bytes
+                    + self.source_reservation_bytes
+                    <= self.max_in_flight_source_bytes
+                ):
+                    flight = _SnapshotFlight(
+                        generation,
+                        self.source_reservation_bytes,
+                    )
+                    self._flights[flight_key] = flight
+                    self._in_flight_source_bytes += flight.source_bytes
+                    self._peak_in_flight_source_bytes = max(
+                        self._peak_in_flight_source_bytes,
+                        self._in_flight_source_bytes,
+                    )
+                    self._cache_misses += 1
+                    self._snapshot_loads += 1
+                    leader = True
+                    break
+                self._budget_waits += 1
+                self._condition.wait()
+                current = self._clock_value()
+                self._expire_locked(current)
+                cached = self._entries.get(cache_key)
+                if cached is not None:
+                    return self._cache_hit_locked(
+                        cache_key,
+                        cached,
+                        current,
+                    )
+
+        if not leader:
+            flight.event.wait()
+            if flight.error is not None:
+                self._raise_flight_error(flight.error)
+            if flight.state is None:
+                raise RuntimeError("Cursor chat snapshot flight returned no state")
+            return flight.state
+
+        try:
+            state, stable_signature = _snapshot_cursor_chat_uncached(
+                source_path,
+                sleeper=sleeper,
+                source_byte_limit=flight.source_bytes,
+            )
+        except BaseException as error:
+            with self._lock:
+                self._fail_flight_locked(flight_key, flight, error)
+            raise
+
+        publication_key = (cache_key[0], stable_signature)
+        try:
+            publication_weight = _cache_entry_weight(
+                publication_key,
+                state,
+            )
+            publication_now = self._clock_value()
+            with self._lock:
+                if self._publication_probe is not None:
+                    self._publication_probe()
+                self._store_locked(
+                    publication_key,
+                    state,
+                    publication_weight,
+                    publication_now,
+                    generation,
+                )
+                flight.state = state
+                self._release_flight_locked(flight_key, flight)
+                flight.event.set()
+                self._condition.notify_all()
+        except BaseException as error:
+            typed_error = self._publication_error(error)
+            with self._lock:
+                published = self._entries.get(publication_key)
+                if published is not None and published.state is state:
+                    self._remove_entry_locked(publication_key)
+                self._fail_flight_locked(
+                    flight_key,
+                    flight,
+                    typed_error,
+                )
+            raise typed_error
+        return state
+
+    def cache_key(
+        self,
+        path: Union[str, os.PathLike],
+    ) -> SnapshotCacheKey:
+        """Return the canonical path and complete current DB/WAL signature."""
+
+        source_path = _normalize_path(path)
+        return (
+            str(_canonical_store_path(source_path)),
+            _source_signature(source_path),
+        )
+
+    @property
+    def stats(self) -> CursorChatSnapshotStats:
+        with self._lock:
+            return CursorChatSnapshotStats(
+                signature_checks=self._signature_checks,
+                cache_hits=self._cache_hits,
+                cache_misses=self._cache_misses,
+                snapshot_loads=self._snapshot_loads,
+                coalesced_waits=self._coalesced_waits,
+                evictions=self._evictions,
+                expirations=self._expirations,
+                errors=self._errors,
+                entries=len(self._entries),
+                in_flight=len(self._flights),
+                cache_bytes=self._cache_bytes,
+                peak_cache_bytes=self._peak_cache_bytes,
+                oversized_states=self._oversized_states,
+                in_flight_source_bytes=self._in_flight_source_bytes,
+                peak_in_flight_source_bytes=(
+                    self._peak_in_flight_source_bytes
+                ),
+                budget_waits=self._budget_waits,
+                generation=self._generation,
+            )
+
+    def reset(self) -> None:
+        """Drop cached state and counters without disrupting active callers."""
+
+        with self._lock:
+            self._generation += 1
+            self._scan_depth = 0
+            self._entries.clear()
+            self._cache_bytes = 0
+            self._peak_cache_bytes = 0
+            self._oversized_states = 0
+            self._signature_checks = 0
+            self._cache_hits = 0
+            self._cache_misses = 0
+            self._snapshot_loads = 0
+            self._coalesced_waits = 0
+            self._evictions = 0
+            self._expirations = 0
+            self._errors = 0
+            self._peak_in_flight_source_bytes = self._in_flight_source_bytes
+            self._budget_waits = 0
+            self._condition.notify_all()
+
+
 def _safe_message(error_type: type, message: str) -> CursorChatError:
     return error_type(message)
 
 
 def _normalize_path(path: Union[str, os.PathLike]) -> Path:
     return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+
+
+def _canonical_store_path(path: Union[str, os.PathLike]) -> Path:
+    return Path(os.path.realpath(str(_normalize_path(path))))
 
 
 def _regular_signature(path: Path, maximum: int, required: bool) -> Optional[FileSignature]:
@@ -188,93 +845,64 @@ def _copy_regular_file(source: Path, destination: Path, expected_size: int) -> i
     return copied
 
 
-class _DuplicateJSONKey(ValueError):
-    pass
-
-
-def _json_object(pairs: Sequence[Tuple[str, Any]]) -> Dict[str, Any]:
-    result: Dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateJSONKey()
-        result[key] = value
-    return result
-
-
-def _reject_json_constant(_value: str) -> None:
-    raise ValueError()
-
-
-def _validate_json_text(value: str, error_type: type) -> None:
-    try:
-        value.encode("utf-8", "strict")
-    except UnicodeEncodeError:
-        raise _safe_message(error_type, "Cursor chat JSON text is invalid")
-
-
-def _validate_json_tree(value: Any, error_type: type) -> None:
-    stack: List[Tuple[Any, int]] = [(value, 1)]
-    nodes = 1
-    while stack:
-        current, depth = stack.pop()
-        if depth > MAX_JSON_DEPTH:
-            raise _safe_message(CursorChatLimitError, "Cursor chat JSON is nested too deeply")
-        if isinstance(current, float) and not math.isfinite(current):
-            raise _safe_message(error_type, "Cursor chat JSON number is invalid")
-        if current is None or isinstance(current, (bool, int, float)):
-            continue
-        if isinstance(current, str):
-            _validate_json_text(current, error_type)
-            continue
-        if isinstance(current, list):
-            nodes += len(current)
-            if nodes > MAX_JSON_NODES:
-                raise _safe_message(
-                    CursorChatLimitError,
-                    "Cursor chat JSON has too many nodes",
-                )
-            stack.extend((item, depth + 1) for item in reversed(current))
-            continue
-        if isinstance(current, Mapping):
-            nodes += len(current) * 2
-            if nodes > MAX_JSON_NODES:
-                raise _safe_message(
-                    CursorChatLimitError,
-                    "Cursor chat JSON has too many nodes",
-                )
-            for key, item in current.items():
-                if not isinstance(key, str):
-                    raise _safe_message(
-                        error_type,
-                        "Cursor chat JSON key is invalid",
-                    )
-                _validate_json_text(key, error_type)
-                stack.append((item, depth + 1))
-            continue
-        raise _safe_message(error_type, "Cursor chat JSON value is unsupported")
-
-
 def _strict_json(raw: bytes, error_type: type) -> Any:
     try:
-        text = raw.decode("utf-8", "strict")
-    except UnicodeDecodeError:
-        raise _safe_message(error_type, "Cursor chat JSON is malformed")
-    try:
-        decoded = json.loads(
-            text,
-            object_pairs_hook=_json_object,
-            parse_constant=_reject_json_constant,
+        return parse_json(
+            raw,
+            JSONLimits(
+                max_depth=MAX_JSON_DEPTH - 1,
+                max_nodes=MAX_JSON_NODES,
+            ),
         )
-    except RecursionError:
-        raise _safe_message(CursorChatLimitError, "Cursor chat JSON is nested too deeply")
-    except (json.JSONDecodeError, ValueError):
-        raise _safe_message(error_type, "Cursor chat JSON is malformed")
-    _validate_json_tree(decoded, error_type)
-    return decoded
+    except JSONLimitError as error:
+        raise _cursor_json_limit(error) from error
+    except JSONSyntaxError as error:
+        if error.reason == "unicode":
+            raise _safe_message(
+                error_type,
+                "Cursor chat JSON text is invalid",
+            ) from error
+        raise _safe_message(error_type, "Cursor chat JSON is malformed") from error
+
+
+def _cursor_json_limit(error: JSONLimitError) -> CursorChatLimitError:
+    if error.reason == "depth":
+        return CursorChatLimitError("Cursor chat JSON is nested too deeply")
+    if error.reason in ("items", "nodes"):
+        return CursorChatLimitError("Cursor chat JSON has too many nodes")
+    if error.reason == "string":
+        return CursorChatLimitError("Cursor chat JSON text is too large")
+    if error.reason == "integer":
+        return CursorChatLimitError("Cursor chat JSON integer is too large")
+    return CursorChatLimitError("Cursor chat JSON exceeds its size limit")
+
+
+def _cursor_json_syntax(
+    error: JSONSyntaxError,
+    error_type: type,
+) -> CursorChatError:
+    if error.reason == "nonfinite":
+        return _safe_message(error_type, "Cursor chat JSON number is invalid")
+    if error.reason == "unicode":
+        return _safe_message(error_type, "Cursor chat JSON text is invalid")
+    if error.reason == "key":
+        return _safe_message(error_type, "Cursor chat JSON key is invalid")
+    return _safe_message(error_type, "Cursor chat JSON value is unsupported")
 
 
 def _freeze_json(value: Any) -> FrozenJSON:
-    _validate_json_tree(value, CursorChatBlobError)
+    try:
+        validate_json(
+            value,
+            JSONLimits(
+                max_depth=MAX_JSON_DEPTH - 1,
+                max_nodes=MAX_JSON_NODES,
+            ),
+        )
+    except JSONLimitError as error:
+        raise _cursor_json_limit(error) from error
+    except JSONSyntaxError as error:
+        raise _cursor_json_syntax(error, CursorChatBlobError) from error
 
     def freeze(current: Any) -> FrozenJSON:
         if current is None or isinstance(current, (bool, int, float, str)):
@@ -718,29 +1346,20 @@ def _message_text(message: Mapping[str, FrozenJSON]) -> str:
     return "\n".join(parts)
 
 
-def _snip(value: str, limit: int = 160) -> str:
-    text = " ".join(value.split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
 def extract_title(
     messages: Sequence[Mapping[str, FrozenJSON]],
     fallback: str = "",
 ) -> str:
-    """Extract the first real user query, ignoring generated user context."""
+    """Preserve the public decoder API while delegating title policy."""
 
-    fallback_user = ""
-    for message in messages:
-        if message.get("role") != "user":
-            continue
-        text = _message_text(message)
-        match = _USER_QUERY.search(text)
-        if match and match.group(1).strip():
-            return _snip(match.group(1))
-        candidate = _USER_INFO.sub("", text).strip()
-        if candidate and not fallback_user:
-            fallback_user = candidate
-    return _snip(fallback_user or fallback or "Cursor chat")
+    return extract_cursor_title(
+        (
+            _message_text(message)
+            for message in messages
+            if message.get("role") == "user"
+        ),
+        fallback or "Cursor chat",
+    )
 
 
 def _read_state(
@@ -797,20 +1416,44 @@ def _read_state(
     )
 
 
-def _read_stable_copy(
+def _snapshot_retry_delay(attempt: int) -> float:
+    return min(
+        SNAPSHOT_BACKOFF_INITIAL_SECONDS * (2**attempt),
+        SNAPSHOT_BACKOFF_MAX_SECONDS,
+    )
+
+
+def _read_stable_copy_with_signature_unlimited(
     path: Union[str, os.PathLike],
     reader: Callable[[sqlite3.Connection], ReadResult],
-) -> ReadResult:
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+    source_byte_limit: Optional[int] = None,
+) -> Tuple[ReadResult, StableCopySignature]:
     source_db = _normalize_path(path)
     source_wal = Path(str(source_db) + "-wal")
-    for _attempt in range(SNAPSHOT_ATTEMPTS):
+    for attempt in range(SNAPSHOT_ATTEMPTS):
         before_db = _regular_signature(source_db, MAX_DB_BYTES, required=True)
         before_wal = _regular_signature(source_wal, MAX_WAL_BYTES, required=False)
         if before_db is None:
             raise _safe_message(CursorChatSourceError, "Cursor chat database is missing")
-        copy_failed = False
+        source_bytes = before_db[2] + (
+            before_wal[2] if before_wal is not None else 0
+        )
+        if source_byte_limit is not None and source_bytes > source_byte_limit:
+            raise _safe_message(
+                CursorChatLimitError,
+                "Cursor chat source exceeds snapshot in-flight budget",
+            )
+        copy_error: Optional[OSError] = None
         with tempfile.TemporaryDirectory(prefix="cursor-chat-") as temporary:
-            os.chmod(temporary, 0o700)
+            try:
+                os.chmod(temporary, 0o700)
+            except OSError:
+                raise _safe_message(
+                    CursorChatSourceError,
+                    "Cursor chat snapshot cannot be prepared",
+                )
             copied_db = Path(temporary) / "snapshot.db"
             copied_wal = Path(str(copied_db) + "-wal")
             try:
@@ -820,27 +1463,40 @@ def _read_stable_copy(
                     if before_wal is not None
                     else 0
                 )
-            except OSError:
-                copy_failed = True
+            except OSError as error:
+                copy_error = error
                 db_bytes = -1
                 wal_bytes = -1
 
-            try:
-                after_db = _regular_signature(source_db, MAX_DB_BYTES, required=True)
-                after_wal = _regular_signature(source_wal, MAX_WAL_BYTES, required=False)
-            except CursorChatSourceError:
-                after_db = None
-                after_wal = None
-            if (
-                copy_failed
-                or before_db != after_db
-                or before_wal != after_wal
-                or db_bytes != before_db[2]
+            # Missing/replaced source files are consistency races.  Other stat
+            # failures and copy/read errors against unchanged signatures are
+            # permanent for this call and must not be retried or delayed.
+            after_db = _regular_signature(
+                source_db,
+                MAX_DB_BYTES,
+                required=False,
+            )
+            after_wal = _regular_signature(
+                source_wal,
+                MAX_WAL_BYTES,
+                required=False,
+            )
+            signature_race = before_db != after_db or before_wal != after_wal
+            incomplete_copy = (
+                db_bytes != before_db[2]
                 or (
                     before_wal is not None
                     and wal_bytes != before_wal[2]
                 )
-            ):
+            )
+            if not signature_race and (copy_error is not None or incomplete_copy):
+                raise _safe_message(
+                    CursorChatSourceError,
+                    "Cursor chat snapshot cannot be copied",
+                )
+            if signature_race:
+                if attempt + 1 < SNAPSHOT_ATTEMPTS:
+                    sleeper(_snapshot_retry_delay(attempt))
                 continue
 
             connection: Optional[sqlite3.Connection] = None
@@ -849,7 +1505,7 @@ def _read_stable_copy(
                 connection = sqlite3.connect(uri, uri=True)
                 connection.execute("PRAGMA query_only = ON")
                 connection.execute("PRAGMA trusted_schema = OFF")
-                return reader(connection)
+                return reader(connection), (before_db, before_wal)
             except CursorChatError:
                 raise
             except sqlite3.DatabaseError:
@@ -863,6 +1519,47 @@ def _read_stable_copy(
     raise _safe_message(CursorChatBusyError, "Cursor chat changed during snapshot")
 
 
+def _read_stable_copy_with_signature(
+    path: Union[str, os.PathLike],
+    reader: Callable[[sqlite3.Connection], ReadResult],
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+    source_byte_limit: Optional[int] = None,
+) -> Tuple[ReadResult, StableCopySignature]:
+    """Serialize all copy/decode paths through the process hard slot count."""
+
+    with _GLOBAL_SNAPSHOT_SLOTS:
+        return _read_stable_copy_with_signature_unlimited(
+            path,
+            reader,
+            sleeper=sleeper,
+            source_byte_limit=source_byte_limit,
+        )
+
+
+def _read_stable_copy(
+    path: Union[str, os.PathLike],
+    reader: Callable[[sqlite3.Connection], ReadResult],
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> ReadResult:
+    result, _signature = _read_stable_copy_with_signature(
+        path,
+        reader,
+        sleeper=sleeper,
+    )
+    return result
+
+
+def _source_file_signature(
+    signature: Optional[FileSignature],
+) -> SourceFileSignature:
+    if signature is None:
+        return (False, 0, 0, 0, 0, 0)
+    device, inode, size, mtime_ns, ctime_ns = signature
+    return (True, inode, mtime_ns, size, device, ctime_ns)
+
+
 def _source_signature(path: Union[str, os.PathLike]) -> SourceSignature:
     source_db = _normalize_path(path)
     source_wal = Path(str(source_db) + "-wal")
@@ -870,21 +1567,63 @@ def _source_signature(path: Union[str, os.PathLike]) -> SourceSignature:
     if database is None:
         raise _safe_message(CursorChatSourceError, "Cursor chat database is missing")
     return (
-        database,
-        _regular_signature(source_wal, MAX_WAL_BYTES, required=False),
+        _source_file_signature(database),
+        _source_file_signature(
+            _regular_signature(source_wal, MAX_WAL_BYTES, required=False)
+        ),
     )
+
+
+def _snapshot_cursor_chat_uncached(
+    path: Union[str, os.PathLike],
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+    source_byte_limit: Optional[int] = None,
+) -> Tuple[CursorChatState, SourceSignature]:
+    state, stable_signature = _read_stable_copy_with_signature(
+        path,
+        lambda connection: _read_state(connection, None),
+        sleeper=sleeper,
+        source_byte_limit=source_byte_limit,
+    )
+    database, wal = stable_signature
+    return state, (
+        _source_file_signature(database),
+        _source_file_signature(wal),
+    )
+
+
+_DEFAULT_SNAPSHOT_BROKER = CursorChatSnapshotBroker()
+
+
+def default_snapshot_broker() -> CursorChatSnapshotBroker:
+    """Return the process-local bounded broker shared by Cursor consumers."""
+
+    return _DEFAULT_SNAPSHOT_BROKER
+
+
+def reset_default_snapshot_broker() -> None:
+    """Reset the shared broker for daemon lifecycle and isolated tests."""
+
+    _DEFAULT_SNAPSHOT_BROKER.reset()
 
 
 def snapshot_cursor_chat(
     path: Union[str, os.PathLike],
     *,
     root_blob_id: Optional[str] = None,
+    broker: Optional[CursorChatSnapshotBroker] = None,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> CursorChatState:
     """Return a decoded stable snapshot without opening any source SQLite file."""
 
+    if root_blob_id is None:
+        selected_broker = broker if broker is not None else _DEFAULT_SNAPSHOT_BROKER
+        return selected_broker.snapshot(path, sleeper=sleeper)
     return _read_stable_copy(
         path,
         lambda connection: _read_state(connection, root_blob_id),
+        sleeper=sleeper,
     )
 
 
@@ -920,6 +1659,7 @@ class CursorChatFollower:
         from_start: bool = False,
         max_records: int = DEFAULT_FOLLOW_RECORDS,
         clock: Callable[[], float] = time.time,
+        snapshot_broker: Optional[CursorChatSnapshotBroker] = None,
     ) -> None:
         if (
             not isinstance(max_records, int)
@@ -932,6 +1672,11 @@ class CursorChatFollower:
         self.from_start = bool(from_start)
         self.max_records = max_records
         self._clock = clock
+        self._snapshot_broker = (
+            snapshot_broker
+            if snapshot_broker is not None
+            else _DEFAULT_SNAPSHOT_BROKER
+        )
         self._root_blob_id: Optional[str] = None
         self._message_count = 0
         self._prefix_hash = _EMPTY_PREFIX_HASH
@@ -1196,7 +1941,10 @@ class CursorChatFollower:
             ):
                 self.last_error = None
                 return []
-            state = snapshot_cursor_chat(self.path)
+            state = snapshot_cursor_chat(
+                self.path,
+                broker=self._snapshot_broker,
+            )
             after_signature = _source_signature(self.path)
             self._last_source_signature = (
                 before_signature
@@ -1276,6 +2024,14 @@ def _is_count(value: object) -> bool:
 __all__ = [
     "COPY_CHUNK_BYTES",
     "DEFAULT_FOLLOW_RECORDS",
+    "DEFAULT_SNAPSHOT_CACHE_BYTES",
+    "DEFAULT_SNAPSHOT_CACHE_ENTRIES",
+    "DEFAULT_SNAPSHOT_CACHE_TTL_SECONDS",
+    "DEFAULT_SNAPSHOT_HARD_BYTES",
+    "DEFAULT_SNAPSHOT_HARD_ENTRIES",
+    "DEFAULT_SNAPSHOT_MAX_ENTRY_BYTES",
+    "DEFAULT_SNAPSHOT_MAX_IN_FLIGHT",
+    "DEFAULT_SNAPSHOT_MAX_IN_FLIGHT_SOURCE_BYTES",
     "MAX_CHECKPOINT_BYTES",
     "MAX_CONTENT_BLOCKS",
     "MAX_DB_BYTES",
@@ -1293,6 +2049,8 @@ __all__ = [
     "MAX_WAL_BYTES",
     "MAX_WORKSPACE_URI_BYTES",
     "SNAPSHOT_ATTEMPTS",
+    "SNAPSHOT_BACKOFF_INITIAL_SECONDS",
+    "SNAPSHOT_BACKOFF_MAX_SECONDS",
     "CursorChatBlobError",
     "CursorChatBusyError",
     "CursorChatError",
@@ -1304,7 +2062,12 @@ __all__ = [
     "CursorChatSchemaError",
     "CursorChatSourceError",
     "CursorChatState",
+    "CursorChatSnapshotBroker",
+    "CursorChatSnapshotStats",
+    "cursor_chat_state_weight",
     "decode_file_uri",
+    "default_snapshot_broker",
     "extract_title",
+    "reset_default_snapshot_broker",
     "snapshot_cursor_chat",
 ]

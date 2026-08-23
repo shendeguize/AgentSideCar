@@ -2,13 +2,15 @@ import hashlib
 import json
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from sidecar.cursor_chat import CursorChatSourceError
 from sidecar.model import Event, Session
-from sidecar.tail import JSONLFollower, SessionTailer
+from sidecar.tail import JSONLFollower, SessionTailer, watch_sessions
 
 
 class PagedDSHAdapter:
@@ -511,6 +513,62 @@ class CursorChatSessionTailerTests(unittest.TestCase):
             self.assertEqual(["fresh answer"], [event.text for event in events])
             self.assertEqual(["assistant"], [event.kind for event in events])
             self.assertEqual(appended_signature, _source_signature(path))
+
+
+class WatchSessionsCancellationTests(unittest.TestCase):
+    def test_pre_cancelled_watch_does_not_construct_tailers(self):
+        cancel = threading.Event()
+        cancel.set()
+        with mock.patch("sidecar.tail.SessionTailer") as tailer:
+            self.assertEqual(
+                [],
+                list(
+                    watch_sessions(
+                        [make_dsh_session(0)],
+                        cancel_event=cancel,
+                    )
+                ),
+            )
+        tailer.assert_not_called()
+
+    def test_cancel_event_interrupts_long_poll_wait_without_busy_loop(self):
+        cancel = threading.Event()
+        poll_calls = []
+
+        class IdleTailer:
+            def __init__(self, session, from_start=False):
+                del session, from_start
+
+            def poll(self):
+                poll_calls.append(time.monotonic())
+                return []
+
+        finished = threading.Event()
+
+        def consume():
+            with mock.patch("sidecar.tail.SessionTailer", IdleTailer):
+                list(
+                    watch_sessions(
+                        [make_dsh_session(0)],
+                        poll_interval=30.0,
+                        cancel_event=cancel,
+                    )
+                )
+            finished.set()
+
+        worker = threading.Thread(target=consume)
+        worker.start()
+        deadline = time.monotonic() + 1.0
+        while not poll_calls and time.monotonic() < deadline:
+            time.sleep(0.005)
+        started = time.monotonic()
+        cancel.set()
+        worker.join(timeout=1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(finished.is_set())
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(1, len(poll_calls))
 
 
 if __name__ == "__main__":

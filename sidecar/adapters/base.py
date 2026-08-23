@@ -28,6 +28,7 @@ from typing import (
 )
 
 from sidecar.model import Event, Session, Status
+from sidecar.text_utils import snip
 
 Pathish = Union[str, os.PathLike]
 FileSignature = Tuple[str, int, int]
@@ -189,15 +190,6 @@ def sanitize_terminal_text(value: Any, collapse_whitespace: bool = True) -> str:
         for character in text
         if not (ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F)
     )
-
-
-def snip(value: Any, limit: int = 120) -> str:
-    """Collapse whitespace and truncate text to a display-safe length."""
-
-    text = " ".join(str(value or "").split())
-    if limit <= 0:
-        return ""
-    return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
 
 
 def read_json_object(path: Pathish, max_bytes: int) -> Dict[str, Any]:

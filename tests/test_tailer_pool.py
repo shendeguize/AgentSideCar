@@ -1,4 +1,6 @@
+import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -8,7 +10,13 @@ from sidecar.adapters.base import Adapter
 from sidecar.bus import EventBus
 from sidecar.model import Event, Session, Status
 from sidecar.tail import SessionTailer
-from sidecar.tailer_pool import TailerPool
+from sidecar.tailer_pool import (
+    MAX_TAIL_ERRORS,
+    MAX_TAIL_ERROR_AGENT_LENGTH,
+    MAX_TAIL_ERROR_CODE_LENGTH,
+    MAX_TAIL_ERROR_SESSION_ID_LENGTH,
+    TailerPool,
+)
 
 
 class FakeAdapter(Adapter):
@@ -80,6 +88,36 @@ class RecordingTailer:
         self.session = session
 
     def poll(self):
+        return []
+
+
+class ClosableFollower:
+    def __init__(self):
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+
+
+class ClosableTailer(RecordingTailer):
+    def __init__(self, session):
+        super().__init__(session)
+        self.errors = []
+        self.follower = ClosableFollower()
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+
+
+class DiagnosticTailer(RecordingTailer):
+    def __init__(self, session, errors=()):
+        super().__init__(session)
+        self.errors = list(errors)
+        self.poll_errors = []
+
+    def poll(self):
+        self.errors.extend(self.poll_errors)
         return []
 
 
@@ -246,6 +284,285 @@ class TailerPoolPolicyTests(unittest.TestCase):
         self.assertEqual(frozenset(), callable_pool.state.active)
         with self.assertRaises(TypeError):
             TailerPool(object())
+
+
+class TailerPoolLifecycleTests(unittest.TestCase):
+    def test_close_waits_for_inflight_poll_ownership(self):
+        class BlockingTailer(RecordingTailer):
+            def __init__(self, session):
+                super().__init__(session)
+                self.poll_started = threading.Event()
+                self.poll_release = threading.Event()
+                self.close_started = threading.Event()
+                self.order = []
+
+            def poll(self):
+                self.order.append("poll_started")
+                self.poll_started.set()
+                self.poll_release.wait(2.0)
+                self.order.append("poll_exited")
+                return []
+
+            def close(self):
+                self.order.append("close_started")
+                self.close_started.set()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = Path(temporary) / "events.jsonl"
+            transcript.write_text("", encoding="utf-8")
+            tailers = []
+
+            def factory(session):
+                tailer = BlockingTailer(session)
+                tailers.append(tailer)
+                return tailer
+
+            pool = TailerPool(lambda event: None, tailer_factory=factory)
+            session = make_session(transcript)
+            key = ("fake", "one")
+            pool.refresh([session], changed_keys={key}, initial=True)
+            refresh_thread = threading.Thread(
+                target=pool.refresh,
+                args=([session],),
+                kwargs={"changed_keys": {key}},
+            )
+            close_thread = threading.Thread(target=pool.close)
+            refresh_thread.start()
+            self.assertTrue(tailers[0].poll_started.wait(1.0))
+
+            close_thread.start()
+            self.assertFalse(tailers[0].close_started.wait(0.05))
+            self.assertTrue(close_thread.is_alive())
+
+            tailers[0].poll_release.set()
+            refresh_thread.join(1.0)
+            close_thread.join(1.0)
+
+            self.assertFalse(refresh_thread.is_alive())
+            self.assertFalse(close_thread.is_alive())
+            self.assertEqual(
+                ["poll_started", "poll_exited", "close_started"],
+                tailers[0].order,
+            )
+
+    def test_close_is_idempotent_releases_resources_and_blocks_refresh(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = Path(temporary) / "events.jsonl"
+            transcript.write_text("", encoding="utf-8")
+            tailers = []
+
+            def factory(session):
+                tailer = ClosableTailer(session)
+                tailers.append(tailer)
+                return tailer
+
+            pool = TailerPool(lambda event: None, tailer_factory=factory)
+            session = make_session(transcript)
+            key = ("fake", "one")
+            pool.refresh(
+                [session],
+                changed_keys={key},
+                initial=True,
+            )
+
+            pool.close()
+            pool.close()
+
+            self.assertTrue(pool.state.closed)
+            self.assertEqual(frozenset(), pool.state.known)
+            self.assertEqual(frozenset(), pool.state.active)
+            self.assertEqual(frozenset(), pool.state.checkpoints)
+            self.assertEqual(frozenset(), pool.state.pending)
+            self.assertEqual(1, tailers[0].close_calls)
+            self.assertEqual(1, tailers[0].follower.close_calls)
+            self.assertFalse(
+                pool.refresh([session], changed_keys={key})
+            )
+            self.assertEqual(1, len(tailers))
+
+            pool.reset()
+            self.assertFalse(pool.state.closed)
+            pool.refresh(
+                [session],
+                changed_keys={key},
+                initial=True,
+            )
+            self.assertEqual(2, len(tailers))
+            pool.close()
+
+    def test_close_discards_retained_checkpoints(self):
+        class CheckpointTailer(ClosableTailer):
+            def export_checkpoint(self):
+                return {"offset": 1}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = Path(temporary) / "events.jsonl"
+            transcript.write_text("{}\n", encoding="utf-8")
+            session = make_session(
+                transcript,
+                updated_at=1.0,
+                status=Status.IDLE,
+            )
+            pool = TailerPool(
+                lambda event: None,
+                tail_recent_seconds=1.0,
+                tailer_factory=CheckpointTailer,
+            )
+            key = ("fake", "one")
+            pool.refresh(
+                [session],
+                changed_keys={key},
+                initial=True,
+                now=10.0,
+            )
+            self.assertEqual({key}, pool.state.checkpoints)
+
+            pool.close()
+
+            self.assertEqual(frozenset(), pool.state.checkpoints)
+
+    def test_close_continues_when_one_resource_raises(self):
+        class RaisingTailer(ClosableTailer):
+            def close(self):
+                self.close_calls += 1
+                raise RuntimeError("close failed")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = Path(temporary) / "events.jsonl"
+            transcript.write_text("", encoding="utf-8")
+            tailers = []
+
+            def factory(session):
+                tailer = RaisingTailer(session)
+                tailers.append(tailer)
+                return tailer
+
+            pool = TailerPool(lambda event: None, tailer_factory=factory)
+            session = make_session(transcript)
+            pool.refresh(
+                [session],
+                changed_keys={("fake", "one")},
+                initial=True,
+            )
+
+            pool.close()
+
+            self.assertTrue(pool.state.closed)
+            self.assertEqual(1, tailers[0].close_calls)
+            self.assertEqual(1, tailers[0].follower.close_calls)
+
+
+class TailerPoolDiagnosticTests(unittest.TestCase):
+    def test_tail_errors_are_safe_consumed_and_deduplicated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = Path(temporary) / "store.db"
+            transcript.write_bytes(b"not a real database")
+            created = []
+
+            def factory(session):
+                tailer = DiagnosticTailer(
+                    session,
+                    (
+                        "CursorChatSourceError",
+                        "RuntimeError: /private/transcript secret content",
+                        "/private/transcript",
+                    ),
+                )
+                tailer.poll_errors = [
+                    "CursorChatSourceError",
+                    "RuntimeError: changed private content",
+                ]
+                created.append(tailer)
+                return tailer
+
+            pool = TailerPool(lambda event: None, tailer_factory=factory)
+            session = make_session(
+                transcript,
+                agent="cursor-cli",
+                extra={"transcript_kind": "cursor-chat-sqlite"},
+            )
+            key = ("cursor-cli", "one")
+            pool.refresh(
+                [session],
+                changed_keys={key},
+                initial=True,
+            )
+            pool.refresh([session], changed_keys={key})
+            first = pool.tail_errors
+            pool.refresh([session], changed_keys={key})
+
+            self.assertEqual(
+                [
+                    {
+                        "agent": "cursor-cli",
+                        "session_id": "one",
+                        "code": "CursorChatSourceError",
+                    },
+                    {
+                        "agent": "cursor-cli",
+                        "session_id": "one",
+                        "code": "RuntimeError",
+                    },
+                    {
+                        "agent": "cursor-cli",
+                        "session_id": "one",
+                        "code": "tail_error",
+                    },
+                ],
+                first,
+            )
+            self.assertEqual(first, pool.tail_errors)
+            self.assertEqual([], created[0].errors)
+            encoded = json.dumps(pool.tail_errors, ensure_ascii=False)
+            self.assertNotIn("private", encoded)
+            self.assertNotIn("secret", encoded)
+            self.assertNotIn(str(transcript), encoded)
+            pool.close()
+            self.assertEqual([], pool.tail_errors)
+
+    def test_tail_error_count_and_fields_are_bounded_json(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = Path(temporary) / "events.jsonl"
+            transcript.write_text("", encoding="utf-8")
+            diagnostics = [
+                "Generated{}Error".format(index)
+                for index in range(MAX_TAIL_ERRORS + 9)
+            ]
+            pool = TailerPool(
+                lambda event: None,
+                tailer_factory=lambda session: DiagnosticTailer(
+                    session,
+                    diagnostics,
+                ),
+            )
+            agent = "a" * (MAX_TAIL_ERROR_AGENT_LENGTH + 10)
+            session_id = (
+                "s" * (MAX_TAIL_ERROR_SESSION_ID_LENGTH + 10)
+                + "\ud800\n"
+            )
+            session = make_session(
+                transcript,
+                agent=agent,
+                session_id=session_id,
+            )
+            pool.refresh(
+                [session],
+                changed_keys={(agent, session_id)},
+                initial=True,
+            )
+
+            errors = pool.tail_errors
+            self.assertEqual(MAX_TAIL_ERRORS, len(errors))
+            self.assertTrue(
+                all(
+                    len(error["agent"]) <= MAX_TAIL_ERROR_AGENT_LENGTH
+                    and len(error["session_id"])
+                    <= MAX_TAIL_ERROR_SESSION_ID_LENGTH
+                    and len(error["code"]) <= MAX_TAIL_ERROR_CODE_LENGTH
+                    for error in errors
+                )
+            )
+            json.dumps(errors, ensure_ascii=False).encode("utf-8")
 
 
 class TailerPoolCheckpointTests(unittest.TestCase):

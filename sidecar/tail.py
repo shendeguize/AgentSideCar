@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import stat as stat_module
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -63,8 +64,7 @@ class JSONLFollower:
         self.offset = 0 if self.from_start else stat.st_size
         if self.offset:
             self._anchor = self._read_anchor(self.offset)
-            if not self.from_start:
-                self._capture_trailing_partial(self.offset)
+            self._capture_trailing_partial(self.offset)
 
     def _capture_trailing_partial(self, end: int) -> None:
         """Keep only the unterminated row at an initial EOF boundary."""
@@ -612,34 +612,37 @@ def watch_sessions(
     sessions: Iterable[Session],
     from_start: bool = False,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Iterator[Event]:
     """Poll several direct followers forever, yielding normalized events."""
 
     if poll_interval <= 0:
         raise ValueError("poll_interval must be positive")
-    tailers = [SessionTailer(session, from_start=from_start) for session in sessions]
-    while tailers:
+    tailers = []
+    for session in sessions:
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        tailers.append(SessionTailer(session, from_start=from_start))
+    while tailers and not (cancel_event is not None and cancel_event.is_set()):
         for tailer in tailers:
+            if cancel_event is not None and cancel_event.is_set():
+                return
             yield from tailer.poll()
-        time.sleep(poll_interval)
-
-
-def follow_session(
-    session: Session,
-    from_start: bool = False,
-    poll_interval: float = DEFAULT_POLL_INTERVAL,
-) -> Iterator[Event]:
-    return watch_sessions(
-        (session,),
-        from_start=from_start,
-        poll_interval=poll_interval,
-    )
+        if cancel_event is None:
+            time.sleep(poll_interval)
+            continue
+        remaining = poll_interval
+        while remaining > 0:
+            wait_seconds = min(remaining, 1.0)
+            started = time.monotonic()
+            if cancel_event.wait(wait_seconds):
+                return
+            remaining -= max(wait_seconds, time.monotonic() - started)
 
 
 __all__ = [
     "JSONLFollower",
     "MAX_TAILER_DIAGNOSTICS",
     "SessionTailer",
-    "follow_session",
     "watch_sessions",
 ]

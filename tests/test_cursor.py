@@ -9,11 +9,18 @@ from unittest import mock
 
 import sidecar.adapters.cursor as cursor_module
 from sidecar.adapters.cursor import CursorAdapter, _read_cli_meta
-from sidecar.cursor_chat import CursorChatSchemaError
+from sidecar.cursor_chat import (
+    CursorChatSchemaError,
+    CursorChatSnapshotBroker,
+    default_snapshot_broker,
+    reset_default_snapshot_broker,
+)
 from sidecar.index import IncrementalIndex
 from sidecar.model import Session, Status
 from sidecar.scan import Scanner
 from sidecar.state import StateEngine
+from sidecar.tailer_pool import TailerPool
+from sidecar.text_utils import CURSOR_TITLE_MAX_TEXTS, extract_cursor_title
 
 
 def varint(value):
@@ -271,6 +278,126 @@ class CursorAdapterTests(unittest.TestCase):
             session.extra["wal_signature"],
         )
 
+    def test_one_decode_shared_across_discovery_checkpoint_and_tailing(self):
+        self.writer.close()
+        for path in self.sqlite_files:
+            path.unlink(missing_ok=True)
+        self.writer, _root_id = create_production_store(
+            self.store,
+            [
+                {
+                    "role": "user",
+                    "content": "<user_query>Shared snapshot</user_query>",
+                }
+            ],
+        )
+        reset_default_snapshot_broker()
+        broker = default_snapshot_broker()
+        adapter = CursorAdapter()
+        pool = TailerPool(
+            lambda event: None,
+            tail_recent_seconds=1.0,
+        )
+        key = ("cursor-cli", "session-id")
+        try:
+            expired = list(adapter.discover(self.home))[0]
+            expired.updated_at = 0.0
+            expired.status = Status.IDLE
+
+            pool.refresh(
+                [expired],
+                changed_keys={key},
+                initial=True,
+                now=10.0,
+            )
+
+            self.assertEqual({key}, pool.state.checkpoints)
+            self.assertEqual(1, broker.stats.snapshot_loads)
+            self.assertEqual(1, broker.stats.cache_hits)
+
+            unchanged = broker.stats
+            pool.refresh(
+                [expired],
+                changed_keys={key},
+                now=11.0,
+            )
+            self.assertEqual(unchanged.snapshot_loads, broker.stats.snapshot_loads)
+            self.assertEqual(unchanged.signature_checks, broker.stats.signature_checks)
+
+            wal = Path(str(self.store) + "-wal")
+            details = wal.stat()
+            os.utime(
+                wal,
+                ns=(details.st_atime_ns, details.st_mtime_ns + 1_000_000),
+            )
+            active = list(adapter.discover(self.home))[0]
+            active.status = Status.WORKING
+            pool.refresh(
+                [active],
+                changed_keys={key},
+                now=12.0,
+            )
+
+            self.assertEqual(2, broker.stats.snapshot_loads)
+            self.assertEqual(frozenset(), pool.state.checkpoints)
+            after_changed = broker.stats
+
+            same = list(adapter.discover(self.home))[0]
+            same.status = Status.WORKING
+            pool.refresh(
+                [same],
+                changed_keys={key},
+                now=13.0,
+            )
+
+            self.assertEqual(
+                after_changed.snapshot_loads,
+                broker.stats.snapshot_loads,
+            )
+            self.assertEqual(
+                after_changed.signature_checks,
+                broker.stats.signature_checks,
+            )
+        finally:
+            pool.close()
+            reset_default_snapshot_broker()
+
+    def test_adapter_generation_nests_inside_outer_scope(self):
+        self.writer.close()
+        for path in self.sqlite_files:
+            path.unlink(missing_ok=True)
+        self.writer, _root_id = create_production_store(
+            self.store,
+            [{"role": "user", "content": "Nested generation"}],
+        )
+        now = [10.0]
+        broker = CursorChatSnapshotBroker(
+            ttl_seconds=1.0,
+            clock=lambda: now[0],
+        )
+        adapter = CursorAdapter(snapshot_broker=broker)
+
+        with broker.scan_generation() as generation:
+            first = list(adapter.discover(self.home))
+            self.assertEqual(1, broker.scan_depth)
+            self.assertEqual(generation, broker.stats.generation)
+            self.assertEqual(1, broker.stats.snapshot_loads)
+
+            now[0] += 2.0
+            second = list(adapter.discover(self.home))
+            self.assertEqual(1, broker.scan_depth)
+            self.assertEqual(generation, broker.stats.generation)
+            self.assertEqual(1, broker.stats.snapshot_loads)
+            self.assertEqual(first[0].title, second[0].title)
+            self.assertEqual(1, broker.stats.entries)
+
+        self.assertEqual(0, broker.scan_depth)
+        self.assertEqual(1, broker.stats.entries)
+        now[0] += 2.0
+        with broker.scan_generation():
+            pass
+        self.assertEqual(0, broker.stats.entries)
+
     def test_typed_snapshot_failure_falls_back_without_error_text(self):
         with (
             mock.patch.object(
@@ -365,6 +492,7 @@ class CursorAdapterTests(unittest.TestCase):
         self.assertEqual(["cwd", "name"], metadata["meta_keys"])
 
     def test_untyped_snapshot_failure_is_not_silently_downgraded(self):
+        broker = CursorChatSnapshotBroker()
         with (
             mock.patch.object(
                 cursor_module,
@@ -373,7 +501,10 @@ class CursorAdapterTests(unittest.TestCase):
             ),
             self.assertRaises(RuntimeError),
         ):
-            list(CursorAdapter().discover(self.home))
+            list(
+                CursorAdapter(snapshot_broker=broker).discover(self.home)
+            )
+        self.assertEqual(0, broker.scan_depth)
 
     def test_wal_growth_changes_incremental_signature(self):
         adapter = CursorAdapter()
@@ -400,6 +531,26 @@ class CursorAdapterTests(unittest.TestCase):
         self.assertNotEqual(first_signature, second.extra["store_signature"]["wal"])
         self.assertEqual(newer_ns / 1e9, second.updated_at)
         self.assertEqual({("cursor-cli", "session-id")}, delta.changed)
+
+    def test_same_size_mtime_wal_replacement_invalidates_snapshot_metadata(self):
+        broker = CursorChatSnapshotBroker()
+        adapter = CursorAdapter(snapshot_broker=broker)
+        first = list(adapter.discover(self.home))[0]
+        wal = Path(str(self.store) + "-wal")
+        details = wal.stat()
+        replacement = self.home / "replacement-wal"
+        replacement.write_bytes(wal.read_bytes())
+        os.utime(
+            replacement,
+            ns=(details.st_atime_ns, details.st_mtime_ns),
+        )
+
+        os.replace(str(replacement), str(wal))
+        second = list(adapter.discover(self.home))[0]
+
+        self.assertEqual(first.title, second.title)
+        self.assertEqual(first.project, second.project)
+        self.assertEqual(2, broker.stats.snapshot_loads)
 
     def test_recent_db_or_wal_keeps_cli_session_working(self):
         now = 2_000_000_000.0
@@ -479,6 +630,29 @@ class CursorAdapterTests(unittest.TestCase):
                 session,
                 adapter=adapter,
                 now=now,
+            ),
+        )
+
+    def test_title_helper_bounds_text_count_and_malformed_metadata(self):
+        inspected = []
+
+        def payloads():
+            for index in range(CURSOR_TITLE_MAX_TEXTS + 1):
+                inspected.append(index)
+                if index == 0:
+                    yield "First fallback"
+                elif index == CURSOR_TITLE_MAX_TEXTS:
+                    yield "<user_query>Too late</user_query>"
+                else:
+                    yield "<user_info>generated</user_info>"
+
+        self.assertEqual("First fallback", extract_cursor_title(payloads()))
+        self.assertEqual(CURSOR_TITLE_MAX_TEXTS, len(inspected))
+        self.assertEqual(
+            "Metadata fallback",
+            extract_cursor_title(
+                ("private metadata</user_info>",),
+                "Metadata fallback",
             ),
         )
 

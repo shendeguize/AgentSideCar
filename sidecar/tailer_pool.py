@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import inspect
+import re
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     Any,
     Callable,
+    Deque,
     Dict,
     FrozenSet,
     Iterable,
+    List,
     Mapping,
     Optional,
     Set,
@@ -24,6 +29,15 @@ from sidecar.tail import SessionTailer
 
 DEFAULT_TAIL_RECENT_SECONDS = 48.0 * 60.0 * 60.0
 DEFAULT_EVENT_POLLS = 32
+MAX_TAIL_ERRORS = 128
+MAX_TAIL_ERROR_AGENT_LENGTH = 64
+MAX_TAIL_ERROR_SESSION_ID_LENGTH = 256
+MAX_TAIL_ERROR_CODE_LENGTH = 128
+TAIL_ERROR_FALLBACK_CODE = "tail_error"
+
+_TAIL_ERROR_CODE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning)$"
+)
 
 TailerFactory = Callable[..., Any]
 EventPublisher = Callable[[Any], None]
@@ -38,13 +52,14 @@ class TailerPoolState:
     active: FrozenSet[SessionKey]
     checkpoints: FrozenSet[SessionKey]
     pending: FrozenSet[SessionKey]
+    closed: bool = False
 
 
 class TailerPool:
     """Own session tailers and preserve cursors across temporary expiry.
 
-    ``refresh`` is intentionally serialized by its caller. A pool has no
-    internal locking because the daemon gives scanning a single owner.
+    Lifecycle operations share one reentrant ownership lock, so resource
+    closure can never overlap a refresh or tailer poll.
     """
 
     def __init__(
@@ -66,6 +81,10 @@ class TailerPool:
         self._paths: Dict[SessionKey, str] = {}
         self._checkpoints: Dict[SessionKey, Checkpoint] = {}
         self._pending: Set[SessionKey] = set()
+        self._tail_errors: Deque[Dict[str, str]] = deque()
+        self._tail_error_keys: Set[Tuple[str, str, str]] = set()
+        self._lifecycle_lock = threading.RLock()
+        self._closed = False
 
     @staticmethod
     def _publisher_callable(publisher: Any) -> EventPublisher:
@@ -80,21 +99,141 @@ class TailerPool:
     def state(self) -> TailerPoolState:
         """Return an immutable view without exposing tailer instances."""
 
-        return TailerPoolState(
-            known=frozenset(self._known_keys),
-            active=frozenset(self._tailers),
-            checkpoints=frozenset(self._checkpoints),
-            pending=frozenset(self._pending),
+        with self._lifecycle_lock:
+            return TailerPoolState(
+                known=frozenset(self._known_keys),
+                active=frozenset(self._tailers),
+                checkpoints=frozenset(self._checkpoints),
+                pending=frozenset(self._pending),
+                closed=self._closed,
+            )
+
+    @property
+    def tail_errors(self) -> List[Dict[str, str]]:
+        """Return bounded, path-free diagnostics collected from tailers."""
+
+        with self._lifecycle_lock:
+            return [dict(error) for error in self._tail_errors]
+
+    @staticmethod
+    def _bounded_identifier(value: object, limit: int) -> str:
+        text = str(value or "")
+        safe = "".join(
+            character
+            for character in text
+            if (
+                ord(character) >= 0x20
+                and ord(character) != 0x7F
+                and not 0xD800 <= ord(character) <= 0xDFFF
+            )
         )
+        return safe[:limit] or "unknown"
 
-    def reset(self) -> None:
-        """Discard all lifecycle state before a fresh daemon run."""
+    @staticmethod
+    def _safe_error_code(value: object) -> str:
+        if isinstance(value, BaseException):
+            candidate = value.__class__.__name__
+        else:
+            candidate = str(value or "").partition(":")[0].strip()
+        candidate = candidate[:MAX_TAIL_ERROR_CODE_LENGTH]
+        if not _TAIL_ERROR_CODE.fullmatch(candidate):
+            return TAIL_ERROR_FALLBACK_CODE
+        return candidate
 
+    def _record_tail_error(self, key: SessionKey, value: object) -> None:
+        agent = self._bounded_identifier(key[0], MAX_TAIL_ERROR_AGENT_LENGTH)
+        session_id = self._bounded_identifier(
+            key[1],
+            MAX_TAIL_ERROR_SESSION_ID_LENGTH,
+        )
+        code = self._safe_error_code(value)
+        diagnostic_key = (agent, session_id, code)
+        if diagnostic_key in self._tail_error_keys:
+            return
+        if len(self._tail_errors) >= MAX_TAIL_ERRORS:
+            oldest = self._tail_errors.popleft()
+            self._tail_error_keys.discard(
+                (
+                    oldest["agent"],
+                    oldest["session_id"],
+                    oldest["code"],
+                )
+            )
+        self._tail_errors.append(
+            {
+                "agent": agent,
+                "session_id": session_id,
+                "code": code,
+            }
+        )
+        self._tail_error_keys.add(diagnostic_key)
+
+    def _consume_tailer_errors(self, key: SessionKey, tailer: Any) -> None:
+        try:
+            errors = getattr(tailer, "errors", ())
+            if isinstance(errors, (str, bytes)):
+                values = (errors,)
+            else:
+                values = tuple(errors or ())
+        except Exception:
+            return
+        clear = getattr(errors, "clear", None)
+        if callable(clear):
+            try:
+                clear()
+            except Exception:
+                pass
+        for error in values:
+            self._record_tail_error(key, error)
+
+    def _close_tailer(self, key: SessionKey, tailer: Any) -> None:
+        self._consume_tailer_errors(key, tailer)
+        resources = [tailer]
+        try:
+            follower = getattr(tailer, "follower", None)
+        except Exception:
+            follower = None
+        if follower is not None and follower is not tailer:
+            resources.append(follower)
+        for resource in resources:
+            try:
+                closer = getattr(resource, "close", None)
+                if callable(closer):
+                    closer()
+            except Exception:
+                pass
+        self._consume_tailer_errors(key, tailer)
+
+    def _clear(self) -> None:
+        tailers = tuple(self._tailers.items())
         self._known_keys.clear()
         self._tailers.clear()
         self._paths.clear()
         self._checkpoints.clear()
         self._pending.clear()
+        self._tail_errors.clear()
+        self._tail_error_keys.clear()
+        for key, tailer in tailers:
+            self._close_tailer(key, tailer)
+        self._tail_errors.clear()
+        self._tail_error_keys.clear()
+
+    def reset(self) -> None:
+        """Discard all lifecycle state before a fresh daemon run."""
+
+        with self._lifecycle_lock:
+            self._closed = True
+            self._clear()
+            self._closed = False
+
+    def close(self) -> None:
+        """Release all tailing state; repeated calls are harmless."""
+
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._clear()
 
     @staticmethod
     def supports_tailing(session: Session) -> bool:
@@ -135,6 +274,24 @@ class TailerPool:
         drain up to ``max_event_polls`` bounded batches.
         """
 
+        with self._lifecycle_lock:
+            return self._refresh(
+                sessions,
+                changed_keys=changed_keys,
+                initial=initial,
+                now=now,
+            )
+
+    def _refresh(
+        self,
+        sessions: Iterable[Session],
+        *,
+        changed_keys: Iterable[SessionKey],
+        initial: bool = False,
+        now: Optional[float] = None,
+    ) -> bool:
+        if self._closed:
+            return False
         current = {session_key(session): session for session in sessions}
         current_keys = set(current)
         changed = set(changed_keys).intersection(current_keys)
@@ -165,7 +322,7 @@ class TailerPool:
         pending_before = set(self._pending)
         for key in sorted(pending_before.difference(changed)):
             tailer = self._tailers.get(key)
-            if tailer is None or not self._poll(tailer):
+            if tailer is None or not self._poll(key, tailer):
                 self._pending.discard(key)
 
         self._known_keys = current_keys
@@ -185,12 +342,14 @@ class TailerPool:
         )
         tailer = self._tailers.get(key)
         if retain_checkpoint and tailer is not None:
+            self._consume_tailer_errors(key, tailer)
             self._checkpoints.pop(key, None)
             exporter = getattr(tailer, "export_checkpoint", None)
             if callable(exporter):
                 try:
                     checkpoint = exporter()
-                except Exception:
+                except Exception as error:
+                    self._record_tail_error(key, error)
                     checkpoint = None
                 path = self._paths.get(key)
                 if path is not None and isinstance(checkpoint, Mapping):
@@ -200,6 +359,8 @@ class TailerPool:
         self._tailers.pop(key, None)
         self._paths.pop(key, None)
         self._pending.discard(key)
+        if tailer is not None:
+            self._close_tailer(key, tailer)
         return existed
 
     def _capture_initial_checkpoint(
@@ -227,19 +388,16 @@ class TailerPool:
         checkpoint = None
         try:
             tailer = self._make_tailer(session, from_start=False)
+            self._consume_tailer_errors(key, tailer)
             exporter = getattr(tailer, "export_checkpoint", None)
             if callable(exporter):
                 checkpoint = exporter()
-        except Exception:
+        except Exception as error:
+            self._record_tail_error(key, error)
             return
         finally:
             if tailer is not None:
-                closer = getattr(tailer, "close", None)
-                if callable(closer):
-                    try:
-                        closer()
-                    except Exception:
-                        pass
+                self._close_tailer(key, tailer)
 
         if isinstance(checkpoint, Mapping):
             self._checkpoints[key] = (session.transcript, checkpoint)
@@ -310,7 +468,7 @@ class TailerPool:
         except OSError:
             return False
 
-    def _poll(self, tailer: Any) -> bool:
+    def _poll(self, key: SessionKey, tailer: Any) -> bool:
         try:
             single_poll = bool(
                 getattr(tailer, "single_poll_per_refresh", False)
@@ -321,8 +479,11 @@ class TailerPool:
         for _ in range(poll_limit):
             try:
                 events = tailer.poll()
-            except Exception:
+            except Exception as error:
+                self._record_tail_error(key, error)
+                self._consume_tailer_errors(key, tailer)
                 return False
+            self._consume_tailer_errors(key, tailer)
             emitted = False
             for event in events or ():
                 if isinstance(event, (Event, Mapping)):
@@ -369,15 +530,17 @@ class TailerPool:
                     from_start=bool(new_session and not initial),
                     checkpoint=checkpoint,
                 )
-            except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            except (KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+                self._record_tail_error(key, error)
                 return
+            self._consume_tailer_errors(key, tailer)
             if checkpoint is not None and not checkpoint_consumed:
                 restore = getattr(tailer, "restore_checkpoint", None)
                 if callable(restore):
                     try:
                         restore(checkpoint)
-                    except Exception:
-                        pass
+                    except Exception as error:
+                        self._record_tail_error(key, error)
             self._checkpoints.pop(key, None)
             self._tailers[key] = tailer
             self._paths[key] = session.transcript
@@ -385,7 +548,7 @@ class TailerPool:
             tailer.session = session
 
         if not initial:
-            if self._poll(tailer):
+            if self._poll(key, tailer):
                 self._pending.add(key)
             else:
                 self._pending.discard(key)
@@ -395,6 +558,11 @@ __all__ = [
     "DEFAULT_EVENT_POLLS",
     "DEFAULT_TAIL_RECENT_SECONDS",
     "EventPublisher",
+    "MAX_TAIL_ERRORS",
+    "MAX_TAIL_ERROR_AGENT_LENGTH",
+    "MAX_TAIL_ERROR_CODE_LENGTH",
+    "MAX_TAIL_ERROR_SESSION_ID_LENGTH",
+    "TAIL_ERROR_FALLBACK_CODE",
     "TailerFactory",
     "TailerPool",
     "TailerPoolState",

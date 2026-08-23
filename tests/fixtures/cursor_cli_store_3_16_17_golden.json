@@ -1,0 +1,865 @@
+{
+  "expected": {
+    "assistant_text": "Fixture assistant response.",
+    "content_types": [
+      "text",
+      "reasoning",
+      "tool-call",
+      "tool-result",
+      "tool-call",
+      "tool-result",
+      "tool-call",
+      "tool-result",
+      "reasoning",
+      "text",
+      "tool-call",
+      "tool-result",
+      "text"
+    ],
+    "created_at": 1.0,
+    "decoded_state": {
+      "created_at": 1.0,
+      "message_ids": [
+        "7536105f1f84c4e6cd21b90edc427ecc7c8660d434cd167c09ba1a2faf84a297",
+        "fb0f6c3438a42651673dce83407ccfd1de08b6be77e82819b4fc07df20b27c64",
+        "8c9bd3a813ea28449fcb1b44069bba09b20b90d2ae4d30f243800bdf5b57b7bd",
+        "827df57a487a271c08f9dce2d5a15ea0ce46d15b7b5d266f8775088ccdf08f8f",
+        "eaebac87fb04a7ee3519a2fe669bf69c5ecf01f8da8ce010a1f43da0d7ba88ef",
+        "83026bf765d28ad2a90704d44ed45a1e585213065e09498a41ff13caa103515e",
+        "913d8c5a2b329414826a4bbb45211cee7130a249078232d8ee77d90eeeea150b",
+        "52ab79d0343e7dd2b670c8299e68b0f93532af43da8dc66811c8b7089c6a59d3",
+        "289d0a8119b68dff9a9f99ce616cdae1157600b56bc6b3f99e52dff4fca23ea2",
+        "cff70491b3da2e8b5a852d65169d428a277aa8f6a2873c0b9e01ea79004bf2fb",
+        "3018cc311f7c7aa139a07d177dbe1e30d7af17aa55fed820fa22aae422ccd524",
+        "92aee49944ebb5d7ac4a81a36eddac647e4052d3ce88095ee5f610316253e546"
+      ],
+      "messages": [
+        {
+          "content": "Fixture system context.",
+          "role": "system"
+        },
+        {
+          "content": "<user_info>Fixture context.</user_info>",
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "text": "<user_query>Fixture user request.</user_query>",
+              "type": "text"
+            }
+          ],
+          "providerOptions": {
+            "cursor": {
+              "requestId": "fixture-value-001"
+            }
+          },
+          "role": "user"
+        },
+        {
+          "content": [
+            {
+              "providerOptions": {
+                "cursor": {
+                  "modelName": "fixture-model"
+                }
+              },
+              "signature": "fixture-signature",
+              "text": "Fixture reasoning.",
+              "type": "reasoning"
+            },
+            {
+              "args": {
+                "command": "fixture-command",
+                "description": "Fixture tool request.",
+                "working_directory": "/fixture/project"
+              },
+              "toolCallId": "fixture-tool-call-00",
+              "toolName": "fixture-tool",
+              "type": "tool-call"
+            }
+          ],
+          "id": "fixture-message-03",
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "experimental_content": [
+                {
+                  "text": "Fixture tool result.",
+                  "type": "text"
+                }
+              ],
+              "result": "Fixture tool result.",
+              "toolCallId": "fixture-tool-call-00",
+              "toolName": "fixture-tool",
+              "type": "tool-result"
+            }
+          ],
+          "id": "fixture-message-04",
+          "providerOptions": {
+            "cursor": {
+              "highLevelToolCallResult": {
+                "isError": false,
+                "output": {
+                  "isBackground": false,
+                  "sandboxPolicy": {
+                    "allowlistEscalated": false,
+                    "type": "fixture-value-005"
+                  },
+                  "success": {
+                    "command": "fixture-command",
+                    "executionTime": 0,
+                    "interleavedOutput": "fixture-value-004",
+                    "stdout": "fixture-value-003",
+                    "workingDirectory": "fixture-value-002"
+                  },
+                  "terminalsFolder": "fixture-value-006"
+                }
+              }
+            }
+          },
+          "role": "tool"
+        },
+        {
+          "content": [
+            {
+              "args": {
+                "command": "fixture-command",
+                "description": "Fixture tool request.",
+                "working_directory": "/fixture/project"
+              },
+              "toolCallId": "fixture-tool-call-01",
+              "toolName": "fixture-tool",
+              "type": "tool-call"
+            }
+          ],
+          "id": "fixture-message-05",
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "experimental_content": [
+                {
+                  "text": "Fixture tool result.",
+                  "type": "text"
+                }
+              ],
+              "result": "Fixture tool result.",
+              "toolCallId": "fixture-tool-call-01",
+              "toolName": "fixture-tool",
+              "type": "tool-result"
+            }
+          ],
+          "id": "fixture-message-06",
+          "providerOptions": {
+            "cursor": {
+              "highLevelToolCallResult": {
+                "isError": false,
+                "output": {
+                  "isBackground": false,
+                  "sandboxPolicy": {
+                    "allowlistEscalated": false,
+                    "type": "fixture-value-010"
+                  },
+                  "success": {
+                    "command": "fixture-command",
+                    "executionTime": 0,
+                    "interleavedOutput": "fixture-value-009",
+                    "stdout": "fixture-value-008",
+                    "workingDirectory": "fixture-value-007"
+                  },
+                  "terminalsFolder": "fixture-value-011"
+                }
+              }
+            }
+          },
+          "role": "tool"
+        },
+        {
+          "content": [
+            {
+              "args": {
+                "path": "/fixture/project/input.txt"
+              },
+              "toolCallId": "fixture-tool-call-02",
+              "toolName": "fixture-tool",
+              "type": "tool-call"
+            }
+          ],
+          "id": "fixture-message-07",
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "experimental_content": [
+                {
+                  "text": "Fixture tool result.",
+                  "type": "text"
+                }
+              ],
+              "result": "Fixture tool result.",
+              "toolCallId": "fixture-tool-call-02",
+              "toolName": "fixture-tool",
+              "type": "tool-result"
+            }
+          ],
+          "id": "fixture-message-08",
+          "providerOptions": {
+            "cursor": {
+              "highLevelToolCallResult": {
+                "isError": false,
+                "output": {
+                  "success": {
+                    "content": "fixture-value-012",
+                    "fileSize": 0,
+                    "path": "/fixture/project/input.txt",
+                    "readRange": {
+                      "endLine": 0,
+                      "startLine": 0
+                    },
+                    "totalLines": 0
+                  }
+                }
+              }
+            }
+          },
+          "role": "tool"
+        },
+        {
+          "content": [
+            {
+              "providerOptions": {
+                "cursor": {
+                  "modelName": "fixture-model"
+                }
+              },
+              "signature": "fixture-signature",
+              "text": "Fixture reasoning.",
+              "type": "reasoning"
+            },
+            {
+              "text": "Fixture assistant progress.",
+              "type": "text"
+            },
+            {
+              "args": {
+                "contents": "Fixture file contents.",
+                "path": "/fixture/project/input.txt"
+              },
+              "toolCallId": "fixture-tool-call-03",
+              "toolName": "fixture-tool",
+              "type": "tool-call"
+            }
+          ],
+          "id": "fixture-message-09",
+          "role": "assistant"
+        },
+        {
+          "content": [
+            {
+              "experimental_content": [
+                {
+                  "text": "Fixture tool result.",
+                  "type": "text"
+                }
+              ],
+              "result": "Fixture tool result.",
+              "toolCallId": "fixture-tool-call-03",
+              "toolName": "fixture-tool",
+              "type": "tool-result"
+            }
+          ],
+          "id": "fixture-message-10",
+          "providerOptions": {
+            "cursor": {
+              "highLevelToolCallResult": {
+                "isError": false,
+                "output": {
+                  "success": {
+                    "afterFullFileContent": "fixture-value-014",
+                    "diffString": "fixture-value-013",
+                    "linesAdded": 0,
+                    "linesRemoved": 0,
+                    "message": "fixture-value-015",
+                    "path": "/fixture/project/input.txt"
+                  }
+                }
+              }
+            }
+          },
+          "role": "tool"
+        },
+        {
+          "content": [
+            {
+              "text": "Fixture assistant response.",
+              "type": "text"
+            }
+          ],
+          "id": "fixture-message-11",
+          "role": "assistant"
+        }
+      ],
+      "metadata": {
+        "agent_id": "fixture-actor",
+        "created_at": 1.0,
+        "latest_root_blob_id": "719ef07221b5a5bc03f579d13579d63000935992565132396abd641cc4b84c3e",
+        "mode": "fixture-mode",
+        "name": "Fixture chat"
+      },
+      "project": "/fixture/project",
+      "provisional": null,
+      "provisional_hash": null,
+      "root_blob_id": "719ef07221b5a5bc03f579d13579d63000935992565132396abd641cc4b84c3e",
+      "title": "Fixture user request."
+    },
+    "message_ids": [
+      "7536105f1f84c4e6cd21b90edc427ecc7c8660d434cd167c09ba1a2faf84a297",
+      "fb0f6c3438a42651673dce83407ccfd1de08b6be77e82819b4fc07df20b27c64",
+      "8c9bd3a813ea28449fcb1b44069bba09b20b90d2ae4d30f243800bdf5b57b7bd",
+      "827df57a487a271c08f9dce2d5a15ea0ce46d15b7b5d266f8775088ccdf08f8f",
+      "eaebac87fb04a7ee3519a2fe669bf69c5ecf01f8da8ce010a1f43da0d7ba88ef",
+      "83026bf765d28ad2a90704d44ed45a1e585213065e09498a41ff13caa103515e",
+      "913d8c5a2b329414826a4bbb45211cee7130a249078232d8ee77d90eeeea150b",
+      "52ab79d0343e7dd2b670c8299e68b0f93532af43da8dc66811c8b7089c6a59d3",
+      "289d0a8119b68dff9a9f99ce616cdae1157600b56bc6b3f99e52dff4fca23ea2",
+      "cff70491b3da2e8b5a852d65169d428a277aa8f6a2873c0b9e01ea79004bf2fb",
+      "3018cc311f7c7aa139a07d177dbe1e30d7af17aa55fed820fa22aae422ccd524",
+      "92aee49944ebb5d7ac4a81a36eddac647e4052d3ce88095ee5f610316253e546"
+    ],
+    "project": "/fixture/project",
+    "roles": [
+      "system",
+      "user",
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+      "tool",
+      "assistant",
+      "tool",
+      "assistant",
+      "tool",
+      "assistant"
+    ],
+    "root_blob_id": "719ef07221b5a5bc03f579d13579d63000935992565132396abd641cc4b84c3e",
+    "title": "Fixture user request.",
+    "tool_call_ids": [
+      "fixture-tool-call-00",
+      "fixture-tool-call-01",
+      "fixture-tool-call-02",
+      "fixture-tool-call-03"
+    ],
+    "tool_result_ids": [
+      "fixture-tool-call-00",
+      "fixture-tool-call-01",
+      "fixture-tool-call-02",
+      "fixture-tool-call-03"
+    ],
+    "user_text": "<user_query>Fixture user request.</user_query>"
+  },
+  "format": 1,
+  "kv": {
+    "blobs": [
+      [
+        "37353336313035663166383463346536636432316239306564633432376563633763383636306434333463643136376330396261316132666166383461323937",
+        "7b22726f6c65223a2273797374656d222c22636f6e74656e74223a22466978747572652073797374656d20636f6e746578742e227d"
+      ],
+      [
+        "66623066366333343338613432363531363733646365383334303763636664316465303862366265373765383238313962346663303764663230623237633634",
+        "7b22726f6c65223a2275736572222c22636f6e74656e74223a223c757365725f696e666f3e4669787475726520636f6e746578742e3c2f757365725f696e666f3e227d"
+      ],
+      [
+        "38633962643361383133656132383434396663623162343430363962626130396232306239306432616534643330663234333830306264663562353762376264",
+        "7b22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a223c757365725f71756572793e46697874757265207573657220726571756573742e3c2f757365725f71756572793e227d5d2c2270726f76696465724f7074696f6e73223a7b22637572736f72223a7b22726571756573744964223a22666978747572652d76616c75652d303031227d7d7d"
+      ],
+      [
+        "38323764663537613438376132373163303866396463653264356131356561306365343664313562376235643236366638373735303838636364663038663866",
+        "7b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b2274797065223a22726561736f6e696e67222c2274657874223a224669787475726520726561736f6e696e672e222c2270726f76696465724f7074696f6e73223a7b22637572736f72223a7b226d6f64656c4e616d65223a22666978747572652d6d6f64656c227d7d2c227369676e6174757265223a22666978747572652d7369676e6174757265227d2c7b2274797065223a22746f6f6c2d63616c6c222c22746f6f6c43616c6c4964223a22666978747572652d746f6f6c2d63616c6c2d3030222c22746f6f6c4e616d65223a22666978747572652d746f6f6c222c2261726773223a7b22636f6d6d616e64223a22666978747572652d636f6d6d616e64222c22776f726b696e675f6469726563746f7279223a222f666978747572652f70726f6a656374222c226465736372697074696f6e223a224669787475726520746f6f6c20726571756573742e227d7d5d2c226964223a22666978747572652d6d6573736167652d3033227d"
+      ],
+      [
+        "65616562616338376662303461376565333531396132666536363962663639633565636630316638646138636530313061316634336461306437626138386566",
+        "7b22726f6c65223a22746f6f6c222c22636f6e74656e74223a5b7b2274797065223a22746f6f6c2d726573756c74222c22746f6f6c43616c6c4964223a22666978747572652d746f6f6c2d63616c6c2d3030222c22746f6f6c4e616d65223a22666978747572652d746f6f6c222c22726573756c74223a224669787475726520746f6f6c20726573756c742e222c226578706572696d656e74616c5f636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a224669787475726520746f6f6c20726573756c742e227d5d7d5d2c226964223a22666978747572652d6d6573736167652d3034222c2270726f76696465724f7074696f6e73223a7b22637572736f72223a7b22686967684c6576656c546f6f6c43616c6c526573756c74223a7b226f7574707574223a7b2273756363657373223a7b22636f6d6d616e64223a22666978747572652d636f6d6d616e64222c22776f726b696e674469726563746f7279223a22666978747572652d76616c75652d303032222c227374646f7574223a22666978747572652d76616c75652d303033222c22657865637574696f6e54696d65223a302c22696e7465726c65617665644f7574707574223a22666978747572652d76616c75652d303034227d2c2273616e64626f78506f6c696379223a7b2274797065223a22666978747572652d76616c75652d303035222c22616c6c6f776c697374457363616c61746564223a66616c73657d2c2269734261636b67726f756e64223a66616c73652c227465726d696e616c73466f6c646572223a22666978747572652d76616c75652d303036227d2c2269734572726f72223a66616c73657d7d7d7d"
+      ],
+      [
+        "38333032366266373635643238616432613930373034643434656434356131653538353231333036356530393439386134316666313363616131303335313565",
+        "7b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b2274797065223a22746f6f6c2d63616c6c222c22746f6f6c43616c6c4964223a22666978747572652d746f6f6c2d63616c6c2d3031222c22746f6f6c4e616d65223a22666978747572652d746f6f6c222c2261726773223a7b22636f6d6d616e64223a22666978747572652d636f6d6d616e64222c22776f726b696e675f6469726563746f7279223a222f666978747572652f70726f6a656374222c226465736372697074696f6e223a224669787475726520746f6f6c20726571756573742e227d7d5d2c226964223a22666978747572652d6d6573736167652d3035227d"
+      ],
+      [
+        "39313364386335613262333239343134383236613462626234353231316365653731333061323439303738323332643865653737643930656565656131353062",
+        "7b22726f6c65223a22746f6f6c222c22636f6e74656e74223a5b7b2274797065223a22746f6f6c2d726573756c74222c22746f6f6c43616c6c4964223a22666978747572652d746f6f6c2d63616c6c2d3031222c22746f6f6c4e616d65223a22666978747572652d746f6f6c222c22726573756c74223a224669787475726520746f6f6c20726573756c742e222c226578706572696d656e74616c5f636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a224669787475726520746f6f6c20726573756c742e227d5d7d5d2c226964223a22666978747572652d6d6573736167652d3036222c2270726f76696465724f7074696f6e73223a7b22637572736f72223a7b22686967684c6576656c546f6f6c43616c6c526573756c74223a7b226f7574707574223a7b2273756363657373223a7b22636f6d6d616e64223a22666978747572652d636f6d6d616e64222c22776f726b696e674469726563746f7279223a22666978747572652d76616c75652d303037222c227374646f7574223a22666978747572652d76616c75652d303038222c22657865637574696f6e54696d65223a302c22696e7465726c65617665644f7574707574223a22666978747572652d76616c75652d303039227d2c2273616e64626f78506f6c696379223a7b2274797065223a22666978747572652d76616c75652d303130222c22616c6c6f776c697374457363616c61746564223a66616c73657d2c2269734261636b67726f756e64223a66616c73652c227465726d696e616c73466f6c646572223a22666978747572652d76616c75652d303131227d2c2269734572726f72223a66616c73657d7d7d7d"
+      ],
+      [
+        "35326162373964303334336537646432623637306338323939653638623066393335333261663433646138646336363831316338623730383963366135396433",
+        "7b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b2274797065223a22746f6f6c2d63616c6c222c22746f6f6c43616c6c4964223a22666978747572652d746f6f6c2d63616c6c2d3032222c22746f6f6c4e616d65223a22666978747572652d746f6f6c222c2261726773223a7b2270617468223a222f666978747572652f70726f6a6563742f696e7075742e747874227d7d5d2c226964223a22666978747572652d6d6573736167652d3037227d"
+      ],
+      [
+        "32383964306138313139623638646666396139663939636536313663646165313135373630306235366263366233663939653532646666346663613233656132",
+        "7b22726f6c65223a22746f6f6c222c22636f6e74656e74223a5b7b2274797065223a22746f6f6c2d726573756c74222c22746f6f6c43616c6c4964223a22666978747572652d746f6f6c2d63616c6c2d3032222c22746f6f6c4e616d65223a22666978747572652d746f6f6c222c22726573756c74223a224669787475726520746f6f6c20726573756c742e222c226578706572696d656e74616c5f636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a224669787475726520746f6f6c20726573756c742e227d5d7d5d2c226964223a22666978747572652d6d6573736167652d3038222c2270726f76696465724f7074696f6e73223a7b22637572736f72223a7b22686967684c6576656c546f6f6c43616c6c526573756c74223a7b226f7574707574223a7b2273756363657373223a7b22636f6e74656e74223a22666978747572652d76616c75652d303132222c22746f74616c4c696e6573223a302c2266696c6553697a65223a302c2270617468223a222f666978747572652f70726f6a6563742f696e7075742e747874222c227265616452616e6765223a7b2273746172744c696e65223a302c22656e644c696e65223a307d7d7d2c2269734572726f72223a66616c73657d7d7d7d"
+      ],
+      [
+        "63666637303439316233646132653862356138353264363531363964343238613237376161386636613238373363306239653031656137393030346266326662",
+        "7b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b2274797065223a22726561736f6e696e67222c2274657874223a224669787475726520726561736f6e696e672e222c2270726f76696465724f7074696f6e73223a7b22637572736f72223a7b226d6f64656c4e616d65223a22666978747572652d6d6f64656c227d7d2c227369676e6174757265223a22666978747572652d7369676e6174757265227d2c7b2274797065223a2274657874222c2274657874223a224669787475726520617373697374616e742070726f67726573732e227d2c7b2274797065223a22746f6f6c2d63616c6c222c22746f6f6c43616c6c4964223a22666978747572652d746f6f6c2d63616c6c2d3033222c22746f6f6c4e616d65223a22666978747572652d746f6f6c222c2261726773223a7b2270617468223a222f666978747572652f70726f6a6563742f696e7075742e747874222c22636f6e74656e7473223a22466978747572652066696c6520636f6e74656e74732e227d7d5d2c226964223a22666978747572652d6d6573736167652d3039227d"
+      ],
+      [
+        "33303138636333313166376337616131333961303764313737646265316533306437616631376161353566656438323066613232616165343232636364353234",
+        "7b22726f6c65223a22746f6f6c222c22636f6e74656e74223a5b7b2274797065223a22746f6f6c2d726573756c74222c22746f6f6c43616c6c4964223a22666978747572652d746f6f6c2d63616c6c2d3033222c22746f6f6c4e616d65223a22666978747572652d746f6f6c222c22726573756c74223a224669787475726520746f6f6c20726573756c742e222c226578706572696d656e74616c5f636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a224669787475726520746f6f6c20726573756c742e227d5d7d5d2c226964223a22666978747572652d6d6573736167652d3130222c2270726f76696465724f7074696f6e73223a7b22637572736f72223a7b22686967684c6576656c546f6f6c43616c6c526573756c74223a7b226f7574707574223a7b2273756363657373223a7b2270617468223a222f666978747572652f70726f6a6563742f696e7075742e747874222c226c696e65734164646564223a302c226c696e657352656d6f766564223a302c2264696666537472696e67223a22666978747572652d76616c75652d303133222c22616674657246756c6c46696c65436f6e74656e74223a22666978747572652d76616c75652d303134222c226d657373616765223a22666978747572652d76616c75652d303135227d7d2c2269734572726f72223a66616c73657d7d7d7d"
+      ],
+      [
+        "39326165653439393434656262356437616334613831613336656464616336343765343035326433636538383039356565356636313033313632353365353436",
+        "7b22726f6c65223a22617373697374616e74222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a224669787475726520617373697374616e7420726573706f6e73652e227d5d2c226964223a22666978747572652d6d6573736167652d3131227d"
+      ],
+      [
+        "35326637376561636631386534666233663862313433623461643138336533393736373061613833613066333263343831376234323266633962613131313034",
+        "0a17666978747572652d6669656c64382d626c6f622d312d31"
+      ],
+      [
+        "37313965663037323231623561356263303366353739643133353739643633303030393335393932353635313332333936616264363431636334623834633365",
+        "0a207536105f1f84c4e6cd21b90edc427ecc7c8660d434cd167c09ba1a2faf84a2970a20fb0f6c3438a42651673dce83407ccfd1de08b6be77e82819b4fc07df20b27c640a208c9bd3a813ea28449fcb1b44069bba09b20b90d2ae4d30f243800bdf5b57b7bd0a20827df57a487a271c08f9dce2d5a15ea0ce46d15b7b5d266f8775088ccdf08f8f0a20eaebac87fb04a7ee3519a2fe669bf69c5ecf01f8da8ce010a1f43da0d7ba88ef0a2083026bf765d28ad2a90704d44ed45a1e585213065e09498a41ff13caa103515e0a20913d8c5a2b329414826a4bbb45211cee7130a249078232d8ee77d90eeeea150b0a2052ab79d0343e7dd2b670c8299e68b0f93532af43da8dc66811c8b7089c6a59d30a20289d0a8119b68dff9a9f99ce616cdae1157600b56bc6b3f99e52dff4fca23ea20a20cff70491b3da2e8b5a852d65169d428a277aa8f6a2873c0b9e01ea79004bf2fb0a203018cc311f7c7aa139a07d177dbe1e30d7af17aa55fed820fa22aae422ccd5240a2092aee49944ebb5d7ac4a81a36eddac647e4052d3ce88095ee5f610316253e5462a0408001000422052f77eacf18e4fb3f8b143b4ad183e397670aa83a0f32c4817b422fc9ba111044a1766696c653a2f2f2f666978747572652f70726f6a65637450007a340a18666978747572652d726f6f742d6669656c6431352d312d311218666978747572652d726f6f742d6669656c6431352d322d32920112666978747572652d726f6f742d76616c7565"
+      ]
+    ],
+    "meta": [
+      [
+        "30",
+        "376232323631363736353665373434393634323233613232363636393738373437353732363532643631363337343666373232323263323236633631373436353733373435323666366637343432366336663632343936343232336132323337333133393635363633303337333233323331363233353631333536323633333033333636333533373339363433313333333533373339363433363333333033303330333933333335333933393332333533363335333133333332333333393336363136323634333633343331363336333334363233383334363333333635323232633232366536313664363532323361323234363639373837343735373236353230363336383631373432323263323236643666363436353232336132323636363937383734373537323635326436643666363436353232326332323633373236353631373436353634343137343232336133313764"
+      ]
+    ]
+  },
+  "provenance": {
+    "cursor_version": "3.16.17",
+    "message_shapes": [
+      {
+        "content": "string",
+        "role": "string"
+      },
+      {
+        "content": "string",
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "text": "string",
+            "type": "string"
+          }
+        ],
+        "providerOptions": {
+          "cursor": {
+            "requestId": "string"
+          }
+        },
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "providerOptions": {
+              "cursor": {
+                "modelName": "string"
+              }
+            },
+            "signature": "string",
+            "text": "string",
+            "type": "string"
+          },
+          {
+            "args": {
+              "command": "string",
+              "description": "string",
+              "working_directory": "string"
+            },
+            "toolCallId": "string",
+            "toolName": "string",
+            "type": "string"
+          }
+        ],
+        "id": "string",
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "experimental_content": [
+              {
+                "text": "string",
+                "type": "string"
+              }
+            ],
+            "result": "string",
+            "toolCallId": "string",
+            "toolName": "string",
+            "type": "string"
+          }
+        ],
+        "id": "string",
+        "providerOptions": {
+          "cursor": {
+            "highLevelToolCallResult": {
+              "isError": "bool",
+              "output": {
+                "isBackground": "bool",
+                "sandboxPolicy": {
+                  "allowlistEscalated": "bool",
+                  "type": "string"
+                },
+                "success": {
+                  "command": "string",
+                  "executionTime": "int",
+                  "interleavedOutput": "string",
+                  "stdout": "string",
+                  "workingDirectory": "string"
+                },
+                "terminalsFolder": "string"
+              }
+            }
+          }
+        },
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "args": {
+              "command": "string",
+              "description": "string",
+              "working_directory": "string"
+            },
+            "toolCallId": "string",
+            "toolName": "string",
+            "type": "string"
+          }
+        ],
+        "id": "string",
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "experimental_content": [
+              {
+                "text": "string",
+                "type": "string"
+              }
+            ],
+            "result": "string",
+            "toolCallId": "string",
+            "toolName": "string",
+            "type": "string"
+          }
+        ],
+        "id": "string",
+        "providerOptions": {
+          "cursor": {
+            "highLevelToolCallResult": {
+              "isError": "bool",
+              "output": {
+                "isBackground": "bool",
+                "sandboxPolicy": {
+                  "allowlistEscalated": "bool",
+                  "type": "string"
+                },
+                "success": {
+                  "command": "string",
+                  "executionTime": "int",
+                  "interleavedOutput": "string",
+                  "stdout": "string",
+                  "workingDirectory": "string"
+                },
+                "terminalsFolder": "string"
+              }
+            }
+          }
+        },
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "args": {
+              "path": "string"
+            },
+            "toolCallId": "string",
+            "toolName": "string",
+            "type": "string"
+          }
+        ],
+        "id": "string",
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "experimental_content": [
+              {
+                "text": "string",
+                "type": "string"
+              }
+            ],
+            "result": "string",
+            "toolCallId": "string",
+            "toolName": "string",
+            "type": "string"
+          }
+        ],
+        "id": "string",
+        "providerOptions": {
+          "cursor": {
+            "highLevelToolCallResult": {
+              "isError": "bool",
+              "output": {
+                "success": {
+                  "content": "string",
+                  "fileSize": "int",
+                  "path": "string",
+                  "readRange": {
+                    "endLine": "int",
+                    "startLine": "int"
+                  },
+                  "totalLines": "int"
+                }
+              }
+            }
+          }
+        },
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "providerOptions": {
+              "cursor": {
+                "modelName": "string"
+              }
+            },
+            "signature": "string",
+            "text": "string",
+            "type": "string"
+          },
+          {
+            "text": "string",
+            "type": "string"
+          },
+          {
+            "args": {
+              "contents": "string",
+              "path": "string"
+            },
+            "toolCallId": "string",
+            "toolName": "string",
+            "type": "string"
+          }
+        ],
+        "id": "string",
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "experimental_content": [
+              {
+                "text": "string",
+                "type": "string"
+              }
+            ],
+            "result": "string",
+            "toolCallId": "string",
+            "toolName": "string",
+            "type": "string"
+          }
+        ],
+        "id": "string",
+        "providerOptions": {
+          "cursor": {
+            "highLevelToolCallResult": {
+              "isError": "bool",
+              "output": {
+                "success": {
+                  "afterFullFileContent": "string",
+                  "diffString": "string",
+                  "linesAdded": "int",
+                  "linesRemoved": "int",
+                  "message": "string",
+                  "path": "string"
+                }
+              }
+            }
+          }
+        },
+        "role": "string"
+      },
+      {
+        "content": [
+          {
+            "text": "string",
+            "type": "string"
+          }
+        ],
+        "id": "string",
+        "role": "string"
+      }
+    ],
+    "nested_wire_fields": {
+      "root_field_15": [
+        {
+          "field": 1,
+          "wire_type": 2
+        },
+        {
+          "field": 2,
+          "wire_type": 2
+        }
+      ],
+      "root_field_5": [
+        {
+          "field": 1,
+          "wire_type": 0
+        },
+        {
+          "field": 2,
+          "wire_type": 0
+        }
+      ],
+      "root_field_8_blob": [
+        {
+          "field": 1,
+          "wire_type": 2
+        }
+      ]
+    },
+    "root_wire_fields": [
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 1,
+        "wire_type": 2
+      },
+      {
+        "field": 5,
+        "wire_type": 2
+      },
+      {
+        "field": 8,
+        "wire_type": 2
+      },
+      {
+        "field": 9,
+        "wire_type": 2
+      },
+      {
+        "field": 10,
+        "wire_type": 0
+      },
+      {
+        "field": 15,
+        "wire_type": 2
+      },
+      {
+        "field": 18,
+        "wire_type": 2
+      }
+    ],
+    "sqlite_schema": [
+      {
+        "columns": [
+          {
+            "name": "id",
+            "not_null": false,
+            "primary_key": true,
+            "type": "TEXT"
+          },
+          {
+            "name": "data",
+            "not_null": false,
+            "primary_key": false,
+            "type": "BLOB"
+          }
+        ],
+        "sql": "CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)",
+        "table": "blobs"
+      },
+      {
+        "columns": [
+          {
+            "name": "key",
+            "not_null": false,
+            "primary_key": true,
+            "type": "TEXT"
+          },
+          {
+            "name": "value",
+            "not_null": false,
+            "primary_key": false,
+            "type": "TEXT"
+          }
+        ],
+        "sql": "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
+        "table": "meta"
+      }
+    ]
+  },
+  "sanitization": {
+    "structural_values": [
+      "assistant",
+      "reasoning",
+      "system",
+      "text",
+      "tool",
+      "tool-call",
+      "tool-result",
+      "user"
+    ],
+    "synthetic_prefixes": [
+      "Fixture ",
+      "fixture-",
+      "/fixture/",
+      "file:///fixture/",
+      "<user_"
+    ]
+  }
+}

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from sidecar.adapters.base import Adapter
 from sidecar.model import Session, Status
-from sidecar.scan import Scanner, scan_sessions
+from sidecar.scan import Scanner
 
 
 class FakeAdapter(Adapter):
@@ -113,22 +113,6 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(["recent"], [session.session_id for session in first])
         self.assertEqual([], second)
-
-    def test_registry_aliases_do_not_repeat_same_adapter(self):
-        adapter = FakeAdapter([make_session("fake", "one", 10)])
-        registry = {"fake": adapter, "alias": adapter}
-        errors = []
-
-        sessions = scan_sessions(
-            adapters=registry,
-            home=self.home,
-            now=20,
-            errors=errors,
-        )
-
-        self.assertEqual(["one"], [session.session_id for session in sessions])
-        self.assertEqual([], errors)
-
 
 if __name__ == "__main__":
     unittest.main()

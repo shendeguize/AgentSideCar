@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Mapping, MutableSequence, Optional, Tuple, Union
+from typing import Iterable, List, Mapping, Optional, Tuple, Union
 
 from sidecar.adapters.base import Adapter
 from sidecar.model import Session, Status
@@ -181,22 +181,4 @@ class Scanner:
             key=lambda session: (-session.updated_at, session.agent, session.session_id),
         )
 
-def scan_sessions(
-    adapters: Optional[AdapterSource] = None,
-    state_engine: Optional[StateEngine] = None,
-    home: Optional[Path] = None,
-    recent_seconds: Optional[float] = None,
-    now: Optional[float] = None,
-    errors: Optional[MutableSequence[ScanError]] = None,
-    recent: Optional[float] = None,
-) -> List[Session]:
-    """Canonical one-shot scanner with optional caller-owned error collection."""
-
-    scanner = Scanner(adapters=adapters, state_engine=state_engine, home=home)
-    sessions = scanner.scan(recent_seconds=recent_seconds, now=now, recent=recent)
-    if errors is not None:
-        errors.extend(scanner.errors)
-    return sessions
-
-
-__all__ = ["ScanError", "Scanner", "scan_sessions"]
+__all__ = ["ScanError", "Scanner"]

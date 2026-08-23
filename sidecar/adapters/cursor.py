@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import sqlite3
 import time
 from functools import lru_cache
@@ -34,13 +33,15 @@ from sidecar.adapters.base import (
     snip,
     text_content,
 )
-from sidecar.cursor_chat import CursorChatError, snapshot_cursor_chat
-from sidecar.model import Event, Session, Status
-
-_USER_QUERY = re.compile(
-    r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL | re.IGNORECASE
+from sidecar.cursor_chat import (
+    CursorChatError,
+    CursorChatSnapshotBroker,
+    default_snapshot_broker,
+    snapshot_cursor_chat,
 )
-_USER_INFO = re.compile(r"<user_info>.*?</user_info>", re.DOTALL | re.IGNORECASE)
+from sidecar.model import Event, Session, Status
+from sidecar.text_utils import extract_cursor_title
+
 _META_LIMIT = 256 * 1024
 # SQLite mtimes are activity snapshots, not durable leases.  These windows
 # mirror the generic state engine's fresh and idle defaults.
@@ -76,23 +77,24 @@ def decode_cursor_project_slug(slug: str) -> str:
 
 
 def _first_cursor_user_text(path: Path) -> str:
-    for record in read_jsonl_prefix(path):
-        message = record.get("message")
-        if not isinstance(message, Mapping):
-            message = {}
-        role = record.get("role") or message.get("role")
-        if role != "user":
-            continue
-        content = message.get("content", record.get("content"))
-        for item in content_items(content):
-            if item.get("type") != "text":
+    def user_texts() -> Iterable[str]:
+        for record in read_jsonl_prefix(path):
+            message = record.get("message")
+            if not isinstance(message, Mapping):
+                message = {}
+            role = record.get("role") or message.get("role")
+            if role != "user":
                 continue
-            text = str(item.get("text") or "")
-            if not text:
-                continue
-            query = _USER_QUERY.search(text)
-            return snip(query.group(1) if query else text, 160)
-    return ""
+            content = message.get("content", record.get("content"))
+            parts = [
+                str(item.get("text") or "")
+                for item in content_items(content)
+                if item.get("type") == "text" and item.get("text")
+            ]
+            if parts:
+                yield "\n".join(parts)
+
+    return extract_cursor_title(user_texts())
 
 
 def _decode_meta_value(value: Any) -> Any:
@@ -236,11 +238,14 @@ def _read_cli_meta(path: Path) -> Tuple[str, str, Dict[str, Any]]:
     return snip(title, 160), project, {"meta_keys": sorted(decoded_keys)}
 
 
-def _read_cli_snapshot_meta(path: Path) -> Tuple[str, str, Dict[str, Any]]:
+def _read_cli_snapshot_meta(
+    path: Path,
+    snapshot_broker: Optional[CursorChatSnapshotBroker] = None,
+) -> Tuple[str, str, Dict[str, Any]]:
     """Prefer a production chat snapshot and safely degrade for legacy stores."""
 
     try:
-        state = snapshot_cursor_chat(path)
+        state = snapshot_cursor_chat(path, broker=snapshot_broker)
     except CursorChatError as error:
         title, project, metadata = _read_cli_meta(path)
         fallback = dict(metadata)
@@ -339,15 +344,6 @@ def _cursor_chat_extra(
     return extra
 
 
-def _cursor_chat_user_text(value: Any) -> str:
-    if not isinstance(value, str):
-        return ""
-    query = _USER_QUERY.search(value)
-    if query is not None:
-        return query.group(1).strip()
-    return _USER_INFO.sub("", value).strip()
-
-
 def _cursor_chat_tool_identity(item: Mapping[str, Any]) -> Tuple[str, str]:
     call_id = ""
     for key in ("toolCallId", "tool_call_id", "callId", "id"):
@@ -440,7 +436,7 @@ def _normalize_cursor_chat(
                 raw_text = item.get("text")
                 if role == "user":
                     kind = "user"
-                    text = snip(_cursor_chat_user_text(raw_text), 120)
+                    text = snip(extract_cursor_title((raw_text,)), 120)
                 elif role == "assistant":
                     kind = (
                         "assistant_update" if base_extra["provisional"] else "assistant"
@@ -483,12 +479,22 @@ class CursorAdapter(Adapter):
     def __init__(
         self,
         metadata_cache_size: int = DEFAULT_METADATA_CACHE_SIZE,
+        snapshot_broker: Optional[CursorChatSnapshotBroker] = None,
     ) -> None:
         self._metadata_cache: MetadataCache[_CursorMetadata] = MetadataCache(
             metadata_cache_size
         )
+        self._snapshot_broker = (
+            snapshot_broker
+            if snapshot_broker is not None
+            else default_snapshot_broker()
+        )
 
     def discover(self, home: Path) -> Iterable[Session]:
+        with self._snapshot_broker.scan_generation():
+            return self._discover(home)
+
+    def _discover(self, home: Path) -> Iterable[Session]:
         sessions: List[Session] = []
         active_signatures: List[Hashable] = []
         projects_root = home / ".cursor" / "projects"
@@ -549,13 +555,20 @@ class CursorAdapter(Adapter):
                 continue
             wal = Path(str(store) + "-wal")
             wal_signature = file_signature(wal)
-            metadata_signature = (db_signature, wal_signature)
+            try:
+                metadata_signature: Hashable = self._snapshot_broker.cache_key(store)
+                self._snapshot_broker.pin(metadata_signature)
+            except CursorChatError:
+                metadata_signature = (db_signature, wal_signature)
             active_signatures.append(metadata_signature)
             title, project, meta = cast(
                 Tuple[str, str, Dict[str, Any]],
                 self._metadata_cache.get_or_load(
                     metadata_signature,
-                    lambda: _read_cli_snapshot_meta(store),
+                    lambda: _read_cli_snapshot_meta(
+                        store,
+                        self._snapshot_broker,
+                    ),
                 ),
             )
             updated_at, store_signature = _sqlite_store_signature(store)
