@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import venv
 import zipfile
+from email.parser import Parser
 from pathlib import Path
 from unittest import mock
 
@@ -525,7 +526,21 @@ class WheelSmokeTests(unittest.TestCase):
             self.assertIn("\nName: agent-sidecar\n", "\n" + metadata)
             self.assertIn("\nVersion: 0.4.0\n", "\n" + metadata)
             self.assertIn("\nRequires-Python: >=3.9\n", "\n" + metadata)
-            self.assertNotIn("\nRequires-Dist:", "\n" + metadata)
+            requirements = Parser().parsestr(metadata).get_all(
+                "Requires-Dist",
+                [],
+            )
+            self.assertEqual(
+                {"coverage", "ruff"},
+                {
+                    requirement.partition(";")[0].partition("==")[0].strip()
+                    for requirement in requirements
+                },
+            )
+            for requirement in requirements:
+                marker = requirement.partition(";")[2]
+                normalized_marker = "".join(marker.split()).replace("'", '"')
+                self.assertEqual('extra=="dev"', normalized_marker)
 
             environment_dir = root / "venv"
             venv.EnvBuilder(with_pip=True).create(str(environment_dir))

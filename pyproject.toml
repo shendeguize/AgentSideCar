@@ -18,6 +18,12 @@ keywords = [
     "session-monitoring",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "coverage==7.10.7",
+    "ruff==0.15.12",
+]
+
 [project.urls]
 Homepage = "https://github.com/shendeguize/AgentSideCar"
 Repository = "https://github.com/shendeguize/AgentSideCar.git"
@@ -33,3 +39,17 @@ version = {attr = "sidecar.__version__"}
 [tool.setuptools.packages.find]
 include = ["sidecar*"]
 exclude = ["tests*"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 88
+src = ["sidecar", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Existing imports predate Ruff; keep the baseline surgical while requiring
+# sorted imports in new tooling. Remove these exceptions as legacy files change.
+"sidecar/**/*.py" = ["I001"]
+"tests/**/*.py" = ["I001"]
