@@ -1124,7 +1124,14 @@ def _path_identity(path: Path, expected_type: int) -> Optional[tuple]:
         return None
     if stat.S_IFMT(details.st_mode) != expected_type:
         return None
-    return details.st_dev, details.st_ino
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_size,
+        details.st_mtime_ns,
+        details.st_ctime_ns,
+    )
 
 
 def _capture_owned_daemon_paths(
