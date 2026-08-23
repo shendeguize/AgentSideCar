@@ -80,7 +80,16 @@ ALLOWED_PRAGMAS = {
     ),
 }
 _IGNORED_DIRECTORY_NAMES = frozenset(
-    {".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv", "build", "dist"}
+    {
+        ".git",
+        ".local",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "build",
+        "dist",
+    }
 )
 
 

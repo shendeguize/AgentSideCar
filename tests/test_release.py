@@ -531,7 +531,7 @@ class WheelSmokeTests(unittest.TestCase):
                 [],
             )
             self.assertEqual(
-                {"coverage", "ruff"},
+                {"coverage[toml]", "ruff"},
                 {
                     requirement.partition(";")[0].partition("==")[0].strip()
                     for requirement in requirements

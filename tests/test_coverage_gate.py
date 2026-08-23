@@ -177,6 +177,21 @@ class CoverageGateTests(unittest.TestCase):
             self.assertEqual(1, len(report.violations))
             self.assertIn("sidecar/new_module.py:1", report.violations[0])
 
+    def test_pragma_scan_ignores_private_local_workspace_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private_path = root / ".local" / "reference" / "private.py"
+            private_path.parent.mkdir(parents=True)
+            private_path.write_text(
+                "value = 1  " + coverage_gate.PRAGMA_MARKER + "\n",
+                encoding="utf-8",
+            )
+
+            report = coverage_gate.scan_pragmas(root)
+
+            self.assertTrue(report.passed)
+            self.assertEqual(0, report.count)
+
     def test_gate_main_prints_metrics_thresholds_and_suppression_count(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
