@@ -348,7 +348,7 @@ class CLITests(unittest.TestCase):
         )
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def test_global_version_is_exact_v040(self):
+    def test_global_version_matches_current_release(self):
         stdout = io.StringIO()
 
         with contextlib.redirect_stdout(stdout):
@@ -356,8 +356,8 @@ class CLITests(unittest.TestCase):
                 main(["--version"])
 
         self.assertEqual(0, raised.exception.code)
-        self.assertEqual("0.4.0", sidecar.__version__)
-        self.assertEqual("agent-sidecar 0.4.0\n", stdout.getvalue())
+        self.assertEqual("0.4.1", sidecar.__version__)
+        self.assertEqual("agent-sidecar 0.4.1\n", stdout.getvalue())
 
     def test_help_documents_version_and_repeatable_agent_filter(self):
         parser = build_parser()

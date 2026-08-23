@@ -2,7 +2,7 @@
 
 ## Installation and release artifact
 
-Agent Sidecar 0.4.0 requires Python 3.9+ and declares no runtime Python
+Agent Sidecar 0.4.1 requires Python 3.9+ and declares no runtime Python
 dependencies. It is not documented as published on PyPI. Install the console
 script from a checkout or Git source:
 
@@ -11,7 +11,7 @@ pipx install .
 pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'
 ```
 
-Append an available release tag such as `@v0.4.0` to the Git URL when an
+Append an available release tag such as `@v0.4.1` to the Git URL when an
 immutable revision is required. The existing `scripts/install-skill.sh`
 alternative creates only symlinks into its checkout and retains its
 idempotent/refuse-unrelated-path safety behavior.

@@ -91,7 +91,7 @@ class ReleaseZipappTests(unittest.TestCase):
             )
 
             self.assertEqual(0, version.returncode, version.stderr)
-            self.assertEqual("agent-sidecar 0.4.0\n", version.stdout)
+            self.assertEqual("agent-sidecar 0.4.1\n", version.stdout)
             self.assertEqual(0, list_help.returncode, list_help.stderr)
             self.assertIn("usage: agent-sidecar list", list_help.stdout)
 
@@ -107,7 +107,7 @@ class ReleaseZipappTests(unittest.TestCase):
                     timeout=10,
                 )
                 self.assertEqual(0, direct.returncode, direct.stderr)
-                self.assertEqual("agent-sidecar 0.4.0\n", direct.stdout)
+                self.assertEqual("agent-sidecar 0.4.1\n", direct.stdout)
 
     def test_standalone_release_builds_identical_runnable_nested_release(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -149,7 +149,7 @@ class ReleaseZipappTests(unittest.TestCase):
             self.assertEqual(0, package.returncode, package.stderr)
             self.assertEqual(outer.read_bytes(), nested.read_bytes())
             self.assertEqual(0, version.returncode, version.stderr)
-            self.assertEqual("agent-sidecar 0.4.0\n", version.stdout)
+            self.assertEqual("agent-sidecar 0.4.1\n", version.stdout)
 
     @unittest.skipUnless(
         sys.platform == "darwin",
@@ -508,7 +508,7 @@ class WheelSmokeTests(unittest.TestCase):
                 timeout=60,
             )
             self.assertEqual(0, built.returncode, built.stderr)
-            wheels = list(wheelhouse.glob("agent_sidecar-0.4.0-*.whl"))
+            wheels = list(wheelhouse.glob("agent_sidecar-0.4.1-*.whl"))
             self.assertEqual(1, len(wheels), built.stdout)
             wheel_path = wheels[0]
 
@@ -524,7 +524,7 @@ class WheelSmokeTests(unittest.TestCase):
                     any(name.startswith("tests/") for name in archive.namelist())
                 )
             self.assertIn("\nName: agent-sidecar\n", "\n" + metadata)
-            self.assertIn("\nVersion: 0.4.0\n", "\n" + metadata)
+            self.assertIn("\nVersion: 0.4.1\n", "\n" + metadata)
             self.assertIn("\nRequires-Python: >=3.9\n", "\n" + metadata)
             requirements = Parser().parsestr(metadata).get_all(
                 "Requires-Dist",
@@ -585,4 +585,4 @@ class WheelSmokeTests(unittest.TestCase):
                 timeout=10,
             )
             self.assertEqual(0, version.returncode, version.stderr)
-            self.assertEqual("agent-sidecar 0.4.0\n", version.stdout)
+            self.assertEqual("agent-sidecar 0.4.1\n", version.stdout)

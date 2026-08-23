@@ -16,7 +16,7 @@ body:
     attributes:
       label: Agent Sidecar version
       description: Paste the output of `agent-sidecar --version` or identify the exact commit.
-      placeholder: "agent-sidecar 0.4.0"
+      placeholder: "agent-sidecar 0.4.1"
     validations:
       required: true
 

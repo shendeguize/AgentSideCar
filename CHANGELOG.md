@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-24
+
 ### Added
 
 - MIT licensing, contribution and security policies, issue and pull-request
@@ -81,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI and terminal-dashboard workflows for session listing, status, watching,
   and process inspection.
 
-[Unreleased]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/shendeguize/AgentSideCar/releases/tag/v0.3.0

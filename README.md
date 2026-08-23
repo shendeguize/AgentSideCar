@@ -31,12 +31,12 @@ daemon observation. Those daemon and audit bookkeeping files do not themselves
 edit transcripts or agent configuration; a resumed native agent can do so as
 described above. The installer only creates integration symlinks.
 
-Version 0.4.0 requires Python 3.9+ and has no runtime Python dependencies. DSH
+Version 0.4.1 requires Python 3.9+ and has no runtime Python dependencies. DSH
 event watching additionally requires an external `zstd` executable.
 
-## Version 0.4.0
+## Version 0.4.1
 
-Version 0.4.0 completes concurrent local/remote `watch --all --remote`, adds
+Version 0.4.1 completes concurrent local/remote `watch --all --remote`, adds
 durable private send auditing and request-ID idempotency, and provides the
 opt-in numeric-loopback HTTP panel. It also adds a deterministic executable
 zipapp, package metadata suitable for `pipx`, an explicit macOS user
@@ -74,7 +74,7 @@ The agent names below are also the exact values accepted by `list --agent`:
 - `codex`: Codex CLI rollout JSONL plus read-only native status SQLite when
   available.
 - `copilot`: GitHub Copilot CLI `workspace.yaml` metadata only. It has no event
-  source in v0.4.0 and is reported as `idle`.
+  source in v0.4.1 and is reported as `idle`.
 - `dsh`: DeepSeek DSH projection-cache metadata for listing and status, plus
   compressed transcript events for watching. Listing and status work without
   `zstd`; watching does not.
@@ -105,7 +105,7 @@ Or install directly from Git:
 pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'
 ```
 
-For a released, immutable revision, append its tag, for example `@v0.4.0`, to
+For a released, immutable revision, append its tag, for example `@v0.4.1`, to
 the Git URL after that tag is available. Both forms create an isolated
 environment and install `agent-sidecar`; the package has no runtime Python
 dependencies.
@@ -113,10 +113,10 @@ dependencies.
 ### Install a GitHub Release zipapp
 
 GitHub Releases publish the executable zipapp and its checksum file. For
-version 0.4.0:
+version 0.4.1:
 
 ```sh
-version=0.4.0
+version=0.4.1
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/agent-sidecar-${version}.pyz"
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -735,7 +735,7 @@ runtime files, follow the sanitization requirements in the Security Policy.
 
 ## Current scope and deferred work
 
-Version 0.4.0 provides local observation for the supported sources, Cursor CLI
+Version 0.4.1 provides local observation for the supported sources, Cursor CLI
 event watching, remote `list`/`status` snapshots, concurrent local and remote
 `watch --all --remote`, and experimental local send for Claude, Codex, and
 Cursor CLI. It packages the CLI for pipx and deterministic zipapp use, and adds
