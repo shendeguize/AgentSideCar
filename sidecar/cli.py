@@ -1181,6 +1181,28 @@ def _cleanup_owned_daemon_paths(paths: Optional[_OwnedDaemonPaths]) -> None:
         _cleanup_verified_pidfile(paths.runtime_dir, paths.pid)
 
 
+def _owned_daemon_paths_are_gone(paths: _OwnedDaemonPaths) -> bool:
+    pid_path = paths.runtime_dir / PIDFILE_NAME
+    socket_is_gone = (
+        paths.socket_identity is None
+        or _path_identity(paths.socket_path, stat.S_IFSOCK) != paths.socket_identity
+    )
+    return (
+        _path_identity(pid_path, stat.S_IFREG) != paths.pid_identity
+        and socket_is_gone
+    )
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, ValueError):
+        return True
+    return True
+
+
 def _cleanup_verified_pidfile(runtime_dir: Path, pid: int) -> None:
     if read_pid(runtime_dir) != pid:
         return
@@ -1468,6 +1490,7 @@ def _daemon_stop(client: SidecarClient, stdout: TextIO, stderr: TextIO) -> int:
         stderr.flush()
         return 2
 
+    owned_paths = _capture_owned_daemon_paths(client, (socket_pid,))
     try:
         os.kill(socket_pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -1487,12 +1510,26 @@ def _daemon_stop(client: SidecarClient, stdout: TextIO, stderr: TextIO) -> int:
         try:
             current_pid = _ping_pid(client)
         except (SidecarClientError, OSError):
-            _cleanup_verified_pidfile(runtime_dir, socket_pid)
-            stdout.write("daemon stopped\n")
-            stdout.flush()
-            return 0
+            if owned_paths is None:
+                _cleanup_verified_pidfile(runtime_dir, socket_pid)
+                stopped = True
+            else:
+                _cleanup_owned_daemon_paths(owned_paths)
+                stopped = (
+                    _owned_daemon_paths_are_gone(owned_paths)
+                    and not _pid_is_alive(socket_pid)
+                )
+            if stopped:
+                stdout.write("daemon stopped\n")
+                stdout.flush()
+                return 0
+            time.sleep(DAEMON_POLL_INTERVAL)
+            continue
         if current_pid != socket_pid:
-            _cleanup_verified_pidfile(runtime_dir, socket_pid)
+            if owned_paths is None:
+                _cleanup_verified_pidfile(runtime_dir, socket_pid)
+            else:
+                _cleanup_owned_daemon_paths(owned_paths)
             stdout.write(
                 "daemon stopped; another daemon is running (pid {})\n".format(current_pid)
             )

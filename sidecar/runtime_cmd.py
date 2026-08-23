@@ -78,20 +78,26 @@ def _trusted_target_ancestor(details: os.stat_result) -> bool:
     )
 
 
-def _same_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+def _same_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return (
         left.st_dev,
         left.st_ino,
         left.st_uid,
         left.st_mode,
-        left.st_size,
-        left.st_mtime_ns,
-        left.st_ctime_ns,
     ) == (
         right.st_dev,
         right.st_ino,
         right.st_uid,
         right.st_mode,
+    )
+
+
+def _same_snapshot(left: os.stat_result, right: os.stat_result) -> bool:
+    return _same_identity(left, right) and (
+        left.st_size,
+        left.st_mtime_ns,
+        left.st_ctime_ns,
+    ) == (
         right.st_size,
         right.st_mtime_ns,
         right.st_ctime_ns,
@@ -121,7 +127,8 @@ def _retain_resolved_path(
                 if descriptor >= 0:
                     os.close(descriptor)
                 return None
-            if not _same_snapshot(before, after):
+            unchanged = _same_snapshot if index == 0 else _same_identity
+            if not unchanged(before, after):
                 os.close(descriptor)
                 return None
             retained.append((path, descriptor, before))
@@ -184,22 +191,24 @@ def _trusted_executable(
     if retained is None:
         return None
     try:
-        for lexical_path, before in lexical_snapshots:
+        for index, (lexical_path, before) in enumerate(lexical_snapshots):
             try:
                 after = lexical_path.lstat()
             except OSError:
                 return None
-            if not _same_snapshot(before, after):
+            unchanged = _same_snapshot if index == 0 else _same_identity
+            if not unchanged(before, after):
                 return None
-        for target_path, descriptor, before in retained:
+        for index, (target_path, descriptor, before) in enumerate(retained):
             try:
                 path_after = target_path.lstat()
                 descriptor_after = os.fstat(descriptor)
             except OSError:
                 return None
+            unchanged = _same_snapshot if index == 0 else _same_identity
             if (
-                not _same_snapshot(before, path_after)
-                or not _same_snapshot(before, descriptor_after)
+                not unchanged(before, path_after)
+                or not unchanged(before, descriptor_after)
             ):
                 return None
     finally:

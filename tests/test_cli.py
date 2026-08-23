@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 import sidecar
+import sidecar.cli as cli_module
 from sidecar.adapters import get_adapter, iter_adapters, registry
 from sidecar.adapters.base import (
     Adapter,
@@ -3209,6 +3210,321 @@ class CLITests(unittest.TestCase):
             )
         )
 
+    def test_daemon_runtime_ownership_helpers_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            pidfile = runtime / "daemon.pid"
+            socket_path = runtime / "daemon.sock"
+            client = FakeClient(pid=55, socket_path=socket_path)
+
+            pidfile.write_text("55\n", encoding="ascii")
+            self.assertIsNone(
+                cli_module._path_identity(pidfile, cli_module.stat.S_IFSOCK)
+            )
+
+            with mock.patch("sidecar.cli.read_pid", return_value=55):
+                pidfile.unlink()
+                pidfile.mkdir()
+                self.assertIsNone(
+                    cli_module._capture_owned_daemon_paths(client, (55,))
+                )
+            pidfile.rmdir()
+
+            daemon_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            daemon_socket.bind(str(socket_path))
+            daemon_socket.close()
+            pidfile.write_text("55\n", encoding="ascii")
+            paths = cli_module._capture_owned_daemon_paths(client, (55,))
+            self.assertIsNotNone(paths)
+
+            pidfile.write_text("56\n", encoding="ascii")
+            cli_module._cleanup_owned_daemon_paths(paths)
+            self.assertTrue(socket_path.exists())
+            pidfile.write_text("55\n", encoding="ascii")
+
+            socket_path.unlink()
+            replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            replacement.bind(str(socket_path))
+            replacement.close()
+            cli_module._cleanup_owned_daemon_paths(paths)
+            self.assertTrue(socket_path.exists())
+
+            socket_path.unlink()
+            daemon_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            daemon_socket.bind(str(socket_path))
+            daemon_socket.close()
+            paths = cli_module._capture_owned_daemon_paths(client, (55,))
+            with (
+                mock.patch("sidecar.cli._socket_is_live", return_value=False),
+                mock.patch.object(Path, "unlink", side_effect=OSError("busy")),
+            ):
+                cli_module._cleanup_owned_daemon_paths(paths)
+            self.assertTrue(socket_path.exists())
+            self.assertTrue(pidfile.exists())
+
+            cli_module._cleanup_verified_pidfile(runtime, 56)
+            self.assertTrue(pidfile.exists())
+            for error in (PermissionError("hidden"), ValueError("invalid")):
+                with self.subTest(error=type(error).__name__):
+                    with mock.patch("sidecar.cli.os.kill", side_effect=error):
+                        self.assertTrue(cli_module._pid_is_alive(55))
+
+            process = FakeDaemonProcess()
+            info = cli_module.PingInfo.from_response(
+                {
+                    "ok": True,
+                    "op": "ping",
+                    "pid": process.pid + 1,
+                }
+            )
+            with mock.patch("sidecar.cli.os.getpgid", side_effect=OSError("gone")):
+                self.assertFalse(cli_module._ping_belongs_to_child(process, info))
+            with mock.patch(
+                "sidecar.cli.os.killpg",
+                side_effect=PermissionError("hidden"),
+            ):
+                self.assertTrue(cli_module._child_group_exists(process.pid))
+
+    def test_daemon_process_cleanup_helpers_remain_bounded(self):
+        process = FakeDaemonProcess()
+        with (
+            mock.patch("sidecar.cli.time.monotonic", side_effect=RuntimeError("clock")),
+            mock.patch("sidecar.cli.time.time", return_value=10.0),
+            mock.patch("sidecar.cli._child_group_exists", return_value=False),
+        ):
+            self.assertTrue(
+                cli_module._wait_for_child_group(process, process.pid, 1.0)
+            )
+
+        process = FakeDaemonProcess()
+        with (
+            mock.patch(
+                "sidecar.cli.time.monotonic",
+                side_effect=(0.0, 0.0, 2.0),
+            ),
+            mock.patch("sidecar.cli._child_group_exists", return_value=True),
+            mock.patch(
+                "sidecar.cli.time.sleep",
+                side_effect=KeyboardInterrupt(),
+            ),
+        ):
+            self.assertFalse(
+                cli_module._wait_for_child_group(process, process.pid, 1.0)
+            )
+
+        exited = FakeDaemonProcess()
+        exited.returncode = 0
+        exited.wait = mock.Mock(side_effect=OSError("already reaped"))
+        cli_module._terminate_and_reap_daemon_child(exited)
+        exited.wait.assert_called_once_with(timeout=0)
+
+        unrelated = FakeDaemonProcess()
+        with mock.patch(
+            "sidecar.cli.os.getpgid",
+            return_value=unrelated.pid + 1,
+        ):
+            cli_module._terminate_and_reap_daemon_child(unrelated)
+        self.assertEqual([], unrelated.wait_calls)
+
+        vanished = FakeDaemonProcess()
+        vanished.wait = mock.Mock(side_effect=OSError("gone"))
+        with mock.patch("sidecar.cli.os.getpgid", side_effect=ProcessLookupError):
+            cli_module._terminate_and_reap_daemon_child(vanished)
+        vanished.wait.assert_called_once_with(timeout=0)
+
+        stubborn = FakeDaemonProcess()
+        stubborn.wait = mock.Mock(side_effect=OSError("not a child"))
+        with (
+            mock.patch("sidecar.cli.os.getpgid", return_value=stubborn.pid),
+            mock.patch("sidecar.cli.os.killpg", side_effect=OSError("gone")) as kill,
+            mock.patch(
+                "sidecar.cli._wait_for_child_group",
+                side_effect=(False, True),
+            ) as wait_group,
+        ):
+            cli_module._terminate_and_reap_daemon_child(stubborn)
+        self.assertEqual(
+            [
+                mock.call(stubborn.pid, signal.SIGTERM),
+                mock.call(stubborn.pid, signal.SIGKILL),
+            ],
+            kill.call_args_list,
+        )
+        self.assertEqual(2, wait_group.call_count)
+        stubborn.wait.assert_called_once_with(timeout=0)
+
+    def test_daemon_start_reports_runtime_and_spawn_failures(self):
+        for patched, expected_code, expected_message in (
+            (
+                mock.patch(
+                    "sidecar.cli.resolve_runtime_prefix",
+                    side_effect=cli_module.RuntimeCommandError("missing"),
+                ),
+                2,
+                "cannot resolve",
+            ),
+            (
+                mock.patch(
+                    "sidecar.cli.subprocess.Popen",
+                    side_effect=OSError("spawn failed"),
+                ),
+                1,
+                "spawn failed",
+            ),
+        ):
+            with self.subTest(expected_message=expected_message):
+                stderr = io.StringIO()
+                with patched:
+                    code = main(
+                        ["daemon", "start"],
+                        client=OfflineClient(),
+                        stdout=io.StringIO(),
+                        stderr=stderr,
+                    )
+                self.assertEqual(expected_code, code)
+                self.assertIn(expected_message, stderr.getvalue())
+
+    def test_daemon_stop_reports_each_terminal_process_state(self):
+        stdout = io.StringIO()
+        self.assertEqual(
+            1,
+            main(
+                ["daemon", "stop"],
+                client=OfflineClient(),
+                stdout=stdout,
+                stderr=io.StringIO(),
+            ),
+        )
+        self.assertIn("not running", stdout.getvalue())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            pidfile = runtime / "daemon.pid"
+            socket_path = runtime / "daemon.sock"
+
+            def new_client(*responses):
+                pidfile.write_text("55\n", encoding="ascii")
+                return SequencedPingClient(responses, socket_path=socket_path)
+
+            stderr = io.StringIO()
+            with mock.patch(
+                "sidecar.cli.os.kill",
+                side_effect=PermissionError("denied"),
+            ):
+                code = main(
+                    ["daemon", "stop"],
+                    client=new_client({"ok": True, "op": "ping", "pid": 55}),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+            self.assertEqual(1, code)
+            self.assertIn("cannot signal", stderr.getvalue())
+
+            with mock.patch(
+                "sidecar.cli.os.kill",
+                side_effect=(ProcessLookupError(), ProcessLookupError()),
+            ):
+                code = main(
+                    ["daemon", "stop"],
+                    client=new_client(
+                        {"ok": True, "op": "ping", "pid": 55},
+                        SidecarClientError("offline", code="connection_failed"),
+                    ),
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            self.assertEqual(0, code)
+            self.assertFalse(pidfile.exists())
+
+            with (
+                mock.patch("sidecar.cli.os.kill"),
+                mock.patch(
+                    "sidecar.cli._capture_owned_daemon_paths",
+                    return_value=None,
+                ),
+            ):
+                code = main(
+                    ["daemon", "stop"],
+                    client=new_client(
+                        {"ok": True, "op": "ping", "pid": 55},
+                        SidecarClientError("offline", code="connection_failed"),
+                    ),
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+            self.assertEqual(0, code)
+            self.assertFalse(pidfile.exists())
+
+            stdout = io.StringIO()
+            with mock.patch("sidecar.cli.os.kill"):
+                code = main(
+                    ["daemon", "stop"],
+                    client=new_client(
+                        {"ok": True, "op": "ping", "pid": 55},
+                        {"ok": True, "op": "ping", "pid": 66},
+                    ),
+                    stdout=stdout,
+                    stderr=io.StringIO(),
+                )
+            self.assertEqual(0, code)
+            self.assertIn("another daemon", stdout.getvalue())
+
+            stderr = io.StringIO()
+            with (
+                mock.patch("sidecar.cli.os.kill"),
+                mock.patch("sidecar.cli.DAEMON_STOP_TIMEOUT", 0.0),
+            ):
+                code = main(
+                    ["daemon", "stop"],
+                    client=new_client({"ok": True, "op": "ping", "pid": 55}),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+            self.assertEqual(1, code)
+            self.assertIn("timed out", stderr.getvalue())
+
+    def test_daemon_run_restores_handlers_after_signals_and_errors(self):
+        installed = {}
+        previous_handler = object()
+
+        def install_handler(signum, handler):
+            if handler is not previous_handler:
+                installed[signum] = handler
+
+        def request_signal(**kwargs):
+            del kwargs
+            installed[signal.SIGTERM](signal.SIGTERM, None)
+
+        with (
+            mock.patch("sidecar.cli.signal.getsignal", return_value=previous_handler),
+            mock.patch("sidecar.cli.signal.signal", side_effect=install_handler) as setter,
+            mock.patch("sidecar.cli.run_foreground", side_effect=request_signal),
+        ):
+            code = main(
+                ["daemon", "run"],
+                client=OfflineClient(),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+        self.assertEqual(128 + signal.SIGTERM, code)
+        self.assertEqual(4, setter.call_count)
+
+        for error, expected_code, expected_message in (
+            (KeyboardInterrupt(), 130, ""),
+            (cli_module.DaemonError("failed"), 1, "daemon run: failed"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                stderr = io.StringIO()
+                with mock.patch("sidecar.cli.run_foreground", side_effect=error):
+                    code = main(
+                        ["daemon", "run"],
+                        client=OfflineClient(),
+                        stdout=io.StringIO(),
+                        stderr=stderr,
+                    )
+                self.assertEqual(expected_code, code)
+                self.assertIn(expected_message, stderr.getvalue())
+
     @mock.patch("sidecar.cli.subprocess.Popen")
     def test_daemon_start_spawns_detached_and_waits_for_ping(self, popen):
         class StartingClient:
@@ -3766,16 +4082,28 @@ class CLITests(unittest.TestCase):
         self.assertIn("refusing to signal", stderr.getvalue())
         kill.assert_not_called()
 
+    @mock.patch("sidecar.cli._socket_is_live", side_effect=(True, False))
     @mock.patch("sidecar.cli.os.kill")
-    def test_daemon_stop_signals_only_verified_pid(self, kill):
+    def test_daemon_stop_signals_only_verified_pid(self, kill, socket_is_live):
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)
             pidfile = runtime / "daemon.pid"
+            socket_path = runtime / "daemon.sock"
+
+            def signal_process(pid, signum):
+                self.assertEqual(55, pid)
+                if signum == 0:
+                    raise ProcessLookupError
+
+            kill.side_effect = signal_process
+            daemon_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            daemon_socket.bind(str(socket_path))
+            daemon_socket.close()
             pidfile.write_text("55\n", encoding="ascii")
 
             class StoppingClient(FakeClient):
                 def __init__(self):
-                    super().__init__(pid=55, socket_path=runtime / "daemon.sock")
+                    super().__init__(pid=55, socket_path=socket_path)
                     self.pings = 0
 
                 def ping(self):
@@ -3785,15 +4113,22 @@ class CLITests(unittest.TestCase):
                     return super().ping()
 
             stdout = io.StringIO()
+            client = StoppingClient()
             code = main(
                 ["daemon", "stop"],
-                client=StoppingClient(),
+                client=client,
                 stdout=stdout,
                 stderr=io.StringIO(),
             )
 
             self.assertEqual(0, code)
-            kill.assert_called_once_with(55, mock.ANY)
+            self.assertEqual(3, client.pings)
+            self.assertEqual(
+                [mock.call(55, signal.SIGTERM), mock.call(55, 0)],
+                kill.call_args_list,
+            )
+            self.assertEqual(2, socket_is_live.call_count)
+            self.assertFalse(socket_path.exists())
             self.assertFalse(pidfile.exists())
             self.assertIn("stopped", stdout.getvalue())
 
