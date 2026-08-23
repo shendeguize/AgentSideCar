@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 import io
 import json
 import os
@@ -13,8 +14,16 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-from sidecar import remote
+from sidecar import remote, remote_inventory, remote_transport, remote_types
+from sidecar.json_limits import (
+    JSONLimitError,
+    JSONLimits,
+    JSONSyntaxError,
+    parse_json,
+    validate_json,
+)
 from sidecar.process_runner import BoundedProcessResult
+from sidecar.release import build_release_zipapp
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +91,20 @@ def session_row(session_id="session", *, status="waiting", agent="claude"):
     }
 
 
+def minimal_session_row(session_id="s"):
+    return {
+        "agent": "a",
+        "session_id": session_id,
+        "project": "",
+        "transcript": "",
+        "updated_at": 0,
+        "title": "",
+        "status": "idle",
+        "extra": {},
+        "parent_id": None,
+    }
+
+
 def process_exists(pid):
     try:
         os.kill(pid, 0)
@@ -112,6 +135,10 @@ class RemoteDataModelTests(unittest.TestCase):
         self.assertNotIn("stderr", aggregate.to_dict()["failures"][0])
         self.assertEqual(remote.EXIT_NO_SUCCESS, aggregate.exit_code)
         self.assertNotIn("build_zipapp", remote.__all__)
+        self.assertNotIn("build_zipapp_to_path", remote.__all__)
+        self.assertFalse(hasattr(remote, "build_zipapp_to_path"))
+        self.assertFalse(hasattr(remote, "MAX_JSON_EXTRA_ITEMS"))
+        self.assertFalse(hasattr(remote, "MAX_ROW_BYTES"))
 
     def test_partial_and_exit_policy_distinguish_outcomes(self):
         row = session_row()
@@ -129,11 +156,15 @@ class RemoteDataModelTests(unittest.TestCase):
             hosts=("good",),
             succeeded=("good",),
         )
+        empty = remote.RemoteAggregate("status")
 
         self.assertTrue(partial.partial)
         self.assertEqual(remote.EXIT_OK, partial.exit_code)
         self.assertFalse(complete.partial)
         self.assertEqual(remote.EXIT_OK, complete.exit_code)
+        self.assertFalse(empty.partial)
+        self.assertEqual(remote.EXIT_OK, empty.exit_code)
+        self.assertEqual(remote.EXIT_OK, empty.to_dict()["exit_code"])
         self.assertEqual(
             remote.EXIT_INVALID_INVENTORY,
             remote.RemoteInventoryError.exit_code,
@@ -155,31 +186,128 @@ class RemoteDataModelTests(unittest.TestCase):
 
 
 class BoundedJSONTests(unittest.TestCase):
+    def test_canonical_limits_are_frozen_and_errors_are_neutral(self):
+        limits = JSONLimits(
+            max_bytes=32,
+            max_depth=2,
+            max_items=2,
+            max_nodes=4,
+            max_string_bytes=3,
+            max_integer_bits=8,
+        )
+
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            limits.max_bytes = 64
+        with self.assertRaises(JSONSyntaxError):
+            parse_json(b'{"key":1,"key":2}', limits)
+        with self.assertRaises(JSONLimitError):
+            parse_json(b'"four"', limits)
+        cyclic = []
+        cyclic.append(cyclic)
+        with self.assertRaises(JSONSyntaxError):
+            validate_json(cyclic, JSONLimits())
+
     def test_duplicate_keys_and_nonfinite_numbers_are_rejected(self):
-        with self.assertRaises(ValueError):
-            remote.parse_bounded_json(b'{"host":"a","host":"b"}', max_bytes=100)
-        with self.assertRaises(ValueError):
-            remote.parse_bounded_json(b'{"value":NaN}', max_bytes=100)
+        for payload in (
+            b'{"host":"a","host":"b"}',
+            b'{"value":NaN}',
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError) as raised:
+                    remote.parse_bounded_json(payload, max_bytes=100)
+                self.assertNotIsInstance(
+                    raised.exception,
+                    remote.ProtocolResourceLimitError,
+                )
 
     def test_payload_size_depth_and_string_limits_are_bounded(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(remote.ProtocolResourceLimitError):
             remote.parse_bounded_json(b"[]" * 10, max_bytes=5)
-        nested = "[" * (remote.MAX_JSON_DEPTH + 2) + "0" + "]" * (
-            remote.MAX_JSON_DEPTH + 2
+        self.assertEqual(
+            [],
+            remote.parse_bounded_json(b"[]", max_bytes=2),
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(remote.ProtocolResourceLimitError):
+            remote.parse_bounded_json(b"[]", max_bytes=1)
+        nested = (
+            "[" * (remote.MAX_JSON_DEPTH + 2) + "0" + "]" * (remote.MAX_JSON_DEPTH + 2)
+        )
+        with self.assertRaises(remote.ProtocolResourceLimitError):
             remote.parse_bounded_json(nested, max_bytes=len(nested.encode("utf-8")))
+        boundary_string = json.dumps("x" * remote.MAX_JSON_STRING_BYTES)
+        self.assertEqual(
+            "x" * remote.MAX_JSON_STRING_BYTES,
+            remote.parse_bounded_json(
+                boundary_string,
+                max_bytes=len(boundary_string.encode("utf-8")),
+            ),
+        )
         oversized_string = json.dumps("x" * (remote.MAX_JSON_STRING_BYTES + 1))
-        with self.assertRaises(ValueError):
+        with self.assertRaises(remote.ProtocolResourceLimitError):
             remote.parse_bounded_json(
                 oversized_string,
                 max_bytes=len(oversized_string.encode("utf-8")),
             )
 
-    def test_parser_converts_recursion_and_invalid_unicode_to_value_error(self):
+        depth_boundary = None
+        for _index in range(remote.MAX_JSON_DEPTH):
+            depth_boundary = [depth_boundary]
+        limits = JSONLimits(max_depth=remote.MAX_JSON_DEPTH)
+        validate_json(depth_boundary, limits)
+        with self.assertRaises(JSONLimitError):
+            validate_json([depth_boundary], limits)
+
+    def test_global_node_budget_accepts_more_than_2600_minimal_rows(self):
+        row_count = 3000
+        payload = json.dumps(
+            {"ok": True, "rows": [minimal_session_row()] * row_count},
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        rows = remote_types._parse_execution_response(payload, "edge")
+
+        self.assertLess(len(payload), remote.MAX_PROTOCOL_BYTES)
+        self.assertEqual(row_count, len(rows))
+
+    def test_near_max_rows_fit_protocol_bytes_and_global_node_budget(self):
+        payload = json.dumps(
+            {"ok": True, "rows": [minimal_session_row()] * remote.MAX_ROWS},
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        rows = remote_types._parse_execution_response(payload, "edge")
+
+        self.assertLess(len(payload), remote.MAX_PROTOCOL_BYTES)
+        self.assertEqual(remote.MAX_ROWS, len(rows))
+
+    def test_deep_and_high_node_extras_have_resource_limit_diagnostic(self):
+        deep = {}
+        cursor = deep
+        for _index in range(remote.MAX_JSON_DEPTH + 1):
+            child = {}
+            cursor["child"] = child
+            cursor = child
+        high_node = {"items": [None] * (remote_types.MAX_JSON_EXTRA_ITEMS + 1)}
+
+        for extra in (deep, high_node):
+            row = minimal_session_row()
+            row["extra"] = extra
+            with self.subTest(kind="deep" if extra is deep else "high-node"):
+                with self.assertRaises(remote.ProtocolResourceLimitError) as raised:
+                    remote_types._validate_protocol_rows([row], "edge")
+                self.assertEqual("resource_limit", raised.exception.code)
+
+    def test_parser_maps_recursion_exhaustion_to_resource_limit(self):
         deeply_nested = "[" * 5000 + "0" + "]" * 5000
+
+        with self.assertRaises(remote.ProtocolResourceLimitError):
+            remote.parse_bounded_json(
+                deeply_nested,
+                max_bytes=len(deeply_nested),
+            )
+
+    def test_invalid_unicode_remains_malformed_protocol_data(self):
         invalid_values = (
-            deeply_nested,
             '"\ud800"',
             b'"\\ud800"',
             b'"\xff"',
@@ -187,18 +315,31 @@ class BoundedJSONTests(unittest.TestCase):
 
         for payload in invalid_values:
             with self.subTest(payload_type=type(payload).__name__):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(ValueError) as raised:
                     remote.parse_bounded_json(
                         payload,
-                        max_bytes=max(
-                            10001,
-                            len(payload) if isinstance(payload, bytes) else len(payload),
-                        ),
+                        max_bytes=max(100, len(payload)),
                     )
+                self.assertNotIsInstance(
+                    raised.exception,
+                    remote.ProtocolResourceLimitError,
+                )
+
+    def test_node_limit_accepts_boundary_and_rejects_boundary_plus_one(self):
+        validate_json(
+            [None, None, None],
+            JSONLimits(max_nodes=4),
+        )
+
+        with self.assertRaises(JSONLimitError):
+            validate_json(
+                [None, None, None, None],
+                JSONLimits(max_nodes=4),
+            )
 
 
 class InventoryTests(unittest.TestCase):
-    @mock.patch.object(remote, "_run_bounded")
+    @mock.patch.object(remote_inventory, "_run_bounded")
     def test_default_inventory_probe_uses_canonical_bounded_runner(self, run_bounded):
         argv = ("dshc", "ls", "--json")
         payload = json.dumps([inventory_row("edge")]).encode("utf-8")
@@ -229,11 +370,7 @@ class InventoryTests(unittest.TestCase):
             inventory_root = root / "inventory"
             inventory_root.mkdir()
             config = {"hosts": {"fallback": {"enabled": True, "local": False}}}
-            state = {
-                "hosts": {
-                    "fallback": {"phase": "ready", "orphaned": False}
-                }
-            }
+            state = {"hosts": {"fallback": {"phase": "ready", "orphaned": False}}}
             (inventory_root / "config.json").write_text(
                 json.dumps(config),
                 encoding="utf-8",
@@ -260,7 +397,11 @@ class InventoryTests(unittest.TestCase):
             }
             started = time.monotonic()
 
-            with mock.patch.object(remote, "MAX_INVENTORY_BYTES", 65536):
+            with mock.patch.object(
+                remote_inventory,
+                "MAX_INVENTORY_BYTES",
+                65536,
+            ):
                 hosts = remote.load_remote_hosts(env=environment, timeout=3)
 
             self.assertLess(time.monotonic() - started, 2.8)
@@ -275,7 +416,7 @@ class InventoryTests(unittest.TestCase):
         path = Path("/inventory/config.json")
 
         with mock.patch.object(Path, "open", return_value=stream) as path_open:
-            payload = remote._read_bounded_inventory_file(path)
+            payload = remote_inventory._read_bounded_inventory_file(path)
 
         self.assertEqual(b"{}", payload)
         path_open.assert_called_once_with("rb")
@@ -367,11 +508,7 @@ class InventoryTests(unittest.TestCase):
             value = (
                 {"hosts": {"fallback": {"enabled": True, "local": False}}}
                 if path.name == "config.json"
-                else {
-                    "hosts": {
-                        "fallback": {"phase": "ready", "orphaned": False}
-                    }
-                }
+                else {"hosts": {"fallback": {"phase": "ready", "orphaned": False}}}
             )
             return json.dumps(value).encode("utf-8")
 
@@ -546,6 +683,20 @@ class InventoryTests(unittest.TestCase):
 
 
 class ZipappTests(unittest.TestCase):
+    def _write_outer_archive(self, path, *, omit=(), extras=()):
+        with zipfile.ZipFile(io.BytesIO(remote.build_zipapp_bytes())) as source:
+            with zipfile.ZipFile(
+                path,
+                mode="w",
+                compression=zipfile.ZIP_STORED,
+                allowZip64=False,
+            ) as outer:
+                for info in source.infolist():
+                    if info.filename not in omit:
+                        outer.writestr(info, source.read(info))
+                for name, data in extras:
+                    outer.writestr(name, data)
+
     def test_archive_is_reproducible_stored_and_source_only(self):
         first = remote.build_zipapp_bytes()
         second = remote.build_zipapp_bytes()
@@ -559,6 +710,9 @@ class ZipappTests(unittest.TestCase):
             self.assertIn("__main__.py", names)
             self.assertIn("sidecar/__init__.py", names)
             self.assertIn("sidecar/remote.py", names)
+            self.assertIn("sidecar/remote_inventory.py", names)
+            self.assertIn("sidecar/remote_transport.py", names)
+            self.assertIn("sidecar/remote_types.py", names)
             self.assertTrue(all(name.endswith(".py") for name in names))
             self.assertFalse(any("tests/" in name or ".git/" in name for name in names))
             self.assertTrue(
@@ -571,11 +725,13 @@ class ZipappTests(unittest.TestCase):
                 all(((info.external_attr >> 16) & 0o777) == 0o644 for info in infos)
             )
 
-    def test_atomic_path_build_runs_version_and_list_with_isolated_home(self):
+    def test_zipapp_bytes_run_version_and_list_with_isolated_home(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             artifact_path = root / "dist" / "agent-sidecar.pyz"
-            result_path = remote.build_zipapp_to_path(artifact_path)
+            artifact_path.parent.mkdir()
+            artifact = remote.build_zipapp_bytes()
+            artifact_path.write_bytes(artifact)
             environment = os.environ.copy()
             environment["HOME"] = str(root / "home")
             for variable in (
@@ -588,7 +744,7 @@ class ZipappTests(unittest.TestCase):
                 environment.pop(variable, None)
 
             version = subprocess.run(
-                [sys.executable, "-I", str(result_path), "--version"],
+                [sys.executable, "-I", str(artifact_path), "--version"],
                 cwd=str(root),
                 env=environment,
                 stdout=subprocess.PIPE,
@@ -601,7 +757,7 @@ class ZipappTests(unittest.TestCase):
                 [
                     sys.executable,
                     "-I",
-                    str(result_path),
+                    str(artifact_path),
                     "list",
                     "--json",
                     "--all",
@@ -615,20 +771,126 @@ class ZipappTests(unittest.TestCase):
                 timeout=10,
             )
 
-            self.assertEqual(artifact_path, result_path)
             self.assertEqual(0, version.returncode, version.stderr)
-            self.assertIn("0.3.0", version.stdout)
+            self.assertIn("0.4.0", version.stdout)
             self.assertEqual(0, listing.returncode, listing.stderr)
             self.assertIsInstance(json.loads(listing.stdout), list)
             self.assertEqual(
-                remote.build_zipapp_bytes(),
+                artifact,
                 artifact_path.read_bytes(),
             )
+
+    def test_zipimport_reader_is_bounded_canonical_and_never_extracts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            safe = root / "safe.pyz"
+            self._write_outer_archive(
+                safe,
+                extras=(
+                    ("docs/ignored.txt", b"not source"),
+                    ("assets/payload.bin", b"\x00\x01"),
+                ),
+            )
+
+            members = remote_transport._archive_source_members(safe)
+
+            self.assertIn("__main__.py", members)
+            self.assertIn("sidecar/remote_transport.py", members)
+            self.assertNotIn("docs/ignored.txt", members)
+            self.assertNotIn("assets/payload.bin", members)
+            self.assertEqual([safe], list(root.iterdir()))
+
+            portable = root / "portable.pyz"
+            with zipfile.ZipFile(io.BytesIO(remote.build_zipapp_bytes())) as source:
+                with zipfile.ZipFile(portable, mode="w") as outer:
+                    for info in source.infolist():
+                        outer.writestr(info.filename, source.read(info))
+            portable_members = remote_transport._archive_source_members(portable)
+            self.assertEqual(members, portable_members)
+
+            traversal = root / "traversal.pyz"
+            self._write_outer_archive(
+                traversal,
+                extras=(("sidecar/../escape.py", b"raise RuntimeError"),),
+            )
+            with self.assertRaises(ValueError):
+                remote_transport._archive_source_members(traversal)
+            self.assertFalse((root / "escape.py").exists())
+
+            incomplete = root / "incomplete.pyz"
+            self._write_outer_archive(
+                incomplete,
+                omit=("sidecar/cli.py",),
+            )
+            with self.assertRaises(ValueError):
+                remote_transport._archive_source_members(incomplete)
+
+            with zipfile.ZipFile(safe) as archive:
+                member_count = len(archive.infolist()) - 1
+            with mock.patch.object(
+                remote_transport,
+                "_MAX_ARCHIVE_MEMBERS",
+                member_count,
+            ):
+                with self.assertRaises(ValueError):
+                    remote_transport._archive_source_members(safe)
+
+    def test_standalone_release_builds_remote_list_and_watch_artifacts(self):
+        script = (
+            "import hashlib,sys\n"
+            "sys.path.insert(0,sys.argv[1])\n"
+            "from sidecar import remote\n"
+            "host=remote.RemoteHost('edge','ready')\n"
+            "artifacts=[]\n"
+            "def execute(host,command,artifact,**kwargs):\n"
+            "    artifacts.append(artifact)\n"
+            "    return (),None\n"
+            "remote.execute_remote_host=execute\n"
+            "result=remote.aggregate_remote('list',hosts=(host,),max_workers=1)\n"
+            "assert result.succeeded == ('edge',)\n"
+            "def opener(host,artifact,**kwargs):\n"
+            "    artifacts.append(artifact)\n"
+            "    return None,remote.RemoteFailure(host.alias,'remote')\n"
+            "with remote.watch_remote(hosts=(host,),host_opener=opener) as session:\n"
+            "    list(session)\n"
+            "rebuilt=remote.build_zipapp_bytes()\n"
+            "assert len(artifacts) == 2\n"
+            "assert artifacts[0] == artifacts[1] == rebuilt\n"
+            "print(hashlib.sha256(rebuilt).hexdigest())\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            outer = root / "agent-sidecar.pyz"
+            build_release_zipapp(outer)
+            expected = hashlib.sha256(remote.build_zipapp_bytes()).hexdigest()
+
+            results = [
+                subprocess.run(
+                    [sys.executable, "-I", "-c", script, str(outer)],
+                    cwd=str(root),
+                    env={"PATH": os.environ.get("PATH", "")},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=15,
+                )
+                for _index in range(2)
+            ]
+
+        for result in results:
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(expected + "\n", result.stdout)
 
 
 class SSHExecutionTests(unittest.TestCase):
     def test_ssh_argv_has_fixed_options_no_pty_and_alias_as_data(self):
         argv = remote.ssh_argv("edge.safe", command="list")
+        recent_argv = remote.ssh_argv(
+            "edge.safe",
+            command="list",
+            recent_seconds=172800,
+        )
 
         self.assertEqual(
             (
@@ -656,10 +918,27 @@ class SSHExecutionTests(unittest.TestCase):
         )
         self.assertNotIn("edge.safe", argv[-1])
         self.assertIn("list --json --all", argv[-1])
+        self.assertTrue(recent_argv[-1].endswith("list --json --recent-seconds 172800"))
         with self.assertRaises(ValueError):
             remote.ssh_argv("edge; touch /tmp/pwned", command="status")
         with self.assertRaises(ValueError):
             remote.remote_shell_command("watch")
+
+    def test_recency_api_rejects_nonfinite_nonpositive_and_overbound_values(self):
+        invalid = (
+            0,
+            -1,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            remote.MAX_RECENT_SECONDS + 1,
+        )
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    remote.remote_shell_command("list", recent_seconds=value)
+        with self.assertRaises(ValueError):
+            remote.remote_shell_command("status", recent_seconds=1)
 
     def test_old_python_is_gated_before_artifact_transfer(self):
         calls = []
@@ -687,6 +966,7 @@ class SSHExecutionTests(unittest.TestCase):
         )
         for stderr, expected in cases:
             with self.subTest(expected=expected):
+
                 def runner(argv, **kwargs):
                     del kwargs
                     return completed(argv, returncode=255, stderr=stderr)
@@ -728,7 +1008,7 @@ class SSHExecutionTests(unittest.TestCase):
         self.assertIsNone(rows)
         self.assertEqual("unreachable", failure.code)
 
-    def test_transport_overflow_is_always_protocol(self):
+    def test_transport_overflow_distinguishes_resource_streams(self):
         probe_overflow = BoundedProcessResult(
             args=("ssh",),
             returncode=0,
@@ -743,7 +1023,7 @@ class SSHExecutionTests(unittest.TestCase):
             runner=lambda argv, **kwargs: probe_overflow,
         )
         self.assertIsNone(rows)
-        self.assertEqual("protocol", failure.code)
+        self.assertEqual("resource_limit", failure.code)
 
         execution_overflow = BoundedProcessResult(
             args=("ssh",),
@@ -769,15 +1049,18 @@ class SSHExecutionTests(unittest.TestCase):
         self.assertEqual("protocol", failure.code)
         self.assertEqual(2, len(calls))
 
-    def test_banner_duplicate_line_and_oversize_probe_are_protocol_failures(self):
+    def test_probe_malformed_and_resource_failures_are_distinguished(self):
         payloads = (
-            b'Welcome\n{"python":[3,11,0]}\n',
-            b'{"python":[3,11,0]}\n\n',
-            b"x" * 1025,
-            b'{"python":["\\ud800",11,0]}',
-            ("[" * 500 + "0" + "]" * 500).encode("ascii"),
+            (b'Welcome\n{"python":[3,11,0]}\n', "protocol"),
+            (b'{"python":[3,11,0]}\n\n', "protocol"),
+            (b"x" * 1025, "resource_limit"),
+            (b'{"python":["\\ud800",11,0]}', "protocol"),
+            (
+                ("[" * 500 + "0" + "]" * 500).encode("ascii"),
+                "resource_limit",
+            ),
         )
-        for payload in payloads:
+        for payload, expected_code in payloads:
             with self.subTest(size=len(payload)):
                 rows, failure = remote.execute_remote_host(
                     remote.RemoteHost("edge", "ready"),
@@ -789,7 +1072,7 @@ class SSHExecutionTests(unittest.TestCase):
                     ),
                 )
                 self.assertIsNone(rows)
-                self.assertEqual("protocol", failure.code)
+                self.assertEqual(expected_code, failure.code)
 
     def test_success_transfers_bytes_and_validates_annotated_rows(self):
         calls = []
@@ -815,26 +1098,59 @@ class SSHExecutionTests(unittest.TestCase):
         self.assertNotIn("shell", calls[0][1])
         self.assertNotIn("shell", calls[1][1])
 
-    def test_oversize_or_malformed_execution_response_is_protocol_failure(self):
-        payloads = (
-            b"x" * (remote.MAX_PROTOCOL_BYTES + 1),
-            json.dumps(
-                {"ok": True, "rows": [{"agent": "claude", "status": "waiting"}]}
-            ).encode("utf-8"),
-            json.dumps(
-                {
-                    "ok": True,
-                    "rows": [
-                        {
-                            "agent": "claude",
-                            "session_id": "one",
-                            "status": "unknown",
-                        }
-                    ],
-                }
-            ).encode("utf-8"),
+    def test_list_recency_is_forwarded_as_fixed_child_arguments(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if len(calls) == 1:
+                return probe_completed(argv)
+            return execution_completed(argv, [session_row()])
+
+        rows, failure = remote.execute_remote_host(
+            remote.RemoteHost("edge", "ready"),
+            "list",
+            b"zipapp",
+            recent_seconds=172800,
+            runner=runner,
         )
-        for payload in payloads:
+
+        self.assertIsNone(failure)
+        self.assertEqual(1, len(rows))
+        self.assertIn(
+            "list --json --recent-seconds 172800",
+            calls[1][0][-1],
+        )
+
+    def test_oversize_and_malformed_execution_responses_are_distinguished(self):
+        payloads = (
+            (b"x" * (remote.MAX_PROTOCOL_BYTES + 1), "resource_limit"),
+            (
+                json.dumps(
+                    {
+                        "ok": True,
+                        "rows": [{"agent": "claude", "status": "waiting"}],
+                    }
+                ).encode("utf-8"),
+                "protocol",
+            ),
+            (
+                json.dumps(
+                    {
+                        "ok": True,
+                        "rows": [
+                            {
+                                "agent": "claude",
+                                "session_id": "one",
+                                "status": "unknown",
+                            }
+                        ],
+                    }
+                ).encode("utf-8"),
+                "protocol",
+            ),
+        )
+        for payload, expected_code in payloads:
             calls = []
 
             def runner(argv, payload=payload, **kwargs):
@@ -851,7 +1167,61 @@ class SSHExecutionTests(unittest.TestCase):
                 runner=runner,
             )
             self.assertIsNone(rows)
-            self.assertEqual("protocol", failure.code)
+            self.assertEqual(expected_code, failure.code)
+
+    def test_protocol_resource_and_malformed_failures_remain_distinct(self):
+        over = minimal_session_row()
+        over["title"] = "x" * (remote_types._SESSION_STRING_LIMITS["title"] + 1)
+        payloads = (
+            (
+                json.dumps(
+                    {"ok": True, "rows": [over]},
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+                "resource_limit",
+            ),
+            (
+                b'{"ok":true,"ok":true,"rows":[]}',
+                "protocol",
+            ),
+            (
+                ("[" * 5000 + "0" + "]" * 5000).encode("ascii"),
+                "resource_limit",
+            ),
+        )
+
+        for payload, expected_code in payloads:
+            calls = []
+
+            def runner(argv, payload=payload, **kwargs):
+                del kwargs
+                calls.append(argv)
+                if len(calls) == 1:
+                    return probe_completed(argv)
+                return completed(argv, stdout=payload)
+
+            rows, failure = remote.execute_remote_host(
+                remote.RemoteHost("edge", "ready"),
+                "status",
+                b"zipapp",
+                runner=runner,
+            )
+
+            self.assertIsNone(rows)
+            self.assertEqual(expected_code, failure.code)
+
+    def test_probe_recursion_exhaustion_is_resource_limit(self):
+        payload = ("[" * 5000 + "0" + "]" * 5000).encode("ascii")
+
+        rows, failure = remote.execute_remote_host(
+            remote.RemoteHost("edge", "ready"),
+            "status",
+            b"zipapp",
+            runner=lambda argv, **kwargs: completed(argv, stdout=payload),
+        )
+
+        self.assertIsNone(rows)
+        self.assertEqual("resource_limit", failure.code)
 
     def test_session_rows_require_exact_complete_schema_and_types(self):
         cases = []
@@ -863,20 +1233,15 @@ class SSHExecutionTests(unittest.TestCase):
         cases.append(extra_key)
         invalid_values = (
             ("agent", ""),
-            ("agent", "x" * 257),
             ("session_id", ""),
             ("project", 7),
             ("transcript", "\ud800"),
-            ("title", "x" * 65537),
             ("updated_at", True),
             ("updated_at", float("nan")),
             ("updated_at", float("inf")),
-            ("updated_at", -1),
-            ("updated_at", remote.MAX_SESSION_TIMESTAMP + 1),
             ("status", "unknown"),
             ("extra", []),
             ("parent_id", 1),
-            ("parent_id", "x" * 4097),
         )
         for key, value in invalid_values:
             row = session_row()
@@ -885,14 +1250,70 @@ class SSHExecutionTests(unittest.TestCase):
 
         for row in cases:
             with self.subTest(row=row):
-                with self.assertRaises(ValueError):
-                    remote._validate_protocol_rows([row], "edge")
+                with self.assertRaises(ValueError) as raised:
+                    remote_types._validate_protocol_rows([row], "edge")
+                self.assertNotIsInstance(
+                    raised.exception,
+                    remote.ProtocolResourceLimitError,
+                )
+
+    def test_bounded_session_fields_accept_limit_and_reject_limit_plus_one(self):
+        for key, limit in remote_types._SESSION_STRING_LIMITS.items():
+            with self.subTest(key=key):
+                boundary = minimal_session_row()
+                boundary[key] = "x" * limit
+                remote_types._validate_protocol_rows([boundary], "edge")
+
+                over = minimal_session_row()
+                over[key] = "x" * (limit + 1)
+                with self.assertRaises(remote.ProtocolResourceLimitError):
+                    remote_types._validate_protocol_rows([over], "edge")
+
+    def test_timestamp_extra_row_and_row_count_boundaries_are_typed(self):
+        for value in (
+            remote.MIN_SESSION_TIMESTAMP,
+            remote.MAX_SESSION_TIMESTAMP,
+        ):
+            row = minimal_session_row()
+            row["updated_at"] = value
+            remote_types._validate_protocol_rows([row], "edge")
+        for value in (
+            remote.MIN_SESSION_TIMESTAMP - 1,
+            remote.MAX_SESSION_TIMESTAMP + 1,
+        ):
+            row = minimal_session_row()
+            row["updated_at"] = value
+            with self.assertRaises(remote.ProtocolResourceLimitError):
+                remote_types._validate_protocol_rows([row], "edge")
+
+        boundary_items = remote_types.MAX_JSON_EXTRA_ITEMS - 3
+        extra_boundary = minimal_session_row()
+        extra_boundary["extra"] = {"items": [None] * boundary_items}
+        remote_types._validate_protocol_rows([extra_boundary], "edge")
+        extra_over = minimal_session_row()
+        extra_over["extra"] = {"items": [None] * (boundary_items + 1)}
+        with self.assertRaises(remote.ProtocolResourceLimitError):
+            remote_types._validate_protocol_rows([extra_over], "edge")
+
+        row = minimal_session_row()
+        encoded_size = len(remote_types._encoded_row(row))
+        with mock.patch.object(remote_types, "MAX_ROW_BYTES", encoded_size):
+            remote_types._validate_protocol_rows([row], "edge")
+        with mock.patch.object(remote_types, "MAX_ROW_BYTES", encoded_size - 1):
+            with self.assertRaises(remote.ProtocolResourceLimitError):
+                remote_types._validate_protocol_rows([row], "edge")
+
+        with self.assertRaises(remote.ProtocolResourceLimitError):
+            remote_types._validate_protocol_rows(
+                [minimal_session_row()] * (remote.MAX_ROWS + 1),
+                "edge",
+            )
 
     def test_session_row_validation_accepts_datetime_safe_int_before_annotation(self):
         row = session_row()
         row["updated_at"] = remote.MAX_SESSION_TIMESTAMP
 
-        rows = remote._validate_protocol_rows([row], "edge")
+        rows = remote_types._validate_protocol_rows([row], "edge")
 
         self.assertEqual(remote.MAX_SESSION_TIMESTAMP, rows[0]["updated_at"])
         self.assertEqual("edge", rows[0]["host"])
@@ -902,7 +1323,7 @@ class SSHExecutionTests(unittest.TestCase):
         bootstrap = remote.REMOTE_BOOTSTRAP
         self.assertIn("tempfile.mkstemp", bootstrap)
         self.assertIn("os.fchmod(fd, 0o600)", bootstrap)
-        self.assertIn("[sys.executable, \"-I\", path] + child_args", bootstrap)
+        self.assertIn('[sys.executable, "-I", path] + child_args', bootstrap)
         self.assertIn("selectors.DefaultSelector", bootstrap)
         self.assertIn("os.set_blocking", bootstrap)
         self.assertIn("MAX_OUTPUT = 8388608", bootstrap)
@@ -931,7 +1352,14 @@ class EmbeddedBootstrapTests(unittest.TestCase):
             archive.writestr("__main__.py", source)
         return output.getvalue()
 
-    def _run_bootstrap(self, root, source, *, child_timeout=None):
+    def _run_bootstrap(
+        self,
+        root,
+        source,
+        *,
+        child_timeout=None,
+        child_args=None,
+    ):
         bootstrap = remote.REMOTE_BOOTSTRAP
         if child_timeout is not None:
             bootstrap = bootstrap.replace(
@@ -943,8 +1371,9 @@ class EmbeddedBootstrapTests(unittest.TestCase):
         environment["TMPDIR"] = str(root)
         environment["CHILD_PID"] = str(root / "child.pid")
         environment["GRANDCHILD_PID"] = str(root / "grandchild.pid")
+        args = ["status", "--json"] if child_args is None else list(child_args)
         return subprocess.run(
-            [sys.executable, "-I", "-c", bootstrap, "status", "--json"],
+            [sys.executable, "-I", "-c", bootstrap] + args,
             input=self._zipapp(source),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -973,7 +1402,12 @@ class EmbeddedBootstrapTests(unittest.TestCase):
                     self.assertLess(time.monotonic() - started, 3.0)
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual(
-                        {"ok": False, "code": "protocol"},
+                        {
+                            "ok": False,
+                            "code": (
+                                "resource_limit" if descriptor == 1 else "protocol"
+                            ),
+                        },
                         json.loads(result.stdout),
                     )
                     pid = int((root / "child.pid").read_text(encoding="ascii"))
@@ -986,9 +1420,9 @@ class EmbeddedBootstrapTests(unittest.TestCase):
             source = (
                 "import os,subprocess,sys,time\n"
                 "subprocess.Popen([sys.executable, '-c', "
-                "\"import os,time; "
+                '"import os,time; '
                 "open(os.environ['GRANDCHILD_PID'],'w').write(str(os.getpid())); "
-                "time.sleep(60)\"])\n"
+                'time.sleep(60)"])\n'
                 "with open(os.environ['CHILD_PID'],'w') as stream:\n"
                 "    stream.write(str(os.getpid()))\n"
                 "time.sleep(60)\n"
@@ -1004,9 +1438,7 @@ class EmbeddedBootstrapTests(unittest.TestCase):
                 json.loads(result.stdout),
             )
             pid = int((root / "child.pid").read_text(encoding="ascii"))
-            grandchild_pid = int(
-                (root / "grandchild.pid").read_text(encoding="ascii")
-            )
+            grandchild_pid = int((root / "grandchild.pid").read_text(encoding="ascii"))
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline and (
                 process_exists(pid) or process_exists(grandchild_pid)
@@ -1016,6 +1448,55 @@ class EmbeddedBootstrapTests(unittest.TestCase):
             self.assertFalse(process_exists(grandchild_pid))
             self.assertEqual([], list(root.glob("*.pyz")))
 
+    def test_bootstrap_maps_json_recursion_exhaustion_to_resource_limit(self):
+        source = "print('[' * 5000 + '0' + ']' * 5000)"
+        with tempfile.TemporaryDirectory() as temporary:
+            result = self._run_bootstrap(Path(temporary), source)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            {"ok": False, "code": "resource_limit"},
+            json.loads(result.stdout),
+        )
+
+    def test_bootstrap_accepts_only_bounded_list_recency_shape(self):
+        source = "import json,sys;print(json.dumps(sys.argv[1:]))"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            accepted = self._run_bootstrap(
+                root,
+                source,
+                child_args=("list", "--json", "--recent-seconds", "172800"),
+            )
+            rejected_values = ("0", "-1", "nan", "inf", "31536001")
+            rejected = [
+                self._run_bootstrap(
+                    root,
+                    source,
+                    child_args=(
+                        "list",
+                        "--json",
+                        "--recent-seconds",
+                        value,
+                    ),
+                )
+                for value in rejected_values
+            ]
+
+        self.assertEqual(
+            {
+                "ok": True,
+                "rows": ["list", "--json", "--recent-seconds", "172800"],
+            },
+            json.loads(accepted.stdout),
+        )
+        self.assertTrue(
+            all(
+                json.loads(result.stdout) == {"ok": False, "code": "protocol"}
+                for result in rejected
+            )
+        )
+
 
 class BoundedTransportTests(unittest.TestCase):
     def _pid_path(self, root, name):
@@ -1024,10 +1505,10 @@ class BoundedTransportTests(unittest.TestCase):
     def _read_pid(self, path):
         return int(path.read_text(encoding="ascii"))
 
-    @mock.patch.object(remote, "_run_bounded")
+    @mock.patch.object(remote_transport, "_run_bounded")
     def test_remote_wrapper_keeps_thirty_second_timeout_ceiling(self, run_bounded):
         with self.assertRaises(ValueError):
-            remote._bounded_popen(
+            remote_transport._bounded_popen(
                 [sys.executable, "-c", "pass"],
                 stdout_limit=1,
                 timeout=remote.FLEET_TIMEOUT_SECONDS + 0.1,
@@ -1049,7 +1530,7 @@ class BoundedTransportTests(unittest.TestCase):
                         "fd=int(sys.argv[2]);chunk=b'x'*65536;"
                         "\nwhile True: os.write(fd,chunk)"
                     )
-                    result = remote._bounded_popen(
+                    result = remote_transport._bounded_popen(
                         [sys.executable, "-c", code, str(pid_path), str(descriptor)],
                         stdout_limit=limit,
                         stderr_limit=remote.MAX_STDERR_BYTES,
@@ -1074,7 +1555,7 @@ class BoundedTransportTests(unittest.TestCase):
             )
             started = time.monotonic()
             with self.assertRaises(subprocess.TimeoutExpired):
-                remote._bounded_popen(
+                remote_transport._bounded_popen(
                     [sys.executable, "-c", code, str(pid_path)],
                     stdout_limit=1024,
                     timeout=0.2,
@@ -1092,7 +1573,7 @@ class BoundedTransportTests(unittest.TestCase):
             )
             started = time.monotonic()
             with self.assertRaises(subprocess.TimeoutExpired):
-                remote._bounded_popen(
+                remote_transport._bounded_popen(
                     [sys.executable, "-c", code, str(pid_path)],
                     input_data=b"x" * remote.MAX_ARTIFACT_BYTES,
                     stdout_limit=1024,
@@ -1112,9 +1593,9 @@ class AggregationTests(unittest.TestCase):
             executable.write_text(
                 "#!{}\n"
                 "import os,subprocess,sys,time\n"
-                "code=\"import os,sys,time;"
+                'code="import os,sys,time;'
                 "open(sys.argv[1],'w').write(str(os.getpid()));"
-                "time.sleep(60)\"\n"
+                'time.sleep(60)"\n'
                 "subprocess.Popen([sys.executable,'-c',code,"
                 "os.environ['SSH_DESCENDANT_PID']])\n"
                 "open(os.environ['SSH_CHILD_PID'],'w').write(str(os.getpid()))\n"
@@ -1157,8 +1638,7 @@ class AggregationTests(unittest.TestCase):
             try:
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline and (
-                    not child_pid_path.exists()
-                    or not descendant_pid_path.exists()
+                    not child_pid_path.exists() or not descendant_pid_path.exists()
                 ):
                     if parent.poll() is not None:
                         break
@@ -1166,9 +1646,7 @@ class AggregationTests(unittest.TestCase):
                 self.assertTrue(child_pid_path.exists())
                 self.assertTrue(descendant_pid_path.exists())
                 child_pid = int(child_pid_path.read_text(encoding="ascii"))
-                descendant_pid = int(
-                    descendant_pid_path.read_text(encoding="ascii")
-                )
+                descendant_pid = int(descendant_pid_path.read_text(encoding="ascii"))
 
                 started = time.monotonic()
                 os.kill(parent.pid, exit_signal)
@@ -1243,6 +1721,32 @@ class AggregationTests(unittest.TestCase):
         )
         self.assertNotIn("secret", repr(result))
 
+    def test_list_aggregation_uses_all_or_bounded_recency_protocol(self):
+        execution_commands = []
+
+        def runner(argv, **kwargs):
+            del kwargs
+            if "MAX_ARTIFACT" not in argv[-1]:
+                return probe_completed(argv)
+            execution_commands.append(argv[-1])
+            return execution_completed(argv, [])
+
+        for recent_seconds in (None, 172800):
+            result = remote.aggregate_remote(
+                "list",
+                recent_seconds=recent_seconds,
+                hosts=(remote.RemoteHost("edge", "ready"),),
+                runner=runner,
+                artifact=b"zipapp",
+            )
+            self.assertEqual(("edge",), result.succeeded)
+
+        self.assertIn("list --json --all", execution_commands[0])
+        self.assertIn(
+            "list --json --recent-seconds 172800",
+            execution_commands[1],
+        )
+
     def test_no_successful_host_has_distinct_exit(self):
         def runner(argv, **kwargs):
             del kwargs
@@ -1256,6 +1760,22 @@ class AggregationTests(unittest.TestCase):
         )
         self.assertEqual(remote.EXIT_NO_SUCCESS, all_failed.exit_code)
         self.assertEqual("unreachable", all_failed.failures[0].code)
+
+    def test_empty_eligible_fleet_is_success_without_starting_transport(self):
+        calls = []
+
+        result = remote.aggregate_remote(
+            "status",
+            hosts=(),
+            runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+        self.assertEqual((), result.hosts)
+        self.assertEqual((), result.succeeded)
+        self.assertEqual((), result.failures)
+        self.assertEqual((), result.rows)
+        self.assertEqual(remote.EXIT_OK, result.exit_code)
+        self.assertEqual([], calls)
 
     def test_selected_aliases_are_case_insensitive_and_typos_fail(self):
         hosts = (
@@ -1323,6 +1843,50 @@ class AggregationTests(unittest.TestCase):
         self.assertGreater(peak, 1)
         self.assertLessEqual(peak, remote.MAX_WORKERS)
 
+    def test_sliding_window_does_not_let_one_slow_host_starve_later_hosts(self):
+        hosts = (
+            remote.RemoteHost("a-slow", "ready"),
+            remote.RemoteHost("b-fast", "ready"),
+            remote.RemoteHost("c-fast", "ready"),
+            remote.RemoteHost("d-fast", "ready"),
+        )
+        attempted = set()
+        lock = threading.Lock()
+        later_hosts_finished = threading.Event()
+
+        def runner(argv, **kwargs):
+            alias = argv[-2]
+            with lock:
+                attempted.add(alias)
+            if alias == "a-slow":
+                later_hosts_finished.wait(kwargs["timeout"] + 0.005)
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            if "MAX_ARTIFACT" not in argv[-1]:
+                return probe_completed(argv)
+            if alias == "d-fast":
+                later_hosts_finished.set()
+            return execution_completed(argv, [session_row(alias)])
+
+        result = remote.aggregate_remote(
+            "status",
+            hosts=hosts,
+            max_workers=2,
+            runner=runner,
+            artifact=b"zipapp",
+            fleet_timeout=0.2,
+        )
+
+        self.assertEqual(("b-fast", "c-fast", "d-fast"), result.succeeded)
+        self.assertEqual(
+            [("a-slow", "timeout")],
+            [(failure.host, failure.code) for failure in result.failures],
+        )
+        self.assertEqual({host.alias for host in hosts}, attempted)
+        self.assertEqual(
+            ["b-fast", "c-fast", "d-fast"],
+            [row["host"] for row in result.rows],
+        )
+
     def test_fleet_deadline_marks_running_and_queued_hosts_timeout(self):
         hosts = tuple(
             remote.RemoteHost("slow-{:02d}".format(index), "ready")
@@ -1352,6 +1916,10 @@ class AggregationTests(unittest.TestCase):
         self.assertLess(elapsed, 0.2)
         self.assertEqual(20, len(result.failures))
         self.assertTrue(all(item.code == "timeout" for item in result.failures))
+        self.assertEqual(
+            sorted(host.alias for host in hosts),
+            sorted(item.host for item in result.failures),
+        )
         self.assertLess(len(called), len(hosts))
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
@@ -1365,7 +1933,7 @@ class AggregationTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertFalse(leaked)
 
-    def test_aggregate_row_cap_rejects_only_host_that_exceeds_remainder(self):
+    def test_aggregate_row_cap_uses_fleet_global_overflow_policy(self):
         hosts = (
             remote.RemoteHost("a-small", "ready"),
             remote.RemoteHost("b-large", "ready"),
@@ -1378,7 +1946,10 @@ class AggregationTests(unittest.TestCase):
             count = 1 if argv[-2] == "a-small" else 2
             return execution_completed(
                 argv,
-                [session_row("{}-{}".format(argv[-2], index)) for index in range(count)],
+                [
+                    session_row("{}-{}".format(argv[-2], index))
+                    for index in range(count)
+                ],
             )
 
         with mock.patch.object(remote, "MAX_ROWS", 2):
@@ -1390,13 +1961,17 @@ class AggregationTests(unittest.TestCase):
                 artifact=b"zipapp",
             )
 
-        self.assertEqual(("a-small",), result.succeeded)
-        self.assertEqual(1, len(result.rows))
-        self.assertEqual([("b-large", "protocol")], [
-            (failure.host, failure.code) for failure in result.failures
-        ])
+        self.assertEqual((), result.succeeded)
+        self.assertEqual((), result.rows)
+        self.assertEqual(
+            [
+                ("a-small", "resource_limit"),
+                ("b-large", "resource_limit"),
+            ],
+            [(failure.host, failure.code) for failure in result.failures],
+        )
 
-    def test_aggregate_byte_cap_rejects_only_over_budget_host(self):
+    def test_aggregate_byte_cap_uses_fleet_global_overflow_policy(self):
         hosts = (
             remote.RemoteHost("a-small", "ready"),
             remote.RemoteHost("b-over", "ready"),
@@ -1404,7 +1979,7 @@ class AggregationTests(unittest.TestCase):
         first = session_row("a-small")
         first_annotated = dict(first)
         first_annotated["host"] = "a-small"
-        exact_first_budget = len(remote._encoded_row(first_annotated)) + 3
+        exact_first_budget = len(remote_types._encoded_row(first_annotated)) + 3
 
         def runner(argv, **kwargs):
             del kwargs
@@ -1425,10 +2000,98 @@ class AggregationTests(unittest.TestCase):
                 artifact=b"zipapp",
             )
 
-        self.assertEqual(("a-small",), result.succeeded)
-        self.assertEqual([("b-over", "protocol")], [
-            (failure.host, failure.code) for failure in result.failures
-        ])
+        self.assertEqual((), result.succeeded)
+        self.assertEqual((), result.rows)
+        self.assertEqual(
+            [
+                ("a-small", "resource_limit"),
+                ("b-over", "resource_limit"),
+            ],
+            [(failure.host, failure.code) for failure in result.failures],
+        )
+
+    def test_aggregate_caps_are_independent_of_completion_order(self):
+        hosts = (
+            remote.RemoteHost("a-edge", "ready"),
+            remote.RemoteHost("b-edge", "ready"),
+        )
+
+        def run(delays, *, rows_by_host, row_cap, byte_cap):
+            def runner(argv, **kwargs):
+                del kwargs
+                if "MAX_ARTIFACT" not in argv[-1]:
+                    return probe_completed(argv)
+                alias = argv[-2]
+                time.sleep(delays[alias])
+                return execution_completed(argv, rows_by_host[alias])
+
+            with mock.patch.object(remote, "MAX_ROWS", row_cap):
+                with mock.patch.object(
+                    remote,
+                    "MAX_AGGREGATE_BYTES",
+                    byte_cap,
+                ):
+                    result = remote.aggregate_remote(
+                        "status",
+                        hosts=hosts,
+                        max_workers=2,
+                        runner=runner,
+                        artifact=b"zipapp",
+                    )
+            return (
+                result.rows,
+                result.succeeded,
+                tuple((failure.host, failure.code) for failure in result.failures),
+            )
+
+        timing_orders = (
+            {"a-edge": 0.02, "b-edge": 0.001},
+            {"a-edge": 0.001, "b-edge": 0.02},
+        )
+        row_sets = {
+            "a-edge": [session_row("a-1"), session_row("a-2")],
+            "b-edge": [session_row("b-1")],
+        }
+        row_results = [
+            run(
+                delays,
+                rows_by_host=row_sets,
+                row_cap=2,
+                byte_cap=remote.MAX_AGGREGATE_BYTES,
+            )
+            for delays in timing_orders
+        ]
+
+        byte_sets = {
+            "a-edge": [session_row("a")],
+            "b-edge": [session_row("b")],
+        }
+        annotated_sizes = []
+        for alias, values in byte_sets.items():
+            annotated = dict(values[0], host=alias)
+            annotated_sizes.append(len(remote_types._encoded_row(annotated)) + 1)
+        byte_results = [
+            run(
+                delays,
+                rows_by_host=byte_sets,
+                row_cap=remote.MAX_ROWS,
+                byte_cap=2 + max(annotated_sizes),
+            )
+            for delays in timing_orders
+        ]
+
+        self.assertEqual(row_results[0], row_results[1])
+        self.assertEqual(byte_results[0], byte_results[1])
+        for result in (row_results[0], byte_results[0]):
+            self.assertEqual((), result[0])
+            self.assertEqual((), result[1])
+            self.assertEqual(
+                (
+                    ("a-edge", "resource_limit"),
+                    ("b-edge", "resource_limit"),
+                ),
+                result[2],
+            )
 
 
 if __name__ == "__main__":
