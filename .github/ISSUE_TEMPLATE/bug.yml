@@ -1,0 +1,114 @@
+name: Bug report
+description: Report a reproducible Agent Sidecar problem with sanitized diagnostics
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Agent Sidecar.
+
+        **Security vulnerabilities do not belong in a public issue.** Follow the [security policy](https://github.com/shendeguize/AgentSideCar/security/policy) and use GitHub private vulnerability reporting.
+
+        Before submitting, redact bearer tokens and authorization headers, usernames and filesystem paths, session/request identifiers, transcript or message content, and SSH host aliases, addresses, inventory, remote paths, and authentication details. Do not attach raw transcripts, databases/WAL files, `http.token`, `audit.key`, private keys, or credentials.
+
+  - type: input
+    id: version
+    attributes:
+      label: Agent Sidecar version
+      description: Paste the output of `agent-sidecar --version` or identify the exact commit.
+      placeholder: "agent-sidecar 0.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: os_python
+    attributes:
+      label: Operating system and Python
+      description: Include the OS name/version, architecture, and `python3 --version`.
+      placeholder: "macOS 15.6, arm64; Python 3.13.7"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation_channel
+    attributes:
+      label: Installation channel
+      description: How is the affected `agent-sidecar` executable installed or run?
+      options:
+        - pipx from a local checkout
+        - pipx from Git
+        - deterministic zipapp
+        - checkout shim or source invocation
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Show the smallest command that triggers the problem. Replace sensitive arguments and identifiers with clear placeholders.
+      placeholder: "agent-sidecar status --json"
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include the exit code and stable error code when available, but no private content.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: Reproducibility
+      options:
+        - Every time
+        - Often
+        - Sometimes
+        - Once
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction_steps
+    attributes:
+      label: Minimal reproduction steps
+      description: Use synthetic sessions or placeholder data where possible. State whether the problem reproduces without the daemon, HTTP, remote mode, or `send`.
+      placeholder: |
+        1. Start from ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: sanitized_diagnostics
+    attributes:
+      label: Sanitized JSON and diagnostics
+      description: Paste only the relevant, sanitized `--json` output, stderr diagnostics, or daemon-log records. JSON may contain paths, session IDs, transcript-derived text, and SSH host provenance; inspect and redact it first.
+      placeholder: |
+        {
+          "session_id": "<redacted-session-id>",
+          "project": "<redacted-project-path>"
+        }
+      render: shell
+
+  - type: checkboxes
+    id: redaction_confirmation
+    attributes:
+      label: Redaction confirmation
+      options:
+        - label: I removed tokens, paths, transcript/message content, stable identifiers, and SSH host or inventory details from this report.
+          required: true

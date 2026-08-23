@@ -1,0 +1,52 @@
+name: Feature request
+description: Propose an outcome or capability for Agent Sidecar
+title: "[Feature] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem before the implementation. Do not include tokens, transcript/message content, private paths, session identifiers, SSH inventory, host details, credentials, or vulnerability information.
+
+        Report suspected vulnerabilities privately through the [security policy](https://github.com/shendeguize/AgentSideCar/security/policy).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem or limitation should Agent Sidecar address? Who encounters it, and in what workflow?
+      placeholder: "When ..., I cannot ..., which means ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_outcome
+    attributes:
+      label: Proposed outcome
+      description: Describe the observable result and success criteria. Implementation ideas are welcome but secondary.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or alternative designs have you considered, and why are they insufficient?
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope_security_impact
+    attributes:
+      label: Scope and security impact
+      description: Explain whether this changes read-only observation, local writes, daemon/HTTP exposure, token handling, diagnostics/privacy, SSH remote access, or experimental `send`. Identify any new trust boundary.
+      placeholder: "This remains read-only / adds an explicit mutation because ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility
+      description: Identify affected operating systems, Python versions, agent adapters, installation channels, output schemas, or existing commands. Note any migration or backward-compatibility concern.
+    validations:
+      required: true

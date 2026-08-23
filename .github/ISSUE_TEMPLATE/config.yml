@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security policy
+    url: https://github.com/shendeguize/AgentSideCar/security/policy
+    about: Read the reporting policy and sanitize diagnostic material before sharing it.
+  - name: Privately report a vulnerability
+    url: https://github.com/shendeguize/AgentSideCar/security/advisories/new
+    about: Send suspected vulnerability and exploit details through GitHub's private channel.
