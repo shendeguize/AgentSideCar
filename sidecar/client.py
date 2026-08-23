@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from sidecar.daemon import SOCKET_NAME, default_runtime_dir
 
 DEFAULT_TIMEOUT = 1.0
-DEFAULT_RESPONSE_BYTES = 2 * 1024 * 1024
+CANCEL_POLL_SECONDS = 0.25
+MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+DEFAULT_RESPONSE_BYTES = MAX_RESPONSE_BYTES
 
 
 class SidecarClientError(RuntimeError):
@@ -19,6 +23,98 @@ class SidecarClientError(RuntimeError):
     def __init__(self, message: str, code: str = "client_error") -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class HttpPingInfo:
+    """Typed HTTP listener details advertised by the Unix daemon."""
+
+    enabled: bool
+    host: Optional[str] = None
+    port: Optional[int] = None
+
+    @classmethod
+    def from_value(cls, value: object) -> "HttpPingInfo":
+        if value is None:
+            return cls(enabled=False)
+        if not isinstance(value, Mapping) or not isinstance(
+            value.get("enabled"),
+            bool,
+        ):
+            raise SidecarClientError(
+                "daemon returned invalid HTTP ping information",
+                code="invalid_response",
+            )
+        if value["enabled"] is False:
+            return cls(enabled=False)
+        host = value.get("host")
+        port = value.get("port")
+        if (
+            not isinstance(host, str)
+            or not host
+            or not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 1 <= port <= 65535
+        ):
+            raise SidecarClientError(
+                "daemon returned invalid HTTP ping information",
+                code="invalid_response",
+            )
+        return cls(enabled=True, host=host, port=port)
+
+
+@dataclass(frozen=True)
+class PingInfo:
+    """Typed daemon health information, including optional HTTP state."""
+
+    pid: int
+    version: str
+    http: HttpPingInfo
+
+    @classmethod
+    def from_response(cls, response: object) -> "PingInfo":
+        if (
+            not isinstance(response, Mapping)
+            or response.get("ok") is not True
+            or response.get("op") != "ping"
+        ):
+            raise SidecarClientError(
+                "daemon returned an invalid ping",
+                code="invalid_response",
+            )
+        pid = response.get("pid")
+        if isinstance(pid, bool):
+            raise SidecarClientError(
+                "daemon returned an invalid pid",
+                code="invalid_response",
+            )
+        try:
+            parsed_pid = int(pid)
+        except (TypeError, ValueError) as error:
+            raise SidecarClientError(
+                "daemon returned an invalid pid",
+                code="invalid_response",
+            ) from error
+        if parsed_pid <= 0:
+            raise SidecarClientError(
+                "daemon returned an invalid pid",
+                code="invalid_response",
+            )
+        version = response.get("version")
+        if version is None:
+            rendered_version = ""
+        elif isinstance(version, str):
+            rendered_version = version
+        else:
+            raise SidecarClientError(
+                "daemon returned an invalid version",
+                code="invalid_response",
+            )
+        return cls(
+            pid=parsed_pid,
+            version=rendered_version,
+            http=HttpPingInfo.from_value(response.get("http")),
+        )
 
 
 class SidecarClient:
@@ -32,8 +128,12 @@ class SidecarClient:
         timeout: float = DEFAULT_TIMEOUT,
         max_response_bytes: int = DEFAULT_RESPONSE_BYTES,
     ) -> None:
-        if timeout <= 0 or max_response_bytes <= 0:
-            raise ValueError("client bounds must be positive")
+        if (
+            timeout <= 0
+            or max_response_bytes <= 0
+            or max_response_bytes > MAX_RESPONSE_BYTES
+        ):
+            raise ValueError("client bounds are invalid")
         root = default_runtime_dir() if runtime_dir is None else Path(runtime_dir).expanduser()
         self.socket_path = (
             root / SOCKET_NAME
@@ -43,12 +143,19 @@ class SidecarClient:
         self.timeout = float(timeout)
         self.max_response_bytes = int(max_response_bytes)
         self._scan_errors: Tuple[Dict[str, Any], ...] = ()
+        self._tail_errors: Tuple[Dict[str, Any], ...] = ()
 
     @property
     def scan_errors(self) -> List[Dict[str, Any]]:
         """Return defensive copies of errors from the latest status response."""
 
         return [dict(error) for error in self._scan_errors]
+
+    @property
+    def tail_errors(self) -> List[Dict[str, Any]]:
+        """Return defensive copies of tail errors from the latest status."""
+
+        return [dict(error) for error in self._tail_errors]
 
     def _connect(self) -> socket.socket:
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -81,6 +188,10 @@ class SidecarClient:
                 "daemon response exceeds {} bytes".format(self.max_response_bytes),
                 code="response_too_large",
             )
+        return self._decode_response(raw)
+
+    @staticmethod
+    def _decode_response(raw: bytes) -> Dict[str, Any]:
         try:
             response = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeError) as error:
@@ -94,6 +205,59 @@ class SidecarClient:
                 code="invalid_response",
             )
         return response
+
+    def _read_cancelable_response(
+        self,
+        connection: socket.socket,
+        pending: bytearray,
+        cancel_event: threading.Event,
+    ) -> Optional[Dict[str, Any]]:
+        while not cancel_event.is_set():
+            newline = pending.find(b"\n")
+            if newline >= 0:
+                end = newline + 1
+                raw = bytes(pending[:end])
+                del pending[:end]
+                if len(raw) > self.max_response_bytes:
+                    raise SidecarClientError(
+                        "daemon response exceeds {} bytes".format(
+                            self.max_response_bytes
+                        ),
+                        code="response_too_large",
+                    )
+                return self._decode_response(raw)
+            if len(pending) > self.max_response_bytes:
+                raise SidecarClientError(
+                    "daemon response exceeds {} bytes".format(
+                        self.max_response_bytes
+                    ),
+                    code="response_too_large",
+                )
+            try:
+                chunk = connection.recv(
+                    min(
+                        64 * 1024,
+                        self.max_response_bytes + 1 - len(pending),
+                    )
+                )
+            except socket.timeout:
+                continue
+            except OSError as error:
+                raise SidecarClientError(
+                    "failed reading daemon response: {}".format(error),
+                    code="read_failed",
+                ) from error
+            if not chunk:
+                if pending:
+                    raw = bytes(pending)
+                    pending.clear()
+                    return self._decode_response(raw)
+                raise SidecarClientError(
+                    "daemon closed the connection",
+                    code="connection_closed",
+                )
+            pending.extend(chunk)
+        return None
 
     @staticmethod
     def _raise_daemon_error(response: Mapping[str, Any]) -> None:
@@ -112,7 +276,7 @@ class SidecarClient:
         connection = self._connect()
         try:
             with connection:
-                stream = connection.makefile("rwb", buffering=0)
+                stream = connection.makefile("rwb")
                 try:
                     request = json.dumps(
                         {"op": operation},
@@ -139,6 +303,11 @@ class SidecarClient:
     def ping(self) -> Dict[str, Any]:
         return self._request("ping")
 
+    def ping_info(self) -> PingInfo:
+        """Return typed ping details while keeping ``ping`` wire-compatible."""
+
+        return PingInfo.from_response(self.ping())
+
     def status(self) -> List[Dict[str, Any]]:
         response = self._request("status")
         sessions = response.get("sessions")
@@ -157,16 +326,34 @@ class SidecarClient:
                 "daemon status response has no valid scan_errors list",
                 code="invalid_response",
             )
+        tail_errors = response.get("tail_errors", [])
+        if not isinstance(tail_errors, list) or not all(
+            isinstance(error, dict) for error in tail_errors
+        ):
+            raise SidecarClientError(
+                "daemon status response has no valid tail_errors list",
+                code="invalid_response",
+            )
         self._scan_errors = tuple(dict(error) for error in scan_errors)
+        self._tail_errors = tuple(dict(error) for error in tail_errors)
         return sessions
 
-    def subscribe(self) -> Iterator[Dict[str, Any]]:
+    def subscribe(
+        self,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Iterator[Dict[str, Any]]:
         """Yield normalized event dictionaries until disconnected or closed."""
+
+        if cancel_event is not None:
+            if cancel_event.is_set():
+                return
+            yield from self._subscribe_cancelable(cancel_event)
+            return
 
         connection = self._connect()
         try:
             with connection:
-                stream = connection.makefile("rwb", buffering=0)
+                stream = connection.makefile("rwb")
                 try:
                     try:
                         stream.write(b'{"op":"subscribe"}\n')
@@ -199,6 +386,51 @@ class SidecarClient:
         finally:
             connection.close()
 
+    def _subscribe_cancelable(
+        self,
+        cancel_event: threading.Event,
+    ) -> Iterator[Dict[str, Any]]:
+        connection = self._connect()
+        pending = bytearray()
+        try:
+            with connection:
+                connection.settimeout(min(self.timeout, CANCEL_POLL_SECONDS))
+                if cancel_event.is_set():
+                    return
+                try:
+                    connection.sendall(b'{"op":"subscribe"}\n')
+                except (OSError, socket.timeout) as error:
+                    raise SidecarClientError(
+                        "subscribe request failed: {}".format(error),
+                        code="request_failed",
+                    ) from error
+                acknowledgement = self._read_cancelable_response(
+                    connection,
+                    pending,
+                    cancel_event,
+                )
+                if acknowledgement is None:
+                    return
+                self._raise_daemon_error(acknowledgement)
+                if acknowledgement.get("op") != "subscribe":
+                    raise SidecarClientError(
+                        "daemon returned an invalid subscribe acknowledgement",
+                        code="invalid_response",
+                    )
+
+                while not cancel_event.is_set():
+                    event = self._read_cancelable_response(
+                        connection,
+                        pending,
+                        cancel_event,
+                    )
+                    if event is None:
+                        return
+                    self._raise_daemon_error(event)
+                    yield event
+        finally:
+            connection.close()
+
 
 def ping(**kwargs: Any) -> Dict[str, Any]:
     return SidecarClient(**kwargs).ping()
@@ -208,11 +440,20 @@ def status(**kwargs: Any) -> List[Dict[str, Any]]:
     return SidecarClient(**kwargs).status()
 
 
-def subscribe(**kwargs: Any) -> Iterator[Dict[str, Any]]:
-    return SidecarClient(**kwargs).subscribe()
+def subscribe(
+    *,
+    cancel_event: Optional[threading.Event] = None,
+    **kwargs: Any
+) -> Iterator[Dict[str, Any]]:
+    return SidecarClient(**kwargs).subscribe(cancel_event=cancel_event)
 
 
 __all__ = [
+    "CANCEL_POLL_SECONDS",
+    "DEFAULT_RESPONSE_BYTES",
+    "HttpPingInfo",
+    "MAX_RESPONSE_BYTES",
+    "PingInfo",
     "SidecarClient",
     "SidecarClientError",
     "ping",

@@ -1,6 +1,11 @@
+import errno
+import hashlib
+import http.client
+import io
 import json
 import os
 import socket
+import sqlite3
 import stat
 import tempfile
 import threading
@@ -9,9 +14,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from sidecar import bus
 from sidecar.adapters.base import Adapter
+from sidecar.adapters.cursor import CursorAdapter
 from sidecar.client import SidecarClient
+from sidecar.cursor_chat import (
+    default_snapshot_broker,
+    reset_default_snapshot_broker,
+)
 from sidecar.daemon import DaemonAlreadyRunning, SidecarDaemon
+from sidecar.daemon_log import DaemonLog, DaemonLogError, LOG_NAME
 from sidecar.model import Event, Session, Status
 from sidecar.scan import Scanner
 from sidecar.tail import SessionTailer
@@ -79,6 +91,43 @@ class FakeScanner:
         with self.lock:
             self.calls += 1
             return list(self.sessions)
+
+
+def create_cursor_chat_store(path):
+    path.parent.mkdir(parents=True)
+    message = json.dumps(
+        {"role": "user", "content": "<user_query>Daemon generation</user_query>"},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    message_id = hashlib.sha256(message).hexdigest()
+    root = b"\x0a\x20" + bytes.fromhex(message_id)
+    root_id = hashlib.sha256(root).hexdigest()
+    metadata = json.dumps(
+        {
+            "agentId": "daemon-generation",
+            "latestRootBlobId": root_id,
+            "name": "Daemon generation",
+            "mode": "agent",
+            "createdAt": 1_787_430_000_000,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
+        connection.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+        connection.executemany(
+            "INSERT INTO blobs (id, data) VALUES (?, ?)",
+            ((message_id, message), (root_id, root)),
+        )
+        connection.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)",
+            ("0", metadata.hex()),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def make_session(
@@ -165,19 +214,18 @@ class DaemonIntegrationTests(unittest.TestCase):
         self.assertEqual("unknown_op", unknown["error"]["code"])
         self.assertTrue(healthy["ok"])
 
-    def test_status_response_larger_than_64kb_roundtrips_as_jsonl(self):
+    def test_status_response_larger_than_2mib_roundtrips_as_jsonl(self):
         updated_at = time.time()
         sessions = [
             Session(
                 agent="fake",
-                session_id="bulk-{:03d}".format(index),
+                session_id="bulk",
                 project=str(self.root),
                 transcript=str(self.root / "events.log"),
                 updated_at=updated_at,
-                title="large status payload " + ("x" * 320),
+                title="large status payload " + ("x" * (2 * 1024 * 1024)),
                 status=Status.IDLE,
             )
-            for index in range(233)
         ]
         expected = [session.to_dict() for session in sessions]
         response_frame = (
@@ -187,6 +235,7 @@ class DaemonIntegrationTests(unittest.TestCase):
                     "op": "status",
                     "sessions": expected,
                     "scan_errors": [],
+                    "tail_errors": [],
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -194,14 +243,57 @@ class DaemonIntegrationTests(unittest.TestCase):
             ).encode("utf-8")
             + b"\n"
         )
-        self.assertGreater(len(response_frame), 64 * 1024)
-        self.assertLess(len(response_frame), 2 * 1024 * 1024)
+        self.assertGreater(len(response_frame), 2 * 1024 * 1024)
+        self.assertLess(len(response_frame), 32 * 1024 * 1024)
 
         self.scanner.sessions = sessions
         self.daemon.scan_once()
 
         client = SidecarClient(runtime_dir=self.runtime, timeout=2.0)
         self.assertEqual(expected, client.status())
+
+    def test_status_surfaces_safe_tail_errors_without_scan_error_regression(self):
+        active = self.scanner.sessions[0]
+        tailer = self.daemon._tailer_pool._tailers[
+            (active.agent, active.session_id)
+        ]
+        tailer.errors.extend(
+            [
+                "CursorChatSourceError",
+                "RuntimeError: /private/transcript secret content",
+            ]
+        )
+        self.scanner.sessions = [
+            make_session(
+                self.transcript,
+                updated_at=active.updated_at + 1.0,
+            )
+        ]
+
+        self.daemon.scan_once()
+        client = SidecarClient(runtime_dir=self.runtime, timeout=0.5)
+        client.status()
+
+        self.assertEqual([], client.scan_errors)
+        self.assertEqual(
+            [
+                {
+                    "agent": "fake",
+                    "session_id": "one",
+                    "code": "CursorChatSourceError",
+                },
+                {
+                    "agent": "fake",
+                    "session_id": "one",
+                    "code": "RuntimeError",
+                },
+            ],
+            client.tail_errors,
+        )
+        self.assertNotIn(
+            "private",
+            json.dumps(client.tail_errors),
+        )
 
     def test_subscriber_receives_only_new_normalized_event(self):
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -249,6 +341,597 @@ class DaemonIntegrationTests(unittest.TestCase):
 
         self.assertEqual("assistant", event["kind"])
         self.assertEqual("after ignored rows", event["text"])
+
+
+class DaemonHttpIntegrationTests(unittest.TestCase):
+    def _start(self, root, *, scanner=None, http_port=0, **kwargs):
+        daemon = SidecarDaemon(
+            scanner=FakeScanner() if scanner is None else scanner,
+            runtime_dir=root / "runtime",
+            active_interval=0.02,
+            idle_interval=0.02,
+            max_idle_interval=0.03,
+            http_port=http_port,
+            **kwargs
+        )
+        thread = daemon.start_in_thread()
+        self.assertTrue(daemon.wait_until_ready(2.0))
+        return daemon, thread
+
+    @staticmethod
+    def _stop(daemon, thread):
+        daemon.stop(timeout=2.0)
+        thread.join(2.0)
+
+    @staticmethod
+    def _token(runtime):
+        return (runtime / "http.token").read_text(encoding="ascii").strip()
+
+    def test_default_off_has_disabled_ping_and_no_http_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            daemon, thread = self._start(root, http_port=None)
+            runtime = root / "runtime"
+            try:
+                info = SidecarClient(runtime_dir=runtime).ping_info()
+                self.assertFalse(info.http.enabled)
+                self.assertIsNone(daemon._http_server)
+                self.assertFalse((runtime / "http.token").exists())
+                self.assertFalse((runtime / "http.port").exists())
+            finally:
+                self._stop(daemon, thread)
+
+    def test_http_factory_starts_after_scan_and_closes_before_unix_cleanup(self):
+        observations = []
+
+        class FakeHttpServer:
+            port = 43123
+
+            def __init__(self, runtime_dir, socket_path, port):
+                self.runtime_dir = runtime_dir
+                self.socket_path = socket_path
+                self.configured_port = port
+
+            def start(self):
+                observations.append(
+                    (
+                        "start",
+                        self.socket_path.exists(),
+                        (self.runtime_dir / "daemon.pid").exists(),
+                        scanner.calls,
+                    )
+                )
+
+            def close(self):
+                observations.append(
+                    (
+                        "close",
+                        self.socket_path.exists(),
+                        (self.runtime_dir / "daemon.pid").exists(),
+                    )
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scanner = FakeScanner()
+            stop = threading.Event()
+            stop.set()
+            daemon = SidecarDaemon(
+                scanner=scanner,
+                runtime_dir=root / "runtime",
+                http_port=0,
+                http_server_factory=FakeHttpServer,
+            )
+            daemon.serve_forever(stop)
+
+        self.assertEqual(("start", True, True, 1), observations[0])
+        self.assertEqual(("close", True, True), observations[1])
+
+    def test_real_http_status_and_events_reuse_integrated_unix_socket(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transcript = root / "events.jsonl"
+            transcript.write_text("", encoding="utf-8")
+            scanner = FakeScanner([make_session(transcript)])
+            adapter = FakeAdapter()
+            daemon, thread = self._start(
+                root,
+                scanner=scanner,
+                tailer_factory=lambda session, from_start=False: SessionTailer(
+                    session,
+                    adapter=adapter,
+                    from_start=from_start,
+                ),
+            )
+            runtime = root / "runtime"
+            stream = None
+            try:
+                info = SidecarClient(runtime_dir=runtime).ping_info()
+                self.assertTrue(info.http.enabled)
+                self.assertEqual("127.0.0.1", info.http.host)
+                self.assertGreater(info.http.port, 0)
+                token = self._token(runtime)
+
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1",
+                    info.http.port,
+                    timeout=2.0,
+                )
+                connection.request(
+                    "GET",
+                    "/api/v1/status",
+                    headers={"Authorization": "Bearer " + token},
+                )
+                response = connection.getresponse()
+                payload = json.loads(response.read())
+                connection.close()
+                self.assertEqual(200, response.status)
+                self.assertEqual(
+                    [scanner.sessions[0].to_dict()],
+                    payload["sessions"],
+                )
+
+                stream = socket.create_connection(
+                    ("127.0.0.1", info.http.port),
+                    timeout=2.0,
+                )
+                request = (
+                    "GET /api/v1/events HTTP/1.1\r\n"
+                    "Host: 127.0.0.1:{0}\r\n"
+                    "Authorization: Bearer {1}\r\n\r\n"
+                ).format(info.http.port, token)
+                stream.sendall(request.encode("ascii"))
+                received = bytearray()
+                while b'{"ok":true,"op":"subscribe"}\n' not in received:
+                    received.extend(stream.recv(65536))
+
+                with transcript.open("a", encoding="utf-8") as output:
+                    output.write('{"type":"assistant","text":"via HTTP"}\n')
+                    output.flush()
+                    os.fsync(output.fileno())
+
+                while b'"text":"via HTTP"' not in received:
+                    received.extend(stream.recv(65536))
+                self.assertIn(b'"kind":"assistant"', received)
+                self.assertIn(b'"session_id":"one"', received)
+            finally:
+                if stream is not None:
+                    stream.close()
+                self._stop(daemon, thread)
+            self.assertFalse((runtime / "http.port").exists())
+
+    def test_active_http_stream_stops_without_thread_or_port_residue(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            daemon, thread = self._start(root)
+            runtime = root / "runtime"
+            info = SidecarClient(runtime_dir=runtime).ping_info()
+            connection = socket.create_connection(
+                ("127.0.0.1", info.http.port),
+                timeout=2.0,
+            )
+            request = (
+                "GET /api/v1/events HTTP/1.1\r\n"
+                "Host: 127.0.0.1:{0}\r\n"
+                "Authorization: Bearer {1}\r\n\r\n"
+            ).format(info.http.port, self._token(runtime))
+            connection.sendall(request.encode("ascii"))
+            received = bytearray()
+            while b'{"ok":true,"op":"subscribe"}\n' not in received:
+                received.extend(connection.recv(65536))
+
+            self._stop(daemon, thread)
+            connection.settimeout(1.0)
+            self.assertEqual(b"", connection.recv(1))
+            connection.close()
+            self.assertFalse((runtime / "http.port").exists())
+            self.assertFalse(
+                any(
+                    worker.is_alive()
+                    and worker.name.startswith("agent-sidecar-http-")
+                    for worker in threading.enumerate()
+                )
+            )
+
+    def test_http_port_zero_restarts_same_daemon_instance_safely(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            daemon, first = self._start(root)
+            first_info = SidecarClient(runtime_dir=runtime).ping_info()
+            self._stop(daemon, first)
+            self.assertFalse((runtime / "http.port").exists())
+
+            second = daemon.start_in_thread()
+            self.assertTrue(daemon.wait_until_ready(2.0))
+            try:
+                second_info = SidecarClient(runtime_dir=runtime).ping_info()
+                self.assertTrue(second_info.http.enabled)
+                self.assertGreater(first_info.http.port, 0)
+                self.assertGreater(second_info.http.port, 0)
+            finally:
+                self._stop(daemon, second)
+            self.assertFalse((runtime / "http.port").exists())
+
+    def test_http_start_failure_unwinds_unix_pid_pool_and_port_record(self):
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                runtime = Path(temporary) / "runtime"
+                daemon = SidecarDaemon(
+                    scanner=FakeScanner(),
+                    runtime_dir=runtime,
+                    http_port=blocker.getsockname()[1],
+                )
+                with self.assertRaises(OSError):
+                    daemon.serve_forever()
+                self.assertFalse((runtime / "daemon.sock").exists())
+                self.assertFalse((runtime / "daemon.pid").exists())
+                self.assertFalse((runtime / "http.port").exists())
+                self.assertTrue(daemon._tailer_pool.state.closed)
+                self.assertIsNone(daemon._listener)
+                self.assertIsNone(daemon._http_server)
+        finally:
+            blocker.close()
+
+    def test_http_close_failure_sets_shutdown_diagnostic_and_retries(self):
+        class FlakyHttpServer:
+            port = 43124
+
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.close_calls = 0
+
+            def start(self):
+                pass
+
+            def close(self):
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise RuntimeError("bounded close")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stop = threading.Event()
+            stop.set()
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=root / "runtime",
+                http_port=0,
+                http_server_factory=FlakyHttpServer,
+            )
+            daemon.serve_forever(stop)
+
+            self.assertTrue(daemon.shutdown_timed_out)
+            self.assertIn("HTTP shutdown", daemon.shutdown_diagnostics[0])
+            self.assertIsNone(daemon._http_server)
+            self.assertFalse((root / "runtime" / "daemon.sock").exists())
+            self.assertFalse((root / "runtime" / "daemon.pid").exists())
+
+
+class DaemonPersistentLogIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def _read_records(runtime):
+        records = []
+        for index in (2, 1, 0):
+            suffix = "" if index == 0 else ".{}".format(index)
+            path = runtime / "{}{}".format(LOG_NAME, suffix)
+            if not path.exists():
+                continue
+            records.extend(
+                json.loads(line)
+                for line in path.read_text(encoding="ascii").splitlines()
+            )
+        return records
+
+    def test_lifecycle_log_closes_and_same_instance_restarts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=runtime,
+                active_interval=0.01,
+                idle_interval=0.01,
+                max_idle_interval=0.02,
+            )
+
+            for _ in range(2):
+                thread = daemon.start_in_thread()
+                self.assertTrue(daemon.wait_until_ready(1.0))
+                self.assertTrue(daemon.stop(timeout=1.0))
+                thread.join(1.0)
+                self.assertFalse(thread.is_alive())
+                self.assertIsNone(daemon._daemon_log)
+
+            records = self._read_records(runtime)
+            events = [record["event"] for record in records]
+            self.assertEqual(2, events.count("startup"))
+            self.assertEqual(2, events.count("ready"))
+            self.assertEqual(2, events.count("shutdown"))
+            self.assertTrue(
+                all(
+                    record["timed_out"] is False
+                    for record in records
+                    if record["event"] == "shutdown"
+                )
+            )
+            self.assertEqual(0o700, stat.S_IMODE(runtime.stat().st_mode))
+            self.assertEqual(
+                0o600,
+                stat.S_IMODE((runtime / LOG_NAME).stat().st_mode),
+            )
+
+            unlocked = DaemonLog(runtime).open()
+            unlocked.close()
+
+    def test_simultaneous_starters_only_socket_owner_logs_lifecycle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            ownership_barrier = threading.Barrier(2)
+            errors = []
+
+            class SimultaneousDaemon(SidecarDaemon):
+                def _prepare_runtime_paths(self):
+                    super()._prepare_runtime_paths()
+                    ownership_barrier.wait(timeout=2.0)
+
+            daemons = [
+                SimultaneousDaemon(
+                    scanner=FakeScanner(),
+                    runtime_dir=runtime,
+                    active_interval=0.01,
+                    idle_interval=0.01,
+                    max_idle_interval=0.02,
+                )
+                for _ in range(2)
+            ]
+
+            def serve(daemon):
+                try:
+                    daemon.serve_forever()
+                except Exception as error:
+                    errors.append(error)
+
+            threads = [
+                threading.Thread(target=serve, args=(daemon,))
+                for daemon in daemons
+            ]
+            for thread in threads:
+                thread.start()
+            try:
+                deadline = time.monotonic() + 2.0
+                while (
+                    not any(daemon.ready.is_set() for daemon in daemons)
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.005)
+                winners = [daemon for daemon in daemons if daemon.ready.is_set()]
+                self.assertEqual(1, len(winners))
+                winner = winners[0]
+                self.assertTrue(
+                    SidecarClient(runtime_dir=runtime, timeout=0.5).ping()["ok"]
+                )
+                self.assertTrue(winner.stop(timeout=1.0))
+            finally:
+                try:
+                    ownership_barrier.abort()
+                except threading.BrokenBarrierError:
+                    pass
+                for daemon in daemons:
+                    daemon.stop(timeout=1.0)
+                for thread in threads:
+                    thread.join(2.0)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(1, len(errors))
+            self.assertIsInstance(errors[0], DaemonAlreadyRunning)
+            events = [
+                record["event"]
+                for record in self._read_records(runtime)
+            ]
+            self.assertEqual(1, events.count("startup"))
+            self.assertEqual(1, events.count("ready"))
+            self.assertEqual(1, events.count("shutdown"))
+
+    def test_partial_pidfile_failure_unwinds_without_opening_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=runtime,
+            )
+            real_write = os.write
+            writes = 0
+
+            def partial_then_fail(descriptor, payload):
+                nonlocal writes
+                writes += 1
+                if writes == 1:
+                    return real_write(descriptor, payload[:1])
+                raise OSError(errno.ENOSPC, "private pidfile failure")
+
+            with mock.patch(
+                "sidecar.daemon.os.write",
+                side_effect=partial_then_fail,
+            ):
+                with self.assertRaises(OSError):
+                    daemon.serve_forever()
+
+            self.assertFalse((runtime / "daemon.sock").exists())
+            self.assertFalse((runtime / "daemon.pid").exists())
+            self.assertFalse((runtime / LOG_NAME).exists())
+            self.assertIsNone(daemon._daemon_log)
+
+    def test_log_open_failure_keeps_daemon_available_and_is_path_free(self):
+        class FailingLog:
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+
+            def open(self):
+                raise DaemonLogError("unsafe_log")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            stderr = io.StringIO()
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=runtime,
+                active_interval=0.01,
+                idle_interval=0.01,
+                max_idle_interval=0.02,
+                daemon_log_factory=FailingLog,
+            )
+            with mock.patch("sidecar.daemon.sys.stderr", stderr):
+                thread = daemon.start_in_thread()
+                self.assertTrue(daemon.wait_until_ready(1.0))
+                response = daemon._status_response()
+                self.assertTrue(
+                    SidecarClient(runtime_dir=runtime, timeout=0.5).ping()["ok"]
+                )
+                self.assertTrue(daemon.stop(timeout=1.0))
+                thread.join(1.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual("unsafe_log", daemon.log_error)
+            self.assertEqual(
+                [
+                    {
+                        "component": "daemon_log",
+                        "event": "log_error",
+                        "code": "unsafe_log",
+                    }
+                ],
+                response["diagnostics"],
+            )
+            self.assertIn("log_error: unsafe_log", stderr.getvalue())
+            self.assertNotIn(temporary, stderr.getvalue())
+            self.assertTrue(
+                any("unsafe_log" in item for item in daemon.shutdown_diagnostics)
+            )
+
+    def test_unsupported_locking_disables_log_but_daemon_serves(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            stop = threading.Event()
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=runtime,
+                active_interval=0.01,
+                idle_interval=0.01,
+                max_idle_interval=0.02,
+            )
+            stderr = io.StringIO()
+            with (
+                mock.patch("sidecar.daemon_log._fcntl", None),
+                mock.patch("sidecar.daemon.sys.stderr", stderr),
+            ):
+                thread = daemon.start_in_thread(stop)
+                self.assertTrue(daemon.wait_until_ready(1.0))
+                self.assertTrue(
+                    SidecarClient(runtime_dir=runtime, timeout=0.5).ping()["ok"]
+                )
+                stop.set()
+                self.assertTrue(daemon.stop(timeout=1.0))
+                thread.join(1.0)
+
+            self.assertFalse(thread.is_alive())
+            self.assertEqual("unsupported_platform", daemon.log_error)
+            self.assertIn("unsupported_platform", stderr.getvalue())
+            self.assertFalse((runtime / LOG_NAME).exists())
+            self.assertFalse((runtime / "daemon.log.lock").exists())
+
+    def test_write_failure_disables_once_and_surfaces_status(self):
+        instances = []
+
+        class FailingWriter:
+            error_code = "disk_full"
+
+            def __init__(self, *args, **kwargs):
+                del args, kwargs
+                self.append_calls = 0
+                self.closed = False
+                instances.append(self)
+
+            def open(self):
+                return self
+
+            def append(self, *args, **kwargs):
+                del args, kwargs
+                self.append_calls += 1
+                return False
+
+            def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            stderr = io.StringIO()
+            stop = threading.Event()
+            stop.set()
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=runtime,
+                daemon_log_factory=FailingWriter,
+            )
+            with mock.patch("sidecar.daemon.sys.stderr", stderr):
+                daemon.serve_forever(stop)
+
+            self.assertEqual(1, instances[0].append_calls)
+            self.assertTrue(instances[0].closed)
+            self.assertEqual("disk_full", daemon.log_error)
+            self.assertEqual(1, stderr.getvalue().count("log_error"))
+            self.assertEqual(
+                "disk_full",
+                daemon._status_response()["diagnostics"][0]["code"],
+            )
+
+    def test_scan_and_tail_diagnostics_use_bounded_eviction_dedupe(self):
+        class CaptureLog:
+            error_code = None
+
+            def __init__(self):
+                self.records = []
+
+            def append(self, event, **fields):
+                self.records.append((event, fields))
+                return True
+
+        daemon = SidecarDaemon(scanner=FakeScanner())
+        capture = CaptureLog()
+        daemon._daemon_log = capture
+        scan = {
+            "adapter": "cursor",
+            "stage": "discover",
+            "exception_type": "ReadError",
+            "message": "/private/canary secret",
+        }
+        tail = {
+            "agent": "cursor-cli",
+            "session_id": "private-session-id",
+            "code": "TailError",
+        }
+        daemon._log_scan_errors((scan, scan))
+        daemon._log_tail_errors((tail, tail))
+        self.assertEqual(["scan_error", "tail_error"], [item[0] for item in capture.records])
+        self.assertNotIn("message", capture.records[0][1])
+
+        daemon._reset_log_dedupe()
+        capture.records.clear()
+        with mock.patch("sidecar.daemon.MAX_LOG_ERROR_DEDUPE", 2):
+            for code in ("OneError", "TwoError", "ThreeError", "OneError"):
+                daemon._log_scan_errors(
+                    (
+                        {
+                            "adapter": "cursor",
+                            "stage": "discover",
+                            "exception_type": code,
+                        },
+                    )
+                )
+        self.assertEqual(4, len(capture.records))
+        self.assertLessEqual(len(daemon._log_dedupe_order), 2)
 
 
 class ScanFailureToleranceTests(unittest.TestCase):
@@ -399,6 +1082,108 @@ class ScanFailureToleranceTests(unittest.TestCase):
             subscription.close()
 
 
+class DaemonCursorChatGenerationTests(unittest.TestCase):
+    def setUp(self):
+        reset_default_snapshot_broker()
+
+    def tearDown(self):
+        reset_default_snapshot_broker()
+
+    def test_scan_generation_shares_discovery_checkpoint_and_changed_reload(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = (
+                root
+                / ".cursor"
+                / "chats"
+                / "cwd-hash"
+                / "session-id"
+                / "store.db"
+            )
+            create_cursor_chat_store(store)
+            os.utime(store, ns=(1_000_000_000, 1_000_000_000))
+
+            broker = default_snapshot_broker()
+            clock = [0.0]
+            discovery_depths = []
+
+            class AdvancingCursorAdapter(CursorAdapter):
+                def discover(self, home):
+                    sessions = list(super().discover(home))
+                    discovery_depths.append(broker.scan_depth)
+                    clock[0] += broker.ttl_seconds + 1.0
+                    return sessions
+
+            daemon = SidecarDaemon(
+                scanner=Scanner([AdvancingCursorAdapter()], home=root),
+                runtime_dir=root / "runtime",
+                tail_recent_seconds=1.0,
+            )
+            try:
+                with mock.patch.object(
+                    broker,
+                    "_clock",
+                    side_effect=lambda: clock[0],
+                ):
+                    daemon._scan_once(initial=True)
+
+                    self.assertEqual([1], discovery_depths)
+                    self.assertEqual(0, broker.scan_depth)
+                    self.assertEqual(1, broker.stats.snapshot_loads)
+                    self.assertEqual(1, broker.stats.cache_hits)
+                    self.assertEqual(
+                        {("cursor-cli", "session-id")},
+                        set(daemon._tailer_pool.state.checkpoints),
+                    )
+
+                    details = store.stat()
+                    os.utime(
+                        store,
+                        ns=(
+                            details.st_atime_ns,
+                            details.st_mtime_ns + 1_000_000,
+                        ),
+                    )
+                    daemon.scan_once()
+
+                    self.assertEqual([1, 1], discovery_depths)
+                    self.assertEqual(0, broker.scan_depth)
+                    self.assertEqual(2, broker.stats.snapshot_loads)
+            finally:
+                daemon._tailer_pool.close()
+
+    def test_scan_generation_exits_after_scanner_and_tailer_failures(self):
+        broker = default_snapshot_broker()
+        daemon = SidecarDaemon(scanner=FakeScanner())
+
+        with (
+            mock.patch.object(broker, "_clock", return_value=0.0),
+            mock.patch.object(
+                daemon.scanner,
+                "scan",
+                side_effect=RuntimeError("scanner failed"),
+            ),
+        ):
+            self.assertEqual((False, False), daemon.scan_once())
+
+        self.assertEqual(0, broker.scan_depth)
+        scanner_generation = broker.stats.generation
+
+        with (
+            mock.patch.object(broker, "_clock", return_value=0.0),
+            mock.patch.object(
+                daemon._tailer_pool,
+                "refresh",
+                side_effect=RuntimeError("tailer failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "tailer failed"):
+                daemon.scan_once()
+
+        self.assertEqual(0, broker.scan_depth)
+        self.assertGreater(broker.stats.generation, scanner_generation)
+
+
 class ScanSerializationTests(unittest.TestCase):
     def test_public_scan_once_serializes_scanner_ownership(self):
         class OverlapScanner:
@@ -431,6 +1216,274 @@ class ScanSerializationTests(unittest.TestCase):
 
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(1, scanner.max_active)
+
+
+class DaemonLifecycleTests(unittest.TestCase):
+    def test_stop_waits_for_active_generation_not_delayed_previous_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=Path(temporary) / "runtime",
+                active_interval=0.01,
+                idle_interval=0.01,
+                max_idle_interval=0.02,
+            )
+            old_at_completion_gap = threading.Event()
+            new_at_completion_gap = threading.Event()
+            release_old_completion = threading.Event()
+            release_new_completion = threading.Event()
+            finish_lock = threading.Lock()
+            finish_count = 0
+            finish_run = daemon._finish_run
+
+            def controlled_finish(run_done):
+                nonlocal finish_count
+                with finish_lock:
+                    finish_count += 1
+                    invocation = finish_count
+                with daemon._serving_lock:
+                    daemon._serving = False
+                    daemon._serve_thread = None
+                if invocation == 1:
+                    old_at_completion_gap.set()
+                    release_old_completion.wait(2.0)
+                else:
+                    new_at_completion_gap.set()
+                    release_new_completion.wait(2.0)
+                finish_run(run_done)
+
+            first = None
+            second = None
+            stopper = None
+            stop_result = []
+            try:
+                with mock.patch.object(
+                    daemon,
+                    "_finish_run",
+                    side_effect=controlled_finish,
+                ):
+                    first = daemon.start_in_thread()
+                    self.assertTrue(daemon.wait_until_ready(1.0))
+                    self.assertFalse(daemon.stop(timeout=0.0))
+                    self.assertTrue(old_at_completion_gap.wait(1.0))
+
+                    second = daemon.start_in_thread()
+                    self.assertTrue(daemon.wait_until_ready(1.0))
+                    stopper = threading.Thread(
+                        target=lambda: stop_result.append(
+                            daemon.stop(timeout=1.0)
+                        )
+                    )
+                    stopper.start()
+                    self.assertTrue(new_at_completion_gap.wait(1.0))
+
+                    release_old_completion.set()
+                    first.join(1.0)
+                    self.assertFalse(first.is_alive())
+                    time.sleep(0.05)
+                    self.assertTrue(stopper.is_alive())
+                    self.assertEqual([], stop_result)
+
+                    release_new_completion.set()
+                    stopper.join(1.0)
+                    second.join(1.0)
+            finally:
+                release_old_completion.set()
+                release_new_completion.set()
+                daemon.stop(timeout=1.0)
+                for thread in (stopper, first, second):
+                    if thread is not None:
+                        thread.join(1.0)
+
+            self.assertEqual([True], stop_result)
+            self.assertFalse(stopper.is_alive())
+            self.assertFalse(second.is_alive())
+
+    def test_shutdown_waits_for_blocked_poll_and_reports_timeout(self):
+        class ChangingScanner:
+            errors = []
+
+            def __init__(self, transcript):
+                self.transcript = transcript
+                self.calls = 0
+
+            def scan(self):
+                self.calls += 1
+                return [
+                    make_session(
+                        self.transcript,
+                        updated_at=time.time() + self.calls,
+                    )
+                ]
+
+        class BlockingTailer:
+            has_pending_records = False
+
+            def __init__(self, session):
+                self.session = session
+                self.errors = []
+                self.poll_started = threading.Event()
+                self.poll_release = threading.Event()
+                self.close_started = threading.Event()
+                self.order = []
+
+            def poll(self):
+                self.order.append("poll_started")
+                self.poll_started.set()
+                self.poll_release.wait(2.0)
+                self.order.append("poll_exited")
+                return []
+
+            def close(self):
+                self.order.append("close_started")
+                self.close_started.set()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transcript = root / "events.jsonl"
+            transcript.write_text("", encoding="utf-8")
+            tailers = []
+
+            def factory(session):
+                tailer = BlockingTailer(session)
+                tailers.append(tailer)
+                return tailer
+
+            daemon = SidecarDaemon(
+                scanner=ChangingScanner(transcript),
+                runtime_dir=root / "runtime",
+                active_interval=0.01,
+                idle_interval=0.01,
+                max_idle_interval=0.02,
+                shutdown_timeout=0.05,
+                tailer_factory=factory,
+            )
+            thread = daemon.start_in_thread()
+            stopped = False
+            try:
+                self.assertTrue(daemon.wait_until_ready(1.0))
+                self.assertTrue(tailers[0].poll_started.wait(1.0))
+                scan_thread = daemon._scan_thread
+                self.assertIsNotNone(scan_thread)
+
+                self.assertFalse(daemon.stop(timeout=0.01))
+                self.assertTrue(thread.is_alive())
+                self.assertTrue(scan_thread.is_alive())
+                self.assertFalse(tailers[0].close_started.is_set())
+
+                deadline = time.monotonic() + 0.5
+                while (
+                    not daemon.shutdown_timed_out
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.005)
+                self.assertTrue(daemon.shutdown_timed_out)
+                self.assertFalse(tailers[0].close_started.is_set())
+
+                tailers[0].poll_release.set()
+                stopped = daemon.stop(timeout=1.0)
+                thread.join(1.0)
+            finally:
+                if tailers:
+                    tailers[0].poll_release.set()
+                if not stopped:
+                    daemon.stop(timeout=1.0)
+                thread.join(1.0)
+
+            self.assertTrue(stopped)
+            self.assertFalse(thread.is_alive())
+            self.assertFalse(scan_thread.is_alive())
+            self.assertIsNone(daemon._scan_thread)
+            self.assertEqual(
+                ["poll_started", "poll_exited", "close_started"],
+                tailers[0].order,
+            )
+
+            daemon.scanner = FakeScanner()
+            restart = daemon.start_in_thread()
+            self.assertTrue(daemon.wait_until_ready(1.0))
+            self.assertFalse(daemon.shutdown_timed_out)
+            self.assertTrue(daemon.stop(timeout=1.0))
+            restart.join(1.0)
+            self.assertFalse(restart.is_alive())
+
+    def test_normal_shutdown_closes_pool_and_instance_restarts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=runtime,
+                active_interval=0.02,
+                idle_interval=0.02,
+                max_idle_interval=0.03,
+            )
+            first_stop = threading.Event()
+            first_thread = daemon.start_in_thread(first_stop)
+            self.assertTrue(daemon.wait_until_ready(2.0))
+
+            with mock.patch.object(
+                daemon._tailer_pool,
+                "close",
+                wraps=daemon._tailer_pool.close,
+            ) as close:
+                first_stop.set()
+                daemon.stop()
+                first_thread.join(2.0)
+                self.assertFalse(first_thread.is_alive())
+                close.assert_called_once_with()
+
+            self.assertTrue(daemon._tailer_pool.state.closed)
+            second_stop = threading.Event()
+            second_thread = daemon.start_in_thread(second_stop)
+            self.assertTrue(daemon.wait_until_ready(2.0))
+            self.assertFalse(daemon._tailer_pool.state.closed)
+            self.assertTrue(
+                SidecarClient(runtime_dir=runtime, timeout=0.5).ping()["ok"]
+            )
+
+            second_stop.set()
+            daemon.stop()
+            second_thread.join(2.0)
+            self.assertFalse(second_thread.is_alive())
+            self.assertTrue(daemon._tailer_pool.state.closed)
+
+    def test_exceptional_shutdown_cleanup_survives_pool_close_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            daemon = SidecarDaemon(
+                scanner=FakeScanner(),
+                runtime_dir=runtime,
+            )
+            with (
+                mock.patch.object(
+                    daemon,
+                    "_scan_once",
+                    side_effect=RuntimeError("scan failed"),
+                ),
+                mock.patch.object(
+                    daemon,
+                    "_close_clients",
+                    wraps=daemon._close_clients,
+                ) as close_clients,
+                mock.patch.object(
+                    daemon._tailer_pool,
+                    "close",
+                    side_effect=RuntimeError("close failed"),
+                ) as close_pool,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "scan failed"):
+                    daemon.serve_forever()
+
+            close_clients.assert_called_once_with()
+            close_pool.assert_called_once_with()
+            self.assertIsNone(daemon._listener)
+            self.assertIsNone(daemon._scan_thread)
+            self.assertFalse(daemon._serving)
+            self.assertFalse((runtime / "daemon.sock").exists())
+            self.assertFalse((runtime / "daemon.pid").exists())
+            subscription = daemon.event_bus.subscribe()
+            with self.assertRaises(bus.SubscriptionClosed):
+                subscription.get(timeout=0.01)
 
 
 class StaleRuntimeTests(unittest.TestCase):
