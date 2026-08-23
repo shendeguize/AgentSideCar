@@ -267,9 +267,10 @@ def _latest(row: object) -> str:
     return ""
 
 
-def _sort_key(row: object) -> Tuple[float, str, str]:
+def _sort_key(row: object) -> Tuple[float, str, str, str]:
     return (
         -_updated_at(row),
+        str(row_value(row, "host") or "").casefold(),
         str(row_value(row, "agent")),
         str(row_value(row, "session_id")),
     )
@@ -288,12 +289,13 @@ def arrange_session_tree(
     values = list(rows)
     identities = [
         (
+            str(row_value(row, "host") or ""),
             str(row_value(row, "agent") or ""),
             str(row_value(row, "session_id") or ""),
         )
         for row in values
     ]
-    candidates: Dict[Tuple[str, str], List[int]] = {}
+    candidates: Dict[Tuple[str, str, str], List[int]] = {}
     for index, identity in enumerate(identities):
         candidates.setdefault(identity, []).append(index)
 
@@ -302,7 +304,10 @@ def arrange_session_tree(
         parent_id = row_value(row, "parent_id", None)
         if not isinstance(parent_id, str) or not parent_id:
             continue
-        matches = candidates.get((identities[index][0], parent_id), ())
+        matches = candidates.get(
+            (identities[index][0], identities[index][1], parent_id),
+            (),
+        )
         if len(matches) == 1 and matches[0] != index:
             parents[index] = matches[0]
 

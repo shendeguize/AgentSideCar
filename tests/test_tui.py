@@ -14,6 +14,7 @@ from sidecar.tui import (
     SOURCE_DIRECT,
     TREE_MAX_DEPTH,
     SnapshotPoller,
+    arrange_session_tree,
     render_snapshot,
     run_tui,
 )
@@ -204,6 +205,47 @@ class TUIRenderTests(unittest.TestCase):
         self.assertTrue(child_line.startswith("    ↳ claude"))
         self.assertFalse(orphan_line.startswith("    ↳"))
         self.assertIn("[sidechain]", orphan_line)
+
+    def test_tree_identity_and_parent_lookup_include_host(self):
+        local_parent = make_session(
+            "shared",
+            Status.WAITING,
+            100.0,
+        ).to_dict()
+        local_parent["host"] = "local"
+        remote_same_id = make_session(
+            "shared",
+            Status.WAITING,
+            300.0,
+        ).to_dict()
+        remote_same_id["host"] = "edge"
+        remote_child = make_session(
+            "remote-child",
+            Status.WAITING,
+            200.0,
+            parent_id="shared",
+        ).to_dict()
+        remote_child["host"] = "edge"
+        other_host_child = make_session(
+            "other-child",
+            Status.WAITING,
+            400.0,
+            parent_id="shared",
+        ).to_dict()
+        other_host_child["host"] = "other"
+
+        arranged = arrange_session_tree(
+            [other_host_child, remote_child, local_parent, remote_same_id]
+        )
+        depths = {
+            (row["host"], row["session_id"]): depth
+            for row, depth in arranged
+        }
+
+        self.assertEqual(0, depths[("local", "shared")])
+        self.assertEqual(0, depths[("edge", "shared")])
+        self.assertEqual(1, depths[("edge", "remote-child")])
+        self.assertEqual(0, depths[("other", "other-child")])
 
     def test_render_breaks_cycles_and_caps_deep_tree_without_recursion(self):
         cycle_rows = [

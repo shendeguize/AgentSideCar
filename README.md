@@ -1,14 +1,20 @@
 # Agent Sidecar
 
-Agent Sidecar is a local observability CLI for AI-agent sessions. It discovers
-persisted session metadata, infers lifecycle state, follows normalized events,
-and presents the result as text, JSON, or a terminal dashboard.
+Agent Sidecar is a local-first CLI for observing AI-agent sessions. It
+discovers persisted session metadata, infers lifecycle state, follows
+normalized events, and presents the result as text, JSON, or a terminal
+dashboard. It can also aggregate read-only `list` and `status` snapshots over
+SSH and, when explicitly authorized, start an experimental local headless
+resume to send a message.
 
-Observation is read-only: Agent Sidecar does not edit transcripts, agent
-configuration, or hooks, and it does not send messages to agents. The daemon
-only writes its own socket and PID file; the installer only creates integration
-symlinks. Version 0.2 requires Python 3.9+ and has no PyPI dependencies. DSH
-event watching additionally requires an external `zstd` executable.
+The observation commands do not edit agent transcripts, configuration, or
+hooks. `send` is a separate mutating boundary: the resumed native agent may
+contact its provider, run tools, and modify agent-owned state. The daemon only
+writes its own socket and PID file; the installer only creates integration
+symlinks.
+
+Version 0.3 requires Python 3.9+ and has no PyPI dependencies. DSH event
+watching additionally requires an external `zstd` executable.
 
 ## Supported local sources
 
@@ -17,15 +23,16 @@ The agent names below are also the exact values accepted by `list --agent`:
 - `cursor-ide`: Cursor IDE JSONL transcripts and associated terminal metadata.
   Session discovery, inferred status, event watching, and known subagent
   relationships are supported.
-- `cursor-cli`: Cursor CLI `store.db` metadata and DB/WAL activity, opened
-  read-only. Version 0.2 provides metadata and inferred status only; transcript
-  events are unavailable until the deferred blobs task is implemented.
+- `cursor-cli`: Cursor CLI `store.db`, WAL, and referenced message blobs are
+  copied into bounded private snapshots and decoded without opening the live
+  database. Discovery, inferred status, history replay, and new normalized
+  events are supported.
 - `claude`: Claude Code project JSONL transcripts, including known sidechain
   and subagent relationships.
 - `codex`: Codex CLI rollout JSONL plus read-only native status SQLite when
   available.
 - `copilot`: GitHub Copilot CLI `workspace.yaml` metadata only. It has no event
-  source in v0.2 and is reported as `idle`.
+  source in v0.3 and is reported as `idle`.
 - `dsh`: DeepSeek DSH projection-cache metadata for listing and status, plus
   compressed transcript events for watching. Listing and status work without
   `zstd`; watching does not.
@@ -80,6 +87,8 @@ agent-sidecar list
 agent-sidecar list --all
 agent-sidecar list --agent cursor-ide --agent claude
 agent-sidecar list --all --json
+agent-sidecar list --remote
+agent-sidecar list --remote --host <host-alias> --json
 ```
 
 `list` shows sessions updated in the last 48 hours by default. `--all` removes
@@ -93,11 +102,43 @@ agent-sidecar ps
 agent-sidecar ps --json
 agent-sidecar status
 agent-sidecar status --json
+agent-sidecar status --remote
+agent-sidecar status --remote --host <host-alias> --json
 ```
 
 `ps` reports supported local agent executables; process presence is supporting
 evidence and is not reliably attributable to one session. `status` includes
 only `working` and `waiting` sessions.
+
+### Remote list and status
+
+`list --remote` and `status --remote` merge the local snapshot with eligible
+hosts from DSH Center inventory. `--host <host-alias>` is repeatable,
+case-insensitive, and valid only with `--remote`; it limits the remote targets
+but never removes local rows.
+
+Remote human output adds a `HOST` column. Remote JSON adds `host` to every row:
+`local` marks local provenance, while each remote row carries its
+inventory-provided host alias. Local commands without `--remote` retain the
+original session schema and do not add `host`.
+
+Inventory is obtained from `dshc ls --json` when available, with the DSH Center
+config/state files under `DSHC_HOME` or `~/.dsh_center` as a strict fallback.
+Only enabled, nonlocal, non-orphaned hosts in an eligible phase are queried.
+The sidecar builds a bounded zipapp from the current checkout and streams it
+over noninteractive SSH, so no remote installation or third-party Python
+package is required. Remote Python must be 3.9 or newer.
+
+SSH requires an already trusted host key and working noninteractive
+authentication. It does not enroll host keys or fall back to an interactive
+prompt. The transient zipapp is executed with the remote Python interpreter
+and removed after the snapshot.
+
+Remote failures are isolated by host and reported on stderr with stable codes.
+Rows from local and successful remote hosts are still printed. A partial fleet
+success exits `0`; invalid inventory, setup, or host selection exits `2`; if no
+remote host succeeds, the command exits `3`. These commands do not provide
+remote watching or message delivery.
 
 Follow one session by a unique ID prefix, or follow all watchable sessions:
 
@@ -113,6 +154,48 @@ only newly observed events are emitted. `--from-start` replays available
 history before following. `--json` emits one normalized event object per line.
 Direct `--all` fallback skips metadata-only sessions and reports the skipped
 count on stderr.
+
+### Experimental local send
+
+`send` is not an observation command. It performs a direct local scan, resolves
+an exact session ID or unique prefix, and starts a separate blocking native
+headless-resume process:
+
+```sh
+agent-sidecar send <session-prefix> "Please review the latest test failure." --allow-write
+agent-sidecar send <session-prefix> "Summarize your result." --allow-write --timeout 120 --json
+agent-sidecar send <session-prefix> --allow-write -- "-message beginning with a hyphen"
+```
+
+Use it only when the user explicitly requests that message or action.
+`--allow-write` is mandatory because the native agent can contact its provider,
+run tools, and modify session or workspace state. `send` does not use the
+daemon or remote inventory, does not interrupt a live process, and does not
+fork the original session. It starts another native process that resumes the
+persisted session.
+
+Eligible targets are local, top-level `claude`, `codex`, or `cursor-cli`
+sessions in `waiting` or `idle`. `working`, `dead`, child, sidechain, and remote
+sessions are rejected, as are `cursor-ide`, `copilot`, `kimi`, and `dsh`.
+Claude and Codex receive the native prompt on stdin. Cursor CLI necessarily
+receives it in the child process argv.
+
+The message must be nonblank UTF-8 without NUL and at most 16 KiB. Timeout is
+1–900 seconds and defaults to 300. Execution is bounded and never retried.
+Timeout, native failure, or output overflow means delivery is unknown; do not
+retry automatically because the agent may already have received or acted on
+the message.
+
+On success, human output is the final native response, or a delivery receipt
+when no response is available. `--json` emits one result object. Exit `0` means
+the native resume completed successfully and delivery is reported as
+`delivered`; exit `1` means runtime failure, timeout, or overflow with
+`delivery: "unknown"`; exit `2` is a preflight or usage rejection before a
+valid resume result; interruption exits `130` and delivery is unknown.
+
+The positional message is present in the `agent-sidecar` command argv and may
+be stored in shell history or visible in process listings. For Cursor CLI it is
+also present in the native child argv. Do not use this command for secrets.
 
 Open the live terminal dashboard, or render one ANSI-free snapshot:
 
@@ -180,10 +263,12 @@ multi-session following. A one-session watch is direct, and any
 
 The installed Cursor and Claude skill links expose the same
 `skills/agent-sidecar` bundle. The skill instructs agents to query
-`agent-sidecar status --json` first, use list/process/watch commands only when
-needed, and start or stop the daemon only when requested. It preserves the
-same observational boundary: no hook installation, configuration changes,
-message injection, or transcript writes.
+`agent-sidecar status --json` first for local observation, use remote monitoring
+only on request, and start or stop the daemon only when requested. It may run
+`send` only for an explicit same-turn request containing the exact message or
+action; that request supplies the permission represented by `--allow-write`,
+so no second confirmation is required. It never infers send consent from
+monitoring and never retries an unknown delivery.
 
 ## Development
 
@@ -193,9 +278,11 @@ Run the complete standard-library test suite from the repository root:
 python3 -m unittest discover -s tests -v
 ```
 
-## v0.2 scope and deferred work
+## v0.3 scope and deferred work
 
-Version 0.2 is local and read-only. Remote session aggregation, message
-injection or other agent control, and an HTTP server/API/dashboard are not
-available in v0.2. They are deferred work and must not be assumed from the
-local Unix-socket protocol.
+Version 0.3 provides local observation for the supported sources, Cursor CLI
+event watching, remote `list`/`status` snapshots, and experimental local send
+for Claude, Codex, and Cursor CLI. Remote watch and remote send are not
+implemented. Kimi and DSH injection remain deferred; Cursor IDE and Copilot
+send are unsupported. There is no HTTP server, API, or web dashboard, and none
+should be inferred from the local Unix-socket protocol.

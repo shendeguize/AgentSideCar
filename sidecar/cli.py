@@ -1,4 +1,4 @@
-"""Command-line interface for daemon-backed and direct sidecar inspection."""
+"""Command-line interface for sidecar observation and local message delivery."""
 
 from __future__ import annotations
 
@@ -25,6 +25,13 @@ from sidecar.daemon import (
     read_pid,
     run_foreground,
 )
+from sidecar.inject import (
+    DEFAULT_SEND_TIMEOUT_SECONDS,
+    SendError,
+    SendResult,
+    build_send_plan,
+    execute_send,
+)
 from sidecar.model import Session, Status
 from sidecar.presentation import row_age, row_value
 from sidecar.process import running_agent_processes
@@ -40,12 +47,19 @@ _SESSION_LINE = (
     "{branch}{agent:<11} {status:<7} {session:<16} {age:>4}"
     "  {updated:<25}  {title}\n"
 )
+_REMOTE_SESSION_LINE = (
+    "{branch}{host:<16} {agent:<11} {status:<7} {session:<16} {age:>4}"
+    "  {updated:<25}  {title}\n"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-sidecar",
-        description="Inspect local AI agent sessions without modifying their stores.",
+        description=(
+            "Observation commands are read-only. send starts a local headless "
+            "resume and may modify agent state."
+        ),
     )
     parser.add_argument(
         "--version",
@@ -64,12 +78,36 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="include exact agent name (repeatable, case-insensitive)",
     )
+    list_parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="include eligible remote hosts",
+    )
+    list_parser.add_argument(
+        "--host",
+        action="append",
+        default=[],
+        metavar="ALIAS",
+        help="select an eligible remote host (repeatable; requires --remote)",
+    )
 
     ps_parser = commands.add_parser("ps", help="list running agent processes")
     ps_parser.add_argument("--json", action="store_true", help="emit a JSON array")
 
     status_parser = commands.add_parser("status", help="show working and waiting sessions")
     status_parser.add_argument("--json", action="store_true", help="emit a JSON array")
+    status_parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="include eligible remote hosts",
+    )
+    status_parser.add_argument(
+        "--host",
+        action="append",
+        default=[],
+        metavar="ALIAS",
+        help="select an eligible remote host (repeatable; requires --remote)",
+    )
 
     watch_parser = commands.add_parser("watch", help="follow normalized session events")
     watch_parser.add_argument("session_prefix", nargs="?", help="unique session ID prefix")
@@ -80,6 +118,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="replay existing records before following",
     )
     watch_parser.add_argument("--json", action="store_true", help="emit one JSON event per line")
+
+    send_parser = commands.add_parser(
+        "send",
+        help="start a local headless resume that may modify agent state",
+        description="Starts a local headless resume and may modify agent state.",
+        allow_abbrev=False,
+    )
+    send_parser.add_argument(
+        "session_prefix",
+        metavar="session-prefix",
+        help="exact session ID or unique prefix",
+    )
+    send_parser.add_argument("message", help="message delivered to the resumed agent")
+    send_parser.add_argument(
+        "--allow-write",
+        action="store_true",
+        help="explicitly permit the resume to modify agent state",
+    )
+    send_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_SEND_TIMEOUT_SECONDS,
+        metavar="SEC",
+        help="native resume timeout in seconds (default: 300)",
+    )
+    send_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the bounded delivery result as JSON",
+    )
 
     daemon_parser = commands.add_parser("daemon", help="manage the local sidecar daemon")
     daemon_commands = daemon_parser.add_subparsers(dest="daemon_command", required=True)
@@ -198,6 +266,7 @@ def _human_session_sort_key(session: object) -> tuple:
     return (
         status_priority.get(_status_value(session), 4),
         -updated_at,
+        str(row_value(session, "host") or "").casefold(),
         str(row_value(session, "agent") or ""),
         str(row_value(session, "session_id") or ""),
     )
@@ -217,6 +286,7 @@ def _print_sessions(
     *,
     header: bool = False,
     status_priority: bool = False,
+    show_host: bool = False,
 ) -> None:
     values = list(sessions)
     if status_priority:
@@ -242,10 +312,12 @@ def _print_sessions(
         )
     else:
         ordered = arrange_session_tree(values)
+    line_format = _REMOTE_SESSION_LINE if show_host else _SESSION_LINE
     if header:
         stdout.write(
-            _SESSION_LINE.format(
+            line_format.format(
                 branch="",
+                host="HOST",
                 agent="AGENT",
                 status="STATUS",
                 session="SESSION",
@@ -257,8 +329,9 @@ def _print_sessions(
     for session, depth in ordered:
         branch = "{}↳ ".format("  " * depth) if depth else ""
         stdout.write(
-            _SESSION_LINE.format(
+            line_format.format(
                 branch=branch,
+                host=sanitize_terminal_text(row_value(session, "host") or "local"),
                 agent=sanitize_terminal_text(row_value(session, "agent")),
                 status=sanitize_terminal_text(_status_value(session)),
                 session=sanitize_terminal_text(
@@ -317,9 +390,16 @@ def _supports_direct_watch(session: object) -> bool:
     transcript = str(row_value(session, "transcript") or "")
     if not transcript:
         return False
+    suffix = Path(transcript).suffix.lower()
+    extra = row_value(session, "extra", {})
+    if (
+        isinstance(extra, Mapping)
+        and extra.get("transcript_kind") == "cursor-chat-sqlite"
+    ):
+        return suffix in (".db", ".sqlite", ".sqlite3")
     if str(row_value(session, "agent")) == "dsh":
         return True
-    return Path(transcript).suffix.lower() == ".jsonl"
+    return suffix == ".jsonl"
 
 
 def _print_event(event: object, stdout: TextIO) -> None:
@@ -378,6 +458,151 @@ def _filter_agent_rows(
         for row in rows
         if str(row_value(row, "agent") or "").casefold() in selected
     ]
+
+
+def _remote_row_sort_key(command: str, row: object) -> tuple:
+    try:
+        updated_at = float(row_value(row, "updated_at", 0.0))
+    except (TypeError, ValueError):
+        updated_at = 0.0
+    identity = (
+        -updated_at,
+        str(row_value(row, "host") or "").casefold(),
+        str(row_value(row, "host") or ""),
+        str(row_value(row, "agent") or "").casefold(),
+        str(row_value(row, "session_id") or ""),
+    )
+    if command == "status":
+        status_priority = {
+            Status.WORKING.value: 0,
+            Status.WAITING.value: 1,
+        }
+        return (status_priority.get(_status_value(row), 2),) + identity
+    return identity
+
+
+def _aggregate_value(result: object, name: str, default: object) -> object:
+    if isinstance(result, Mapping):
+        return result.get(name, default)
+    return getattr(result, name, default)
+
+
+def _report_remote_failures(failures: Iterable[object], stderr: TextIO) -> None:
+    values = sorted(
+        failures,
+        key=lambda failure: str(
+            _aggregate_value(failure, "host", "")
+        ).casefold(),
+    )
+    for failure in values:
+        host = sanitize_terminal_text(_aggregate_value(failure, "host", ""))
+        code = sanitize_terminal_text(_aggregate_value(failure, "code", "remote"))
+        stderr.write("remote {}: {}\n".format(host, code))
+    stderr.flush()
+
+
+def _run_remote_snapshot(
+    command: str,
+    args: argparse.Namespace,
+    *,
+    scanner: Optional[Scanner],
+    client: SidecarClient,
+    stdout: TextIO,
+    stderr: TextIO,
+    remote_aggregator=None,
+) -> int:
+    from sidecar.remote import (
+        EXIT_NO_SUCCESS,
+        RemoteInventoryError,
+        aggregate_remote,
+    )
+
+    provider = aggregate_remote if remote_aggregator is None else remote_aggregator
+    daemon_rows = _client_status(client, stderr)
+    if daemon_rows is None:
+        active_scanner = Scanner() if scanner is None else scanner
+        local_values: List[object] = _scan_sessions(
+            active_scanner,
+            stderr,
+            None,
+        )
+    else:
+        local_values = list(daemon_rows)
+    local_rows: List[Mapping[str, Any]] = []
+    for session in local_values:
+        row = dict(_as_dict(session))
+        row["host"] = "local"
+        local_rows.append(row)
+
+    result: Optional[object] = None
+    control_error: Optional[str] = None
+    try:
+        result = provider(command, selected=args.host or None)
+    except RemoteInventoryError:
+        control_error = "remote: inventory\n"
+    except OSError:
+        control_error = "remote: setup\n"
+    except ValueError as error:
+        control_error = "remote: {}\n".format(sanitize_terminal_text(error))
+
+    remote_rows: List[Mapping[str, Any]] = []
+    if result is not None:
+        failures = _aggregate_value(result, "failures", ())
+        _report_remote_failures(
+            failures if isinstance(failures, Iterable) else (),
+            stderr,
+        )
+        remote_rows_value = _aggregate_value(result, "rows", ())
+        remote_row_values = (
+            remote_rows_value
+            if isinstance(remote_rows_value, Iterable)
+            and not isinstance(remote_rows_value, (str, bytes, Mapping))
+            else ()
+        )
+        remote_rows = [
+            dict(_as_dict(row))
+            for row in remote_row_values
+        ]
+
+    merged: List[object] = list(local_rows) + remote_rows
+    if command == "list":
+        recent = None if args.all else RECENT_SECONDS
+        merged = list(_recent_rows(merged, recent))
+        merged = _filter_agent_rows(merged, args.agent)
+    else:
+        merged = [
+            row
+            for row in merged
+            if _status_value(row)
+            in (Status.WORKING.value, Status.WAITING.value)
+        ]
+    merged.sort(key=lambda row: _remote_row_sort_key(command, row))
+
+    if control_error is not None:
+        stderr.write(control_error)
+        stderr.flush()
+
+    if args.json:
+        _write_json([dict(_as_dict(row)) for row in merged], stdout)
+    elif command == "status" and not merged:
+        stdout.write("no active sessions\n")
+        stdout.flush()
+    else:
+        _print_sessions(
+            merged,
+            stdout,
+            header=True,
+            status_priority=command == "status",
+            show_host=True,
+        )
+
+    if control_error is not None:
+        return 2
+    try:
+        exit_code = int(_aggregate_value(result, "exit_code", EXIT_NO_SUCCESS))
+    except (TypeError, ValueError):
+        exit_code = EXIT_NO_SUCCESS
+    return 0 if exit_code == 0 else EXIT_NO_SUCCESS
 
 
 def _ping_pid(client: SidecarClient) -> int:
@@ -564,6 +789,139 @@ def _write_event(event: object, as_json: bool, stdout: TextIO) -> None:
         _print_event(event, stdout)
 
 
+def _valid_unicode_scalars(text: str) -> str:
+    return "".join(
+        "\ufffd" if 0xD800 <= ord(character) <= 0xDFFF else character
+        for character in text
+    )
+
+
+def _safe_send_text(value: object, message: str) -> str:
+    text = str(value or "")
+    message_forms = {message, _valid_unicode_scalars(message)}
+    candidates = set(message_forms)
+    for message_form in message_forms:
+        for ensure_ascii in (False, True):
+            encoded = json.dumps(message_form, ensure_ascii=ensure_ascii)
+            candidates.add(encoded[1:-1])
+    for candidate in sorted(candidates, key=len, reverse=True):
+        if candidate:
+            text = text.replace(candidate, "[message redacted]")
+    valid_text = _valid_unicode_scalars(text)
+    return sanitize_terminal_text(valid_text)
+
+
+def _report_send_error(error: object, message: str, stderr: TextIO) -> None:
+    stderr.write("send: {}\n".format(_safe_send_text(error, message)))
+    stderr.flush()
+
+
+def _report_native_send_stderr(
+    result: SendResult,
+    message: str,
+    stderr: TextIO,
+) -> None:
+    native_error = _safe_send_text(result.stderr, message)
+    if native_error:
+        stderr.write("send: native stderr: {}\n".format(native_error))
+        stderr.flush()
+
+
+def _write_send_result(
+    result: SendResult,
+    *,
+    as_json: bool,
+    message: str,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    if as_json:
+        _write_json(result.to_dict(), stdout)
+    elif result.outcome == "completed":
+        response = _safe_send_text(result.response, message)
+        if response:
+            stdout.write(response + "\n")
+        else:
+            stdout.write(
+                "delivered to {}:{}\n".format(
+                    sanitize_terminal_text(result.agent),
+                    sanitize_terminal_text(result.session_id),
+                )
+            )
+        stdout.flush()
+    else:
+        stdout.write(
+            "delivery unknown for {}:{} ({})\n".format(
+                sanitize_terminal_text(result.agent),
+                sanitize_terminal_text(result.session_id),
+                sanitize_terminal_text(result.outcome),
+            )
+        )
+        stdout.flush()
+
+    if result.outcome == "completed":
+        if not as_json:
+            _report_native_send_stderr(result, message, stderr)
+        return 0
+
+    diagnostic = "delivery status is unknown after {}".format(
+        sanitize_terminal_text(result.outcome)
+    )
+    if result.error_code:
+        diagnostic += " ({})".format(sanitize_terminal_text(result.error_code))
+    stderr.write("send: {}\n".format(diagnostic))
+    stderr.flush()
+    _report_native_send_stderr(result, message, stderr)
+    return 1
+
+
+def _run_send(
+    args: argparse.Namespace,
+    *,
+    scanner: Optional[Scanner],
+    stdout: TextIO,
+    stderr: TextIO,
+    planner=None,
+    executor=None,
+) -> int:
+    if args.allow_write is not True:
+        stderr.write("send: explicit --allow-write is required\n")
+        stderr.flush()
+        return 2
+
+    active_scanner = Scanner() if scanner is None else scanner
+    sessions = _scan_sessions(active_scanner, stderr, None)
+    try:
+        selected = resolve_session_prefix(sessions, args.session_prefix)
+    except (LookupError, ValueError) as error:
+        _report_send_error(error, args.message, stderr)
+        return 2
+
+    plan_builder = build_send_plan if planner is None else planner
+    send_executor = execute_send if executor is None else executor
+    try:
+        plan = plan_builder(selected, args.message)
+        result = send_executor(
+            plan,
+            allow_write=args.allow_write,
+            timeout=args.timeout,
+        )
+    except SendError as error:
+        _report_send_error(error, args.message, stderr)
+        return 2
+    except KeyboardInterrupt:
+        stderr.write("send: interrupted; delivery status is unknown\n")
+        stderr.flush()
+        return 130
+    return _write_send_result(
+        result,
+        as_json=args.json,
+        message=args.message,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
 def main(
     argv: Optional[Sequence[str]] = None,
     *,
@@ -574,10 +932,32 @@ def main(
     process_provider=None,
     watch_provider=None,
     tui_runner=None,
+    remote_aggregator=None,
+    send_planner=None,
+    send_executor=None,
 ) -> int:
     output = sys.stdout if stdout is None else stdout
     errors = sys.stderr if stderr is None else stderr
     args = build_parser().parse_args(argv)
+
+    if (
+        args.command in ("list", "status")
+        and args.host
+        and not args.remote
+    ):
+        errors.write("{}: --host requires --remote\n".format(args.command))
+        errors.flush()
+        return 2
+
+    if args.command == "send":
+        return _run_send(
+            args,
+            scanner=scanner,
+            stdout=output,
+            stderr=errors,
+            planner=send_planner,
+            executor=send_executor,
+        )
 
     if args.command == "ps":
         provider = running_agent_processes if process_provider is None else process_provider
@@ -609,6 +989,16 @@ def main(
         )
 
     if args.command == "list":
+        if args.remote:
+            return _run_remote_snapshot(
+                "list",
+                args,
+                scanner=scanner,
+                client=active_client,
+                stdout=output,
+                stderr=errors,
+                remote_aggregator=remote_aggregator,
+            )
         recent = None if args.all else RECENT_SECONDS
         daemon_rows = _client_status(active_client, errors)
         if daemon_rows is None:
@@ -624,6 +1014,16 @@ def main(
         return 0
 
     if args.command == "status":
+        if args.remote:
+            return _run_remote_snapshot(
+                "status",
+                args,
+                scanner=scanner,
+                client=active_client,
+                stdout=output,
+                stderr=errors,
+                remote_aggregator=remote_aggregator,
+            )
         daemon_rows = _client_status(active_client, errors)
         if daemon_rows is None:
             active_scanner = Scanner() if scanner is None else scanner

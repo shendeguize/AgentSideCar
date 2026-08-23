@@ -12,8 +12,10 @@ from sidecar.adapters import get_adapter, iter_adapters, registry
 from sidecar.adapters.base import Adapter, sanitize_terminal_text, snip
 from sidecar.client import SidecarClientError
 from sidecar.cli import RECENT_SECONDS, build_parser, main
+from sidecar.inject import DEFAULT_SEND_TIMEOUT_SECONDS, SendError, SendResult
 from sidecar.model import Event, Session, Status
 from sidecar.presentation import format_age_seconds, row_age, row_value
+from sidecar.remote import RemoteAggregate, RemoteFailure, RemoteInventoryError
 from sidecar.scan import ScanError
 from sidecar.tail import JSONLFollower, SessionTailer
 
@@ -203,7 +205,7 @@ class CLITests(unittest.TestCase):
         )
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def test_global_version_uses_canonical_package_version(self):
+    def test_global_version_is_exact_v030(self):
         stdout = io.StringIO()
 
         with contextlib.redirect_stdout(stdout):
@@ -211,10 +213,8 @@ class CLITests(unittest.TestCase):
                 main(["--version"])
 
         self.assertEqual(0, raised.exception.code)
-        self.assertEqual(
-            "agent-sidecar {}\n".format(sidecar.__version__),
-            stdout.getvalue(),
-        )
+        self.assertEqual("0.3.0", sidecar.__version__)
+        self.assertEqual("agent-sidecar 0.3.0\n", stdout.getvalue())
 
     def test_help_documents_version_and_repeatable_agent_filter(self):
         parser = build_parser()
@@ -231,6 +231,495 @@ class CLITests(unittest.TestCase):
         self.assertIn("--version", parser.format_help())
         self.assertIn("--agent NAME", list_help)
         self.assertEqual(["cursor-ide", "CLAUDE"], args.agent)
+
+    def test_remote_help_selection_and_host_without_remote_conflict(self):
+        parser = build_parser()
+        command_parsers = next(
+            action.choices
+            for action in parser._actions
+            if getattr(action, "dest", None) == "command"
+        )
+        parsed = parser.parse_args(
+            ["status", "--remote", "--host", "Edge", "--host", "SECOND"]
+        )
+
+        self.assertTrue(parsed.remote)
+        self.assertEqual(["Edge", "SECOND"], parsed.host)
+        for command in ("list", "status"):
+            help_text = command_parsers[command].format_help()
+            self.assertIn("--remote", help_text)
+            self.assertIn("--host ALIAS", help_text)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            code = main(
+                [command, "--host", "edge"],
+                scanner=FakeScanner(),
+                client=OfflineClient(),
+                stdout=stdout,
+                stderr=stderr,
+                remote_aggregator=lambda *args, **kwargs: self.fail(
+                    "remote aggregator must not run"
+                ),
+            )
+            self.assertEqual(2, code)
+            self.assertEqual("", stdout.getvalue())
+            self.assertEqual(
+                "{}: --host requires --remote\n".format(command),
+                stderr.getvalue(),
+            )
+
+    def test_default_local_json_never_calls_remote_or_adds_host(self):
+        session = make_session("strictly-local")
+        stdout = io.StringIO()
+
+        code = main(
+            ["list", "--json"],
+            scanner=FakeScanner([session]),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            remote_aggregator=lambda *args, **kwargs: self.fail(
+                "default list must stay local"
+            ),
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual([session.to_dict()], json.loads(stdout.getvalue()))
+        self.assertNotIn("host", json.loads(stdout.getvalue())[0])
+
+    def test_remote_control_errors_preserve_local_json_and_human_views(self):
+        cases = (
+            (
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    RemoteInventoryError()
+                ),
+                "remote: inventory\n",
+            ),
+            (
+                lambda *args, **kwargs: (_ for _ in ()).throw(
+                    ValueError(
+                        "selected remote host is not eligible: "
+                        "typo\x1b]0;pwned\x07"
+                    )
+                ),
+                "remote: selected remote host is not eligible: typo\n",
+            ),
+        )
+        now = time.time()
+        for command in ("list", "status"):
+            local = make_session(
+                "{}-local".format(command),
+                Status.WORKING,
+                updated_at=now,
+            )
+            local_older = make_session(
+                "{}-local-older".format(command),
+                Status.WORKING,
+                updated_at=now - 10,
+            )
+            filtered = make_session(
+                "{}-filtered".format(command),
+                Status.IDLE if command == "status" else Status.WORKING,
+                updated_at=(
+                    now + 100
+                    if command == "status"
+                    else now - RECENT_SECONDS - 1
+                ),
+            )
+            for as_json in (False, True):
+                for aggregator, expected_error in cases:
+                    with self.subTest(
+                        command=command,
+                        as_json=as_json,
+                        expected_error=expected_error,
+                    ):
+                        scanner = FakeScanner([make_session("not-scanned")])
+                        client = FakeClient(
+                            [
+                                filtered.to_dict(),
+                                local_older.to_dict(),
+                                local.to_dict(),
+                            ]
+                        )
+                        stdout = io.StringIO()
+                        stderr = io.StringIO()
+                        argv = [
+                            command,
+                            "--remote",
+                            "--host",
+                            "typo",
+                        ]
+                        if as_json:
+                            argv.append("--json")
+
+                        code = main(
+                            argv,
+                            scanner=scanner,
+                            client=client,
+                            stdout=stdout,
+                            stderr=stderr,
+                            remote_aggregator=aggregator,
+                        )
+
+                        self.assertEqual(2, code)
+                        self.assertEqual(expected_error, stderr.getvalue())
+                        self.assertEqual(1, client.status_calls)
+                        self.assertEqual([], scanner.recent_calls)
+                        if as_json:
+                            self.assertEqual(
+                                [
+                                    dict(local.to_dict(), host="local"),
+                                    dict(local_older.to_dict(), host="local"),
+                                ],
+                                json.loads(stdout.getvalue()),
+                            )
+                        else:
+                            lines = stdout.getvalue().splitlines()
+                            self.assertEqual(
+                                [
+                                    "HOST",
+                                    "AGENT",
+                                    "STATUS",
+                                    "SESSION",
+                                    "AGE",
+                                    "UPDATED",
+                                    "TITLE",
+                                ],
+                                lines[0].split(),
+                            )
+                            self.assertIn("local", lines[1])
+                            self.assertIn(local.session_id, lines[1])
+                            self.assertIn(local_older.session_id, lines[2])
+                            self.assertNotIn(
+                                filtered.session_id,
+                                stdout.getvalue(),
+                            )
+
+    def test_remote_control_error_scanner_fallback_runs_once(self):
+        local = make_session(
+            "scanner-local",
+            Status.WAITING,
+            updated_at=time.time(),
+        )
+        scanner = FakeScanner([local])
+        stdout = io.StringIO()
+
+        code = main(
+            ["list", "--remote", "--json"],
+            scanner=scanner,
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            remote_aggregator=lambda *args, **kwargs: (_ for _ in ()).throw(
+                RemoteInventoryError()
+            ),
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual([None], scanner.recent_calls)
+        self.assertEqual(
+            [dict(local.to_dict(), host="local")],
+            json.loads(stdout.getvalue()),
+        )
+
+    def test_remote_setup_oserror_preserves_local_json_and_human_views(self):
+        for command in ("list", "status"):
+            for as_json in (False, True):
+                with self.subTest(command=command, as_json=as_json):
+                    local = make_session(
+                        "{}-setup-local".format(command),
+                        Status.WORKING,
+                        updated_at=time.time(),
+                    )
+                    client = FakeClient([local.to_dict()])
+                    scanner = FakeScanner([make_session("not-scanned")])
+                    provider_calls = []
+
+                    def aggregate(operation, selected=None):
+                        provider_calls.append((operation, selected))
+                        raise OSError("sensitive zipapp setup detail")
+
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    argv = [command, "--remote"]
+                    if as_json:
+                        argv.append("--json")
+
+                    code = main(
+                        argv,
+                        scanner=scanner,
+                        client=client,
+                        stdout=stdout,
+                        stderr=stderr,
+                        remote_aggregator=aggregate,
+                    )
+
+                    self.assertEqual(2, code)
+                    self.assertEqual("remote: setup\n", stderr.getvalue())
+                    self.assertNotIn("sensitive", stderr.getvalue())
+                    self.assertEqual([(command, None)], provider_calls)
+                    self.assertEqual(1, client.status_calls)
+                    self.assertEqual([], scanner.recent_calls)
+                    if as_json:
+                        self.assertEqual(
+                            [dict(local.to_dict(), host="local")],
+                            json.loads(stdout.getvalue()),
+                        )
+                    else:
+                        lines = stdout.getvalue().splitlines()
+                        self.assertEqual(
+                            [
+                                "HOST",
+                                "AGENT",
+                                "STATUS",
+                                "SESSION",
+                                "AGE",
+                                "UPDATED",
+                                "TITLE",
+                            ],
+                            lines[0].split(),
+                        )
+                        self.assertIn("local", lines[1])
+                        self.assertIn(local.session_id, lines[1])
+
+    def test_remote_setup_isolation_does_not_catch_programmer_errors(self):
+        client = FakeClient([make_session("local").to_dict()])
+        calls = []
+
+        def aggregate(command, selected=None):
+            calls.append((command, selected))
+            raise RuntimeError("programmer error")
+
+        with self.assertRaisesRegex(RuntimeError, "programmer error"):
+            main(
+                ["list", "--remote", "--json"],
+                scanner=FakeScanner(),
+                client=client,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                remote_aggregator=aggregate,
+            )
+
+        self.assertEqual([("list", None)], calls)
+        self.assertEqual(1, client.status_calls)
+
+    def test_remote_all_old_python_prints_local_rows_and_exits_three(self):
+        local = make_session(
+            "local-working",
+            Status.WORKING,
+            updated_at=time.time(),
+        )
+        result = RemoteAggregate(
+            "status",
+            failures=(RemoteFailure("old-edge", "python_too_old"),),
+            hosts=("old-edge",),
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["status", "--remote", "--json"],
+            scanner=FakeScanner([local]),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=stderr,
+            remote_aggregator=lambda command, selected=None: result,
+        )
+
+        self.assertEqual(3, code)
+        self.assertEqual(
+            [dict(local.to_dict(), host="local")],
+            json.loads(stdout.getvalue()),
+        )
+        self.assertEqual(
+            "remote old-edge: python_too_old\n",
+            stderr.getvalue(),
+        )
+
+    def test_remote_partial_status_is_flat_filtered_and_status_sorted(self):
+        now = time.time()
+        local = make_session(
+            "local-waiting",
+            Status.WAITING,
+            updated_at=now + 20,
+        )
+        remote_working = dict(
+            make_session(
+                "remote-working",
+                Status.WORKING,
+                updated_at=now,
+            ).to_dict(),
+            host="Good.Edge",
+        )
+        remote_idle = dict(
+            make_session(
+                "remote-idle",
+                Status.IDLE,
+                updated_at=now + 100,
+            ).to_dict(),
+            host="Good.Edge",
+        )
+        result = RemoteAggregate(
+            "status",
+            rows=(remote_idle, remote_working),
+            failures=(RemoteFailure("bad-edge", "auth"),),
+            hosts=("bad-edge", "Good.Edge"),
+            succeeded=("Good.Edge",),
+        )
+        calls = []
+
+        def aggregate(command, selected=None):
+            calls.append((command, selected))
+            return result
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = main(
+            ["status", "--remote", "--host", "good.edge", "--json"],
+            scanner=FakeScanner([local]),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=stderr,
+            remote_aggregator=aggregate,
+        )
+        rows = json.loads(stdout.getvalue())
+
+        self.assertEqual(0, code)
+        self.assertEqual([("status", ["good.edge"])], calls)
+        self.assertEqual(
+            ["remote-working", "local-waiting"],
+            [row["session_id"] for row in rows],
+        )
+        self.assertEqual(
+            ["Good.Edge", "local"],
+            [row["host"] for row in rows],
+        )
+        self.assertEqual("remote bad-edge: auth\n", stderr.getvalue())
+        self.assertNotIn("remote-idle", stdout.getvalue())
+
+    def test_remote_list_applies_recent_then_agent_filter_after_merge(self):
+        now = time.time()
+        local_recent = make_session(
+            "local-recent",
+            agent="claude",
+            updated_at=now + 5,
+        )
+        local_old = make_session(
+            "local-old",
+            agent="claude",
+            updated_at=now - RECENT_SECONDS - 1,
+        )
+        remote_recent = dict(
+            make_session(
+                "remote-recent",
+                agent="CLAUDE",
+                updated_at=now + 10,
+            ).to_dict(),
+            host="edge",
+        )
+        remote_old = dict(
+            make_session(
+                "remote-old",
+                agent="claude",
+                updated_at=now - RECENT_SECONDS - 1,
+            ).to_dict(),
+            host="edge",
+        )
+        other_agent = dict(
+            make_session(
+                "remote-codex",
+                agent="codex",
+                updated_at=now + 20,
+            ).to_dict(),
+            host="edge",
+        )
+        result = RemoteAggregate(
+            "list",
+            rows=(remote_old, other_agent, remote_recent),
+            hosts=("edge",),
+            succeeded=("edge",),
+        )
+        scanner = FakeScanner([local_old, local_recent])
+        stdout = io.StringIO()
+
+        code = main(
+            ["list", "--remote", "--agent", "cLaUdE", "--json"],
+            scanner=scanner,
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            remote_aggregator=lambda command, selected=None: result,
+        )
+        rows = json.loads(stdout.getvalue())
+
+        self.assertEqual(0, code)
+        self.assertEqual([None], scanner.recent_calls)
+        self.assertEqual(
+            ["remote-recent", "local-recent"],
+            [row["session_id"] for row in rows],
+        )
+        self.assertEqual(
+            ["edge", "local"],
+            [row["host"] for row in rows],
+        )
+
+    def test_remote_all_includes_old_rows_and_human_tables_have_host_header(self):
+        now = time.time()
+        local_parent = make_session(
+            "shared-parent",
+            Status.WAITING,
+            updated_at=now,
+        )
+        cross_host_child = dict(
+            make_session(
+                "cross-host-child",
+                Status.WAITING,
+                updated_at=now + 10,
+                parent_id="shared-parent",
+            ).to_dict(),
+            host="edge",
+        )
+        remote_old = dict(
+            make_session(
+                "remote-old",
+                Status.WAITING,
+                updated_at=now - RECENT_SECONDS - 1,
+            ).to_dict(),
+            host="edge",
+        )
+
+        for command, extra in (("list", ["--all"]), ("status", [])):
+            with self.subTest(command=command):
+                result = RemoteAggregate(
+                    command,
+                    rows=(remote_old, cross_host_child),
+                    hosts=("edge",),
+                    succeeded=("edge",),
+                )
+                stdout = io.StringIO()
+                code = main(
+                    [command, "--remote"] + extra,
+                    scanner=FakeScanner([local_parent]),
+                    client=OfflineClient(),
+                    stdout=stdout,
+                    stderr=io.StringIO(),
+                    remote_aggregator=lambda operation, selected=None, result=result: result,
+                )
+                lines = stdout.getvalue().splitlines()
+                child_line = next(
+                    line for line in lines if "cross-host-child" in line
+                )
+
+                self.assertEqual(0, code)
+                self.assertEqual(
+                    ["HOST", "AGENT", "STATUS", "SESSION", "AGE", "UPDATED", "TITLE"],
+                    lines[0].split(),
+                )
+                self.assertFalse(child_line.startswith("↳"))
+                self.assertNotIn("↳ edge", child_line)
+                if command == "list":
+                    self.assertIn("remote-old", stdout.getvalue())
 
     def test_list_json_uses_session_schema_and_48_hour_default(self):
         session = make_session("one")
@@ -673,6 +1162,61 @@ class CLITests(unittest.TestCase):
         )
         self.assertEqual([], calls)
 
+    def test_watch_cursor_chat_db_direct_with_from_start(self):
+        session = make_session(
+            "cursor-chat",
+            agent="cursor-cli",
+            transcript="/tmp/cursor-chat/store.db",
+            extra={"transcript_kind": "cursor-chat-sqlite"},
+        )
+        event = Event(
+            "2026-08-23T04:00:00+08:00",
+            "cursor-cli",
+            "cursor-chat",
+            "assistant",
+            "watched from sqlite",
+        )
+        calls = []
+
+        def watcher(sessions, from_start=False):
+            calls.append((sessions, from_start))
+            return iter((event,))
+
+        stdout = io.StringIO()
+        code = main(
+            ["watch", "cursor-chat", "--from-start", "--json"],
+            scanner=FakeScanner([session]),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            watch_provider=watcher,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(event.to_dict(), json.loads(stdout.getvalue()))
+        self.assertEqual([([session], True)], calls)
+
+    def test_watch_rejects_legacy_cursor_db_without_transcript_kind(self):
+        session = make_session(
+            "legacy-cursor",
+            agent="cursor-cli",
+            transcript="/tmp/legacy/store.db",
+            extra={"source": "cli", "store": "/tmp/legacy/store.db"},
+        )
+        calls = []
+
+        code = main(
+            ["watch", "legacy-cursor", "--json"],
+            scanner=FakeScanner([session]),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            watch_provider=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual([], calls)
+
     def test_watch_json_uses_event_schema(self):
         session = make_session("unique")
         source = "  \x1b]0;pwned\x07\x1b[31mdone\rreplaced\x9b2J  "
@@ -772,6 +1316,30 @@ class CLITests(unittest.TestCase):
         self.assertEqual([], scanner.recent_calls)
         self.assertEqual([], direct_calls)
 
+    def test_watch_all_cursor_chat_uses_daemon_subscription(self):
+        event = Event(
+            "2026-08-23T04:00:00+08:00",
+            "cursor-cli",
+            "cursor-chat",
+            "assistant",
+            "daemon sqlite event",
+        )
+        client = FakeClient(events=[event.to_dict()])
+        stdout = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--json"],
+            scanner=FakeScanner(),
+            client=client,
+            stdout=stdout,
+            stderr=io.StringIO(),
+            watch_provider=lambda *args, **kwargs: iter(()),
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(event.to_dict(), json.loads(stdout.getvalue()))
+        self.assertEqual(1, client.subscribe_calls)
+
     def test_watch_all_from_start_bypasses_reachable_daemon(self):
         session = make_session("direct")
         event = Event(
@@ -837,6 +1405,18 @@ class CLITests(unittest.TestCase):
     def test_watch_all_direct_fallback_skips_unsupported_sessions(self):
         jsonl = make_session("jsonl")
         unsupported = make_session("copilot-empty", agent="copilot", transcript="")
+        cursor_chat = make_session(
+            "cursor-chat",
+            agent="cursor-cli",
+            transcript="/tmp/cursor-chat/store.db",
+            extra={"transcript_kind": "cursor-chat-sqlite"},
+        )
+        legacy_cursor = make_session(
+            "legacy-cursor",
+            agent="cursor-cli",
+            transcript="/tmp/legacy-cursor/store.db",
+            extra={"source": "cli"},
+        )
         dsh = make_session(
             "dsh-zstd",
             agent="dsh",
@@ -851,7 +1431,9 @@ class CLITests(unittest.TestCase):
         stderr = io.StringIO()
         code = main(
             ["watch", "--all", "--from-start", "--json"],
-            scanner=FakeScanner([jsonl, unsupported, dsh]),
+            scanner=FakeScanner(
+                [jsonl, unsupported, cursor_chat, legacy_cursor, dsh]
+            ),
             client=OfflineClient(),
             stdout=io.StringIO(),
             stderr=stderr,
@@ -859,9 +1441,9 @@ class CLITests(unittest.TestCase):
         )
 
         self.assertEqual(0, code)
-        self.assertEqual([([jsonl, dsh], True)], calls)
+        self.assertEqual([([jsonl, cursor_chat, dsh], True)], calls)
         self.assertEqual(
-            "watch: skipped 1 unsupported session without usable direct event sources\n",
+            "watch: skipped 2 unsupported sessions without usable direct event sources\n",
             stderr.getvalue(),
         )
 
@@ -1000,6 +1582,507 @@ class CLITests(unittest.TestCase):
         self.assertEqual(7, code)
         self.assertTrue(calls[0]["once"])
         self.assertIs(stdout, calls[0]["stdout"])
+
+
+class SendCLITests(unittest.TestCase):
+    def result(
+        self,
+        session,
+        *,
+        outcome="completed",
+        response="",
+        stderr="",
+        error_code=None,
+    ):
+        return SendResult(
+            agent=session.agent,
+            session_id=session.session_id,
+            outcome=outcome,
+            delivery="delivered" if outcome == "completed" else "unknown",
+            returncode=0 if outcome == "completed" else 7,
+            response=response,
+            stderr=stderr,
+            error_code=error_code,
+        )
+
+    def test_parser_and_help_describe_mutating_local_headless_resume(self):
+        parser = build_parser()
+        command_parsers = next(
+            action.choices
+            for action in parser._actions
+            if getattr(action, "dest", None) == "command"
+        )
+        global_help = parser.format_help()
+        send_help = command_parsers["send"].format_help()
+        args = parser.parse_args(["send", "abc", "hello"])
+        hyphen = parser.parse_args(
+            ["send", "abc", "--allow-write", "--", "-private"]
+        )
+
+        self.assertIn("Observation commands are read-only", global_help)
+        self.assertIn("may modify agent state", global_help)
+        self.assertNotIn("without modifying", global_help)
+        self.assertIn("local headless resume", send_help)
+        self.assertIn("may modify agent state", send_help)
+        self.assertIn("--allow-write", send_help)
+        self.assertIn("--timeout SEC", send_help)
+        self.assertIn("--json", send_help)
+        self.assertNotIn("--remote", send_help)
+        self.assertEqual("abc", args.session_prefix)
+        self.assertEqual("hello", args.message)
+        self.assertFalse(args.allow_write)
+        self.assertEqual(DEFAULT_SEND_TIMEOUT_SECONDS, args.timeout)
+        self.assertEqual("-private", hyphen.message)
+        self.assertTrue(hyphen.allow_write)
+
+    def test_allow_write_abbreviations_are_parser_errors_before_scanning(self):
+        for abbreviation in ("--a", "--allow", "--allow-writ"):
+            with self.subTest(abbreviation=abbreviation):
+                scanner = FakeScanner([make_session("abc")])
+                calls = []
+                argparse_stderr = io.StringIO()
+
+                with contextlib.redirect_stderr(argparse_stderr):
+                    with self.assertRaises(SystemExit) as raised:
+                        main(
+                            ["send", "abc", "private", abbreviation],
+                            scanner=scanner,
+                            stdout=io.StringIO(),
+                            stderr=io.StringIO(),
+                            send_planner=lambda *args, **kwargs: calls.append(
+                                ("plan", args, kwargs)
+                            ),
+                            send_executor=lambda *args, **kwargs: calls.append(
+                                ("execute", args, kwargs)
+                            ),
+                        )
+
+                self.assertEqual(2, raised.exception.code)
+                self.assertIn("unrecognized arguments", argparse_stderr.getvalue())
+                self.assertEqual([], scanner.recent_calls)
+                self.assertEqual([], calls)
+
+    def test_missing_allow_write_stops_before_scan_plan_or_execute(self):
+        message = "DO-NOT-ECHO"
+        scanner = FakeScanner([make_session("abc")])
+        client = FakeClient([make_session("daemon").to_dict()])
+        calls = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["send", "abc", message],
+            scanner=scanner,
+            client=client,
+            stdout=stdout,
+            stderr=stderr,
+            remote_aggregator=lambda *args, **kwargs: self.fail(
+                "send must not use remote aggregation"
+            ),
+            send_planner=lambda *args, **kwargs: calls.append(("plan", args, kwargs)),
+            send_executor=lambda *args, **kwargs: calls.append(
+                ("execute", args, kwargs)
+            ),
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("--allow-write", stderr.getvalue())
+        self.assertNotIn(message, stderr.getvalue())
+        self.assertEqual([], scanner.recent_calls)
+        self.assertEqual(0, client.status_calls)
+        self.assertEqual([], calls)
+
+    def test_send_uses_exact_first_and_unique_prefix_resolution(self):
+        exact = make_session("abc")
+        longer = make_session("abc-extra")
+        unique = make_session("unique-session")
+
+        for prefix, expected in (("abc", exact), ("unique", unique)):
+            with self.subTest(prefix=prefix):
+                scanner = FakeScanner([longer, unique, exact])
+                selected = []
+
+                def planner(session, message):
+                    selected.append((session, message))
+                    return object()
+
+                code = main(
+                    ["send", prefix, "private", "--allow-write"],
+                    scanner=scanner,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                    send_planner=planner,
+                    send_executor=lambda plan, **kwargs: self.result(expected),
+                )
+
+                self.assertEqual(0, code)
+                self.assertEqual([(expected, "private")], selected)
+                self.assertEqual([None], scanner.recent_calls)
+
+    def test_send_rejects_ambiguous_and_missing_prefixes_before_planning(self):
+        cases = (
+            (
+                "amb",
+                [make_session("amb-one"), make_session("amb-two")],
+                "ambiguous session prefix",
+            ),
+            ("missing", [make_session("other")], "no session matches prefix"),
+        )
+        for prefix, sessions, expected in cases:
+            with self.subTest(prefix=prefix):
+                message = "PRIVATE-MESSAGE"
+                scanner = FakeScanner(sessions)
+                calls = []
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                code = main(
+                    ["send", prefix, message, "--allow-write"],
+                    scanner=scanner,
+                    stdout=stdout,
+                    stderr=stderr,
+                    send_planner=lambda *args, **kwargs: calls.append(
+                        (args, kwargs)
+                    ),
+                    send_executor=lambda *args, **kwargs: self.fail(
+                        "executor must not run"
+                    ),
+                )
+
+                self.assertEqual(2, code)
+                self.assertEqual("", stdout.getvalue())
+                self.assertIn("send: " + expected, stderr.getvalue())
+                self.assertNotIn(message, stderr.getvalue())
+                self.assertEqual([None], scanner.recent_calls)
+                self.assertEqual([], calls)
+
+    def test_supported_send_contract_is_direct_local_and_forwards_timeout(self):
+        session = make_session("supported-session", agent="codex")
+        scanner = FakeScanner([session])
+        client = FakeClient([make_session("daemon").to_dict()])
+        plan = object()
+        planner_calls = []
+        executor_calls = []
+        stdout = io.StringIO()
+
+        def planner(selected, message):
+            planner_calls.append((selected, message))
+            return plan
+
+        def executor(selected_plan, **kwargs):
+            executor_calls.append((selected_plan, kwargs))
+            return self.result(session, response="done")
+
+        code = main(
+            [
+                "send",
+                "supported",
+                "private prompt",
+                "--allow-write",
+                "--timeout",
+                "42.5",
+                "--json",
+            ],
+            scanner=scanner,
+            client=client,
+            stdout=stdout,
+            stderr=io.StringIO(),
+            remote_aggregator=lambda *args, **kwargs: self.fail(
+                "send must not use remote aggregation"
+            ),
+            send_planner=planner,
+            send_executor=executor,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual([(session, "private prompt")], planner_calls)
+        self.assertEqual(
+            [(plan, {"allow_write": True, "timeout": 42.5})],
+            executor_calls,
+        )
+        self.assertEqual([None], scanner.recent_calls)
+        self.assertEqual(0, client.status_calls)
+        self.assertEqual(
+            self.result(session, response="done").to_dict(),
+            json.loads(stdout.getvalue()),
+        )
+
+    def test_json_success_is_exact_and_preserves_raw_result_text(self):
+        session = make_session("json-session")
+        result = self.result(
+            session,
+            response="\x1b[31mraw response\r",
+            stderr="\x1b]0;raw warning\x07",
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["send", "json", "private", "--allow-write", "--json"],
+            scanner=FakeScanner([session]),
+            stdout=stdout,
+            stderr=stderr,
+            send_planner=lambda selected, message: object(),
+            send_executor=lambda plan, **kwargs: result,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(result.to_dict(), json.loads(stdout.getvalue()))
+        self.assertEqual("", stderr.getvalue())
+        self.assertIn("\x1b", json.loads(stdout.getvalue())["response"])
+
+    def test_human_success_sanitizes_response_stderr_and_redacts_message(self):
+        session = make_session("human-session")
+        message = "TOP-SECRET-MESSAGE"
+        result = self.result(
+            session,
+            response="answer \x1b]0;pwned\x07 " + message,
+            stderr="warning \x1b[31mred\x1b[0m " + message,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["send", "human", message, "--allow-write"],
+            scanner=FakeScanner([session]),
+            stdout=stdout,
+            stderr=stderr,
+            send_planner=lambda selected, private_message: object(),
+            send_executor=lambda plan, **kwargs: result,
+        )
+        rendered = stdout.getvalue() + stderr.getvalue()
+
+        self.assertEqual(0, code)
+        self.assertIn("answer [message redacted]", stdout.getvalue())
+        self.assertIn("native stderr: warning red [message redacted]", stderr.getvalue())
+        self.assertNotIn(message, rendered)
+        self.assertNotIn("pwned", rendered)
+        self.assertNotIn("\x1b", rendered)
+
+    def test_human_output_normalizes_lone_surrogates_without_message_echo(self):
+        session = make_session("surrogate-human")
+        message = "\ud800PRIVATE"
+        result = self.result(
+            session,
+            response="answer " + message,
+            stderr="warning \ud801",
+        )
+        stdout_bytes = io.BytesIO()
+        stderr_bytes = io.BytesIO()
+        stdout = io.TextIOWrapper(
+            stdout_bytes,
+            encoding="utf-8",
+            errors="strict",
+            write_through=True,
+        )
+        stderr = io.TextIOWrapper(
+            stderr_bytes,
+            encoding="utf-8",
+            errors="strict",
+            write_through=True,
+        )
+
+        code = main(
+            ["send", "surrogate", message, "--allow-write"],
+            scanner=FakeScanner([session]),
+            stdout=stdout,
+            stderr=stderr,
+            send_planner=lambda selected, private_message: object(),
+            send_executor=lambda plan, **kwargs: result,
+        )
+        rendered = (stdout_bytes.getvalue() + stderr_bytes.getvalue()).decode("utf-8")
+
+        self.assertEqual(0, code)
+        self.assertIn("answer [message redacted]", rendered)
+        self.assertIn("native stderr: warning \ufffd", rendered)
+        self.assertNotIn("PRIVATE", rendered)
+        self.assertNotIn("\\ud800", rendered)
+        self.assertNotIn("\\ud801", rendered)
+
+    def test_invalid_unicode_message_cannot_break_preflight_json_diagnostics(self):
+        cases = (
+            (
+                "\ud800PRIVATE",
+                "\ud800PRIVATE",
+                FakeScanner(),
+                "no session matches prefix",
+            ),
+            (
+                "unicode-session",
+                "\ud800PRIVATE",
+                FakeScanner([make_session("unicode-session")]),
+                "message must contain valid Unicode scalars",
+            ),
+        )
+        for prefix, message, scanner, expected in cases:
+            with self.subTest(expected=expected):
+                stderr_bytes = io.BytesIO()
+                stderr = io.TextIOWrapper(
+                    stderr_bytes,
+                    encoding="utf-8",
+                    errors="strict",
+                    write_through=True,
+                )
+                stdout = io.StringIO()
+                executor_calls = []
+
+                code = main(
+                    [
+                        "send",
+                        prefix,
+                        message,
+                        "--allow-write",
+                        "--json",
+                    ],
+                    scanner=scanner,
+                    stdout=stdout,
+                    stderr=stderr,
+                    send_executor=lambda *args, **kwargs: executor_calls.append(
+                        (args, kwargs)
+                    ),
+                )
+                diagnostic = stderr_bytes.getvalue().decode("utf-8")
+
+                self.assertEqual(2, code)
+                self.assertEqual("", stdout.getvalue())
+                self.assertIn(expected, diagnostic)
+                self.assertNotIn("PRIVATE", diagnostic)
+                self.assertNotIn("\\ud800", diagnostic)
+                self.assertEqual([], executor_calls)
+
+    def test_human_success_without_response_prints_delivered_receipt(self):
+        session = make_session("empty-response", agent="cursor-cli")
+        stdout = io.StringIO()
+
+        code = main(
+            ["send", "empty", "private", "--allow-write"],
+            scanner=FakeScanner([session]),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            send_planner=lambda selected, message: object(),
+            send_executor=lambda plan, **kwargs: self.result(session),
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            "delivered to cursor-cli:empty-response\n",
+            stdout.getvalue(),
+        )
+
+    def test_runtime_failures_emit_receipts_diagnostics_and_exit_one(self):
+        session = make_session("runtime-session")
+        cases = (
+            ("failed", "native_exit"),
+            ("timed_out", "timeout"),
+            ("overflow", "stdout_overflow"),
+        )
+        for outcome, error_code in cases:
+            for as_json in (False, True):
+                with self.subTest(outcome=outcome, as_json=as_json):
+                    message = "RUNTIME-SECRET"
+                    result = self.result(
+                        session,
+                        outcome=outcome,
+                        stderr="native detail [message redacted]",
+                        error_code=error_code,
+                    )
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    argv = [
+                        "send",
+                        "runtime",
+                        message,
+                        "--allow-write",
+                    ]
+                    if as_json:
+                        argv.append("--json")
+
+                    code = main(
+                        argv,
+                        scanner=FakeScanner([session]),
+                        stdout=stdout,
+                        stderr=stderr,
+                        send_planner=lambda selected, private_message: object(),
+                        send_executor=lambda plan, **kwargs: result,
+                    )
+
+                    self.assertEqual(1, code)
+                    if as_json:
+                        self.assertEqual(
+                            result.to_dict(),
+                            json.loads(stdout.getvalue()),
+                        )
+                    else:
+                        self.assertEqual(
+                            "delivery unknown for claude:runtime-session ({})\n".format(
+                                outcome
+                            ),
+                            stdout.getvalue(),
+                        )
+                    self.assertIn("delivery status is unknown", stderr.getvalue())
+                    self.assertIn(error_code, stderr.getvalue())
+                    self.assertNotIn(message, stdout.getvalue() + stderr.getvalue())
+                    self.assertNotIn("\x1b", stderr.getvalue())
+
+    def test_send_errors_from_planner_and_executor_are_preflight_exit_two(self):
+        session = make_session("error-session")
+        cases = (
+            (
+                lambda selected, message: (_ for _ in ()).throw(
+                    SendError("working_session")
+                ),
+                lambda plan, **kwargs: self.fail("executor must not run"),
+                "working sessions cannot be resumed",
+            ),
+            (
+                lambda selected, message: object(),
+                lambda plan, **kwargs: (_ for _ in ()).throw(
+                    SendError("invalid_timeout")
+                ),
+                "timeout must be finite",
+            ),
+        )
+        for planner, executor, expected in cases:
+            with self.subTest(expected=expected):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                code = main(
+                    ["send", "error", "PRIVATE", "--allow-write"],
+                    scanner=FakeScanner([session]),
+                    stdout=stdout,
+                    stderr=stderr,
+                    send_planner=planner,
+                    send_executor=executor,
+                )
+
+                self.assertEqual(2, code)
+                self.assertEqual("", stdout.getvalue())
+                self.assertIn("send: " + expected, stderr.getvalue())
+                self.assertNotIn("PRIVATE", stderr.getvalue())
+
+    def test_keyboard_interrupt_reports_delivery_unknown_and_exits_130(self):
+        session = make_session("interrupt-session")
+        message = "INTERRUPT-SECRET"
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["send", "interrupt", message, "--allow-write"],
+            scanner=FakeScanner([session]),
+            stdout=stdout,
+            stderr=stderr,
+            send_planner=lambda selected, private_message: object(),
+            send_executor=lambda plan, **kwargs: (_ for _ in ()).throw(
+                KeyboardInterrupt
+            ),
+        )
+
+        self.assertEqual(130, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("delivery status is unknown", stderr.getvalue())
+        self.assertNotIn(message, stderr.getvalue())
 
 
 class RegistryTests(unittest.TestCase):
