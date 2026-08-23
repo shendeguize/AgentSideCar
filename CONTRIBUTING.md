@@ -150,6 +150,28 @@ Record evidence for each applicable item before merge:
 The existing `v0.4.0` tag predates this dual-track procedure and remains
 historical. Do not rewrite it; this procedure governs subsequent releases.
 
+## Governance rule compilation
+
+DevolaFlow is an external repository tool installed in its isolated `uv` tool
+environment; it is not a project runtime or development dependency. From the
+repository root, regenerate `AGENTS.md` and `.rules/.compile-hashes.json` from
+`.rules/compile-config.yaml` with:
+
+```bash
+sync-rules
+```
+
+Then run the read-only drift check:
+
+```bash
+check-rules-drift
+```
+
+The drift command exits nonzero when a declared output is missing or its
+SHA-256 prefix does not match the compiler-written hash store. Edit canonical
+`.rules/*.mdc` sources or the compiler configuration, never generated outputs,
+and commit source and generated changes together.
+
 ## Repository governance
 
 Rulesets are versioned in `.github/rulesets/`. Required check names are exact
