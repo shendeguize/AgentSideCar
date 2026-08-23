@@ -5,8 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-sidecar"
 dynamic = ["version"]
+description = "A local-first CLI for observing AI-agent sessions"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "shendeguize"}]
 requires-python = ">=3.9"
 dependencies = []
+keywords = [
+    "ai-agents",
+    "cli",
+    "observability",
+    "session-monitoring",
+]
+
+[project.urls]
+Homepage = "https://github.com/shendeguize/AgentSideCar"
+Repository = "https://github.com/shendeguize/AgentSideCar.git"
+Issues = "https://github.com/shendeguize/AgentSideCar/issues"
+Changelog = "https://github.com/shendeguize/AgentSideCar/blob/main/CHANGELOG.md"
 
 [project.scripts]
 agent-sidecar = "sidecar.cli:main"
