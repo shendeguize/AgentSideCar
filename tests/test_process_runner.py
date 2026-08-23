@@ -441,6 +441,7 @@ class ProcessRunnerTests(unittest.TestCase):
         self.assertEqual(0, result.returncode)
         self.assertTrue(result.cleanup_incomplete)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kqueue required")
     def test_pre_exec_failure_never_releases_target_gate(self):
         with tempfile.TemporaryDirectory() as temporary:
             marker = Path(temporary) / "target-ran"
