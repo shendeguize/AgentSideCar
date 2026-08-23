@@ -196,6 +196,30 @@ class RuntimeCommandTests(unittest.TestCase):
                 with self.assertRaises(RuntimeCommandError):
                     validate_runtime_prefix((str(interpreter), "-m", "sidecar"))
 
+    def test_unrelated_ancestor_metadata_churn_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = make_executable(root / "bin" / "agent-sidecar")
+
+            import sidecar.runtime_cmd as runtime_cmd
+
+            snapshot = runtime_cmd._snapshot_lexical_path
+
+            def snapshot_then_churn(path):
+                result = snapshot(path)
+                marker = root / "unrelated"
+                marker.write_text("changed", encoding="utf-8")
+                marker.unlink()
+                return result
+
+            with mock.patch(
+                "sidecar.runtime_cmd._snapshot_lexical_path",
+                side_effect=snapshot_then_churn,
+            ):
+                prefix = validate_runtime_prefix((str(executable),))
+
+        self.assertEqual((str(executable),), prefix)
+
     def test_writable_entrypoint_and_interpreter_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

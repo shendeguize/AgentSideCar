@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardened CI and weekly regression behavior with stable status contexts,
   bounded jobs, explicit platform allowances, and release-compatible checks.
 
+### Fixed
+
+- Made `daemon stop` wait for owned runtime paths and the target process to
+  disappear, preventing stale sockets and incomplete shutdown reporting.
+- Kept runtime executable validation fail-closed on identity or permission
+  changes without rejecting harmless metadata churn in shared ancestors.
+
 ### Security
 
 - Added private vulnerability-reporting guidance, supported-version policy,

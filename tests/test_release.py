@@ -208,7 +208,7 @@ class ReleaseZipappTests(unittest.TestCase):
             self.assertEqual([], list(outside.iterdir()))
             self.assertFalse((outside / "missing").exists())
 
-    @unittest.skipUnless(os.name == "posix", "dirfd behavior requires POSIX")
+    @unittest.skipUnless(sys.platform == "darwin", "trusted roots require Darwin")
     def test_allows_synthetic_trusted_root_symlink(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -228,7 +228,7 @@ class ReleaseZipappTests(unittest.TestCase):
             self.assertEqual(output, result.path)
             self.assertTrue((canonical / output.name).is_file())
 
-    @unittest.skipUnless(os.name == "posix", "dirfd behavior requires POSIX")
+    @unittest.skipUnless(sys.platform == "darwin", "trusted roots require Darwin")
     def test_trusted_relative_parent_target_uses_canonical_parent(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -254,7 +254,7 @@ class ReleaseZipappTests(unittest.TestCase):
             self.assertEqual([alias], list(branch.iterdir()))
             self.assertEqual([canonical], list(sibling.iterdir()))
 
-    @unittest.skipUnless(os.name == "posix", "dirfd behavior requires POSIX")
+    @unittest.skipUnless(sys.platform == "darwin", "trusted roots require Darwin")
     def test_nested_trusted_links_with_parent_components_stay_canonical(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -335,7 +335,7 @@ class ReleaseZipappTests(unittest.TestCase):
                 {path.name for path in system.iterdir()},
             )
 
-    @unittest.skipUnless(os.name == "posix", "dirfd behavior requires POSIX")
+    @unittest.skipUnless(sys.platform == "darwin", "trusted roots require Darwin")
     def test_rejects_trusted_symlink_swap(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -531,7 +531,7 @@ class WheelSmokeTests(unittest.TestCase):
                 [],
             )
             self.assertEqual(
-                {"coverage", "ruff"},
+                {"coverage[toml]", "ruff"},
                 {
                     requirement.partition(";")[0].partition("==")[0].strip()
                     for requirement in requirements

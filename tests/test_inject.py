@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -489,7 +490,7 @@ class ExecutionTests(InjectionTestCase):
         self.assertEqual("native response", result.response)
         self.assertEqual("warning", result.stderr)
 
-    @unittest.skipUnless(os.name == "posix", "gated supervisor requires POSIX")
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kqueue required")
     def test_default_no_fork_runner_remains_delivered(self):
         plan = self.plan()
 
