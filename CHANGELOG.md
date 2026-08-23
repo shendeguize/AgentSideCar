@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A dependency-free GitHub Pages landing page and zero-backend synthetic panel
+  demo, with reproducible tracked landing and panel screenshots.
+- A POSIX release installer that resolves stable GitHub releases, selects exact
+  versioned assets, verifies SHA-256 checksums, installs atomically, and can
+  optionally install the Agent Sidecar skill bundle.
+
+### Changed
+
+- Updated the synchronized English and Simplified Chinese manuals with the live
+  site, panel preview, reviewed installer flow, checksum behavior, and safe
+  uninstall guidance.
+- Added deterministic site, screenshot, and Pages deployment checks to the
+  repository quality and release-governance surface.
+
+### Security
+
+- Made release installation fail closed on malformed versions, asset or
+  checksum mismatches, unrecognized executable targets, and unowned uninstall
+  paths; remote skill files are pinned to the resolved immutable release tag.
+
 ## [0.4.1] - 2026-08-24
 
 ### Added

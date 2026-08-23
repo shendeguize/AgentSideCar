@@ -9,8 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/shendeguize/AgentSideCar/blob/main/LICENSE)
 
 [最新版本](https://github.com/shendeguize/AgentSideCar/releases/latest) ·
-[网站/演示](https://shendeguize.github.io/AgentSideCar/)（计划中的 GitHub Pages
-部署地址；网站将在本次文档变更之后部署）
+[网站/演示](https://shendeguize.github.io/AgentSideCar/)
 
 Agent Sidecar 是一个用于观察 AI Agent 会话的本地优先 CLI。它能够发现已持久化的
 会话元数据、推断生命周期状态、跟踪规范化事件，并以文本、JSON 或终端仪表盘展示
@@ -24,8 +23,8 @@ HTTP 面板和 API 会在本机 IPv4 回环地址上公开只读的守护进程�
 诊断日志。只有明确启用 HTTP 后，它才会额外保存私有的 `http.token`，并在运行期间
 维护临时的 `http.port` 记录。发送审计文件由可变更的 CLI `send` 路径写入，而不是
 由守护进程的观察路径写入。这些守护进程和审计簿记文件本身不会编辑会话记录或
-Agent 配置；但恢复后的原生 Agent 可以按上述方式进行修改。安装程序只创建集成用
-的符号链接。
+Agent 配置；但恢复后的原生 Agent 可以按上述方式进行修改。Release 安装程序只
+写入所选可执行文件和可选 Skill Bundle；检出版本安装程序则创建集成用符号链接。
 
 0.4.1 版本要求 Python 3.9+，且没有 Python 运行时依赖。监视 DSH 事件还需要外部
 `zstd` 可执行文件。
@@ -36,6 +35,8 @@ Agent 配置；但恢复后的原生 Agent 可以按上述方式进行修改。�
 审计和请求 ID 幂等性，并提供可选启用、仅限数值回环地址的 HTTP 面板。它还加入
 确定性的可执行 zipapp、适用于 `pipx` 的包元数据、显式管理的 macOS 用户
 LaunchAgent，以及具有日志轮转的有界私有守护进程诊断。
+
+![使用合成会话和事件的 Agent Sidecar 只读面板](site/assets/shots/panel.png)
 
 <a id="support-matrix"></a>
 
@@ -79,6 +80,35 @@ LaunchAgent，以及具有日志轮转的有界私有守护进程诊断。
 请选择一种 CLI 安装方式。本文档没有声称 Agent Sidecar 已发布到 PyPI，因此不要
 假设 `pipx install agent-sidecar` 会解析到本项目。
 
+推荐的 Release 渠道是仓库根目录安装程序。请从受保护的 `main` 分支下载，完整
+检查文件内容，再运行本地副本：
+
+```sh
+installer="$(mktemp)"
+curl --fail --location --proto '=https' --tlsv1.2 --output "$installer" \
+  https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh
+${PAGER:-less} "$installer"
+sh "$installer" --version v0.4.1
+rm "$installer"
+```
+
+省略 `--version v0.4.1` 时会解析最新稳定 GitHub Release。脚本使用 Python 解析
+Release 元数据，要求精确匹配带版本号的 zipapp 和 `SHA256SUMS` 资产，在 macOS
+上使用 `shasum -a 256`、在 Linux 上使用 `sha256sum` 验证校验和，之后才会原子
+替换 `~/.local/bin/agent-sidecar`。可用 `--prefix <path>` 选择其他前缀，用
+`--with-skill` 安装两个 Agent Skill 文件。脚本绝不读取或发送凭据。
+
+仅为方便起见，下面的紧凑形式会下载并立即执行同一个安装程序：
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh | sh
+```
+
+该单行命令通过 TLS 信任受保护 `main` 的当前内容，不提供本地检查步骤。应优先
+使用上面的“下载—检查—运行”流程。脚本仍会验证 Release 产物校验和；该校验和并不
+认证安装程序自身的字节。
+
 ### 使用 pipx 安装
 
 从已有的 Git 检出版本安装控制台命令：
@@ -99,7 +129,8 @@ Python 运行时依赖。
 
 ### 安装 GitHub Release zipapp
 
-GitHub Releases 会发布可执行 zipapp 及其校验和文件。以 0.4.1 版本为例：
+如需手动安装，GitHub Releases 会发布可执行 zipapp 及其校验和文件。以 0.4.1
+版本为例：
 
 ```sh
 version=0.4.1
@@ -197,7 +228,16 @@ agent-sidecar daemon stop
 ```
 
 `service uninstall` 仅适用于 macOS LaunchAgent。它会保留私有运行时目录、诊断
-信息、HTTP 令牌和所有发送审计文件。对于 `pipx` 安装：
+信息、HTTP 令牌和所有发送审计文件。对于根目录 Release 安装程序安装的 zipapp，
+请以相同前缀重新运行已检查的脚本：
+
+```sh
+sh /path/to/inspected/install.sh --uninstall
+```
+
+它只会删除包含 Agent Sidecar 包签名和有效内嵌版本元数据的普通 zipapp，并拒绝
+无关文件或符号链接。添加 `--with-skill` 时，只删除可识别的已复制 Skill Bundle
+或检出版本 Skill 链接。对于 `pipx` 安装：
 
 ```sh
 pipx uninstall agent-sidecar

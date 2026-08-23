@@ -9,8 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/shendeguize/AgentSideCar/blob/main/LICENSE)
 
 [Latest release](https://github.com/shendeguize/AgentSideCar/releases/latest) ·
-[Website/demo](https://shendeguize.github.io/AgentSideCar/) (the planned GitHub
-Pages destination; deployment follows this documentation change)
+[Website/demo](https://shendeguize.github.io/AgentSideCar/)
 
 Agent Sidecar is a local-first CLI for observing AI-agent sessions. It
 discovers persisted session metadata, infers lifecycle state, follows
@@ -29,7 +28,8 @@ retain a private `http.token` and own a transient `http.port` record while
 running. Send-audit files are written by the mutating CLI `send` path, not by
 daemon observation. Those daemon and audit bookkeeping files do not themselves
 edit transcripts or agent configuration; a resumed native agent can do so as
-described above. The installer only creates integration symlinks.
+described above. The release installer writes only the selected executable and
+optional skill bundle; the checkout installer creates integration symlinks.
 
 Version 0.4.1 requires Python 3.9+ and has no runtime Python dependencies. DSH
 event watching additionally requires an external `zstd` executable.
@@ -41,6 +41,8 @@ durable private send auditing and request-ID idempotency, and provides the
 opt-in numeric-loopback HTTP panel. It also adds a deterministic executable
 zipapp, package metadata suitable for `pipx`, an explicit macOS user
 LaunchAgent, and bounded private daemon diagnostics with log rotation.
+
+![Agent Sidecar read-only panel showing synthetic sessions and events](site/assets/shots/panel.png)
 
 <a id="support-matrix"></a>
 
@@ -91,6 +93,40 @@ Choose one CLI installation method. Agent Sidecar is not documented as
 published on PyPI, so do not assume that `pipx install agent-sidecar` resolves
 to this project.
 
+The recommended release channel is the root installer. Download it from the
+protected `main` branch, inspect the complete file, and only then run the local
+copy:
+
+```sh
+installer="$(mktemp)"
+curl --fail --location --proto '=https' --tlsv1.2 --output "$installer" \
+  https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh
+${PAGER:-less} "$installer"
+sh "$installer" --version v0.4.1
+rm "$installer"
+```
+
+Omit `--version v0.4.1` to resolve the latest stable GitHub Release. The script
+parses release metadata with Python, requires the exact versioned zipapp and
+`SHA256SUMS` assets, verifies the checksum with `shasum -a 256` on macOS or
+`sha256sum` on Linux, and only then atomically replaces
+`~/.local/bin/agent-sidecar`. Use `--prefix <path>` for another prefix and
+`--with-skill` to install both agent skill files. It never reads or sends
+credentials.
+
+For convenience only, the compact form below downloads the same installer and
+executes it immediately:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh | sh
+```
+
+This one-liner trusts the current protected `main` content over TLS without
+giving you a local review step. Prefer download-inspect-run above. The release
+artifact is still checksum-verified by the script; that checksum does not
+authenticate the installer bytes themselves.
+
 ### Install with pipx
 
 Install the console command from an existing Git checkout:
@@ -112,8 +148,8 @@ dependencies.
 
 ### Install a GitHub Release zipapp
 
-GitHub Releases publish the executable zipapp and its checksum file. For
-version 0.4.1:
+For manual installation, GitHub Releases publish the executable zipapp and its
+checksum file. For version 0.4.1:
 
 ```sh
 version=0.4.1
@@ -219,7 +255,17 @@ agent-sidecar daemon stop
 
 `service uninstall` applies only to the macOS LaunchAgent. It retains the
 private runtime directory, diagnostics, HTTP token, and any send-audit files.
-For a `pipx` installation:
+For a zipapp installed by the root release installer, rerun the inspected
+script with the same prefix:
+
+```sh
+sh /path/to/inspected/install.sh --uninstall
+```
+
+It removes only a regular zipapp with the Agent Sidecar package signature and
+valid embedded version metadata, and refuses an unrelated file or symlink. Add
+`--with-skill` to remove only recognized copied skill bundles or checkout
+skill links. For a `pipx` installation:
 
 ```sh
 pipx uninstall agent-sidecar

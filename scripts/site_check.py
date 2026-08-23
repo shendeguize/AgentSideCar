@@ -20,6 +20,8 @@ from xml.etree import ElementTree
 ROOT = Path(__file__).resolve().parents[1]
 SITE_SOURCE = ROOT / "site"
 SITE_OUTPUT = ROOT / "_site"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 BASE_PATH = "/AgentSideCar/"
 SITE_ORIGIN = "https://shendeguize.github.io"
 SITE_URL = SITE_ORIGIN + BASE_PATH
