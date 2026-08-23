@@ -1,5 +1,7 @@
 import dataclasses
+import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -11,8 +13,22 @@ from pathlib import Path
 from unittest import mock
 
 from sidecar.process_runner import (
+    MAX_STREAM_INPUT_BYTES,
+    MAX_STREAM_LINE_BYTES,
+    MAX_STREAM_STDERR_BYTES,
     MAX_TIMEOUT_SECONDS,
+    BoundedLineStream,
+    BoundedLineStreamCancelledError,
+    BoundedLineStreamEndReason,
+    BoundedLineStreamOverflowError,
+    BoundedLineStreamProcessError,
+    BoundedLineStreamTimeoutError,
     BoundedProcessResult,
+    DescendantContainmentUnsupportedError,
+    _DarwinKqueueDescendantTracker,
+    _ProcessGroupOwnership,
+    _ProcessRegistry,
+    _kill_process_group,
     bounded_execution_signal_guard,
     run_bounded,
 )
@@ -61,11 +77,50 @@ class ProcessRunnerTests(unittest.TestCase):
         )
         self.assertEqual(b"error", result.stderr)
         self.assertIsNone(result.overflow)
+        self.assertFalse(result.cleanup_incomplete)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             result.returncode = 1
 
+    @unittest.skipUnless(os.name == "posix", "POSIX pipe selectors required")
+    def test_spurious_blocking_write_retries_multichunk_input_exactly(self):
+        input_data = bytes(range(256)) * 600 + b"exact-tail"
+        write_attempts = []
+        real_write = os.write
+
+        def write_with_spurious_block(fd, data):
+            write_attempts.append(bytes(data))
+            if len(write_attempts) == 1:
+                raise BlockingIOError("spurious would-block")
+            return real_write(fd, data)
+
+        with mock.patch(
+            "sidecar.process_runner.os.write",
+            side_effect=write_with_spurious_block,
+        ):
+            result = run_bounded(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys;sys.stdout.buffer.write(sys.stdin.buffer.read())",
+                ],
+                input_data,
+                input_limit=len(input_data),
+                stdout_limit=len(input_data),
+                stderr_limit=1,
+                timeout=5,
+            )
+
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(input_data, result.stdout)
+        self.assertEqual(b"", result.stderr)
+        self.assertIsNone(result.overflow)
+        self.assertGreater(len(write_attempts), 2)
+        self.assertEqual(write_attempts[0], write_attempts[1])
+        self.assertLess(len(write_attempts[0]), len(input_data))
+
     @mock.patch("sidecar.process_runner.subprocess.Popen")
     def test_input_overflow_is_reported_before_spawn(self, popen):
+        pre_spawn = mock.Mock()
         result = run_bounded(
             [sys.executable, "-c", "pass"],
             b"too large",
@@ -73,13 +128,115 @@ class ProcessRunnerTests(unittest.TestCase):
             stdout_limit=10,
             stderr_limit=10,
             timeout=1,
+            pre_spawn=pre_spawn,
         )
 
         popen.assert_not_called()
+        pre_spawn.assert_not_called()
         self.assertEqual("input", result.overflow)
         self.assertEqual(-1, result.returncode)
         self.assertEqual(b"", result.stdout)
         self.assertEqual(b"", result.stderr)
+
+    def test_pre_spawn_runs_after_registry_bookkeeping_immediately_before_popen(
+        self,
+    ):
+        events = []
+        registry = _ProcessRegistry()
+        begin_spawn = registry.begin_spawn
+        abort_spawn = registry.abort_spawn
+        popen_error = OSError("spawn failed")
+        pre_spawn = mock.Mock(side_effect=lambda: events.append("pre_spawn"))
+
+        def recording_begin_spawn():
+            events.append("begin_spawn")
+            begin_spawn()
+
+        def recording_abort_spawn():
+            events.append("abort_spawn")
+            abort_spawn()
+
+        def failing_popen(*_args, **_kwargs):
+            events.append("popen")
+            raise popen_error
+
+        with mock.patch.object(
+            registry,
+            "begin_spawn",
+            side_effect=recording_begin_spawn,
+        ), mock.patch.object(
+            registry,
+            "abort_spawn",
+            side_effect=recording_abort_spawn,
+        ), mock.patch(
+            "sidecar.process_runner._current_process_registry",
+            return_value=registry,
+        ), mock.patch(
+            "sidecar.process_runner.subprocess.Popen",
+            side_effect=failing_popen,
+        ):
+            with self.assertRaises(OSError) as raised:
+                run_bounded(
+                    [sys.executable, "-c", "pass"],
+                    input_limit=1,
+                    stdout_limit=1,
+                    stderr_limit=1,
+                    timeout=1,
+                    pre_spawn=pre_spawn,
+                )
+
+        self.assertIs(popen_error, raised.exception)
+        self.assertEqual(
+            ["begin_spawn", "pre_spawn", "popen", "abort_spawn"],
+            events,
+        )
+        pre_spawn.assert_called_once_with()
+        self.assertEqual(0, registry._spawning)
+        self.assertTrue(registry.wait_empty(timeout=0))
+
+    @unittest.skipUnless(os.name == "posix", "signal restoration requires POSIX")
+    def test_pre_spawn_revalidation_exception_prevents_spawn_without_leak(self):
+        expected_identity = object()
+        current_identity = {"value": expected_identity}
+        rejection = RuntimeError("identity changed")
+        previous_handlers = {
+            value: signal.getsignal(value) for value in (signal.SIGTERM, signal.SIGHUP)
+        }
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+
+        def revalidate_identity():
+            if current_identity["value"] is not expected_identity:
+                raise rejection
+
+        pre_spawn = mock.Mock(side_effect=revalidate_identity)
+        current_identity["value"] = object()
+        registry = _ProcessRegistry()
+
+        with mock.patch(
+            "sidecar.process_runner._current_process_registry",
+            return_value=registry,
+        ), mock.patch("sidecar.process_runner.subprocess.Popen") as popen:
+            with self.assertRaises(RuntimeError) as raised:
+                run_bounded(
+                    [sys.executable, "-c", "pass"],
+                    input_limit=1,
+                    stdout_limit=1,
+                    stderr_limit=1,
+                    timeout=1,
+                    pre_spawn=pre_spawn,
+                )
+
+        self.assertIs(rejection, raised.exception)
+        pre_spawn.assert_called_once_with()
+        popen.assert_not_called()
+        self.assertEqual(0, registry._spawning)
+        self.assertTrue(registry.wait_empty(timeout=0))
+        for value, previous_handler in previous_handlers.items():
+            self.assertEqual(previous_handler, signal.getsignal(value))
+        self.assertEqual(
+            previous_mask,
+            signal.pthread_sigmask(signal.SIG_BLOCK, set()),
+        )
 
     @unittest.skipUnless(os.name == "posix", "POSIX pipe selectors required")
     def test_stdout_and_stderr_overflow_are_capped_and_reaped(self):
@@ -162,6 +319,285 @@ class ProcessRunnerTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertFalse(process_exists(child_pid))
             self.assertFalse(process_exists(descendant_pid))
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_timeout_kills_descendant_after_group_leader_exits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            descendant_pid_path = Path(temporary) / "descendant.pid"
+            descendant_code = (
+                "import os,sys,time;"
+                "open(sys.argv[1],'w').write(str(os.getpid()));"
+                "os.write(1,b'descendant-ready');"
+                "time.sleep(60)"
+            )
+            leader_code = (
+                "import subprocess,sys;"
+                "subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]])"
+            )
+            descendant_pid = None
+
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                    run_bounded(
+                        [
+                            sys.executable,
+                            "-c",
+                            leader_code,
+                            str(descendant_pid_path),
+                            descendant_code,
+                        ],
+                        input_limit=1,
+                        stdout_limit=1024,
+                        stderr_limit=1024,
+                        timeout=0.5,
+                    )
+
+                self.assertEqual(b"descendant-ready", raised.exception.output)
+                descendant_pid = int(
+                    descendant_pid_path.read_text(encoding="ascii")
+                )
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline and process_exists(descendant_pid):
+                    time.sleep(0.01)
+                self.assertFalse(process_exists(descendant_pid))
+            finally:
+                if descendant_pid is None and descendant_pid_path.exists():
+                    descendant_pid = int(
+                        descendant_pid_path.read_text(encoding="ascii")
+                    )
+                if descendant_pid is not None and process_exists(descendant_pid):
+                    try:
+                        os.kill(descendant_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    @unittest.skipUnless(os.name == "posix", "lease inheritance requires POSIX")
+    def test_detached_descendant_lease_delays_success_until_exit(self):
+        code = (
+            "import os,time;"
+            "pid=os.fork();"
+            "\nif pid == 0:\n"
+            " os.setsid();os.close(0);os.close(1);os.close(2);"
+            "time.sleep(.35);os._exit(0)\n"
+            "time.sleep(.1);os._exit(0)"
+        )
+        started = time.monotonic()
+
+        result = run_bounded(
+            [sys.executable, "-c", code],
+            input_limit=1,
+            stdout_limit=1,
+            stderr_limit=1,
+            timeout=2,
+        )
+
+        self.assertGreaterEqual(time.monotonic() - started, 0.3)
+        self.assertEqual(0, result.returncode)
+        self.assertFalse(result.cleanup_incomplete)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kqueue required")
+    def test_twenty_fast_detached_runs_are_never_complete(self):
+        pre_exec = mock.Mock()
+        target = (
+            "import os;"
+            "pid=os.fork();"
+            "\nif pid == 0:\n"
+            " os.setsid();pid=os.fork();"
+            "\n if pid == 0:\n"
+            "  os.closerange(0,256);os._exit(0)\n"
+            " os._exit(0)\n"
+            "os._exit(0)"
+        )
+        for _index in range(20):
+            result = run_bounded(
+                [sys.executable, "-c", target],
+                input_limit=1,
+                stdout_limit=1,
+                stderr_limit=1,
+                timeout=1,
+                require_descendant_containment=True,
+                pre_exec=pre_exec,
+            )
+            self.assertEqual(0, result.returncode)
+            self.assertTrue(result.cleanup_incomplete)
+        self.assertEqual(20, pre_exec.call_count)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kqueue required")
+    def test_synchronous_child_fork_is_conservatively_incomplete(self):
+        target = (
+            "import os;"
+            "pid=os.fork();"
+            "\nif pid == 0: os._exit(0)\n"
+            "os.waitpid(pid,0)"
+        )
+        result = run_bounded(
+            [sys.executable, "-c", target],
+            input_limit=1,
+            stdout_limit=1,
+            stderr_limit=1,
+            timeout=1,
+            require_descendant_containment=True,
+        )
+        self.assertEqual(0, result.returncode)
+        self.assertTrue(result.cleanup_incomplete)
+
+    def test_pre_exec_failure_never_releases_target_gate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "target-ran"
+            rejection = RuntimeError("identity changed")
+            with self.assertRaises(RuntimeError) as raised:
+                run_bounded(
+                    [
+                        sys.executable,
+                        "-c",
+                        "open(__import__('sys').argv[1],'w').write('ran')",
+                        str(marker),
+                    ],
+                    input_limit=1,
+                    stdout_limit=1,
+                    stderr_limit=1,
+                    timeout=1,
+                    require_descendant_containment=True,
+                    pre_exec=lambda: (_ for _ in ()).throw(rejection),
+                )
+
+            self.assertIs(rejection, raised.exception)
+            self.assertFalse(marker.exists())
+
+    def test_supervisor_preserves_exact_stdin_argv_and_hides_target_argv(self):
+        secret_argument = "TARGET-SECRET-ARGUMENT"
+        input_data = b"exact supervisor stdin"
+        popen_argv = []
+        real_popen = subprocess.Popen
+
+        def recording_popen(argv, **kwargs):
+            popen_argv.append(tuple(argv))
+            return real_popen(argv, **kwargs)
+
+        code = (
+            "import json,sys;"
+            "data=sys.stdin.buffer.read();"
+            "sys.stdout.write(json.dumps([sys.argv[1],data.decode('ascii')]))"
+        )
+        with mock.patch(
+            "sidecar.process_runner.subprocess.Popen",
+            side_effect=recording_popen,
+        ):
+            result = run_bounded(
+                [sys.executable, "-c", code, secret_argument],
+                input_data,
+                input_limit=len(input_data),
+                stdout_limit=1024,
+                stderr_limit=1024,
+                timeout=2,
+                require_descendant_containment=True,
+            )
+
+        self.assertEqual(
+            [secret_argument, input_data.decode("ascii")],
+            json.loads(result.stdout.decode("utf-8")),
+        )
+        self.assertEqual(1, len(popen_argv))
+        self.assertNotIn(secret_argument, repr(popen_argv[0]))
+        self.assertFalse(result.cleanup_incomplete)
+
+    def test_default_runners_never_initialize_kqueue_tracking(self):
+        with mock.patch(
+            "sidecar.process_runner._DarwinKqueueDescendantTracker",
+            side_effect=AssertionError("unexpected process tracking"),
+        ):
+            result = run_bounded(
+                [sys.executable, "-c", "print('snapshot')"],
+                input_limit=1,
+                stdout_limit=64,
+                stderr_limit=64,
+                timeout=1,
+            )
+            with BoundedLineStream(
+                [sys.executable, "-c", "print('stream')"],
+                line_limit=64,
+                startup_timeout=1,
+            ) as stream:
+                self.assertEqual([b"stream"], list(stream))
+
+        self.assertEqual(b"snapshot\n", result.stdout)
+
+    @mock.patch("sidecar.process_runner.subprocess.Popen")
+    def test_required_containment_unsupported_never_spawns_target(self, popen):
+        with mock.patch.object(
+            _DarwinKqueueDescendantTracker,
+            "supported",
+            return_value=False,
+        ):
+            with self.assertRaises(DescendantContainmentUnsupportedError):
+                run_bounded(
+                    [sys.executable, "-c", "raise SystemExit('target ran')"],
+                    input_limit=1,
+                    stdout_limit=1,
+                    stderr_limit=1,
+                    timeout=1,
+                    require_descendant_containment=True,
+                )
+        popen.assert_not_called()
+
+    def test_kqueue_fork_is_permanent_incomplete_without_pid_kill(self):
+        class FakeKqueue:
+            def __init__(self):
+                self.batches = [
+                    [
+                        mock.Mock(
+                            ident=1234,
+                            fflags=select.KQ_NOTE_FORK | select.KQ_NOTE_EXIT,
+                        )
+                    ]
+                ]
+
+            def control(self, changes, _maximum, _timeout):
+                if changes is not None:
+                    return []
+                return self.batches.pop(0) if self.batches else []
+
+            def close(self):
+                return None
+
+        fake = FakeKqueue()
+        with mock.patch("sidecar.process_runner.select.kqueue", return_value=fake):
+            tracker = _DarwinKqueueDescendantTracker(1234)
+            with mock.patch("sidecar.process_runner.os.kill") as kill:
+                self.assertEqual((), tracker.sample())
+                self.assertTrue(tracker.cleanup_incomplete)
+                self.assertFalse(tracker.terminate())
+            kill.assert_not_called()
+            tracker.close()
+
+    def test_kqueue_event_overflow_is_cleanup_incomplete(self):
+        class FakeKqueue:
+            def __init__(self):
+                self.batches = [
+                    [
+                        mock.Mock(ident=1234, fflags=select.KQ_NOTE_FORK)
+                        for _index in range(16)
+                    ]
+                ]
+
+            def control(self, changes, _maximum, _timeout):
+                if changes is not None:
+                    return []
+                return self.batches.pop(0) if self.batches else []
+
+            def close(self):
+                return None
+
+        with mock.patch(
+            "sidecar.process_runner.select.kqueue",
+            return_value=FakeKqueue(),
+        ):
+            tracker = _DarwinKqueueDescendantTracker(1234)
+            with mock.patch("sidecar.process_runner.os.kill") as kill:
+                self.assertFalse(tracker.terminate())
+                self.assertTrue(tracker.cleanup_incomplete)
+            kill.assert_not_called()
+            tracker.close()
 
     @unittest.skipUnless(os.name == "posix", "POSIX pipe selectors required")
     def test_timeout_survives_child_closing_both_output_pipes(self):
@@ -412,6 +848,78 @@ class ProcessRunnerTests(unittest.TestCase):
         self.assertEqual([], errors)
         set_handler.assert_not_called()
 
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    @mock.patch("sidecar.process_runner.os.killpg")
+    def test_kill_process_group_does_not_signal_after_leader_reaped(self, killpg):
+        process = mock.Mock()
+        process.pid = 1234
+        process.poll.return_value = 0
+        ownership = _ProcessGroupOwnership(process.pid)
+
+        self.assertEqual(0, ownership.poll(process))
+        _kill_process_group(process, ownership)
+
+        self.assertEqual(2, process.poll.call_count)
+        killpg.assert_not_called()
+        process.kill.assert_not_called()
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    @mock.patch("sidecar.process_runner.os.killpg")
+    def test_kill_process_group_signals_owned_group_after_leader_exits(
+        self,
+        killpg,
+    ):
+        process = mock.Mock()
+        process.pid = 1234
+        process.poll.return_value = 0
+        ownership = _ProcessGroupOwnership(process.pid)
+
+        _kill_process_group(process, ownership)
+
+        process.poll.assert_not_called()
+        killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+        process.kill.assert_not_called()
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    @mock.patch("sidecar.process_runner.os.killpg")
+    def test_delayed_registry_kill_cannot_run_after_ownership_release(
+        self,
+        killpg,
+    ):
+        process = mock.Mock()
+        process.pid = 1234
+        process.poll.return_value = 0
+        ownership = _ProcessGroupOwnership(process.pid)
+        registry = _ProcessRegistry()
+        registry.begin_spawn()
+        registry.complete_spawn(process, ownership)
+        kill_delayed = threading.Event()
+        allow_kill = threading.Event()
+        real_kill_process_group = _kill_process_group
+
+        def delayed_kill(delayed_process, delayed_ownership):
+            kill_delayed.set()
+            allow_kill.wait(timeout=2)
+            real_kill_process_group(delayed_process, delayed_ownership)
+
+        with mock.patch(
+            "sidecar.process_runner._kill_process_group",
+            side_effect=delayed_kill,
+        ):
+            cleanup = threading.Thread(target=registry.kill_all)
+            cleanup.start()
+            try:
+                self.assertTrue(kill_delayed.wait(timeout=2))
+                registry.unregister(process)
+            finally:
+                allow_kill.set()
+                cleanup.join(timeout=2)
+
+        self.assertFalse(cleanup.is_alive())
+        killpg.assert_not_called()
+        process.kill.assert_not_called()
+        self.assertTrue(registry.wait_empty())
+
     @unittest.skipUnless(os.name == "posix", "exit signals require POSIX")
     def test_nested_process_guard_restores_handlers_and_mask(self):
         managed_signals = (signal.SIGTERM, signal.SIGHUP)
@@ -534,6 +1042,345 @@ class ProcessRunnerTests(unittest.TestCase):
             self.assertEqual([], errors)
             self.assertFalse(process_exists(child_pid))
 
+    @unittest.skipUnless(os.name == "posix", "POSIX pipe selectors required")
+    def test_line_stream_uploads_multichunk_input_and_assembles_lines(self):
+        input_data = bytes(range(256)) * 700 + b"exact-tail"
+        real_write = os.write
+        writes = []
+
+        def write_with_spurious_block(fd, data):
+            writes.append(bytes(data))
+            if len(writes) == 1:
+                raise BlockingIOError("spurious would-block")
+            return real_write(fd, data)
+
+        code = (
+            "import os,sys,time;"
+            "data=sys.stdin.buffer.read();"
+            "assert data.endswith(b'exact-tail');"
+            "os.write(1,b'first');time.sleep(.02);"
+            "os.write(1,b'-line\\nsecond\\nthird');"
+        )
+        with mock.patch(
+            "sidecar.process_runner.os.write",
+            side_effect=write_with_spurious_block,
+        ):
+            with BoundedLineStream(
+                [sys.executable, "-c", code],
+                input_data,
+                line_limit=64,
+                startup_timeout=2,
+            ) as stream:
+                self.assertEqual(
+                    [b"first-line", b"second", b"third"],
+                    list(stream),
+                )
+                result = stream.result
+
+        self.assertIsNotNone(result)
+        self.assertEqual(BoundedLineStreamEndReason.EOF, result.end_reason)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(3, result.lines_yielded)
+        self.assertEqual(len(b"first-line\nsecond\nthird"), result.stdout_bytes_read)
+        self.assertEqual(writes[0], writes[1])
+        self.assertGreater(len(writes), 2)
+
+    def test_line_stream_line_overflow_is_typed_and_exactly_bounded(self):
+        code = "import os,time;os.write(1,b'x'*65);time.sleep(60)"
+        with BoundedLineStream(
+            [sys.executable, "-c", code],
+            line_limit=64,
+            startup_timeout=2,
+        ) as stream:
+            with self.assertRaises(BoundedLineStreamOverflowError) as raised:
+                next(stream)
+
+        self.assertEqual(
+            BoundedLineStreamEndReason.LINE_OVERFLOW,
+            raised.exception.result.end_reason,
+        )
+        self.assertEqual(65, raised.exception.result.stdout_bytes_read)
+        self.assertEqual(b"", raised.exception.result.stderr)
+        self.assertEqual(0, raised.exception.result.lines_yielded)
+
+    def test_line_stream_stderr_overflow_is_typed_and_capped(self):
+        code = "import os,time;os.write(2,b'e'*65);time.sleep(60)"
+        with BoundedLineStream(
+            [sys.executable, "-c", code],
+            line_limit=64,
+            stderr_limit=64,
+            startup_timeout=2,
+        ) as stream:
+            with self.assertRaises(BoundedLineStreamOverflowError) as raised:
+                next(stream)
+
+        result = raised.exception.result
+        self.assertEqual(BoundedLineStreamEndReason.STDERR_OVERFLOW, result.end_reason)
+        self.assertEqual(b"e" * 64, result.stderr)
+
+    def test_line_stream_startup_timeout_kills_and_reaps(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_path = Path(temporary) / "child.pid"
+            code = (
+                "import os,sys,time;"
+                "open(sys.argv[1],'w').write(str(os.getpid()));"
+                "time.sleep(60)"
+            )
+            stream = BoundedLineStream(
+                [sys.executable, "-c", code, str(pid_path)],
+                line_limit=64,
+                startup_timeout=0.15,
+            )
+            with self.assertRaises(BoundedLineStreamTimeoutError) as raised:
+                next(stream)
+
+            pid = int(pid_path.read_text(encoding="ascii"))
+            self.assertEqual(
+                BoundedLineStreamEndReason.STARTUP_TIMEOUT,
+                raised.exception.result.end_reason,
+            )
+            self.assertFalse(process_exists(pid))
+
+    def test_line_stream_is_indefinite_after_first_line_then_cancels(self):
+        cancel_event = threading.Event()
+        code = (
+            "import os,time;"
+            "os.write(1,b'ready\\n');"
+            "time.sleep(.3);"
+            "os.write(1,b'still-running\\n');"
+            "time.sleep(60)"
+        )
+        with BoundedLineStream(
+            [sys.executable, "-c", code],
+            line_limit=64,
+            startup_timeout=0.1,
+            cancel_event=cancel_event,
+        ) as stream:
+            self.assertEqual(b"ready", next(stream))
+            self.assertTrue(stream.ready)
+            self.assertEqual(b"still-running", next(stream))
+            cancel_event.set()
+            with self.assertRaises(BoundedLineStreamCancelledError) as raised:
+                next(stream)
+
+        self.assertEqual(
+            BoundedLineStreamEndReason.CANCELLED,
+            raised.exception.result.end_reason,
+        )
+
+    def test_line_stream_supports_caller_defined_ready_and_deadline_reset(self):
+        code = (
+            "import os,time;"
+            "os.write(1,b'connecting\\n');"
+            "time.sleep(.15);"
+            "os.write(1,b'ready\\n')"
+        )
+        with BoundedLineStream(
+            [sys.executable, "-c", code],
+            line_limit=64,
+            startup_timeout=0.1,
+            ready_on_first_line=False,
+        ) as stream:
+            self.assertEqual(b"connecting", next(stream))
+            self.assertFalse(stream.ready)
+            stream.reset_startup_timeout(0.5)
+            self.assertEqual(b"ready", next(stream))
+            stream.mark_ready()
+            with self.assertRaises(StopIteration):
+                next(stream)
+
+        self.assertEqual(BoundedLineStreamEndReason.EOF, stream.end_reason)
+
+    def test_line_stream_early_close_kills_owned_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_path = Path(temporary) / "child.pid"
+            code = (
+                "import os,sys,time;"
+                "open(sys.argv[1],'w').write(str(os.getpid()));"
+                "os.write(1,b'ready\\n');time.sleep(60)"
+            )
+            with BoundedLineStream(
+                [sys.executable, "-c", code, str(pid_path)],
+                line_limit=64,
+                startup_timeout=2,
+            ) as stream:
+                self.assertEqual(b"ready", next(stream))
+                pid = int(pid_path.read_text(encoding="ascii"))
+                stream.close()
+                self.assertEqual(BoundedLineStreamEndReason.CLOSED, stream.end_reason)
+                self.assertIsNotNone(stream.returncode)
+
+            self.assertFalse(process_exists(pid))
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_line_stream_close_kills_descendant_after_leader_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            descendant_pid_path = Path(temporary) / "descendant.pid"
+            descendant_code = (
+                "import os,sys,time;"
+                "open(sys.argv[1],'w').write(str(os.getpid()));"
+                "os.write(1,b'ready\\n');time.sleep(60)"
+            )
+            leader_code = (
+                "import subprocess,sys;"
+                "subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]])"
+            )
+            with BoundedLineStream(
+                [
+                    sys.executable,
+                    "-c",
+                    leader_code,
+                    str(descendant_pid_path),
+                    descendant_code,
+                ],
+                line_limit=64,
+                startup_timeout=2,
+            ) as stream:
+                self.assertEqual(b"ready", next(stream))
+                descendant_pid = int(
+                    descendant_pid_path.read_text(encoding="ascii")
+                )
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline and stream.returncode is None:
+                    time.sleep(0.01)
+                self.assertEqual(0, stream.returncode)
+
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and process_exists(descendant_pid):
+                time.sleep(0.01)
+            self.assertFalse(process_exists(descendant_pid))
+
+    @unittest.skipUnless(os.name == "posix", "process registry requires POSIX")
+    def test_line_stream_worker_is_owned_by_outer_signal_guard(self):
+        started = threading.Event()
+        errors = []
+
+        def run_in_worker():
+            try:
+                with BoundedLineStream(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import os,time;os.write(1,b'ready\\n');time.sleep(60)",
+                    ],
+                    line_limit=64,
+                    startup_timeout=2,
+                ) as stream:
+                    self.assertEqual(b"ready", next(stream))
+                    started.set()
+                    next(stream)
+            except BoundedLineStreamProcessError:
+                pass
+            except BaseException as error:
+                errors.append(error)
+
+        with bounded_execution_signal_guard():
+            worker = threading.Thread(target=run_in_worker)
+            worker.start()
+            self.assertTrue(started.wait(timeout=2))
+
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([], errors)
+
+    def test_line_stream_yields_unterminated_eof_line_once(self):
+        with BoundedLineStream(
+            [sys.executable, "-c", "import os;os.write(1,b'tail')"],
+            line_limit=64,
+            startup_timeout=2,
+        ) as stream:
+            self.assertEqual([b"tail"], list(stream))
+
+        self.assertEqual(BoundedLineStreamEndReason.EOF, stream.end_reason)
+        self.assertEqual(0, stream.returncode)
+        self.assertEqual(1, stream.result.lines_yielded)
+
+    def test_line_stream_has_no_total_cap_for_many_lines(self):
+        count = 1000
+        code = (
+            "import os,sys;"
+            "count=int(sys.argv[1]);"
+            "[os.write(1,(str(i)+'\\n').encode()) for i in range(count)]"
+        )
+        expected = [str(value).encode("ascii") for value in range(count)]
+        with BoundedLineStream(
+            [sys.executable, "-c", code, str(count)],
+            line_limit=8,
+            startup_timeout=2,
+        ) as stream:
+            self.assertEqual(expected, list(stream))
+
+        expected_bytes = sum(len(line) + 1 for line in expected)
+        self.assertEqual(count, stream.result.lines_yielded)
+        self.assertEqual(expected_bytes, stream.result.stdout_bytes_read)
+
+    def test_line_stream_nonzero_eof_is_not_silent_success(self):
+        with BoundedLineStream(
+            [
+                sys.executable,
+                "-c",
+                "import os,sys;os.write(1,b'last\\n');sys.exit(7)",
+            ],
+            line_limit=64,
+            startup_timeout=2,
+        ) as stream:
+            self.assertEqual(b"last", next(stream))
+            with self.assertRaises(BoundedLineStreamProcessError) as raised:
+                next(stream)
+
+        self.assertEqual(7, raised.exception.result.returncode)
+        self.assertEqual(
+            BoundedLineStreamEndReason.NONZERO_EXIT,
+            raised.exception.result.end_reason,
+        )
+
+    @mock.patch("sidecar.process_runner.subprocess.Popen")
+    def test_line_stream_validates_hard_limits_before_spawn(self, popen):
+        cases = (
+            ({"line_limit": 0, "startup_timeout": 1}, ValueError),
+            (
+                {
+                    "line_limit": MAX_STREAM_LINE_BYTES + 1,
+                    "startup_timeout": 1,
+                },
+                ValueError,
+            ),
+            (
+                {
+                    "line_limit": 1,
+                    "stderr_limit": MAX_STREAM_STDERR_BYTES + 1,
+                    "startup_timeout": 1,
+                },
+                ValueError,
+            ),
+            ({"line_limit": 1, "startup_timeout": 0}, ValueError),
+            (
+                {
+                    "line_limit": 1,
+                    "startup_timeout": 1,
+                    "ready_on_first_line": 1,
+                },
+                TypeError,
+            ),
+        )
+        for kwargs, error_type in cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(error_type):
+                    BoundedLineStream([sys.executable], **kwargs)
+
+        with self.assertRaises(BoundedLineStreamOverflowError) as raised:
+            BoundedLineStream(
+                [sys.executable],
+                b"x" * (MAX_STREAM_INPUT_BYTES + 1),
+                line_limit=1,
+                startup_timeout=1,
+            )
+        self.assertEqual(
+            BoundedLineStreamEndReason.INPUT_OVERFLOW,
+            raised.exception.result.end_reason,
+        )
+        popen.assert_not_called()
+
     def test_invalid_arguments_are_rejected_before_spawn(self):
         valid = {
             "input_limit": 1,
@@ -558,6 +1405,14 @@ class ProcessRunnerTests(unittest.TestCase):
                 ValueError,
             ),
             ([sys.executable], {"cwd": b"/tmp"}, TypeError),
+            ([sys.executable], {"pre_spawn": object()}, TypeError),
+            ([sys.executable], {"pre_exec": object()}, TypeError),
+            (
+                [sys.executable],
+                {"require_descendant_containment": 1},
+                TypeError,
+            ),
+            ([sys.executable], {"pre_exec": lambda: None}, ValueError),
         )
 
         with mock.patch("sidecar.process_runner.subprocess.Popen") as popen:

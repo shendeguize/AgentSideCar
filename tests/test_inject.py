@@ -1,11 +1,17 @@
 import dataclasses
+import hashlib
 import io
 import json
+import os
+import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import sidecar.inject as inject_module
 from sidecar.inject import (
     MAX_MESSAGE_BYTES,
     MAX_STDERR_BYTES,
@@ -18,18 +24,53 @@ from sidecar.inject import (
     validate_message,
 )
 from sidecar.model import Session, Status
-from sidecar.process_runner import BoundedProcessResult
+from sidecar.process_runner import (
+    BoundedProcessResult,
+    DescendantContainmentUnsupportedError,
+)
+
+
+def stat_mode(path):
+    return os.stat(str(path)).st_mode & 0o777
+
+
+def honoring_runner(runner):
+    def wrapped(*args, **kwargs):
+        pre_exec = kwargs.get("pre_exec")
+        if not callable(pre_exec):
+            raise AssertionError("runner requires pre_exec")
+        pre_exec()
+        return runner(*args, **kwargs)
+
+    return wrapped
 
 
 class InjectionTestCase(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
+        self.home = self.root / "home"
+        self.home.mkdir(mode=0o700)
+        self.home_environment = mock.patch.dict(
+            os.environ,
+            {"HOME": str(self.home)},
+        )
+        self.home_environment.start()
+        self.account_home = mock.patch(
+            "sidecar.send_audit.pwd.getpwuid",
+            return_value=mock.Mock(pw_dir=str(self.home)),
+        )
+        self.account_home.start()
         self.executable = self.root / "agent-executable"
         self.executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.executable.chmod(0o700)
+        self.transcript = self.root / "transcript"
+        self.transcript.write_text("{}\n", encoding="utf-8")
+        self.runtime = self.root / "runtime"
 
     def tearDown(self):
+        self.account_home.stop()
+        self.home_environment.stop()
         self.temporary.cleanup()
 
     def session(
@@ -46,7 +87,7 @@ class InjectionTestCase(unittest.TestCase):
             agent=agent,
             session_id=session_id,
             project=str(self.root if project is None else project),
-            transcript=str(self.root / "transcript"),
+            transcript=str(self.transcript),
             updated_at=1.0,
             status=status,
             parent_id=parent_id,
@@ -66,6 +107,30 @@ class InjectionTestCase(unittest.TestCase):
             message,
             executable_resolver=lambda _name: str(self.executable),
         )
+
+    def execute_plan(self, plan, **kwargs):
+        runner_invokes_pre_exec = kwargs.pop(
+            "runner_invokes_pre_exec",
+            False,
+        )
+        runner = kwargs.get("runner")
+        if runner is not None and not runner_invokes_pre_exec:
+            kwargs["runner"] = honoring_runner(runner)
+        kwargs.setdefault(
+            "refresher",
+            lambda: [
+                self.session(
+                    plan.agent,
+                    session_id=plan.session_id,
+                )
+            ],
+        )
+        kwargs.setdefault(
+            "executable_resolver",
+            lambda _name: str(self.executable),
+        )
+        kwargs.setdefault("runtime_dir", self.runtime)
+        return execute_send(plan, **kwargs)
 
 
 class MessageValidationTests(InjectionTestCase):
@@ -307,14 +372,55 @@ class PlanTests(InjectionTestCase):
 
 
 class ExecutionTests(InjectionTestCase):
-    def completed(self, plan, *, returncode=0, stdout=b"", stderr=b"", overflow=None):
+    def completed(
+        self,
+        plan,
+        *,
+        returncode=0,
+        stdout=b"",
+        stderr=b"",
+        overflow=None,
+        cleanup_incomplete=False,
+    ):
         return BoundedProcessResult(
             args=plan.argv,
             returncode=returncode,
             stdout=stdout,
             stderr=stderr,
             overflow=overflow,
+            cleanup_incomplete=cleanup_incomplete,
         )
+
+    def assert_spawn_boundary_mutation_blocked(
+        self,
+        plan,
+        mutate,
+        *,
+        refresher=None,
+    ):
+        spawn_calls = []
+
+        def runner(*args, **kwargs):
+            mutate()
+            kwargs["pre_exec"]()
+            spawn_calls.append((args, kwargs))
+            return self.completed(plan)
+
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                plan,
+                allow_write=True,
+                refresher=(
+                    (lambda: [self.session()])
+                    if refresher is None
+                    else refresher
+                ),
+                runner=runner,
+                runner_invokes_pre_exec=True,
+            )
+
+        self.assertEqual("session_changed", raised.exception.code)
+        self.assertEqual([], spawn_calls)
 
     def test_hard_gate_is_identity_true_and_never_calls_runner(self):
         plan = self.plan()
@@ -327,7 +433,7 @@ class ExecutionTests(InjectionTestCase):
 
             with self.subTest(allow_write=allow_write):
                 with self.assertRaises(SendError) as raised:
-                    execute_send(
+                    self.execute_plan(
                         plan,
                         allow_write=allow_write,
                         runner=runner,
@@ -351,7 +457,7 @@ class ExecutionTests(InjectionTestCase):
                 stderr=b"warning",
             )
 
-        result = execute_send(
+        result = self.execute_plan(
             plan,
             allow_write=True,
             timeout=900,
@@ -371,6 +477,8 @@ class ExecutionTests(InjectionTestCase):
                 "timeout": 900.0,
                 "env": None,
                 "cwd": str(self.root),
+                "pre_exec": mock.ANY,
+                "require_descendant_containment": True,
                 "monotonic": clock,
             },
             kwargs,
@@ -381,6 +489,16 @@ class ExecutionTests(InjectionTestCase):
         self.assertEqual("native response", result.response)
         self.assertEqual("warning", result.stderr)
 
+    @unittest.skipUnless(os.name == "posix", "gated supervisor requires POSIX")
+    def test_default_no_fork_runner_remains_delivered(self):
+        plan = self.plan()
+
+        result = self.execute_plan(plan, allow_write=True)
+
+        self.assertEqual("completed", result.outcome)
+        self.assertEqual("delivered", result.delivery)
+        self.assertEqual(0, result.returncode)
+
     def test_cursor_runner_gets_no_stdin(self):
         plan = self.plan("cursor-cli", "argv prompt")
         calls = []
@@ -389,7 +507,7 @@ class ExecutionTests(InjectionTestCase):
             calls.append((argv, input_data, kwargs))
             return self.completed(plan, stdout=b'{"result":"done"}')
 
-        result = execute_send(plan, allow_write=True, runner=runner)
+        result = self.execute_plan(plan, allow_write=True, runner=runner)
 
         self.assertIsNone(calls[0][1])
         self.assertEqual("argv prompt", calls[0][0][-1])
@@ -408,7 +526,7 @@ class ExecutionTests(InjectionTestCase):
                 stderr=("failed " + message).encode("utf-8"),
             )
 
-        result = execute_send(plan, allow_write=True, runner=runner)
+        result = self.execute_plan(plan, allow_write=True, runner=runner)
 
         self.assertEqual("timed_out", result.outcome)
         self.assertEqual("unknown", result.delivery)
@@ -416,9 +534,42 @@ class ExecutionTests(InjectionTestCase):
         self.assertNotIn(message, result.response)
         self.assertNotIn(message, result.stderr)
 
+    def test_incomplete_containment_is_never_reported_delivered(self):
+        plan = self.plan()
+        incomplete = self.execute_plan(
+            plan,
+            allow_write=True,
+            runner=lambda *args, **kwargs: self.completed(
+                plan,
+                returncode=0,
+                stdout=b'{"result":"possibly still running"}',
+                cleanup_incomplete=True,
+            ),
+        )
+
+        self.assertEqual("failed", incomplete.outcome)
+        self.assertEqual("unknown", incomplete.delivery)
+        self.assertEqual("cleanup_incomplete", incomplete.error_code)
+        self.assertEqual(0, incomplete.returncode)
+
+        def timed_out(argv, input_data, **kwargs):
+            del input_data, kwargs
+            error = subprocess.TimeoutExpired(argv, 1)
+            error.cleanup_incomplete = True
+            raise error
+
+        timeout = self.execute_plan(
+            plan,
+            allow_write=True,
+            runner=timed_out,
+        )
+        self.assertEqual("timed_out", timeout.outcome)
+        self.assertEqual("unknown", timeout.delivery)
+        self.assertEqual("cleanup_incomplete", timeout.error_code)
+
     def test_overflow_and_nonzero_are_unknown(self):
         plan = self.plan()
-        overflow = execute_send(
+        overflow = self.execute_plan(
             plan,
             allow_write=True,
             runner=lambda *args, **kwargs: self.completed(
@@ -428,7 +579,7 @@ class ExecutionTests(InjectionTestCase):
                 overflow="stdout",
             ),
         )
-        failed = execute_send(
+        failed = self.execute_plan(
             plan,
             allow_write=True,
             runner=lambda *args, **kwargs: self.completed(
@@ -449,7 +600,7 @@ class ExecutionTests(InjectionTestCase):
     def test_spawn_error_is_distinct_from_preflight_not_found(self):
         plan = self.plan()
 
-        result = execute_send(
+        result = self.execute_plan(
             plan,
             allow_write=True,
             runner=lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -461,10 +612,21 @@ class ExecutionTests(InjectionTestCase):
         self.assertEqual("unknown", result.delivery)
         self.assertEqual("spawn_error", result.error_code)
 
+        unsupported = self.execute_plan(
+            plan,
+            allow_write=True,
+            runner=lambda *args, **kwargs: (_ for _ in ()).throw(
+                DescendantContainmentUnsupportedError("unsupported")
+            ),
+        )
+        self.assertEqual("failed", unsupported.outcome)
+        self.assertEqual("unknown", unsupported.delivery)
+        self.assertEqual("containment_unsupported", unsupported.error_code)
+
         self.executable.unlink()
         calls = []
         with self.assertRaises(SendError) as raised:
-            execute_send(
+            self.execute_plan(
                 plan,
                 allow_write=True,
                 runner=lambda *args, **kwargs: calls.append(args),
@@ -480,7 +642,7 @@ class ExecutionTests(InjectionTestCase):
             raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
-            execute_send(plan, allow_write=True, runner=runner)
+            self.execute_plan(plan, allow_write=True, runner=runner)
 
     def test_timeout_range_is_finite_inclusive_and_capped_at_900(self):
         plan = self.plan()
@@ -491,7 +653,7 @@ class ExecutionTests(InjectionTestCase):
             return self.completed(plan)
 
         for timeout in (1, 1.5, 900):
-            execute_send(
+            self.execute_plan(
                 plan,
                 allow_write=True,
                 timeout=timeout,
@@ -503,7 +665,7 @@ class ExecutionTests(InjectionTestCase):
             before = len(calls)
             with self.subTest(timeout=timeout):
                 with self.assertRaises(SendError) as raised:
-                    execute_send(
+                    self.execute_plan(
                         plan,
                         allow_write=True,
                         timeout=timeout,
@@ -511,6 +673,1101 @@ class ExecutionTests(InjectionTestCase):
                     )
                 self.assertEqual("invalid_timeout", raised.exception.code)
                 self.assertEqual(before, len(calls))
+
+    def test_execution_requires_a_fresh_revalidator(self):
+        plan = self.plan()
+        calls = []
+
+        with self.assertRaises(SendError) as raised:
+            execute_send(
+                plan,
+                allow_write=True,
+                runtime_dir=self.runtime,
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+
+        self.assertEqual("revalidation_required", raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_source_mutation_between_plan_and_refresh_prevents_spawn(self):
+        plan = self.plan(message="mutation secret")
+        self.transcript.write_text('{"changed":true}\n', encoding="utf-8")
+        calls = []
+
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                plan,
+                allow_write=True,
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+
+        self.assertEqual("session_changed", raised.exception.code)
+        self.assertEqual([], calls)
+        self.assertNotIn("mutation secret", str(raised.exception))
+
+    def test_source_mutation_at_spawn_boundary_prevents_spawn(self):
+        plan = self.plan()
+        self.assert_spawn_boundary_mutation_blocked(
+            plan,
+            lambda: self.transcript.write_text(
+                '{"spawn_boundary":true}\n',
+                encoding="utf-8",
+            ),
+        )
+
+    def test_cwd_replacement_at_spawn_boundary_prevents_spawn(self):
+        project = self.root / "spawn-project"
+        project.mkdir()
+        session = self.session(project=project)
+        plan = build_send_plan(
+            session,
+            "private",
+            executable_resolver=lambda _name: str(self.executable),
+        )
+
+        def replace_project():
+            project.rename(self.root / "old-spawn-project")
+            project.mkdir()
+
+        self.assert_spawn_boundary_mutation_blocked(
+            plan,
+            replace_project,
+            refresher=lambda: [self.session(project=project)],
+        )
+
+    def test_executable_replacement_at_spawn_boundary_prevents_spawn(self):
+        plan = self.plan()
+
+        def replace_executable():
+            self.executable.rename(self.root / "old-spawn-executable")
+            self.executable.write_text(
+                "#!/bin/sh\nprintf replaced\n",
+                encoding="utf-8",
+            )
+            self.executable.chmod(0o700)
+
+        self.assert_spawn_boundary_mutation_blocked(
+            plan,
+            replace_executable,
+        )
+
+    def test_cursor_wal_creation_at_spawn_boundary_prevents_spawn(self):
+        wal = Path(str(self.transcript) + "-wal")
+        extra = {
+            "source": "cli",
+            "store": str(self.transcript),
+            "wal": str(wal),
+            "transcript_kind": "cursor-chat-sqlite",
+            "directory_session_id": "session-123",
+        }
+
+        def cursor_session():
+            return self.session("cursor-cli", extra=dict(extra))
+
+        plan = build_send_plan(
+            cursor_session(),
+            "private",
+            executable_resolver=lambda _name: str(self.executable),
+        )
+        self.assert_spawn_boundary_mutation_blocked(
+            plan,
+            lambda: wal.write_bytes(b"spawn boundary"),
+            refresher=lambda: [cursor_session()],
+        )
+
+    def test_runner_without_pre_exec_contract_fails_closed(self):
+        plan = self.plan()
+        calls = []
+
+        def legacy_runner(
+            argv,
+            input_data,
+            *,
+            input_limit,
+            stdout_limit,
+            stderr_limit,
+            timeout,
+            env,
+            cwd,
+            monotonic,
+        ):
+            calls.append((argv, input_data))
+            return self.completed(plan)
+
+        with self.assertRaises(TypeError):
+            execute_send(
+                plan,
+                allow_write=True,
+                refresher=lambda: [self.session()],
+                executable_resolver=lambda _name: str(self.executable),
+                runtime_dir=self.runtime,
+                runner=legacy_runner,
+            )
+
+        self.assertEqual([], calls)
+
+    def test_refresh_rejects_executable_switch_replacement_and_mode_change(self):
+        cases = ("switch", "replacement", "rewrite", "mode")
+        for case in cases:
+            with self.subTest(case=case):
+                self.executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                self.executable.chmod(0o700)
+                plan = self.plan()
+                resolver_path = self.executable
+                if case == "switch":
+                    resolver_path = self.root / "other-executable"
+                    resolver_path.write_text(
+                        "#!/bin/sh\nexit 0\n",
+                        encoding="utf-8",
+                    )
+                    resolver_path.chmod(0o700)
+                elif case == "replacement":
+                    self.executable.rename(self.root / "old-executable")
+                    self.executable.write_text(
+                        "#!/bin/sh\nexit 0\n",
+                        encoding="utf-8",
+                    )
+                    self.executable.chmod(0o700)
+                elif case == "rewrite":
+                    self.executable.write_text(
+                        "#!/bin/sh\nprintf changed\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    self.executable.chmod(0o755)
+                calls = []
+
+                with self.assertRaises(SendError) as raised:
+                    self.execute_plan(
+                        plan,
+                        allow_write=True,
+                        executable_resolver=lambda _name, path=resolver_path: str(
+                            path
+                        ),
+                        runner=lambda *args, **kwargs: calls.append(
+                            (args, kwargs)
+                        ),
+                    )
+
+                self.assertEqual("session_changed", raised.exception.code)
+                self.assertEqual([], calls)
+
+    def test_refresh_rejects_invalid_replacement_executable(self):
+        plan = self.plan()
+        self.executable.chmod(0o600)
+        calls = []
+
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                plan,
+                allow_write=True,
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+
+        self.assertEqual("invalid_executable", raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_refresh_rejects_working_directory_inode_replacement(self):
+        project = self.root / "replaceable-project"
+        project.mkdir()
+        session = self.session(project=project)
+        plan = build_send_plan(
+            session,
+            "private",
+            executable_resolver=lambda _name: str(self.executable),
+        )
+        project.rename(self.root / "old-project")
+        project.mkdir()
+        calls = []
+
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                plan,
+                allow_write=True,
+                refresher=lambda: [self.session(project=project)],
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+
+        self.assertEqual("session_changed", raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_cursor_wal_creation_and_removal_change_source_fingerprint(self):
+        wal = Path(str(self.transcript) + "-wal")
+        extra = {
+            "source": "cli",
+            "store": str(self.transcript),
+            "wal": str(wal),
+            "transcript_kind": "cursor-chat-sqlite",
+            "directory_session_id": "session-123",
+        }
+
+        def cursor_session():
+            return self.session("cursor-cli", extra=dict(extra))
+
+        create_plan = build_send_plan(
+            cursor_session(),
+            "private",
+            executable_resolver=lambda _name: str(self.executable),
+        )
+        wal.write_bytes(b"created")
+        calls = []
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                create_plan,
+                allow_write=True,
+                refresher=lambda: [cursor_session()],
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+        self.assertEqual("session_changed", raised.exception.code)
+
+        remove_plan = build_send_plan(
+            cursor_session(),
+            "private",
+            executable_resolver=lambda _name: str(self.executable),
+        )
+        wal.unlink()
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                remove_plan,
+                allow_write=True,
+                refresher=lambda: [cursor_session()],
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+        self.assertEqual("session_changed", raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_refresh_resolves_exact_agent_and_full_session_id(self):
+        plan = self.plan()
+        calls = []
+        cases = (
+            ([], "session_unavailable"),
+            (
+                [
+                    self.session(),
+                    self.session(),
+                ],
+                "session_changed",
+            ),
+            (
+                [
+                    self.session(agent="codex"),
+                    self.session(session_id="session-123-extra"),
+                ],
+                "session_unavailable",
+            ),
+        )
+        for sessions, code in cases:
+            with self.subTest(code=code):
+                with self.assertRaises(SendError) as raised:
+                    self.execute_plan(
+                        plan,
+                        allow_write=True,
+                        refresher=lambda sessions=sessions: sessions,
+                        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+                    )
+                self.assertEqual(code, raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_refresh_rejects_changed_identity_and_ineligible_state(self):
+        plan = self.plan()
+        other_project = self.root / "other-project"
+        other_project.mkdir()
+        other_transcript = self.root / "other-transcript"
+        other_transcript.write_text("{}\n", encoding="utf-8")
+        cases = (
+            (
+                self.session(project=other_project),
+                "session_changed",
+            ),
+            (
+                Session(
+                    agent="claude",
+                    session_id="session-123",
+                    project=str(self.root),
+                    transcript=str(other_transcript),
+                    updated_at=1.0,
+                    status=Status.WAITING,
+                    extra={},
+                ),
+                "session_changed",
+            ),
+            (
+                self.session(extra={"source": "changed"}),
+                "session_changed",
+            ),
+            (
+                self.session(status=Status.WORKING),
+                "working_session",
+            ),
+            (
+                self.session(parent_id="parent"),
+                "child_session",
+            ),
+            (
+                self.session(extra={"remote": True}),
+                "remote_session",
+            ),
+        )
+        for refreshed, code in cases:
+            with self.subTest(code=code):
+                calls = []
+                with self.assertRaises(SendError) as raised:
+                    self.execute_plan(
+                        plan,
+                        allow_write=True,
+                        refresher=lambda refreshed=refreshed: [refreshed],
+                        runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+                    )
+                self.assertEqual(code, raised.exception.code)
+                self.assertEqual([], calls)
+
+    def test_concurrent_resumes_start_exactly_one_runner(self):
+        plan = self.plan(message="concurrency secret")
+        started = threading.Event()
+        release = threading.Event()
+        outcomes = []
+        runner_calls = []
+
+        def runner(*args, **kwargs):
+            runner_calls.append((args, kwargs))
+            started.set()
+            self.assertTrue(release.wait(2.0))
+            return self.completed(plan)
+
+        def first_send():
+            try:
+                outcomes.append(
+                    self.execute_plan(
+                        plan,
+                        allow_write=True,
+                        runner=runner,
+                    ).outcome
+                )
+            except BaseException as error:
+                outcomes.append(error)
+
+        worker = threading.Thread(target=first_send)
+        worker.start()
+        self.assertTrue(started.wait(2.0))
+        try:
+            with self.assertRaises(SendError) as raised:
+                self.execute_plan(
+                    plan,
+                    allow_write=True,
+                    runner=runner,
+                )
+            self.assertEqual("session_busy", raised.exception.code)
+        finally:
+            release.set()
+            worker.join(2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(["completed"], outcomes)
+        self.assertEqual(1, len(runner_calls))
+
+    def test_lock_releases_after_all_runner_exit_paths(self):
+        plan = self.plan()
+
+        def timeout_runner(argv, input_data, **kwargs):
+            del input_data, kwargs
+            raise subprocess.TimeoutExpired(argv, 1)
+
+        def interrupt_runner(*args, **kwargs):
+            del args, kwargs
+            raise KeyboardInterrupt
+
+        cases = (
+            lambda *args, **kwargs: self.completed(plan),
+            lambda *args, **kwargs: self.completed(plan, returncode=8),
+            timeout_runner,
+            interrupt_runner,
+        )
+        for runner in cases:
+            with self.subTest(runner=runner):
+                try:
+                    self.execute_plan(
+                        plan,
+                        allow_write=True,
+                        runner=runner,
+                    )
+                except KeyboardInterrupt:
+                    pass
+                follow_up = self.execute_plan(
+                    plan,
+                    allow_write=True,
+                    runner=lambda *args, **kwargs: self.completed(plan),
+                )
+                self.assertEqual("completed", follow_up.outcome)
+
+    def test_lock_paths_are_private_hashed_and_reject_unsafe_entries(self):
+        message = "LOCK-PATH-MESSAGE"
+        session_id = "lock-path-session"
+        plan = build_send_plan(
+            self.session(session_id=session_id),
+            message,
+            executable_resolver=lambda _name: str(self.executable),
+        )
+        self.execute_plan(
+            plan,
+            allow_write=True,
+            runner=lambda *args, **kwargs: self.completed(plan),
+        )
+        lock_root = self.runtime / "send-locks"
+        lock_files = list(lock_root.iterdir())
+
+        self.assertEqual(0o700, stat_mode(self.runtime))
+        self.assertEqual(0o700, stat_mode(lock_root))
+        self.assertEqual(1, len(lock_files))
+        self.assertEqual(0o600, stat_mode(lock_files[0]))
+        self.assertNotIn(session_id, lock_files[0].name)
+        self.assertNotIn(message, lock_files[0].name)
+
+        lock_files[0].chmod(0o644)
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(plan, allow_write=True)
+        self.assertEqual("unsafe_lock", raised.exception.code)
+
+    def test_default_lock_root_uses_runtime_environment(self):
+        plan = self.plan()
+        configured = self.root / "configured-runtime"
+
+        with mock.patch.dict(
+            os.environ,
+            {"AGENT_SIDECAR_RUNTIME_DIR": str(configured)},
+        ):
+            result = execute_send(
+                plan,
+                allow_write=True,
+                refresher=lambda: [self.session()],
+                executable_resolver=lambda _name: str(self.executable),
+                runner=honoring_runner(
+                    lambda *args, **kwargs: self.completed(plan)
+                ),
+            )
+
+        self.assertEqual("completed", result.outcome)
+        self.assertEqual(1, len(list((configured / "send-locks").iterdir())))
+
+    def test_default_home_lock_root_remains_usable(self):
+        plan = self.plan()
+        home = self.root / "home"
+        home.mkdir(mode=0o700, exist_ok=True)
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AGENT_SIDECAR_RUNTIME_DIR", None)
+            with mock.patch("sidecar.inject.Path.home", return_value=home):
+                result = execute_send(
+                    plan,
+                    allow_write=True,
+                    refresher=lambda: [self.session()],
+                    executable_resolver=lambda _name: str(self.executable),
+                    runner=honoring_runner(
+                        lambda *args, **kwargs: self.completed(plan)
+                    ),
+                )
+
+        self.assertEqual("completed", result.outcome)
+        lock_root = home / ".agent_sidecar" / "send-locks"
+        self.assertEqual(1, len(list(lock_root.iterdir())))
+
+    def test_rejects_unsafe_lock_directories_and_symlink_file(self):
+        plan = self.plan()
+
+        unsafe_runtime = self.root / "unsafe-runtime"
+        unsafe_runtime.mkdir(mode=0o700)
+        unsafe_runtime.chmod(0o755)
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                plan,
+                allow_write=True,
+                runtime_dir=unsafe_runtime,
+            )
+        self.assertEqual("unsafe_lock", raised.exception.code)
+
+        symlink_runtime = self.root / "symlink-runtime"
+        symlink_runtime.mkdir(mode=0o700)
+        target_directory = self.root / "target-lock-directory"
+        target_directory.mkdir(mode=0o700)
+        (symlink_runtime / "send-locks").symlink_to(
+            target_directory,
+            target_is_directory=True,
+        )
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                plan,
+                allow_write=True,
+                runtime_dir=symlink_runtime,
+            )
+        self.assertEqual("unsafe_lock", raised.exception.code)
+
+        file_runtime = self.root / "file-runtime"
+        self.execute_plan(
+            plan,
+            allow_write=True,
+            runtime_dir=file_runtime,
+            runner=lambda *args, **kwargs: self.completed(plan),
+        )
+        lock_file = next((file_runtime / "send-locks").iterdir())
+        lock_file.unlink()
+        victim = self.root / "victim"
+        victim.write_text("", encoding="utf-8")
+        victim.chmod(0o600)
+        lock_file.symlink_to(victim)
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                plan,
+                allow_write=True,
+                runtime_dir=file_runtime,
+            )
+        self.assertEqual("unsafe_lock", raised.exception.code)
+
+    def test_rejects_symlinked_runtime_ancestor(self):
+        plan = self.plan()
+        real_ancestor = self.root / "real-ancestor"
+        real_ancestor.mkdir(mode=0o700)
+        linked_ancestor = self.root / "linked-ancestor"
+        linked_ancestor.symlink_to(real_ancestor, target_is_directory=True)
+        calls = []
+
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                plan,
+                allow_write=True,
+                runtime_dir=linked_ancestor / "runtime",
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+
+        self.assertEqual("unsafe_lock", raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_rejects_foreign_owned_ancestor_and_allows_root_sticky(self):
+        plan = self.plan()
+        foreign_ancestor = self.root / "foreign-ancestor"
+        foreign_ancestor.mkdir(mode=0o755)
+        real_entry_stat = inject_module._entry_stat
+        calls = []
+
+        def foreign_entry_stat(parent_fd, name):
+            details = real_entry_stat(parent_fd, name)
+            if name != "foreign-ancestor":
+                return details
+            values = list(details)
+            values[4] = os.geteuid() + 1
+            return os.stat_result(values)
+
+        with mock.patch(
+            "sidecar.inject._entry_stat",
+            side_effect=foreign_entry_stat,
+        ):
+            with self.assertRaises(SendError) as raised:
+                self.execute_plan(
+                    plan,
+                    allow_write=True,
+                    runtime_dir=foreign_ancestor / "runtime",
+                    runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+                )
+
+        self.assertEqual("unsafe_lock", raised.exception.code)
+        self.assertEqual([], calls)
+
+        values = list(os.stat(foreign_ancestor))
+        values[0] = stat.S_IFDIR | stat.S_ISVTX | 0o777
+        values[4] = 0
+        inject_module._validate_directory(
+            os.stat_result(values),
+            private=False,
+        )
+
+    def test_mkdir_eexist_race_reopens_once_and_validates(self):
+        plan = self.plan()
+        parent = self.root / "mkdir-race-parent"
+        parent.mkdir(mode=0o700)
+        runtime = parent / "race-runtime"
+        real_mkdir = os.mkdir
+        target_mkdir_calls = []
+        runner_calls = []
+
+        def racing_mkdir(name, mode=0o777, *, dir_fd=None):
+            if name == "race-runtime":
+                target_mkdir_calls.append((name, mode, dir_fd))
+                real_mkdir(name, mode, dir_fd=dir_fd)
+                raise FileExistsError("competing creator")
+            return real_mkdir(name, mode, dir_fd=dir_fd)
+
+        with mock.patch(
+            "sidecar.inject._require_anchored_lock_support",
+        ), mock.patch("sidecar.inject.os.mkdir", side_effect=racing_mkdir):
+            result = self.execute_plan(
+                plan,
+                allow_write=True,
+                runtime_dir=runtime,
+                runner=lambda *args, **kwargs: (
+                    runner_calls.append((args, kwargs))
+                    or self.completed(plan)
+                ),
+            )
+
+        self.assertEqual("completed", result.outcome)
+        self.assertEqual(1, len(target_mkdir_calls))
+        self.assertEqual(1, len(runner_calls))
+        self.assertEqual(0o700, stat_mode(runtime))
+
+    def test_detects_runtime_ancestor_and_lock_directory_swaps(self):
+        plan = self.plan()
+        calls = []
+
+        ancestor = self.root / "swap-ancestor"
+        ancestor.mkdir(mode=0o700)
+        nested = ancestor / "nested"
+        nested.mkdir(mode=0o700)
+        runtime = nested / "runtime"
+
+        def swap_ancestor():
+            moved = ancestor / "moved-nested"
+            nested.rename(moved)
+            nested.symlink_to(moved, target_is_directory=True)
+            return [self.session()]
+
+        result = self.execute_plan(
+            plan,
+            allow_write=True,
+            runtime_dir=runtime,
+            refresher=swap_ancestor,
+            runner=lambda *args, **kwargs: (
+                calls.append((args, kwargs)) or self.completed(plan)
+            ),
+        )
+        self.assertEqual("completed", result.outcome)
+        self.assertEqual(1, len(calls))
+
+        lock_runtime = self.root / "lock-directory-swap"
+
+        def swap_lock_directory():
+            lock_directory = lock_runtime / "send-locks"
+            lock_directory.rename(lock_runtime / "old-send-locks")
+            lock_directory.mkdir(mode=0o700)
+            return [self.session()]
+
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                plan,
+                allow_write=True,
+                runtime_dir=lock_runtime,
+                refresher=swap_lock_directory,
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+        self.assertEqual("unsafe_lock", raised.exception.code)
+        self.assertEqual(1, len(calls))
+
+    def test_request_id_replays_success_without_response_or_second_spawn(self):
+        plan = self.plan(message="REPLAY-SECRET")
+        calls = []
+
+        def runner(*args, **kwargs):
+            calls.append((args, kwargs))
+            return self.completed(
+                plan,
+                stdout=b'{"result":"stored response"}',
+            )
+
+        first = self.execute_plan(
+            plan,
+            allow_write=True,
+            request_id="request-success",
+            runner=runner,
+        )
+        replay = self.execute_plan(
+            plan,
+            allow_write=True,
+            request_id="request-success",
+            runner=lambda *args, **kwargs: self.fail("must not spawn"),
+        )
+
+        self.assertEqual("completed", first.outcome)
+        self.assertFalse(first.replayed)
+        self.assertEqual("request-success", first.request_id)
+        self.assertEqual("completed", replay.outcome)
+        self.assertTrue(replay.replayed)
+        self.assertEqual("", replay.response)
+        self.assertEqual("", replay.stderr)
+        self.assertEqual(1, len(calls))
+
+    def test_replay_identity_ignores_transcript_executable_and_wal_changes(self):
+        message = "stable replay message"
+        plan = self.plan(message=message)
+        calls = []
+
+        def runner(*args, **kwargs):
+            calls.append((args, kwargs))
+            return self.completed(plan)
+
+        first = self.execute_plan(
+            plan,
+            allow_write=True,
+            request_id="request-stable-source",
+            runner=runner,
+        )
+        self.transcript.write_text('{"mutated":true}\n', encoding="utf-8")
+        transcript_plan = self.plan(message=message)
+        transcript_replay = self.execute_plan(
+            transcript_plan,
+            allow_write=True,
+            request_id="request-stable-source",
+            runner=lambda *args, **kwargs: self.fail("must not spawn"),
+        )
+        self.executable.write_text(
+            "#!/bin/sh\nprintf changed\n",
+            encoding="utf-8",
+        )
+        self.executable.chmod(0o700)
+        executable_plan = self.plan(message=message)
+        executable_replay = self.execute_plan(
+            executable_plan,
+            allow_write=True,
+            request_id="request-stable-source",
+            runner=lambda *args, **kwargs: self.fail("must not spawn"),
+        )
+
+        self.assertEqual("completed", first.outcome)
+        self.assertTrue(transcript_replay.replayed)
+        self.assertTrue(executable_replay.replayed)
+        self.assertEqual(1, len(calls))
+
+        wal = Path(str(self.transcript) + "-wal")
+        extra = {
+            "source": "cli",
+            "store": str(self.transcript),
+            "wal": str(wal),
+            "transcript_kind": "cursor-chat-sqlite",
+            "directory_session_id": "session-123",
+        }
+
+        def cursor_session():
+            return self.session("cursor-cli", extra=dict(extra))
+
+        cursor_plan = build_send_plan(
+            cursor_session(),
+            message,
+            executable_resolver=lambda _name: str(self.executable),
+        )
+        cursor_calls = []
+        self.execute_plan(
+            cursor_plan,
+            allow_write=True,
+            request_id="request-stable-wal",
+            refresher=lambda: [cursor_session()],
+            runner=lambda *args, **kwargs: (
+                cursor_calls.append((args, kwargs))
+                or self.completed(cursor_plan)
+            ),
+        )
+        wal.write_bytes(b"changed")
+        changed_wal_plan = build_send_plan(
+            cursor_session(),
+            message,
+            executable_resolver=lambda _name: str(self.executable),
+        )
+        wal_replay = self.execute_plan(
+            changed_wal_plan,
+            allow_write=True,
+            request_id="request-stable-wal",
+            refresher=lambda: [cursor_session()],
+            runner=lambda *args, **kwargs: self.fail("must not spawn"),
+        )
+        self.assertTrue(wal_replay.replayed)
+        self.assertEqual(1, len(cursor_calls))
+
+    def test_same_request_id_with_changed_message_conflicts(self):
+        first = self.plan(message="first message")
+        changed = self.plan(message="changed message")
+        self.execute_plan(
+            first,
+            allow_write=True,
+            request_id="request-changed-message",
+            runner=lambda *args, **kwargs: self.completed(first),
+        )
+        calls = []
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                changed,
+                allow_write=True,
+                request_id="request-changed-message",
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+        self.assertEqual("request_conflict", raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_request_id_replays_every_non_success_outcome(self):
+        cases = (
+            (
+                "failed",
+                lambda plan: self.completed(plan, returncode=9),
+                "native_exit",
+            ),
+            (
+                "timed_out",
+                lambda plan: (_ for _ in ()).throw(
+                    subprocess.TimeoutExpired(plan.argv, 1)
+                ),
+                "timeout",
+            ),
+            (
+                "overflow",
+                lambda plan: self.completed(plan, overflow="stdout"),
+                "stdout_overflow",
+            ),
+        )
+        for outcome, completed, error_code in cases:
+            with self.subTest(outcome=outcome):
+                plan = self.plan()
+                request_id = "request-" + outcome
+                first = self.execute_plan(
+                    plan,
+                    allow_write=True,
+                    request_id=request_id,
+                    runner=lambda *args, completed=completed, **kwargs: completed(
+                        plan
+                    ),
+                )
+                replay = self.execute_plan(
+                    plan,
+                    allow_write=True,
+                    request_id=request_id,
+                    runner=lambda *args, **kwargs: self.fail("must not spawn"),
+                )
+
+                self.assertEqual(outcome, first.outcome)
+                self.assertEqual(outcome, replay.outcome)
+                self.assertEqual(error_code, replay.error_code)
+                self.assertTrue(replay.replayed)
+                self.assertEqual("", replay.response)
+                self.assertEqual("", replay.stderr)
+
+    def test_same_request_id_for_different_target_is_preflight_conflict(self):
+        first = self.plan(message="private")
+        other = build_send_plan(
+            self.session(session_id="different-session"),
+            "private",
+            executable_resolver=lambda _name: str(self.executable),
+        )
+        self.execute_plan(
+            first,
+            allow_write=True,
+            request_id="request-conflict",
+            runner=lambda *args, **kwargs: self.completed(first),
+        )
+        calls = []
+
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                other,
+                allow_write=True,
+                request_id="request-conflict",
+                refresher=lambda: [
+                    self.session(session_id="different-session")
+                ],
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+
+        self.assertEqual("request_conflict", raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_same_session_in_different_project_is_request_conflict(self):
+        first = self.plan(message="private")
+        other_project = self.root / "other-request-project"
+        other_project.mkdir()
+        other = build_send_plan(
+            self.session(project=other_project),
+            "private",
+            executable_resolver=lambda _name: str(self.executable),
+        )
+        self.execute_plan(
+            first,
+            allow_write=True,
+            request_id="request-project-conflict",
+            runner=lambda *args, **kwargs: self.completed(first),
+        )
+        calls = []
+        with self.assertRaises(SendError) as raised:
+            self.execute_plan(
+                other,
+                allow_write=True,
+                request_id="request-project-conflict",
+                refresher=lambda: [self.session(project=other_project)],
+                runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+            )
+        self.assertEqual("request_conflict", raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_pending_request_replays_unknown_without_spawn(self):
+        plan = self.plan()
+        identity = inject_module._send_audit_identity(
+            plan,
+            "private prompt",
+        )
+        store = inject_module.SendAuditStore(self.runtime)
+        self.assertIsNone(store.reserve("request-pending", identity))
+        calls = []
+
+        replay = self.execute_plan(
+            plan,
+            allow_write=True,
+            request_id="request-pending",
+            runner=lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+        self.assertEqual("request_pending", replay.outcome)
+        self.assertEqual("unknown", replay.delivery)
+        self.assertEqual("request_pending", replay.error_code)
+        self.assertTrue(replay.replayed)
+        self.assertEqual([], calls)
+
+    def test_same_request_id_concurrently_reserves_and_spawns_once(self):
+        plan = self.plan()
+        started = threading.Event()
+        release = threading.Event()
+        results = []
+        calls = []
+
+        def runner(*args, **kwargs):
+            calls.append((args, kwargs))
+            started.set()
+            self.assertTrue(release.wait(2.0))
+            return self.completed(plan)
+
+        def execute():
+            try:
+                results.append(
+                    self.execute_plan(
+                        plan,
+                        allow_write=True,
+                        request_id="request-thread",
+                        runner=runner,
+                    )
+                )
+            except BaseException as error:
+                results.append(error)
+
+        worker = threading.Thread(target=execute)
+        worker.start()
+        self.assertTrue(started.wait(2.0))
+        replay = self.execute_plan(
+            plan,
+            allow_write=True,
+            request_id="request-thread",
+            runner=lambda *args, **kwargs: self.fail("must not spawn"),
+        )
+        release.set()
+        worker.join(2.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual("request_pending", replay.outcome)
+        self.assertTrue(replay.replayed)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("completed", results[0].outcome)
+
+    def test_auto_request_id_and_terminal_audit_failure_semantics(self):
+        plan = self.plan()
+        automatic = self.execute_plan(
+            plan,
+            allow_write=True,
+            runner=lambda *args, **kwargs: self.completed(plan),
+        )
+        self.assertTrue(automatic.request_id)
+        self.assertFalse(automatic.replayed)
+
+        with mock.patch(
+            "sidecar.inject.AuditNamespace.append_terminal",
+            side_effect=OSError("audit failed"),
+        ):
+            failed = self.execute_plan(
+                plan,
+                allow_write=True,
+                request_id="request-audit-failure",
+                runner=lambda *args, **kwargs: self.completed(plan),
+            )
+        self.assertEqual("audit_error", failed.outcome)
+        self.assertEqual("unknown", failed.delivery)
+        self.assertEqual("audit_error", failed.error_code)
+
+    def test_key_mutation_after_spawn_makes_delivery_unknown(self):
+        plan = self.plan()
+
+        def runner(*args, **kwargs):
+            key_path = self.runtime / "audit.key"
+            key_path.write_bytes(b"z" * 32)
+            key_path.chmod(0o600)
+            return self.completed(plan)
+
+        result = self.execute_plan(
+            plan,
+            allow_write=True,
+            request_id="request-key-post-spawn",
+            runner=runner,
+        )
+        self.assertEqual("audit_error", result.outcome)
+        self.assertEqual("unknown", result.delivery)
+        self.assertEqual("audit_error", result.error_code)
+
+    def test_send_lock_parent_fsync_failure_prevents_spawn(self):
+        plan = self.plan()
+        runtime = self.root / "send-lock-parent-fsync"
+        send_locks = runtime / "send-locks"
+        calls = []
+        real_fsync = os.fsync
+
+        def fail_after_send_lock_creation(descriptor):
+            details = os.fstat(descriptor)
+            if send_locks.exists():
+                runtime_details = os.stat(runtime)
+                if (details.st_dev, details.st_ino) == (
+                    runtime_details.st_dev,
+                    runtime_details.st_ino,
+                ):
+                    raise OSError("send lock parent fsync failed")
+            return real_fsync(descriptor)
+
+        with mock.patch(
+            "sidecar.inject.os.fsync",
+            side_effect=fail_after_send_lock_creation,
+        ):
+            with self.assertRaises(SendError) as raised:
+                self.execute_plan(
+                    plan,
+                    allow_write=True,
+                    runtime_dir=runtime,
+                    request_id="request-send-lock-fsync",
+                    runner=lambda *args, **kwargs: calls.append(
+                        (args, kwargs)
+                    ),
+                )
+        self.assertEqual("unsafe_lock", raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_audit_never_contains_message_response_or_native_stderr(self):
+        message = "AUDIT-MESSAGE-SECRET"
+        plan = self.plan(message=message)
+        response = "AUDIT-RESPONSE-SECRET"
+        native_error = "AUDIT-STDERR-SECRET"
+
+        self.execute_plan(
+            plan,
+            allow_write=True,
+            request_id="request-hygiene",
+            runner=lambda *args, **kwargs: self.completed(
+                plan,
+                stdout=json.dumps({"result": response}).encode("utf-8"),
+                stderr=native_error.encode("utf-8"),
+            ),
+        )
+        payload = (self.runtime / "audit.jsonl").read_bytes()
+
+        for sensitive in (message, response, native_error):
+            self.assertNotIn(sensitive.encode("utf-8"), payload)
+        self.assertNotIn(
+            hashlib.sha256(message.encode("utf-8")).hexdigest().encode("ascii"),
+            payload,
+        )
 
 
 class NativeOutputTests(InjectionTestCase):
@@ -524,7 +1781,7 @@ class NativeOutputTests(InjectionTestCase):
 
     def execute_output(self, agent, stdout, *, message="private prompt"):
         plan = self.plan(agent, message)
-        return execute_send(
+        return self.execute_plan(
             plan,
             allow_write=True,
             runner=lambda *args, **kwargs: self.completed(plan, stdout),
@@ -633,14 +1890,14 @@ class NativeOutputTests(InjectionTestCase):
                 stderr="timeout stderr \udfff",
             )
 
-        timed_out = execute_send(
+        timed_out = self.execute_plan(
             timeout_plan,
             allow_write=True,
             runner=timeout_runner,
         )
 
         failed_plan = self.plan("cursor-cli")
-        failed = execute_send(
+        failed = self.execute_plan(
             failed_plan,
             allow_write=True,
             runner=lambda *args, **kwargs: self.completed(
@@ -670,11 +1927,53 @@ class NativeOutputTests(InjectionTestCase):
         self.assertEqual(valid, result.response)
         self.assert_machine_output_safe(result)
 
+    def test_output_hygiene_redacts_json_forms_and_preserves_controls(self):
+        message = 'secret "line"\n雪'
+        escaped = json.dumps(message, ensure_ascii=False)[1:-1]
+        ascii_escaped = json.dumps(message, ensure_ascii=True)[1:-1]
+        response = " | ".join(
+            (
+                message,
+                escaped,
+                ascii_escaped,
+                "controls \x1b[31m\tremain",
+                "surrogate \ud800 replaced",
+            )
+        )
+
+        result = self.execute_output(
+            "claude",
+            json.dumps({"result": response}).encode("utf-8"),
+            message=message,
+        )
+
+        self.assertEqual(3, result.response.count("[message redacted]"))
+        self.assertNotIn(message, result.response)
+        self.assertNotIn(escaped, result.response)
+        self.assertNotIn(ascii_escaped, result.response)
+        self.assertIn("controls \x1b[31m\tremain", result.response)
+        self.assertIn("surrogate \ufffd replaced", result.response)
+        self.assert_machine_output_safe(result)
+
+    def test_large_message_is_redacted_from_large_bounded_output(self):
+        message = "s" * MAX_MESSAGE_BYTES
+        prefix = "x" * (256 * 1024)
+        result = self.execute_output(
+            "claude",
+            json.dumps({"result": prefix + message}).encode("utf-8"),
+            message=message,
+        )
+
+        self.assertTrue(result.response.startswith(prefix))
+        self.assertTrue(result.response.endswith("[message redacted]"))
+        self.assertNotIn(message, result.response)
+        self.assert_machine_output_safe(result)
+
     def test_result_repr_dict_and_error_never_retain_submitted_message(self):
         message = "DO-NOT-RETURN-THIS"
         plan = self.plan("claude", message)
         output = json.dumps({"result": "echo " + message}).encode("utf-8")
-        result = execute_send(
+        result = self.execute_plan(
             plan,
             allow_write=True,
             runner=lambda *args, **kwargs: self.completed(
@@ -712,13 +2011,14 @@ class NativeOutputTests(InjectionTestCase):
             executable=original.executable,
             argv=original.argv + ("--dangerously-skip-permissions",),
             cwd=original.cwd,
+            target=original.target,
             input_data=original.input_data,
             prompt_transport=original.prompt_transport,
         )
         calls = []
 
         with self.assertRaises(SendError) as raised:
-            execute_send(
+            self.execute_plan(
                 tampered,
                 allow_write=True,
                 runner=lambda *args, **kwargs: calls.append((args, kwargs)),
