@@ -464,6 +464,7 @@ class ProcessRunnerTests(unittest.TestCase):
             self.assertIs(rejection, raised.exception)
             self.assertFalse(marker.exists())
 
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kqueue required")
     def test_supervisor_preserves_exact_stdin_argv_and_hides_target_argv(self):
         secret_argument = "TARGET-SECRET-ARGUMENT"
         input_data = b"exact supervisor stdin"
@@ -540,6 +541,7 @@ class ProcessRunnerTests(unittest.TestCase):
                 )
         popen.assert_not_called()
 
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kqueue required")
     def test_kqueue_fork_is_permanent_incomplete_without_pid_kill(self):
         class FakeKqueue:
             def __init__(self):
@@ -570,6 +572,7 @@ class ProcessRunnerTests(unittest.TestCase):
             kill.assert_not_called()
             tracker.close()
 
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kqueue required")
     def test_kqueue_event_overflow_is_cleanup_incomplete(self):
         class FakeKqueue:
             def __init__(self):
