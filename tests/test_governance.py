@@ -313,6 +313,17 @@ class GovernanceContractTests(unittest.TestCase):
                 with self.subTest(workflow=path.name, reference=reference):
                     self.assertRegex(reference, r"^[^@\s]+@[0-9a-fA-F]{40}$")
 
+    def test_release_recovery_builds_the_immutable_tag_on_python_39_intel(self):
+        document = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+        release_source = (
+            "${{ github.event_name == 'workflow_dispatch' "
+            "&& inputs.tag || github.ref }}"
+        )
+
+        self.assertEqual(2, document.count("ref: " + release_source))
+        self.assertIn("runs-on: macos-15-intel", document)
+        self.assertIn("sys.version_info[:2] != (3, 9)", document)
+
     def test_documented_canonical_commands_are_backed_by_cli_help(self):
         for path in DOCUMENTATION:
             document = path.read_text(encoding="utf-8")
