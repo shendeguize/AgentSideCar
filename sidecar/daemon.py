@@ -41,10 +41,16 @@ from sidecar.tailer_pool import (
     TailerPool,
 )
 
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
+
 RUNTIME_ENV = "AGENT_SIDECAR_RUNTIME_DIR"
 LEGACY_RUNTIME_ENV = "AGENT_SIDECAR_HOME"
 SOCKET_NAME = "daemon.sock"
 PIDFILE_NAME = "daemon.pid"
+LOCKFILE_NAME = "daemon.lock"
 
 DEFAULT_ACTIVE_INTERVAL = 2.0
 DEFAULT_IDLE_INTERVAL = 5.0
@@ -169,6 +175,7 @@ class SidecarDaemon:
             if pidfile_path is None
             else Path(pidfile_path).expanduser()
         )
+        self.lockfile_path = self.runtime_dir / LOCKFILE_NAME
         self.scanner = Scanner() if scanner is None else scanner
         self.index = IncrementalIndex()
         self.event_bus = bus.EventBus(subscriber_queue_size)
@@ -204,6 +211,7 @@ class SidecarDaemon:
         self._socket_identity: Optional[Tuple[int, int]] = None
         self._pidfile_owned = False
         self._pidfile_identity: Optional[Tuple[int, int]] = None
+        self._runtime_lock_fd: Optional[int] = None
         self._scan_thread: Optional[threading.Thread] = None
         self._client_threads: Set[threading.Thread] = set()
         self._client_sockets: Set[socket.socket] = set()
@@ -589,6 +597,8 @@ class SidecarDaemon:
         ):
             raise RuntimePathError("daemon runtime directory changed while securing it")
 
+        self._acquire_runtime_lock()
+
         try:
             socket_stat = self.socket_path.lstat()
         except FileNotFoundError:
@@ -623,6 +633,68 @@ class SidecarDaemon:
             self.pidfile_path.unlink()
         except OSError as error:
             raise RuntimePathError("cannot remove stale pidfile: {}".format(error))
+
+    def _acquire_runtime_lock(self) -> None:
+        """Claim the stable runtime lock before inspecting ownership artifacts."""
+
+        if _fcntl is None:
+            raise RuntimePathError(
+                "daemon ownership locking is unsupported on this platform "
+                "(fcntl required)"
+            )
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(str(self.lockfile_path), flags, 0o600)
+        except OSError as error:
+            raise RuntimePathError("cannot open daemon ownership lock") from error
+        try:
+            opened = os.fstat(descriptor)
+            try:
+                current = self.lockfile_path.lstat()
+            except OSError as error:
+                raise RuntimePathError("cannot inspect daemon ownership lock") from error
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.geteuid()
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino)
+                != (current.st_dev, current.st_ino)
+            ):
+                raise RuntimePathError("daemon ownership lock is unsafe")
+            if stat.S_IMODE(opened.st_mode) != 0o600:
+                os.fchmod(descriptor, 0o600)
+                opened = os.fstat(descriptor)
+            if stat.S_IMODE(opened.st_mode) != 0o600:
+                raise RuntimePathError("daemon ownership lock is not private")
+            try:
+                _fcntl.flock(descriptor, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno in (errno.EACCES, errno.EAGAIN):
+                    raise DaemonAlreadyRunning(
+                        "daemon runtime is already owned"
+                    ) from error
+                raise RuntimePathError("cannot lock daemon runtime") from error
+            current = self.lockfile_path.lstat()
+            if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                raise RuntimePathError("daemon ownership lock changed while locking")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._runtime_lock_fd = descriptor
+
+    def _release_runtime_lock(self) -> None:
+        """Release ownership without unlinking the stable lock inode."""
+
+        descriptor = self._runtime_lock_fd
+        self._runtime_lock_fd = None
+        if descriptor is None:
+            return
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
 
     def _write_pidfile(self) -> None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -1089,14 +1161,17 @@ class SidecarDaemon:
                 if not http_closed:
                     self._close_http_server()
             finally:
-                self._log_event(
-                    "shutdown",
-                    timed_out=self.shutdown_timed_out,
-                    durable=True,
-                )
-                self._close_daemon_log()
-                self._remove_owned_paths()
-                self._finish_run(run_done)
+                try:
+                    self._log_event(
+                        "shutdown",
+                        timed_out=self.shutdown_timed_out,
+                        durable=True,
+                    )
+                    self._close_daemon_log()
+                    self._remove_owned_paths()
+                finally:
+                    self._release_runtime_lock()
+                    self._finish_run(run_done)
 
 
 def run_foreground(

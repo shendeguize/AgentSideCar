@@ -32,12 +32,45 @@ jobs:
       artifact_name: ${{ steps.package.outputs.artifact_name }}
 
     steps:
-      # Both paths build the immutable tag; dispatch exists to recover a failed
-      # publication without rebuilding from a newer branch tip.
-      - name: Check out release source
+      # Dispatch is build-and-verify-only diagnostics for an existing tag.
+      # Publication recovery reruns the original tag-push workflow.
+      - name: Validate release source ref
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          semver_tag='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$'
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            candidate="${DISPATCH_TAG}"
+          else
+            if [[ "${GITHUB_REF}" != refs/tags/* ]]; then
+              echo "release push must use refs/tags/: ${GITHUB_REF}" >&2
+              exit 1
+            fi
+            candidate="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ ! "${candidate}" =~ ${semver_tag} ]]; then
+            echo "release tag is not strict SemVer: ${candidate}" >&2
+            exit 1
+          fi
+          if [[ "${candidate}" != "${RELEASE_TAG}" ]]; then
+            echo "release tag context mismatch" >&2
+            exit 1
+          fi
+
+      - name: Check out dispatched release tag
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check out pushed release tag
+        if: github.event_name == 'push'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -148,10 +181,41 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Check out installer source
+      - name: Validate release source ref
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          semver_tag='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$'
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            candidate="${DISPATCH_TAG}"
+          else
+            if [[ "${GITHUB_REF}" != refs/tags/* ]]; then
+              echo "release push must use refs/tags/: ${GITHUB_REF}" >&2
+              exit 1
+            fi
+            candidate="${GITHUB_REF#refs/tags/}"
+          fi
+          if [[ ! "${candidate}" =~ ${semver_tag} ]]; then
+            echo "release tag is not strict SemVer: ${candidate}" >&2
+            exit 1
+          fi
+          if [[ "${candidate}" != "${RELEASE_TAG}" ]]; then
+            echo "release tag context mismatch" >&2
+            exit 1
+          fi
+
+      - name: Check out dispatched release tag
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Check out pushed release tag
+        if: github.event_name == 'push'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -229,6 +293,7 @@ jobs:
 
   release:
     name: 3. Attest and publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: [build, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -243,6 +308,18 @@ jobs:
         with:
           name: release-${{ env.RELEASE_TAG }}
           path: dist
+
+      - name: Assert tag-push publication context
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" != "push" ]]; then
+            echo "publication requires a tag-push event" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_REF}" != "refs/tags/${RELEASE_TAG}" ]]; then
+            echo "publication ref does not match release tag" >&2
+            exit 1
+          fi
 
       - name: Attest build provenance
         id: provenance

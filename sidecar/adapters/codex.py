@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sqlite3
+import stat
+import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, Hashable, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -26,6 +30,11 @@ _DISCOVERY_BYTES = 512 * 1024
 _DISCOVERY_RECORDS = 256
 _STATUS_TAIL_BYTES = 128 * 1024
 _STATUS_TAIL_RECORDS = 256
+_SNAPSHOT_ATTEMPTS = 3
+_SNAPSHOT_BACKOFF_SECONDS = 0.002
+_SNAPSHOT_COPY_BYTES = 1024 * 1024
+_SNAPSHOT_DB_BYTES = 64 * 1024 * 1024
+_SNAPSHOT_WAL_BYTES = 256 * 1024 * 1024
 # Native DB and rollout-tail statuses are snapshots, not durable leases.
 # Keep this aligned with the state engine's default 15-minute idle threshold.
 CODEX_STATUS_MAX_AGE_SECONDS = 15.0 * 60.0
@@ -182,82 +191,215 @@ def _quoted_identifier(identifier: str) -> str:
     return '"{}"'.format(identifier.replace('"', '""'))
 
 
-def _latest_thread_status(path: Path, session_id: str) -> Optional[Status]:
-    if not session_id or not path.is_file():
+_FileSignature = Tuple[int, int, int, int, int]
+
+
+def _regular_signature(
+    path: Path,
+    maximum: int,
+    *,
+    required: bool,
+) -> Optional[_FileSignature]:
+    try:
+        details = os.stat(str(path))
+    except FileNotFoundError:
+        if required:
+            raise
+        return None
+    if not stat.S_ISREG(details.st_mode):
+        raise OSError("Codex status source is not a regular file")
+    size = int(details.st_size)
+    if size < 0 or size > maximum:
+        raise OSError("Codex status source exceeds snapshot limit")
+    return (
+        int(details.st_dev),
+        int(details.st_ino),
+        size,
+        int(getattr(details, "st_mtime_ns", int(details.st_mtime * 1e9))),
+        int(getattr(details, "st_ctime_ns", int(details.st_ctime * 1e9))),
+    )
+
+
+def _copy_regular_file(source: Path, destination: Path, expected_size: int) -> int:
+    copied = 0
+    with source.open("rb") as reader, destination.open("xb") as writer:
+        while copied < expected_size:
+            chunk = reader.read(min(_SNAPSHOT_COPY_BYTES, expected_size - copied))
+            if not chunk:
+                break
+            writer.write(chunk)
+            copied += len(chunk)
+    return copied
+
+
+def _status_from_connection(
+    connection: sqlite3.Connection,
+    session_id: str,
+) -> Optional[Status]:
+    connection.execute("PRAGMA query_only = ON")
+    columns = [
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(thread_turns)")
+        if len(row) > 1
+    ]
+    column_names = {name.lower(): name for name in columns}
+    status_column = next(
+        (column_names[name] for name in ("status", "state") if name in column_names),
+        None,
+    )
+    thread_column = next(
+        (
+            column_names[name]
+            for name in (
+                "thread_id",
+                "threadid",
+                "session_id",
+                "sessionid",
+                "conversation_id",
+            )
+            if name in column_names
+        ),
+        None,
+    )
+    if status_column is None or thread_column is None:
         return None
 
+    order_column = next(
+        (
+            column_names[name]
+            for name in (
+                "updated_at",
+                "started_at",
+                "created_at",
+                "turn_id",
+                "completed_at",
+            )
+            if name in column_names
+        ),
+        None,
+    )
+    order_options = ["rowid DESC"]
+    if order_column:
+        order_options.append("{} DESC".format(_quoted_identifier(order_column)))
+    for order_sql in order_options:
+        query = (
+            "SELECT {status} FROM thread_turns "
+            "WHERE {thread} = ? ORDER BY {order} LIMIT 1"
+        ).format(
+            status=_quoted_identifier(status_column),
+            thread=_quoted_identifier(thread_column),
+            order=order_sql,
+        )
+        try:
+            row = connection.execute(query, (session_id,)).fetchone()
+        except sqlite3.DatabaseError:
+            continue
+        return _status_from_native(row[0]) if row else None
+    return None
+
+
+def _read_copied_status(path: Path, session_id: str) -> Optional[Status]:
+    source_wal = Path(str(path) + "-wal")
+    for attempt in range(_SNAPSHOT_ATTEMPTS):
+        try:
+            before_db = _regular_signature(
+                path,
+                _SNAPSHOT_DB_BYTES,
+                required=True,
+            )
+            before_wal = _regular_signature(
+                source_wal,
+                _SNAPSHOT_WAL_BYTES,
+                required=False,
+            )
+        except OSError:
+            break
+        if before_db is None:
+            break
+
+        copy_error: Optional[OSError] = None
+        with tempfile.TemporaryDirectory(prefix="agent-sidecar-codex-") as temporary:
+            copied_db = Path(temporary) / "snapshot.sqlite"
+            copied_wal = Path(str(copied_db) + "-wal")
+            try:
+                db_bytes = _copy_regular_file(path, copied_db, before_db[2])
+                wal_bytes = (
+                    _copy_regular_file(source_wal, copied_wal, before_wal[2])
+                    if before_wal is not None
+                    else 0
+                )
+            except OSError as error:
+                copy_error = error
+                db_bytes = -1
+                wal_bytes = -1
+
+            try:
+                after_db = _regular_signature(
+                    path,
+                    _SNAPSHOT_DB_BYTES,
+                    required=False,
+                )
+                after_wal = _regular_signature(
+                    source_wal,
+                    _SNAPSHOT_WAL_BYTES,
+                    required=False,
+                )
+            except OSError:
+                after_db = None
+                after_wal = None
+            signature_race = before_db != after_db or before_wal != after_wal
+            incomplete_copy = (
+                db_bytes != before_db[2]
+                or (before_wal is not None and wal_bytes != before_wal[2])
+            )
+            if signature_race:
+                if attempt + 1 < _SNAPSHOT_ATTEMPTS:
+                    time.sleep(_SNAPSHOT_BACKOFF_SECONDS * (2**attempt))
+                continue
+            if copy_error is not None or incomplete_copy:
+                break
+
+            connection: Optional[sqlite3.Connection] = None
+            try:
+                connection = sqlite3.connect(
+                    copied_db.as_uri() + "?mode=ro",
+                    uri=True,
+                    timeout=0.1,
+                )
+                return _status_from_connection(connection, session_id)
+            except sqlite3.DatabaseError:
+                break
+            finally:
+                if connection is not None:
+                    connection.close()
+    return _read_immutable_status(path, session_id)
+
+
+def _read_immutable_status(path: Path, session_id: str) -> Optional[Status]:
     connection: Optional[sqlite3.Connection] = None
     try:
+        # immutable=1 prevents SQLite from taking locks or consulting source
+        # sidecars. This fallback may omit WAL-only rows, but remains non-mutating.
         connection = sqlite3.connect(
-            path.resolve().as_uri() + "?mode=ro",
+            path.resolve().as_uri() + "?mode=ro&immutable=1",
             uri=True,
             timeout=0.1,
         )
-        connection.execute("PRAGMA query_only = ON")
-        columns = [
-            str(row[1])
-            for row in connection.execute("PRAGMA table_info(thread_turns)")
-            if len(row) > 1
-        ]
-        column_names = {name.lower(): name for name in columns}
-        status_column = next(
-            (column_names[name] for name in ("status", "state") if name in column_names),
-            None,
-        )
-        thread_column = next(
-            (
-                column_names[name]
-                for name in (
-                    "thread_id",
-                    "threadid",
-                    "session_id",
-                    "sessionid",
-                    "conversation_id",
-                )
-                if name in column_names
-            ),
-            None,
-        )
-        if status_column is None or thread_column is None:
-            return None
-
-        order_column = next(
-            (
-                column_names[name]
-                for name in (
-                    "updated_at",
-                    "started_at",
-                    "created_at",
-                    "turn_id",
-                    "completed_at",
-                )
-                if name in column_names
-            ),
-            None,
-        )
-        order_options = ["rowid DESC"]
-        if order_column:
-            order_options.append("{} DESC".format(_quoted_identifier(order_column)))
-        for order_sql in order_options:
-            query = (
-                "SELECT {status} FROM thread_turns "
-                "WHERE {thread} = ? ORDER BY {order} LIMIT 1"
-            ).format(
-                status=_quoted_identifier(status_column),
-                thread=_quoted_identifier(thread_column),
-                order=order_sql,
-            )
-            try:
-                row = connection.execute(query, (session_id,)).fetchone()
-            except sqlite3.DatabaseError:
-                continue
-            return _status_from_native(row[0]) if row else None
-        return None
+        return _status_from_connection(connection, session_id)
     except (OSError, sqlite3.DatabaseError):
         return None
     finally:
         if connection is not None:
             connection.close()
+
+
+def _latest_thread_status(path: Path, session_id: str) -> Optional[Status]:
+    if not session_id:
+        return None
+    try:
+        return _read_copied_status(path, session_id)
+    except (OSError, sqlite3.DatabaseError):
+        return None
 
 
 def _status_db_path(session: Session) -> Optional[Path]:

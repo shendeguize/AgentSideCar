@@ -1147,21 +1147,27 @@ class ProcessRunnerTests(unittest.TestCase):
 
     def test_line_stream_is_indefinite_after_first_line_then_cancels(self):
         cancel_event = threading.Event()
+        startup_timeout = 2
+        clock_offset = 0.0
+
+        def monotonic():
+            return time.monotonic() + clock_offset
+
         code = (
             "import os,time;"
-            "os.write(1,b'ready\\n');"
-            "time.sleep(.3);"
-            "os.write(1,b'still-running\\n');"
+            "os.write(1,b'ready\\nstill-running\\n');"
             "time.sleep(60)"
         )
         with BoundedLineStream(
             [sys.executable, "-c", code],
             line_limit=64,
-            startup_timeout=0.1,
+            startup_timeout=startup_timeout,
             cancel_event=cancel_event,
+            monotonic=monotonic,
         ) as stream:
             self.assertEqual(b"ready", next(stream))
             self.assertTrue(stream.ready)
+            clock_offset += startup_timeout + 1
             self.assertEqual(b"still-running", next(stream))
             cancel_event.set()
             with self.assertRaises(BoundedLineStreamCancelledError) as raised:
@@ -1173,23 +1179,28 @@ class ProcessRunnerTests(unittest.TestCase):
         )
 
     def test_line_stream_supports_caller_defined_ready_and_deadline_reset(self):
-        code = (
-            "import os,time;"
-            "os.write(1,b'connecting\\n');"
-            "time.sleep(.15);"
-            "os.write(1,b'ready\\n')"
-        )
+        startup_timeout = 2
+        reset_timeout = 5
+        clock_offset = 0.0
+
+        def monotonic():
+            return time.monotonic() + clock_offset
+
+        code = "import os;os.write(1,b'connecting\\nready\\n')"
         with BoundedLineStream(
             [sys.executable, "-c", code],
             line_limit=64,
-            startup_timeout=0.1,
+            startup_timeout=startup_timeout,
             ready_on_first_line=False,
+            monotonic=monotonic,
         ) as stream:
             self.assertEqual(b"connecting", next(stream))
             self.assertFalse(stream.ready)
-            stream.reset_startup_timeout(0.5)
+            stream.reset_startup_timeout(reset_timeout)
+            clock_offset += startup_timeout + 1
             self.assertEqual(b"ready", next(stream))
             stream.mark_ready()
+            clock_offset += reset_timeout + 1
             with self.assertRaises(StopIteration):
                 next(stream)
 

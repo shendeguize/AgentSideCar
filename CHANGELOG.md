@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-24
+
 ### Added
 
 - A dependency-free GitHub Pages landing page and zero-backend synthetic panel
@@ -23,11 +25,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added deterministic site, screenshot, and Pages deployment checks to the
   repository quality and release-governance surface.
 
+### Fixed
+
+- Serialized daemon runtime ownership before stale socket and PID cleanup so
+  concurrent starters cannot replace the active owner's artifacts.
+- Read Codex SQLite and WAL status through bounded private snapshots without
+  mutating the live database or its sidecars.
+- Serialized installer install and uninstall operations, including stale-lock
+  recovery and signal-safe cleanup.
+- Replaced scheduler-sensitive process-stream timing assertions with injected
+  monotonic deadlines while preserving timeout and cancellation coverage.
+- Qualified release recovery through `refs/tags/<tag>` and required checked-out
+  `HEAD` to equal the peeled tag commit.
+
 ### Security
 
 - Made release installation fail closed on malformed versions, asset or
   checksum mismatches, unrecognized executable targets, and unowned uninstall
   paths; remote skill files are pinned to the resolved immutable release tag.
+- Rejected non-regular transcript sources before adapter parsing so FIFOs and
+  other special files cannot block discovery.
+- Restricted release attestation and publication to tag-push runs whose source
+  ref matches the immutable release tag; manual dispatch is build-and-verify
+  only.
 
 ## [0.4.1] - 2026-08-24
 
@@ -105,7 +125,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI and terminal-dashboard workflows for session listing, status, watching,
   and process inspection.
 
-[Unreleased]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/shendeguize/AgentSideCar/releases/tag/v0.3.0

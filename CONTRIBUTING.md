@@ -144,8 +144,16 @@ Record evidence for each applicable item before merge:
    ```
 
    The tag-triggered release workflow validates version, changelog, ancestry,
-   and artifacts before publishing the GitHub Release. Never move, delete, or
-   recreate a published `v*` tag.
+   the checked-out `HEAD` against the peeled tag commit, and artifacts before
+   publishing the GitHub Release. Never move, delete, or recreate a published
+   `v*` tag.
+
+`workflow_dispatch` is build-and-verify-only recovery diagnostics. It accepts
+only a strict existing `vX.Y.Z` or `vX.Y.Z-rc.N` tag, checks out the qualified
+`refs/tags/<tag>` ref, and never attests, publishes, uploads to a GitHub
+Release, or clobbers release assets. To recover a failed publication, rerun the
+original tag-triggered workflow run so provenance remains bound to the tag-push
+source; never use a dispatch run to publish.
 
 The existing `v0.4.0` tag predates this dual-track procedure and remains
 historical. Do not rewrite it; this procedure governs subsequent releases.

@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -10,6 +11,7 @@ from unittest import mock
 import sidecar.adapters.claude as claude_module
 import sidecar.adapters.codex as codex_module
 import sidecar.adapters.cursor as cursor_module
+from sidecar.adapters.base import file_signature
 from sidecar.adapters.claude import ClaudeAdapter
 from sidecar.adapters.codex import CodexAdapter
 from sidecar.adapters.cursor import CursorAdapter
@@ -150,6 +152,75 @@ class DiscoveryMetadataCacheTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_file_signature_accepts_regular_file(self):
+        transcript = self.claude_transcript()
+
+        signature = file_signature(transcript)
+
+        self.assertIsNotNone(signature)
+        assert signature is not None
+        self.assertEqual(os.path.abspath(os.fsdecode(transcript)), signature[0])
+        self.assertEqual(transcript.stat().st_size, signature[2])
+
+    def test_file_signature_accepts_symlink_to_regular_file(self):
+        transcript = self.claude_transcript()
+        symlink = transcript.with_name("linked.jsonl")
+        try:
+            symlink.symlink_to(transcript)
+        except (NotImplementedError, OSError) as error:
+            self.skipTest("regular-file symlinks unavailable: {}".format(error))
+
+        target_signature = file_signature(transcript)
+        symlink_signature = file_signature(symlink)
+
+        self.assertIsNotNone(target_signature)
+        self.assertIsNotNone(symlink_signature)
+        assert target_signature is not None
+        assert symlink_signature is not None
+        self.assertEqual(target_signature[1:], symlink_signature[1:])
+        self.assertEqual(str(symlink.absolute()), symlink_signature[0])
+
+    def test_file_signature_rejects_non_regular_paths_and_stat_errors(self):
+        directory = self.home / "session.jsonl"
+        directory.mkdir()
+
+        self.assertIsNone(file_signature(directory))
+        self.assertIsNone(file_signature(os.devnull))
+        with mock.patch(
+            "sidecar.adapters.base.os.stat",
+            side_effect=PermissionError("denied"),
+        ):
+            self.assertIsNone(file_signature(directory))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO support required")
+    def test_claude_discovery_rejects_fifo_without_blocking(self):
+        fifo = self.home / ".claude" / "projects" / "project" / "blocked.jsonl"
+        fifo.parent.mkdir(parents=True)
+        os.mkfifo(fifo)
+        outcome = []
+        errors = []
+
+        def discover():
+            try:
+                outcome.append(list(ClaudeAdapter().discover(self.home)))
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=discover, daemon=True)
+        worker.start()
+        worker.join(1.0)
+        blocked = worker.is_alive()
+        if blocked:
+            rescue = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
+            os.close(rescue)
+            worker.join(1.0)
+
+        self.assertFalse(worker.is_alive(), "failed to release blocked FIFO reader")
+        self.assertFalse(blocked, "discovery attempted to open a matching FIFO")
+        if errors:
+            raise errors[0]
+        self.assertEqual([[]], outcome)
 
     def test_unchanged_jsonl_sources_parse_once_per_adapter(self):
         self.cursor_transcript()

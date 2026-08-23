@@ -3,6 +3,7 @@ import hashlib
 import http.client
 import io
 import json
+import multiprocessing
 import os
 import socket
 import sqlite3
@@ -94,6 +95,60 @@ class FakeScanner:
             return list(self.sessions)
 
 
+def run_daemon_process(
+    runtime,
+    stop_event,
+    result_queue,
+    stale_classified=None,
+    resume_startup=None,
+):
+    if stale_classified is not None and resume_startup is not None:
+        socket_is_live = daemon_module._socket_is_live
+
+        def delayed_socket_is_live(path, timeout=0.1):
+            live = socket_is_live(path, timeout)
+            if not live:
+                stale_classified.set()
+                if not resume_startup.wait(5.0):
+                    raise RuntimeError("startup test gate timed out")
+            return live
+
+        daemon_module._socket_is_live = delayed_socket_is_live
+
+    daemon = SidecarDaemon(
+        scanner=FakeScanner(),
+        runtime_dir=Path(runtime),
+        active_interval=0.02,
+        idle_interval=0.02,
+        max_idle_interval=0.03,
+    )
+    failure = []
+
+    def serve():
+        try:
+            daemon.serve_forever(stop_event)
+        except Exception as error:
+            failure.append(error)
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    deadline = time.monotonic() + 5.0
+    while thread.is_alive() and not daemon.ready.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        daemon.wait_until_ready(min(0.05, remaining))
+
+    if daemon.ready.is_set():
+        result_queue.put(("ready", os.getpid()))
+        stop_event.wait(10.0)
+        daemon.stop(timeout=2.0)
+    else:
+        error_name = failure[0].__class__.__name__ if failure else "StartupTimeout"
+        result_queue.put(("error", error_name))
+    thread.join(2.0)
+
+
 def create_cursor_chat_store(path):
     path.parent.mkdir(parents=True)
     message = json.dumps(
@@ -151,6 +206,22 @@ def make_session(
 
 
 class DaemonValidationTests(unittest.TestCase):
+    def test_missing_fcntl_fails_only_when_runtime_lock_is_acquired(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            daemon = SidecarDaemon(scanner=FakeScanner(), runtime_dir=runtime)
+
+            with mock.patch("sidecar.daemon._fcntl", None):
+                with self.assertRaisesRegex(
+                    daemon_module.RuntimePathError,
+                    "unsupported.*fcntl required",
+                ):
+                    daemon.serve_forever()
+
+            self.assertFalse((runtime / "daemon.sock").exists())
+            self.assertFalse((runtime / "daemon.pid").exists())
+            self.assertFalse((runtime / "daemon.lock").exists())
+
     def test_runtime_paths_bounds_and_http_ports_are_validated(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -851,9 +922,9 @@ class DaemonPersistentLogIntegrationTests(unittest.TestCase):
             errors = []
 
             class SimultaneousDaemon(SidecarDaemon):
-                def _prepare_runtime_paths(self):
-                    super()._prepare_runtime_paths()
+                def _acquire_runtime_lock(self):
                     ownership_barrier.wait(timeout=2.0)
+                    super()._acquire_runtime_lock()
 
             daemons = [
                 SimultaneousDaemon(
@@ -1665,6 +1736,108 @@ class DaemonLifecycleTests(unittest.TestCase):
 
 
 class StaleRuntimeTests(unittest.TestCase):
+    def test_concurrent_stale_startup_keeps_one_reachable_owner(self):
+        context = multiprocessing.get_context("spawn")
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            runtime.mkdir()
+            socket_path = runtime / "daemon.sock"
+            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale.bind(str(socket_path))
+            stale.close()
+            (runtime / "daemon.pid").write_text("999999\n", encoding="ascii")
+
+            stale_classified = context.Event()
+            resume_startup = context.Event()
+            owner_stop = context.Event()
+            contender_stop = context.Event()
+            owner_results = context.Queue()
+            contender_results = context.Queue()
+            owner = context.Process(
+                target=run_daemon_process,
+                args=(
+                    str(runtime),
+                    owner_stop,
+                    owner_results,
+                    stale_classified,
+                    resume_startup,
+                ),
+            )
+            contender = context.Process(
+                target=run_daemon_process,
+                args=(str(runtime), contender_stop, contender_results),
+            )
+            replacement = None
+            replacement_thread = None
+            try:
+                owner.start()
+                self.assertTrue(stale_classified.wait(5.0))
+
+                contender.start()
+                self.assertEqual(
+                    ("error", "DaemonAlreadyRunning"),
+                    contender_results.get(timeout=5.0),
+                )
+                contender.join(5.0)
+                self.assertFalse(contender.is_alive())
+
+                resume_startup.set()
+                owner_state, owner_pid = owner_results.get(timeout=5.0)
+                self.assertEqual("ready", owner_state)
+                self.assertEqual(
+                    owner_pid,
+                    int((runtime / "daemon.pid").read_text(encoding="ascii")),
+                )
+                first_ping = SidecarClient(runtime_dir=runtime, timeout=1.0).ping()
+                self.assertTrue(first_ping["ok"])
+                self.assertEqual(owner_pid, first_ping["pid"])
+
+                owner.terminate()
+                owner.join(5.0)
+                self.assertFalse(owner.is_alive())
+
+                replacement = SidecarDaemon(
+                    scanner=FakeScanner(),
+                    runtime_dir=runtime,
+                    active_interval=0.02,
+                    idle_interval=0.02,
+                    max_idle_interval=0.03,
+                )
+                replacement_thread = replacement.start_in_thread()
+                self.assertTrue(replacement.wait_until_ready(2.0))
+                replacement_ping = SidecarClient(
+                    runtime_dir=runtime,
+                    timeout=1.0,
+                ).ping()
+                self.assertTrue(replacement_ping["ok"])
+                self.assertEqual(os.getpid(), replacement_ping["pid"])
+                self.assertEqual(
+                    0o600,
+                    stat.S_IMODE((runtime / "daemon.lock").stat().st_mode),
+                )
+            finally:
+                resume_startup.set()
+                if owner.is_alive():
+                    owner_stop.set()
+                if contender.is_alive():
+                    contender_stop.set()
+                if replacement is not None:
+                    replacement.stop(timeout=2.0)
+                if replacement_thread is not None:
+                    replacement_thread.join(2.0)
+                for process in (contender, owner):
+                    if process.is_alive():
+                        process.terminate()
+                    process.join(5.0)
+                for results in (owner_results, contender_results):
+                    results.close()
+                    results.join_thread()
+
+            self.assertFalse(replacement_thread.is_alive())
+            self.assertFalse(socket_path.exists())
+            self.assertFalse((runtime / "daemon.pid").exists())
+            self.assertTrue((runtime / "daemon.lock").exists())
+
     def test_stale_socket_and_pidfile_are_replaced_without_signalling_pid(self):
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary) / "runtime"

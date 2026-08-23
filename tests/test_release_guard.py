@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,15 +9,19 @@ from scripts import release_guard
 TAG_COMMIT = "1" * 40
 MAIN_COMMIT = "2" * 40
 RELEASE_COMMIT = "3" * 40
+COLLISION_COMMIT = "4" * 40
+OTHER_COMMIT = "5" * 40
 
 
 class FakeRepository:
     def __init__(self, refs, ancestors=()):
         self.refs = dict(refs)
         self.ancestors = set(ancestors)
+        self.resolve_calls = []
         self.ancestor_calls = []
 
     def try_resolve_commit(self, ref):
+        self.resolve_calls.append(ref)
         return self.refs.get(ref)
 
     def is_ancestor(self, ancestor, descendant):
@@ -57,6 +62,7 @@ class ReleaseGuardTests(unittest.TestCase):
         return FakeRepository(
             {
                 "refs/tags/v0.4.0": TAG_COMMIT,
+                "HEAD": TAG_COMMIT,
                 "refs/remotes/origin/main": MAIN_COMMIT,
                 "refs/remotes/origin/release": RELEASE_COMMIT,
             },
@@ -90,6 +96,7 @@ class ReleaseGuardTests(unittest.TestCase):
         repository = FakeRepository(
             {
                 "refs/tags/v0.5.0-rc.1": TAG_COMMIT,
+                "HEAD": TAG_COMMIT,
                 "refs/heads/main": MAIN_COMMIT,
             },
             {(TAG_COMMIT, MAIN_COMMIT)},
@@ -104,6 +111,38 @@ class ReleaseGuardTests(unittest.TestCase):
         self.assertTrue(metadata.prerelease)
         self.assertIsNone(metadata.release_ref)
         self.assertEqual([(TAG_COMMIT, MAIN_COMMIT)], repository.ancestor_calls)
+
+    def test_branch_tag_collision_uses_qualified_tag_ref(self):
+        repository = self.stable_repository()
+        repository.refs["refs/heads/v0.4.0"] = COLLISION_COMMIT
+        repository.refs["v0.4.0"] = COLLISION_COMMIT
+
+        metadata, _ = release_guard.validate_release(
+            "v0.4.0",
+            root=self.make_project(),
+            repository=repository,
+        )
+
+        self.assertEqual(TAG_COMMIT, metadata.tag_commit)
+        self.assertEqual(
+            ["refs/tags/v0.4.0", "HEAD"],
+            repository.resolve_calls[:2],
+        )
+        self.assertNotIn("v0.4.0", repository.resolve_calls)
+
+    def test_checked_out_head_must_match_peeled_tag_commit(self):
+        repository = self.stable_repository()
+        repository.refs["HEAD"] = OTHER_COMMIT
+
+        with self.assertRaisesRegex(
+            release_guard.ReleaseGuardError,
+            r"checked-out HEAD .* does not match peeled tag refs/tags/v0\.4\.0",
+        ):
+            release_guard.validate_release(
+                "v0.4.0",
+                root=self.make_project(),
+                repository=repository,
+            )
 
     def test_mismatched_tag_and_project_version_is_rejected(self):
         with self.assertRaisesRegex(
@@ -187,6 +226,56 @@ class ReleaseGuardTests(unittest.TestCase):
     def test_invalid_semver_leading_zero_is_rejected(self):
         with self.assertRaises(release_guard.ReleaseGuardError):
             release_guard.parse_tag("v0.04.0")
+
+
+class GitRepositoryTests(unittest.TestCase):
+    def run_git(self, root, *arguments):
+        completed = subprocess.run(
+            ("git",) + arguments,
+            cwd=str(root),
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        return completed.stdout.strip()
+
+    def test_lightweight_and_annotated_tags_peel_to_the_commit(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.run_git(root, "init", "--quiet")
+        (root / "tracked.txt").write_text("release\n", encoding="utf-8")
+        self.run_git(root, "add", "tracked.txt")
+        identity = ("-c", "user.name=Release Test", "-c", "user.email=test@example.com")
+        self.run_git(root, *identity, "commit", "--quiet", "-m", "release")
+        commit = self.run_git(root, "rev-parse", "HEAD")
+        self.run_git(root, "tag", "v0.4.0")
+        self.run_git(
+            root,
+            *identity,
+            "tag",
+            "-a",
+            "v0.4.1",
+            "-m",
+            "annotated release",
+        )
+
+        repository = release_guard.GitRepository(root)
+
+        self.assertEqual(
+            commit,
+            repository.try_resolve_commit("refs/tags/v0.4.0"),
+        )
+        self.assertNotEqual(
+            commit,
+            self.run_git(root, "rev-parse", "refs/tags/v0.4.1"),
+        )
+        self.assertEqual(
+            commit,
+            repository.try_resolve_commit("refs/tags/v0.4.1"),
+        )
 
 
 if __name__ == "__main__":

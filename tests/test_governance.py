@@ -313,17 +313,46 @@ class GovernanceContractTests(unittest.TestCase):
                 with self.subTest(workflow=path.name, reference=reference):
                     self.assertRegex(reference, r"^[^@\s]+@[0-9a-fA-F]{40}$")
 
-    def test_release_recovery_builds_the_immutable_tag_on_macos_15(self):
+    def test_release_recovery_uses_only_tag_qualified_checkouts(self):
         document = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
-        release_source = (
-            "${{ github.event_name == 'workflow_dispatch' "
-            "&& inputs.tag || github.ref }}"
-        )
 
-        self.assertEqual(2, document.count("ref: " + release_source))
+        self.assertEqual(2, document.count("ref: refs/tags/${{ inputs.tag }}"))
+        self.assertEqual(2, document.count("ref: ${{ github.ref }}"))
+        self.assertEqual(2, document.count("- name: Validate release source ref"))
+        self.assertEqual(2, document.count("if [[ ! \"${candidate}\" =~ ${semver_tag} ]]"))
+        self.assertEqual(
+            2,
+            document.count('if [[ "${GITHUB_REF}" != refs/tags/* ]]'),
+        )
         self.assertIn("runs-on: macos-15", document)
         self.assertIn('python-version: "3.11"', document)
         self.assertIn("sys.version_info[:2] != (3, 11)", document)
+
+    def test_release_guard_requires_head_to_equal_the_peeled_tag_commit(self):
+        document = (ROOT / "scripts" / "release_guard.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('git.try_resolve_commit("HEAD")', document)
+        self.assertIn("if head_commit != tag_commit:", document)
+        self.assertIn("does not match peeled tag", document)
+
+    def test_release_publication_excludes_dispatch_and_asserts_exact_tag_ref(self):
+        document = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+        release_job = document[document.index("\n  release:\n") :]
+
+        self.assertIn(
+            "if: github.event_name == 'push' "
+            "&& startsWith(github.ref, 'refs/tags/')",
+            release_job,
+        )
+        self.assertNotIn("workflow_dispatch", release_job)
+        ref_assertion = 'if [[ "${GITHUB_REF}" != "refs/tags/${RELEASE_TAG}" ]]'
+        self.assertIn(ref_assertion, release_job)
+        self.assertLess(
+            release_job.index(ref_assertion),
+            release_job.index("- name: Attest build provenance"),
+        )
 
     def test_documented_canonical_commands_are_backed_by_cli_help(self):
         for path in DOCUMENTATION:

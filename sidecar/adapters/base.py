@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import math
 import os
+import stat
 import time
 from abc import ABC, abstractmethod
 from collections import OrderedDict
@@ -48,11 +49,13 @@ def as_mapping(value: Any) -> Mapping[str, Any]:
 
 
 def file_signature(path: Pathish) -> Optional[FileSignature]:
-    """Return a path/mtime/size signature, or ``None`` if it disappeared."""
+    """Return a regular file's signature, or ``None`` if it is unavailable."""
 
     try:
         stat_result = os.stat(path)
     except OSError:
+        return None
+    if not stat.S_ISREG(stat_result.st_mode):
         return None
     mtime_ns = int(
         getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1e9))

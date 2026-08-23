@@ -202,6 +202,16 @@ def validate_release(
     if tag_commit is None:
         raise ReleaseGuardError("cannot resolve tag {!r}".format(tag))
 
+    head_commit = git.try_resolve_commit("HEAD")
+    if head_commit is None:
+        raise ReleaseGuardError("cannot resolve checked-out HEAD")
+    if head_commit != tag_commit:
+        raise ReleaseGuardError(
+            "checked-out HEAD ({}) does not match peeled tag {} ({})".format(
+                head_commit, tag_ref, tag_commit
+            )
+        )
+
     main_ref, main_commit = resolve_branch(git, main_branch, remote)
     if not git.is_ancestor(tag_commit, main_commit):
         raise ReleaseGuardError(

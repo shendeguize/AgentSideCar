@@ -2,9 +2,12 @@ import hashlib
 import io
 import json
 import os
+import select
 import shutil
+import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -166,7 +169,7 @@ class ReleaseInstallerTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def environment(self, *, home=None, temp_root=None):
+    def environment(self, *, home=None, temp_root=None, extra=None):
         environment = os.environ.copy()
         environment["HOME"] = str(self.home if home is None else home)
         environment["FAKE_RELEASE_ROOT"] = str(self.fixture.root)
@@ -175,6 +178,8 @@ class ReleaseInstallerTests(unittest.TestCase):
         )
         if temp_root is not None:
             environment["TMPDIR"] = str(temp_root)
+        if extra is not None:
+            environment.update(extra)
         return environment
 
     def run_installer(
@@ -183,11 +188,16 @@ class ReleaseInstallerTests(unittest.TestCase):
         installer=INSTALLER,
         home=None,
         temp_root=None,
+        extra_env=None,
     ):
         return subprocess.run(
             ["/bin/sh", str(installer), *map(str, arguments)],
             cwd=str(REPO_ROOT),
-            env=self.environment(home=home, temp_root=temp_root),
+            env=self.environment(
+                home=home,
+                temp_root=temp_root,
+                extra=extra_env,
+            ),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -198,6 +208,58 @@ class ReleaseInstallerTests(unittest.TestCase):
     def target(self, prefix=None):
         root = self.prefix if prefix is None else prefix
         return root / "bin" / "agent-sidecar"
+
+    def operation_lock(self, prefix=None):
+        root = self.prefix if prefix is None else prefix
+        return root / ".agent-sidecar-operation.lock"
+
+    def wait_for_pipe(self, descriptor, message):
+        readable, _, _ = select.select([descriptor], [], [], 5)
+        self.assertEqual([descriptor], readable, message)
+        self.assertEqual(b"1", os.read(descriptor, 1), message)
+
+    def write_python_pause_wrapper(self, destination):
+        destination.mkdir()
+        wrapper = destination / "python3"
+        wrapper.write_text(
+            """#!{python}
+import os
+import subprocess
+import sys
+
+payload = sys.stdin.buffer.read()
+if b"os.unlink(path)" in payload:
+    os.write(int(os.environ["REMOVE_READY_FD"]), b"1")
+    if os.read(int(os.environ["REMOVE_RELEASE_FD"]), 1) != b"1":
+        raise SystemExit("remove pause was not released")
+result = subprocess.run(
+    [os.environ["REAL_PYTHON"], *sys.argv[1:]],
+    input=payload,
+)
+raise SystemExit(result.returncode)
+""".format(
+                python=sys.executable
+            ),
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+
+    def write_sleep_pause_wrapper(self, destination):
+        destination.mkdir()
+        wrapper = destination / "sleep"
+        wrapper.write_text(
+            """#!{python}
+import os
+
+os.write(int(os.environ["LOCK_WAIT_READY_FD"]), b"1")
+if os.read(int(os.environ["LOCK_WAIT_RELEASE_FD"]), 1) != b"1":
+    raise SystemExit("lock wait pause was not released")
+""".format(
+                python=sys.executable
+            ),
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
 
     def test_shell_syntax_and_help(self):
         for shell in ("bash", "/bin/sh"):
@@ -275,6 +337,7 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertIn("checksum verification failed", result.stderr)
         self.assertEqual(original, target.read_bytes())
         self.assertEqual(original_inode, target.stat().st_ino)
+        self.assertFalse(self.operation_lock().exists())
 
     def test_malformed_version_is_rejected_without_curl(self):
         for version in ("1.2.3", "v01.2.3", "v1.2", "latest;touch-pwned"):
@@ -342,6 +405,212 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(0, uninstall.returncode, uninstall.stderr)
         self.assertFalse(self.target().exists())
         self.assertIn("skill installations were left unchanged", uninstall.stdout)
+
+    def test_concurrent_uninstall_cannot_remove_replacement_install(self):
+        initial = self.run_installer("--prefix", self.prefix)
+        self.assertEqual(0, initial.returncode, initial.stderr)
+
+        python_bin = self.root / "pause-remove-bin"
+        sleep_bin = self.root / "pause-lock-wait-bin"
+        self.write_python_pause_wrapper(python_bin)
+        self.write_sleep_pause_wrapper(sleep_bin)
+        remove_ready_read, remove_ready_write = os.pipe()
+        remove_release_read, remove_release_write = os.pipe()
+        wait_ready_read, wait_ready_write = os.pipe()
+        wait_release_read, wait_release_write = os.pipe()
+        uninstall = None
+        install = None
+        descriptors = {
+            remove_ready_read,
+            remove_ready_write,
+            remove_release_read,
+            remove_release_write,
+            wait_ready_read,
+            wait_ready_write,
+            wait_release_read,
+            wait_release_write,
+        }
+        try:
+            uninstall_environment = self.environment(
+                extra={
+                    "PATH": os.pathsep.join(
+                        (str(python_bin), self.environment()["PATH"])
+                    ),
+                    "REAL_PYTHON": sys.executable,
+                    "REMOVE_READY_FD": str(remove_ready_write),
+                    "REMOVE_RELEASE_FD": str(remove_release_read),
+                }
+            )
+            uninstall = subprocess.Popen(
+                [
+                    "/bin/sh",
+                    str(INSTALLER),
+                    "--prefix",
+                    str(self.prefix),
+                    "--uninstall",
+                ],
+                cwd=str(REPO_ROOT),
+                env=uninstall_environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(remove_ready_write, remove_release_read),
+            )
+            os.close(remove_ready_write)
+            descriptors.remove(remove_ready_write)
+            os.close(remove_release_read)
+            descriptors.remove(remove_release_read)
+            self.wait_for_pipe(
+                remove_ready_read,
+                "uninstall did not pause after taking the operation lock",
+            )
+
+            install_environment = self.environment(
+                extra={
+                    "PATH": os.pathsep.join(
+                        (str(sleep_bin), self.environment()["PATH"])
+                    ),
+                    "LOCK_WAIT_READY_FD": str(wait_ready_write),
+                    "LOCK_WAIT_RELEASE_FD": str(wait_release_read),
+                }
+            )
+            install = subprocess.Popen(
+                ["/bin/sh", str(INSTALLER), "--prefix", str(self.prefix)],
+                cwd=str(REPO_ROOT),
+                env=install_environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(wait_ready_write, wait_release_read),
+            )
+            os.close(wait_ready_write)
+            descriptors.remove(wait_ready_write)
+            os.close(wait_release_read)
+            descriptors.remove(wait_release_read)
+            self.wait_for_pipe(
+                wait_ready_read,
+                "install did not block on the uninstall operation lock",
+            )
+
+            os.write(remove_release_write, b"1")
+            uninstall_stdout, uninstall_stderr = uninstall.communicate(timeout=5)
+            self.assertEqual(0, uninstall.returncode, uninstall_stderr)
+            self.assertIn("removed:", uninstall_stdout)
+
+            os.write(wait_release_write, b"1")
+            install_stdout, install_stderr = install.communicate(timeout=5)
+            self.assertEqual(0, install.returncode, install_stderr)
+            self.assertIn("installed Agent Sidecar", install_stdout)
+            self.assertTrue(self.target().is_file())
+            self.assertEqual(
+                self.fixture.artifact.read_bytes(),
+                self.target().read_bytes(),
+            )
+            self.assertFalse(self.operation_lock().exists())
+        finally:
+            for descriptor in descriptors:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            for process in (uninstall, install):
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate(timeout=2)
+
+    def test_stale_operation_lock_is_recovered(self):
+        lock = self.operation_lock()
+        lock.mkdir(parents=True)
+        lock.joinpath("owner").write_text("999999999\n", encoding="ascii")
+
+        result = self.run_installer("--prefix", self.prefix)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(self.fixture.artifact.read_bytes(), self.target().read_bytes())
+        self.assertFalse(lock.exists())
+
+    def test_live_operation_lock_times_out_without_mutation(self):
+        lock = self.operation_lock()
+        lock.mkdir(parents=True)
+        lock.joinpath("owner").write_text("{}\n".format(os.getpid()), encoding="ascii")
+
+        result = self.run_installer(
+            "--prefix",
+            self.prefix,
+            extra_env={"AGENT_SIDECAR_LOCK_TIMEOUT_SECONDS": "0"},
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("timed out waiting for operation lock", result.stderr)
+        self.assertFalse(self.target().exists())
+        self.assertFalse(self.fixture.log.exists())
+        self.assertEqual("{}\n".format(os.getpid()), lock.joinpath("owner").read_text())
+
+    def test_interrupt_releases_operation_lock_without_removing_target(self):
+        initial = self.run_installer("--prefix", self.prefix)
+        self.assertEqual(0, initial.returncode, initial.stderr)
+        original = self.target().read_bytes()
+
+        python_bin = self.root / "pause-interrupt-bin"
+        self.write_python_pause_wrapper(python_bin)
+        ready_read, ready_write = os.pipe()
+        release_read, release_write = os.pipe()
+        process = None
+        descriptors = {ready_read, ready_write, release_read, release_write}
+        try:
+            environment = self.environment(
+                extra={
+                    "PATH": os.pathsep.join(
+                        (str(python_bin), self.environment()["PATH"])
+                    ),
+                    "REAL_PYTHON": sys.executable,
+                    "REMOVE_READY_FD": str(ready_write),
+                    "REMOVE_RELEASE_FD": str(release_read),
+                }
+            )
+            process = subprocess.Popen(
+                [
+                    "/bin/sh",
+                    str(INSTALLER),
+                    "--prefix",
+                    str(self.prefix),
+                    "--uninstall",
+                ],
+                cwd=str(REPO_ROOT),
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(ready_write, release_read),
+                start_new_session=True,
+            )
+            os.close(ready_write)
+            descriptors.remove(ready_write)
+            os.close(release_read)
+            descriptors.remove(release_read)
+            self.wait_for_pipe(
+                ready_read,
+                "uninstall did not pause while holding the operation lock",
+            )
+
+            os.killpg(process.pid, signal.SIGTERM)
+            process.communicate(timeout=5)
+            self.assertNotEqual(0, process.returncode)
+            self.assertEqual(original, self.target().read_bytes())
+            self.assertFalse(self.operation_lock().exists())
+        finally:
+            for descriptor in descriptors:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if process is not None and process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=2)
 
     def test_paths_with_spaces_and_space_backed_temp_directory(self):
         home = self.root / "home with spaces"

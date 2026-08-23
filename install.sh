@@ -304,6 +304,122 @@ if [ "$prefix_set" -eq 0 ]; then
 fi
 prefix=$(normalize_path "$prefix") || die "invalid installation prefix"
 target=$prefix/bin/agent-sidecar
+operation_lock=$prefix/.agent-sidecar-operation.lock
+operation_lock_owner=$operation_lock/owner
+operation_lock_recovery=$operation_lock/recovery
+operation_lock_held=0
+temporary=
+
+read_operation_lock_owner() {
+    observed_lock_owner=
+    if [ -f "$operation_lock_owner" ] &&
+        [ ! -L "$operation_lock_owner" ]; then
+        IFS= read -r observed_lock_owner < "$operation_lock_owner" ||
+            observed_lock_owner=
+    fi
+    case $observed_lock_owner in
+        ''|0|*[!0-9]*)
+            observed_lock_owner=
+            ;;
+    esac
+}
+
+recover_stale_operation_lock() {
+    [ -d "$operation_lock" ] && [ ! -L "$operation_lock" ] || return 1
+    read_operation_lock_owner
+    stale_owner=$observed_lock_owner
+    [ -n "$stale_owner" ] || return 1
+    kill -0 "$stale_owner" 2>/dev/null && return 1
+
+    mkdir "$operation_lock_recovery" 2>/dev/null || return 1
+    read_operation_lock_owner
+    current_owner=$observed_lock_owner
+    if [ -n "$current_owner" ] && [ "$current_owner" != "$stale_owner" ]; then
+        rmdir "$operation_lock_recovery" 2>/dev/null || :
+        return 1
+    fi
+    if [ -n "$current_owner" ] && kill -0 "$current_owner" 2>/dev/null; then
+        rmdir "$operation_lock_recovery" 2>/dev/null || :
+        return 1
+    fi
+
+    if [ -n "$current_owner" ]; then
+        rm -f "$operation_lock_owner" 2>/dev/null || {
+            rmdir "$operation_lock_recovery" 2>/dev/null || :
+            return 1
+        }
+    fi
+    rmdir "$operation_lock_recovery" 2>/dev/null || return 1
+    rmdir "$operation_lock" 2>/dev/null
+}
+
+acquire_operation_lock() {
+    operation_lock_timeout=${AGENT_SIDECAR_LOCK_TIMEOUT_SECONDS-30}
+    case $operation_lock_timeout in
+        0|[1-9]|[1-9][0-9]|[12][0-9][0-9]|300)
+            ;;
+        *)
+            die "AGENT_SIDECAR_LOCK_TIMEOUT_SECONDS must be 0 through 300"
+            ;;
+    esac
+
+    mkdir -p "$prefix" ||
+        die "cannot create installation prefix for operation lock"
+    operation_lock_started=$(date +%s) ||
+        die "cannot read clock for operation lock"
+    while :; do
+        if mkdir -m 700 "$operation_lock" 2>/dev/null; then
+            if (umask 077; printf '%s\n' "$$" > "$operation_lock_owner"); then
+                operation_lock_held=1
+                return
+            fi
+            rmdir "$operation_lock" 2>/dev/null || :
+            die "cannot record operation lock owner"
+        fi
+        if [ -L "$operation_lock" ] || [ ! -d "$operation_lock" ]; then
+            die "refusing unsafe operation lock path: $operation_lock"
+        fi
+        if recover_stale_operation_lock; then
+            continue
+        fi
+        operation_lock_now=$(date +%s) ||
+            die "cannot read clock for operation lock"
+        if [ $((operation_lock_now - operation_lock_started)) \
+            -ge "$operation_lock_timeout" ]; then
+            die "timed out waiting for operation lock: $operation_lock"
+        fi
+        sleep 1
+    done
+}
+
+release_operation_lock() {
+    [ "$operation_lock_held" -eq 1 ] || return 0
+    read_operation_lock_owner
+    if [ "$observed_lock_owner" = "$$" ]; then
+        rm -f "$operation_lock_owner" 2>/dev/null || :
+        rmdir "$operation_lock" 2>/dev/null || :
+    fi
+    operation_lock_held=0
+}
+
+cleanup() {
+    release_operation_lock
+    if [ -n "${temporary-}" ] && [ -d "$temporary" ]; then
+        rm -rf "$temporary"
+    fi
+}
+
+handle_signal() {
+    handled_signal=$1
+    trap - "$handled_signal"
+    cleanup
+    kill -s "$handled_signal" "$$"
+}
+
+trap cleanup EXIT
+trap 'handle_signal HUP' HUP
+trap 'handle_signal INT' INT
+trap 'handle_signal TERM' TERM
 
 script_dir=
 if [ -f "$0" ]; then
@@ -333,6 +449,7 @@ fi
 if [ "$uninstall" -eq 1 ]; then
     [ "$version_set" -eq 0 ] ||
         die "--version cannot be combined with --uninstall"
+    acquire_operation_lock
     if [ -e "$target" ] || [ -L "$target" ]; then
         validate_zipapp "$target" ||
             die "refusing to remove unrecognized path: $target"
@@ -342,7 +459,6 @@ if [ "$uninstall" -eq 1 ]; then
     else
         printf '%s\n' "already absent: $target"
     fi
-
     if [ "$with_skill" -eq 1 ]; then
         [ -n "${HOME-}" ] || die "HOME must be set for --with-skill"
         home=$(normalize_path "$HOME") || die "invalid HOME"
@@ -353,6 +469,7 @@ if [ "$uninstall" -eq 1 ]; then
     else
         printf '%s\n' "skill installations were left unchanged"
     fi
+    release_operation_lock
     exit 0
 fi
 
@@ -361,6 +478,7 @@ if [ "$version_request" != latest ]; then
         die "--version must be latest or vX.Y.Z without leading zeros"
 fi
 
+acquire_operation_lock
 if [ -e "$target" ] || [ -L "$target" ]; then
     validate_zipapp "$target" ||
         die "refusing to replace unrecognized path: $target"
@@ -396,12 +514,6 @@ import tempfile
 print(tempfile.mkdtemp(prefix="agent-sidecar-install-"))
 PY
 ) || die "cannot create temporary directory"
-cleanup() {
-    if [ -n "${temporary-}" ] && [ -d "$temporary" ]; then
-        rm -rf "$temporary"
-    fi
-}
-trap cleanup EXIT HUP INT TERM
 
 download() {
     curl \
@@ -875,5 +987,6 @@ finally:
 PY
     die "atomic installation failed"
 
+release_operation_lock
 printf '%s\n' "installed Agent Sidecar $version: $target"
 printf '%s\n' "checksum verified from the matching $tag release"
