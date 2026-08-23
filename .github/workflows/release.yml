@@ -32,11 +32,12 @@ jobs:
       artifact_name: ${{ steps.package.outputs.artifact_name }}
 
     steps:
-      # A dispatch builds its selected branch; a tag push builds the tagged SHA.
+      # Both paths build the immutable tag; dispatch exists to recover a failed
+      # publication without rebuilding from a newer branch tip.
       - name: Check out release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -143,14 +144,14 @@ jobs:
   verify:
     name: 2. Verify on macOS
     needs: build
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     timeout-minutes: 10
 
     steps:
       - name: Check out installer source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -158,6 +159,19 @@ jobs:
           python-version: "3.9"
           cache: pip
           cache-dependency-path: pyproject.toml
+
+      - name: Verify minimum Python runtime
+        run: |
+          python - <<'PY'
+          import sys
+
+          if sys.version_info[:2] != (3, 9):
+              raise SystemExit(
+                  "release verification requires Python 3.9; got {}".format(
+                      sys.version.split()[0]
+                  )
+              )
+          PY
 
       - name: Install development dependencies
         run: python -m pip install '.[dev]'
