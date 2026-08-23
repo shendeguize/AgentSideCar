@@ -156,3 +156,6 @@ mkdir -p "$HOME/.cursor/skills" "$HOME/.claude/skills" "$HOME/.local/bin"
 install_link "$SKILL_SOURCE" "$CURSOR_DESTINATION"
 install_link "$SKILL_SOURCE" "$CLAUDE_DESTINATION"
 install_link "$CLI_SOURCE" "$CLI_DESTINATION"
+
+printf '%s\n' \
+    "alternative CLI installs: pipx install \"$REPO_ROOT\" or build dist/agent-sidecar.pyz with ./agent-sidecar package build"

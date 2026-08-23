@@ -1,7 +1,14 @@
 import contextlib
 import io
 import json
+import os
+import queue
+import signal
+import socket
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -9,15 +16,41 @@ from unittest import mock
 
 import sidecar
 from sidecar.adapters import get_adapter, iter_adapters, registry
-from sidecar.adapters.base import Adapter, sanitize_terminal_text, snip
+from sidecar.adapters.base import (
+    Adapter,
+    sanitize_terminal_text,
+    snip,
+)
 from sidecar.client import SidecarClientError
-from sidecar.cli import RECENT_SECONDS, build_parser, main
-from sidecar.inject import DEFAULT_SEND_TIMEOUT_SECONDS, SendError, SendResult
+from sidecar.cli import (
+    RECENT_SECONDS,
+    TAIL_ERROR_DEDUPE_LIMIT,
+    build_parser,
+    main,
+)
+from sidecar.inject import (
+    DEFAULT_SEND_TIMEOUT_SECONDS,
+    SendError,
+    SendResult,
+    build_send_plan,
+    execute_send,
+)
+from sidecar.launchd import ServiceResult
 from sidecar.model import Event, Session, Status
 from sidecar.presentation import format_age_seconds, row_age, row_value
-from sidecar.remote import RemoteAggregate, RemoteFailure, RemoteInventoryError
+from sidecar.remote import (
+    RemoteAggregate,
+    RemoteFailure,
+    RemoteInventoryError,
+    RemoteWatchEvent,
+    RemoteWatchFailure,
+    RemoteWatchReady,
+)
+from sidecar.release import ReleaseArtifact, ReleaseError
 from sidecar.scan import ScanError
+from sidecar.send_audit import AuditError
 from sidecar.tail import JSONLFollower, SessionTailer
+from sidecar.text_utils import normalize_scalar_text, redact_message
 
 
 def make_session(
@@ -112,12 +145,16 @@ class FakeClient:
         pid=4321,
         socket_path=None,
         scan_errors=(),
+        tail_errors=(),
+        http=None,
     ):
         self.sessions = list(sessions)
         self.events = list(events)
         self.pid = pid
         self.socket_path = socket_path
         self.scan_errors = list(scan_errors)
+        self.tail_errors = list(tail_errors)
+        self.http = http
         self.status_calls = 0
         self.subscribe_calls = 0
 
@@ -130,7 +167,85 @@ class FakeClient:
         return iter(self.events)
 
     def ping(self):
-        return {"ok": True, "op": "ping", "pid": self.pid}
+        response = {"ok": True, "op": "ping", "pid": self.pid}
+        if self.http is not None:
+            response["http"] = dict(self.http)
+        return response
+
+
+class SequencedPingClient:
+    def __init__(self, responses, *, socket_path=None):
+        self.responses = list(responses)
+        self.socket_path = socket_path
+
+    def ping(self):
+        if len(self.responses) > 1:
+            value = self.responses.pop(0)
+        else:
+            value = self.responses[0]
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+
+class FakeDaemonProcess:
+    def __init__(self, pid=7654, *, poll_error=None):
+        self.pid = pid
+        self.returncode = None
+        self.poll_error = poll_error
+        self.wait_calls = []
+
+    def poll(self):
+        if self.poll_error is not None:
+            raise self.poll_error
+        return self.returncode
+
+    def wait(self, timeout=None):
+        self.wait_calls.append(timeout)
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired(["daemon"], timeout)
+        return self.returncode
+
+
+def controlled_process_group(process, *, survive_term=False):
+    active = {"value": True}
+    signals = []
+
+    def killpg(process_group, signum):
+        if process_group != process.pid:
+            raise AssertionError("unexpected process group")
+        signals.append(signum)
+        if signum == 0:
+            if not active["value"]:
+                raise ProcessLookupError
+            return
+        if signum == signal.SIGTERM:
+            process.returncode = -signal.SIGTERM
+            if not survive_term:
+                active["value"] = False
+            return
+        if signum == signal.SIGKILL:
+            process.returncode = -signal.SIGKILL
+            active["value"] = False
+            return
+        raise AssertionError("unexpected signal")
+
+    return signals, killpg
+
+
+class FakeRemoteWatchSession:
+    def __init__(self, items=(), hosts=("edge",), all_failed=False):
+        self.items = list(items)
+        self.hosts = tuple(hosts)
+        self.empty = not self.hosts
+        self.all_failed = all_failed
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def close(self):
+        self.closed = True
 
 
 class ReplayAdapter(Adapter):
@@ -191,6 +306,33 @@ class TerminalTextTests(unittest.TestCase):
             ),
         )
 
+    def test_shared_scalar_normalization_and_redaction_are_terminal_neutral(self):
+        valid = "中文 😀\n\t\x1b[31m"
+        self.assertEqual(valid, normalize_scalar_text(valid))
+        self.assertEqual(valid, normalize_scalar_text(valid, errors="replace"))
+        with self.assertRaises(UnicodeEncodeError):
+            normalize_scalar_text("left\ud800right")
+        self.assertEqual(
+            "left\ufffdright",
+            normalize_scalar_text("left\ud800right", errors="replace"),
+        )
+        with self.assertRaises(ValueError):
+            normalize_scalar_text("text", errors="ignore")
+
+        message = 'private "line"\n雪'
+        escaped = json.dumps(message, ensure_ascii=False)[1:-1]
+        ascii_escaped = json.dumps(message, ensure_ascii=True)[1:-1]
+        redacted = redact_message(
+            "{} | {} | {} | \x1b[31m".format(
+                message,
+                escaped,
+                ascii_escaped,
+            ),
+            message,
+        )
+        self.assertEqual(3, redacted.count("[message redacted]"))
+        self.assertTrue(redacted.endswith("\x1b[31m"))
+
 
 class CLITests(unittest.TestCase):
     def run_cli(self, argv, scanner):
@@ -205,7 +347,7 @@ class CLITests(unittest.TestCase):
         )
         return code, stdout.getvalue(), stderr.getvalue()
 
-    def test_global_version_is_exact_v030(self):
+    def test_global_version_is_exact_v040(self):
         stdout = io.StringIO()
 
         with contextlib.redirect_stdout(stdout):
@@ -213,8 +355,8 @@ class CLITests(unittest.TestCase):
                 main(["--version"])
 
         self.assertEqual(0, raised.exception.code)
-        self.assertEqual("0.3.0", sidecar.__version__)
-        self.assertEqual("agent-sidecar 0.3.0\n", stdout.getvalue())
+        self.assertEqual("0.4.0", sidecar.__version__)
+        self.assertEqual("agent-sidecar 0.4.0\n", stdout.getvalue())
 
     def test_help_documents_version_and_repeatable_agent_filter(self):
         parser = build_parser()
@@ -231,6 +373,79 @@ class CLITests(unittest.TestCase):
         self.assertIn("--version", parser.format_help())
         self.assertIn("--agent NAME", list_help)
         self.assertEqual(["cursor-ide", "CLAUDE"], args.agent)
+
+    def test_package_build_is_explicit_and_reports_artifact_identity(self):
+        parser = build_parser()
+        command_parsers = next(
+            action.choices
+            for action in parser._actions
+            if getattr(action, "dest", None) == "command"
+        )
+        package_parser = command_parsers["package"]
+        package_commands = next(
+            action.choices
+            for action in package_parser._actions
+            if getattr(action, "dest", None) == "package_command"
+        )
+        parsed_default = parser.parse_args(["package", "build"])
+        parsed_custom = parser.parse_args(
+            ["package", "build", "--output", "artifacts/custom.pyz"]
+        )
+
+        self.assertEqual(
+            Path("dist/agent-sidecar.pyz"),
+            parsed_default.output,
+        )
+        self.assertEqual(
+            Path("artifacts/custom.pyz"),
+            parsed_custom.output,
+        )
+        self.assertIn("build", package_parser.format_help())
+        self.assertIn("--output PATH", package_commands["build"].format_help())
+
+        output = Path("artifacts/custom.pyz")
+        artifact = ReleaseArtifact(output, "a" * 64, 1234)
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch(
+            "sidecar.cli.build_release_zipapp",
+            return_value=artifact,
+        ) as builder:
+            code = main(
+                ["package", "build", "--output", str(output)],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(0, code)
+        builder.assert_called_once_with(output)
+        self.assertEqual(
+            "path=artifacts/custom.pyz sha256={} size=1234\n".format(
+                "a" * 64
+            ),
+            stdout.getvalue(),
+        )
+        self.assertEqual("", stderr.getvalue())
+
+    def test_package_build_reports_safe_failure(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch(
+            "sidecar.cli.build_release_zipapp",
+            side_effect=ReleaseError("refusing unsafe output"),
+        ):
+            code = main(
+                ["package", "build"],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual(
+            "package build: refusing unsafe output\n",
+            stderr.getvalue(),
+        )
 
     def test_remote_help_selection_and_host_without_remote_conflict(self):
         parser = build_parser()
@@ -269,8 +484,119 @@ class CLITests(unittest.TestCase):
                 stderr.getvalue(),
             )
 
+    def test_internal_recency_parser_is_bounded_and_mutually_exclusive(self):
+        invalid_values = (
+            "0",
+            "-1",
+            "nan",
+            "inf",
+            str(365 * 24 * 60 * 60 + 1),
+        )
+        for value in invalid_values:
+            with self.subTest(value=value):
+                parser_stderr = io.StringIO()
+                with contextlib.redirect_stderr(parser_stderr):
+                    with self.assertRaises(SystemExit) as raised:
+                        main(["list", "--recent-seconds", value, "--json"])
+                self.assertEqual(2, raised.exception.code)
+                self.assertIn("recent seconds", parser_stderr.getvalue())
+
+        parser_stderr = io.StringIO()
+        with contextlib.redirect_stderr(parser_stderr):
+            with self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "list",
+                        "--all",
+                        "--recent-seconds",
+                        "172800",
+                    ]
+                )
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("not allowed with argument", parser_stderr.getvalue())
+
+    def test_internal_recency_path_filters_direct_list_without_remote(self):
+        scanner = FakeScanner()
+
+        code, stdout, stderr = self.run_cli(
+            ["list", "--recent-seconds", "123.5", "--json"],
+            scanner,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual([], json.loads(stdout))
+        self.assertEqual([123.5], scanner.recent_calls)
+        self.assertEqual("", stderr)
+
+    def test_remote_list_default_and_all_forward_distinct_recency(self):
+        calls = []
+
+        def aggregate(command, selected=None, recent_seconds=None):
+            calls.append((command, selected, recent_seconds))
+            return RemoteAggregate(
+                command,
+                hosts=("edge",),
+                succeeded=("edge",),
+            )
+
+        for extra in ([], ["--all"]):
+            code = main(
+                ["list", "--remote", "--json"] + extra,
+                scanner=FakeScanner(),
+                client=OfflineClient(),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                remote_aggregator=aggregate,
+            )
+            self.assertEqual(0, code)
+
+        self.assertEqual(
+            [
+                ("list", None, RECENT_SECONDS),
+                ("list", None, None),
+            ],
+            calls,
+        )
+
+    def test_legacy_remote_aggregator_shape_is_preserved_without_typeerror_retry(self):
+        legacy_calls = []
+
+        def legacy(command, selected=None):
+            legacy_calls.append((command, selected))
+            return RemoteAggregate(
+                command,
+                hosts=("edge",),
+                succeeded=("edge",),
+            )
+
+        code = main(
+            ["list", "--remote", "--json"],
+            scanner=FakeScanner(),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            remote_aggregator=legacy,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual([("list", None)], legacy_calls)
+
+        def broken(command, selected=None, recent_seconds=None):
+            del command, selected, recent_seconds
+            raise TypeError("programmer error")
+
+        with self.assertRaisesRegex(TypeError, "programmer error"):
+            main(
+                ["list", "--remote", "--json"],
+                scanner=FakeScanner(),
+                client=OfflineClient(),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                remote_aggregator=broken,
+            )
+
     def test_default_local_json_never_calls_remote_or_adds_host(self):
-        session = make_session("strictly-local")
+        session = make_session("strictly-local", updated_at=time.time())
         stdout = io.StringIO()
 
         code = main(
@@ -417,7 +743,7 @@ class CLITests(unittest.TestCase):
         )
 
         self.assertEqual(2, code)
-        self.assertEqual([None], scanner.recent_calls)
+        self.assertEqual([RECENT_SECONDS], scanner.recent_calls)
         self.assertEqual(
             [dict(local.to_dict(), host="local")],
             json.loads(stdout.getvalue()),
@@ -534,6 +860,36 @@ class CLITests(unittest.TestCase):
         )
         self.assertEqual(
             "remote old-edge: python_too_old\n",
+            stderr.getvalue(),
+        )
+
+    def test_empty_remote_fleet_is_nonfailure_with_local_rows_and_notice(self):
+        local = make_session(
+            "local-working",
+            Status.WORKING,
+            updated_at=time.time(),
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["status", "--remote", "--json"],
+            scanner=FakeScanner([local]),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=stderr,
+            remote_aggregator=lambda command, selected=None: RemoteAggregate(
+                command
+            ),
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [dict(local.to_dict(), host="local")],
+            json.loads(stdout.getvalue()),
+        )
+        self.assertEqual(
+            "remote: no eligible hosts; showing local sessions only\n",
             stderr.getvalue(),
         )
 
@@ -654,7 +1010,7 @@ class CLITests(unittest.TestCase):
         rows = json.loads(stdout.getvalue())
 
         self.assertEqual(0, code)
-        self.assertEqual([None], scanner.recent_calls)
+        self.assertEqual([RECENT_SECONDS], scanner.recent_calls)
         self.assertEqual(
             ["remote-recent", "local-recent"],
             [row["session_id"] for row in rows],
@@ -721,8 +1077,189 @@ class CLITests(unittest.TestCase):
                 if command == "list":
                     self.assertIn("remote-old", stdout.getvalue())
 
+    def test_local_and_remote_snapshots_share_selection_and_ordering(self):
+        now = time.time()
+        sessions = [
+            make_session(
+                "root-a",
+                Status.WAITING,
+                agent="claude",
+                updated_at=now - 30,
+            ),
+            make_session(
+                "child-a",
+                Status.WAITING,
+                agent="claude",
+                updated_at=now + 10,
+                parent_id="root-a",
+            ),
+            make_session(
+                "work-b",
+                Status.WORKING,
+                agent="cursor-cli",
+                updated_at=now + 20,
+            ),
+            make_session(
+                "idle-c",
+                Status.IDLE,
+                agent="codex",
+                updated_at=now + 40,
+            ),
+            make_session(
+                "old-d",
+                Status.WAITING,
+                agent="claude",
+                updated_at=now - RECENT_SECONDS - 10,
+            ),
+        ]
+        local_rows = [session.to_dict() for session in sessions]
+        remote_rows = tuple(
+            dict(session.to_dict(), host="edge")
+            for session in reversed(sessions)
+        )
+        all_ids = {session.session_id for session in sessions}
+        cases = (
+            (
+                "default",
+                ["list"],
+                ["idle-c", "work-b", "child-a", "root-a"],
+                ["idle-c", "work-b", "root-a", "child-a"],
+            ),
+            (
+                "all",
+                ["list", "--all"],
+                ["idle-c", "work-b", "child-a", "root-a", "old-d"],
+                ["idle-c", "work-b", "root-a", "child-a", "old-d"],
+            ),
+            (
+                "agent",
+                ["list", "--all", "--agent", "cLaUdE"],
+                ["child-a", "root-a", "old-d"],
+                ["root-a", "child-a", "old-d"],
+            ),
+            (
+                "status",
+                ["status"],
+                ["work-b", "child-a", "root-a", "old-d"],
+                ["work-b", "root-a", "child-a", "old-d"],
+            ),
+        )
+
+        def human_signature(rendered):
+            signature = []
+            for line in rendered.splitlines()[1:]:
+                matches = [session_id for session_id in all_ids if session_id in line]
+                if matches:
+                    self.assertEqual(1, len(matches))
+                    signature.append((matches[0], "↳" in line))
+            return signature
+
+        for name, base_argv, json_order, human_order in cases:
+            for as_json in (False, True):
+                with self.subTest(name=name, as_json=as_json):
+                    argv = base_argv + (["--json"] if as_json else [])
+                    local_stdout = io.StringIO()
+                    local_stderr = io.StringIO()
+                    local_code = main(
+                        argv,
+                        scanner=FakeScanner(),
+                        client=FakeClient(local_rows),
+                        stdout=local_stdout,
+                        stderr=local_stderr,
+                    )
+                    remote_stdout = io.StringIO()
+                    remote_stderr = io.StringIO()
+                    remote_code = main(
+                        argv + ["--remote"],
+                        scanner=FakeScanner(),
+                        client=FakeClient(),
+                        stdout=remote_stdout,
+                        stderr=remote_stderr,
+                        remote_aggregator=lambda command, selected=None, recent_seconds=None: RemoteAggregate(
+                            command,
+                            rows=remote_rows,
+                            hosts=("edge",),
+                            succeeded=("edge",),
+                        ),
+                    )
+
+                    self.assertEqual(0, local_code)
+                    self.assertEqual(local_code, remote_code)
+                    self.assertEqual("", local_stderr.getvalue())
+                    self.assertEqual("", remote_stderr.getvalue())
+                    if as_json:
+                        local_payload = json.loads(local_stdout.getvalue())
+                        remote_payload = json.loads(remote_stdout.getvalue())
+                        self.assertEqual(
+                            local_payload,
+                            [
+                                {
+                                    key: value
+                                    for key, value in row.items()
+                                    if key != "host"
+                                }
+                                for row in remote_payload
+                            ],
+                        )
+                        self.assertEqual(
+                            json_order,
+                            [row["session_id"] for row in local_payload],
+                        )
+                    else:
+                        local_signature = human_signature(local_stdout.getvalue())
+                        remote_signature = human_signature(remote_stdout.getvalue())
+                        self.assertEqual(local_signature, remote_signature)
+                        self.assertEqual(
+                            human_order,
+                            [session_id for session_id, _depth in local_signature],
+                        )
+                        self.assertTrue(local_stdout.getvalue().startswith("AGENT"))
+                        self.assertTrue(remote_stdout.getvalue().startswith("HOST"))
+
+    def test_empty_status_uses_same_local_and_remote_rendering(self):
+        idle = make_session(
+            "idle-only",
+            Status.IDLE,
+            updated_at=time.time(),
+        )
+        remote_idle = dict(idle.to_dict(), host="edge")
+
+        for as_json in (False, True):
+            with self.subTest(as_json=as_json):
+                argv = ["status"] + (["--json"] if as_json else [])
+                outputs = []
+                for remote in (False, True):
+                    stdout = io.StringIO()
+                    code = main(
+                        argv + (["--remote"] if remote else []),
+                        scanner=FakeScanner(),
+                        client=FakeClient([] if remote else [idle.to_dict()]),
+                        stdout=stdout,
+                        stderr=io.StringIO(),
+                        remote_aggregator=(
+                            (
+                                lambda command, selected=None: RemoteAggregate(
+                                    command,
+                                    rows=(remote_idle,),
+                                    hosts=("edge",),
+                                    succeeded=("edge",),
+                                )
+                            )
+                            if remote
+                            else None
+                        ),
+                    )
+                    self.assertEqual(0, code)
+                    outputs.append(stdout.getvalue())
+
+                self.assertEqual(
+                    "[]\n" if as_json else "no active sessions\n",
+                    outputs[0],
+                )
+                self.assertEqual(outputs[0], outputs[1])
+
     def test_list_json_uses_session_schema_and_48_hour_default(self):
-        session = make_session("one")
+        session = make_session("one", updated_at=time.time())
         scanner = FakeScanner(
             [session],
             [
@@ -754,7 +1291,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual("", stderr)
 
     def test_list_human_output_has_clear_header_but_json_does_not(self):
-        session = make_session("one")
+        session = make_session("one", updated_at=time.time())
 
         code, human, stderr = self.run_cli(["list"], FakeScanner([session]))
         json_code, encoded, json_stderr = self.run_cli(
@@ -775,9 +1312,10 @@ class CLITests(unittest.TestCase):
         self.assertEqual("", json_stderr)
 
     def test_list_agent_filter_is_repeatable_exact_and_case_insensitive_direct(self):
-        claude = make_session("claude", agent="claude")
-        cursor_ide = make_session("ide", agent="cursor-ide")
-        cursor_cli = make_session("cli", agent="cursor-cli")
+        now = time.time()
+        claude = make_session("claude", agent="claude", updated_at=now)
+        cursor_ide = make_session("ide", agent="cursor-ide", updated_at=now)
+        cursor_cli = make_session("cli", agent="cursor-cli", updated_at=now)
         scanner = FakeScanner([claude, cursor_ide, cursor_cli])
 
         code, stdout, stderr = self.run_cli(
@@ -892,6 +1430,7 @@ class CLITests(unittest.TestCase):
             "\x1b[2J\x1b[999C\x9b2J\x9d0;c1-pwned\x9c"
         )
         session = make_session("unsafe", Status.WAITING)
+        session.updated_at = time.time()
         session.title = snip(title, 200)
 
         for command in ("list", "status"):
@@ -912,7 +1451,7 @@ class CLITests(unittest.TestCase):
     def test_list_json_preserves_untrusted_semantic_text(self):
         source = "  \x1b]0;pwned\x07\x1b[31m红色\r覆写\x9b2J  "
         title = "\x1b]0;pwned\x07\x1b[31m红色 覆写\x9b2J"
-        session = make_session("unsafe-json")
+        session = make_session("unsafe-json", updated_at=time.time())
         session.title = snip(source, 200)
 
         code, stdout, stderr = self.run_cli(
@@ -935,7 +1474,7 @@ class CLITests(unittest.TestCase):
         for command in ("list", "status"):
             with self.subTest(command=command):
                 code, stdout, stderr = self.run_cli(
-                    [command],
+                    [command] + (["--all"] if command == "list" else []),
                     FakeScanner([child, parent]),
                 )
                 lines = stdout.splitlines()
@@ -962,7 +1501,7 @@ class CLITests(unittest.TestCase):
         )
 
         code, stdout, stderr = self.run_cli(
-            ["list"],
+            ["list", "--all"],
             FakeScanner([cursor_child, second, orphan, first, claude_parent]),
         )
 
@@ -1014,7 +1553,10 @@ class CLITests(unittest.TestCase):
             )
             parent_id = session_id
 
-        code, stdout, stderr = self.run_cli(["list"], FakeScanner(sessions))
+        code, stdout, stderr = self.run_cli(
+            ["list", "--all"],
+            FakeScanner(sessions),
+        )
 
         self.assertEqual(0, code)
         self.assertEqual("", stderr)
@@ -1026,13 +1568,13 @@ class CLITests(unittest.TestCase):
         ]
         self.assertLessEqual(max(branch_offsets), 12)
 
-    def test_list_json_preserves_flat_input_order_with_parent_metadata(self):
+    def test_list_json_sorts_flat_rows_without_tree_reparenting(self):
         child = make_session("child", parent_id="parent", updated_at=300.0)
         parent = make_session("parent", updated_at=100.0)
 
         code, stdout, stderr = self.run_cli(
-            ["list", "--json"],
-            FakeScanner([child, parent]),
+            ["list", "--all", "--json"],
+            FakeScanner([parent, child]),
         )
 
         self.assertEqual(0, code)
@@ -1092,6 +1634,54 @@ class CLITests(unittest.TestCase):
                     stderr.getvalue(),
                 )
                 self.assertNotIn("scan error", stdout.getvalue())
+
+    def test_daemon_tail_errors_are_sanitized_deduplicated_and_json_safe(self):
+        session = make_session("daemon", updated_at=time.time())
+        tail_error = {
+            "agent": "cursor-\x1b]0;pwned\x07cli",
+            "session_id": "one",
+            "code": "CursorChatSourceError",
+            "message": "/private/transcript content",
+        }
+        cases = (
+            (["list", "--json"], None),
+            (["status", "--json"], None),
+            (
+                ["list", "--remote", "--json"],
+                lambda command, selected=None, recent_seconds=None: RemoteAggregate(
+                    command,
+                    hosts=("edge",),
+                    succeeded=("edge",),
+                ),
+            ),
+        )
+
+        for argv, aggregator in cases:
+            with self.subTest(argv=argv):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                code = main(
+                    argv,
+                    scanner=FakeScanner([make_session("direct")]),
+                    client=FakeClient(
+                        [session.to_dict()],
+                        tail_errors=[tail_error, dict(tail_error)],
+                    ),
+                    stdout=stdout,
+                    stderr=stderr,
+                    remote_aggregator=aggregator,
+                )
+
+                self.assertEqual(0, code)
+                self.assertIsInstance(json.loads(stdout.getvalue()), list)
+                self.assertEqual(
+                    "tail error: cursor-cli session=one "
+                    "code=CursorChatSourceError\n",
+                    stderr.getvalue(),
+                )
+                self.assertNotIn("private", stderr.getvalue())
+                self.assertNotIn("pwned", stderr.getvalue())
+                self.assertNotIn("tail error", stdout.getvalue())
 
     def test_status_silently_falls_back_when_daemon_is_unavailable(self):
         session = make_session("direct", Status.WORKING)
@@ -1316,6 +1906,111 @@ class CLITests(unittest.TestCase):
         self.assertEqual([], scanner.recent_calls)
         self.assertEqual([], direct_calls)
 
+    def test_watch_all_warns_and_falls_back_after_live_subscription_drops(self):
+        daemon_event = Event(
+            "2026-08-23T04:00:00+08:00",
+            "claude",
+            "daemon-session",
+            "assistant",
+            "before drop",
+        )
+        direct_session = make_session("direct")
+        direct_event = Event(
+            "2026-08-23T04:00:01+08:00",
+            "claude",
+            "direct",
+            "assistant",
+            "after fallback",
+        )
+        tail_error = {
+            "agent": "cursor-cli",
+            "session_id": "broken-tail",
+            "code": "CursorChatSourceError",
+        }
+
+        class DroppingClient(FakeClient):
+            def subscribe(self):
+                self.subscribe_calls += 1
+
+                def events():
+                    yield daemon_event.to_dict()
+                    raise SidecarClientError(
+                        "private daemon transport detail",
+                        code="connection_closed",
+                    )
+
+                return events()
+
+        direct_calls = []
+
+        def direct_watcher(sessions, from_start=False):
+            direct_calls.append((sessions, from_start))
+            return iter((direct_event,))
+
+        client = DroppingClient(tail_errors=[tail_error, dict(tail_error)])
+        scanner = FakeScanner([direct_session])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--json"],
+            scanner=scanner,
+            client=client,
+            stdout=stdout,
+            stderr=stderr,
+            watch_provider=direct_watcher,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [daemon_event.to_dict(), direct_event.to_dict()],
+            [json.loads(line) for line in stdout.getvalue().splitlines()],
+        )
+        self.assertEqual(1, client.status_calls)
+        self.assertEqual(1, client.subscribe_calls)
+        self.assertEqual([None], scanner.recent_calls)
+        self.assertEqual([([direct_session], False)], direct_calls)
+        self.assertEqual(
+            "tail error: cursor-cli session=broken-tail "
+            "code=CursorChatSourceError\n"
+            "watch: daemon subscription lost; switching to direct local "
+            "tailing; events during transition may be missed\n",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("private", stderr.getvalue())
+        self.assertNotIn("tail error", stdout.getvalue())
+
+    def test_watch_all_daemon_unavailable_before_subscription_falls_back_silently(self):
+        session = make_session("direct")
+        event = Event(
+            "2026-08-23T04:00:00+08:00",
+            "claude",
+            "direct",
+            "assistant",
+            "normal fallback",
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        calls = []
+
+        def direct_watcher(sessions, from_start=False):
+            calls.append((sessions, from_start))
+            return iter((event,))
+
+        code = main(
+            ["watch", "--all", "--json"],
+            scanner=FakeScanner([session]),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=stderr,
+            watch_provider=direct_watcher,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(event.to_dict(), json.loads(stdout.getvalue()))
+        self.assertEqual([([session], False)], calls)
+        self.assertEqual("", stderr.getvalue())
+
     def test_watch_all_cursor_chat_uses_daemon_subscription(self):
         event = Event(
             "2026-08-23T04:00:00+08:00",
@@ -1447,6 +2142,831 @@ class CLITests(unittest.TestCase):
             stderr.getvalue(),
         )
 
+    def test_remote_watch_validation_stops_before_setup(self):
+        cases = (
+            (
+                ["watch", "--all", "--host", "edge"],
+                "watch: --host requires --remote\n",
+            ),
+            (
+                ["watch", "--remote"],
+                "watch: --remote requires --all\n",
+            ),
+            (
+                ["watch", "prefix", "--remote"],
+                "watch: --remote conflicts with a session prefix; use --all\n",
+            ),
+            (
+                ["watch", "prefix", "--all", "--remote"],
+                "watch: --remote conflicts with a session prefix; use --all\n",
+            ),
+        )
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                calls = []
+                stderr = io.StringIO()
+                code = main(
+                    argv,
+                    scanner=FakeScanner(),
+                    client=OfflineClient(),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                    remote_watch_provider=lambda **kwargs: calls.append(kwargs),
+                )
+                self.assertEqual(2, code)
+                self.assertEqual(expected, stderr.getvalue())
+                self.assertEqual([], calls)
+
+    def test_remote_watch_merges_local_and_two_hosts_fairly_from_start(self):
+        local_session = make_session("local-direct")
+        local_events = [
+            Event("t1", "claude", "local-1", "assistant", "one"),
+            Event("t3", "claude", "local-2", "assistant", "two"),
+        ]
+        remote_events = [
+            RemoteWatchEvent(
+                "edge-a",
+                "t2",
+                "codex",
+                "remote-a",
+                "assistant",
+                "a",
+                {},
+            ),
+            RemoteWatchEvent(
+                "edge-b",
+                "t4",
+                "cursor-cli",
+                "remote-b",
+                "assistant",
+                "b",
+                {},
+            ),
+        ]
+        barrier = threading.Barrier(2)
+        direct_calls = []
+        remote_calls = []
+
+        def direct(sessions, from_start=False, cancel_event=None):
+            direct_calls.append((sessions, from_start, cancel_event))
+
+            def events():
+                barrier.wait(timeout=1)
+                yield from local_events
+
+            return events()
+
+        class GatedRemote(FakeRemoteWatchSession):
+            def __iter__(self):
+                barrier.wait(timeout=1)
+                return iter(self.items)
+
+        remote_session = GatedRemote(
+            remote_events,
+            hosts=("edge-a", "edge-b"),
+        )
+
+        def remote_provider(selected=None, from_start=False, cancel_event=None):
+            remote_calls.append((selected, from_start, cancel_event))
+            return remote_session
+
+        stdout = io.StringIO()
+        code = main(
+            [
+                "watch",
+                "--all",
+                "--remote",
+                "--host",
+                "edge-a",
+                "--host",
+                "edge-b",
+                "--from-start",
+                "--json",
+            ],
+            scanner=FakeScanner([local_session]),
+            client=FakeClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            watch_provider=direct,
+            remote_watch_provider=remote_provider,
+            local_watch_queue=queue.Queue(maxsize=1),
+            remote_watch_queue=queue.Queue(maxsize=1),
+        )
+        rows = [json.loads(line) for line in stdout.getvalue().splitlines()]
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            {"local-1", "local-2", "remote-a", "remote-b"},
+            {row["session_id"] for row in rows},
+        )
+        self.assertEqual(
+            {"local", "edge-a", "edge-b"},
+            {row["host"] for row in rows},
+        )
+        self.assertLess(
+            abs(
+                rows.index(next(row for row in rows if row["host"] == "local"))
+                - rows.index(next(row for row in rows if row["host"] != "local"))
+            ),
+            2,
+        )
+        self.assertEqual([([local_session], True, direct_calls[0][2])], direct_calls)
+        self.assertIsInstance(direct_calls[0][2], threading.Event)
+        self.assertEqual(["edge-a", "edge-b"], remote_calls[0][0])
+        self.assertTrue(remote_calls[0][1])
+        self.assertIs(direct_calls[0][2], remote_calls[0][2])
+        self.assertTrue(remote_session.closed)
+
+    def test_remote_watch_partial_failure_keeps_local_and_peer_events(self):
+        local = Event("t1", "claude", "local", "assistant", "local event")
+        remote = RemoteWatchEvent(
+            "good",
+            "t2",
+            "codex",
+            "remote",
+            "assistant",
+            "remote event",
+            {},
+        )
+        remote_session = FakeRemoteWatchSession(
+            (
+                RemoteWatchReady("good"),
+                RemoteWatchFailure("old", "python_too_old"),
+                remote,
+            ),
+            hosts=("good", "old"),
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--remote", "--json"],
+            scanner=FakeScanner(),
+            client=FakeClient(events=[local.to_dict()]),
+            stdout=stdout,
+            stderr=stderr,
+            remote_watch_provider=lambda **kwargs: remote_session,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            {"local", "remote"},
+            {
+                row["session_id"]
+                for row in map(json.loads, stdout.getvalue().splitlines())
+            },
+        )
+        self.assertEqual(
+            "watch: remote failure host=old code=python_too_old; "
+            "events may be missed\n",
+            stderr.getvalue(),
+        )
+
+    def test_remote_watch_daemon_drop_warns_and_cancels_direct_fallback(self):
+        direct_session = make_session("direct")
+        direct_event = Event(
+            "t",
+            "claude",
+            "direct",
+            "assistant",
+            "after drop",
+        )
+
+        class DroppingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.cancel_event = None
+
+            def subscribe(self, cancel_event=None):
+                self.subscribe_calls += 1
+                self.cancel_event = cancel_event
+                raise SidecarClientError("private", code="connection_closed")
+
+        client = DroppingClient()
+        direct_calls = []
+
+        def direct(sessions, from_start=False, cancel_event=None):
+            direct_calls.append((sessions, from_start, cancel_event))
+            return iter((direct_event,))
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = main(
+            ["watch", "--all", "--remote", "--json"],
+            scanner=FakeScanner([direct_session]),
+            client=client,
+            stdout=stdout,
+            stderr=stderr,
+            watch_provider=direct,
+            remote_watch_provider=lambda **kwargs: FakeRemoteWatchSession(
+                hosts=()
+            ),
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual("direct", json.loads(stdout.getvalue())["session_id"])
+        self.assertIn("daemon subscription lost", stderr.getvalue())
+        self.assertNotIn("private", stderr.getvalue())
+        self.assertIsInstance(client.cancel_event, threading.Event)
+        self.assertEqual([direct_session], direct_calls[0][0])
+        self.assertFalse(direct_calls[0][1])
+        self.assertIs(client.cancel_event, direct_calls[0][2])
+
+    def test_remote_watch_all_failure_without_local_exits_three(self):
+        remote_session = FakeRemoteWatchSession(
+            (RemoteWatchFailure("old", "python_too_old"),),
+            hosts=("old",),
+            all_failed=True,
+        )
+        stderr = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner(),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=stderr,
+            remote_watch_provider=lambda **kwargs: remote_session,
+        )
+
+        self.assertEqual(3, code)
+        self.assertIn("watch: no sessions found\n", stderr.getvalue())
+        self.assertIn("host=old code=python_too_old", stderr.getvalue())
+        self.assertNotIn("traceback", stderr.getvalue().casefold())
+
+    def test_remote_watch_producer_crash_overrides_stale_session_outcome(self):
+        class CrashingRemote(FakeRemoteWatchSession):
+            def __iter__(self):
+                raise RuntimeError("private remote iterator detail")
+
+        remote_session = CrashingRemote(hosts=("edge",), all_failed=False)
+        stderr = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner(),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=stderr,
+            remote_watch_provider=lambda **kwargs: remote_session,
+        )
+
+        self.assertEqual(3, code)
+        self.assertIn(
+            "watch: remote failure code=remote; events may be missed\n",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("private", stderr.getvalue())
+        self.assertNotIn("traceback", stderr.getvalue().casefold())
+        self.assertTrue(remote_session.closed)
+
+    def test_sole_remote_event_then_failure_is_terminal_failure(self):
+        event = RemoteWatchEvent(
+            "edge",
+            "t",
+            "codex",
+            "remote-event",
+            "assistant",
+            "delivered before failure",
+            {},
+        )
+        remote_session = FakeRemoteWatchSession(
+            (
+                RemoteWatchReady("edge"),
+                event,
+                RemoteWatchFailure("edge", "remote"),
+            ),
+            hosts=("edge",),
+            all_failed=False,
+        )
+        stdout = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner(),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            remote_watch_provider=lambda **kwargs: remote_session,
+        )
+
+        self.assertEqual(3, code)
+        self.assertEqual("remote-event", json.loads(stdout.getvalue())["session_id"])
+        self.assertTrue(remote_session.closed)
+
+    def test_local_event_then_crash_with_all_remote_failure_exits_three(self):
+        local_event = Event(
+            "t",
+            "claude",
+            "local-event",
+            "assistant",
+            "delivered before crash",
+        )
+
+        def local_provider(*args, **kwargs):
+            del args, kwargs
+
+            def events():
+                yield local_event
+                raise RuntimeError("private local crash")
+
+            return events()
+
+        remote_session = FakeRemoteWatchSession(
+            (RemoteWatchFailure("old", "python_too_old"),),
+            hosts=("old",),
+            all_failed=False,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner([make_session("local")]),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=stderr,
+            watch_provider=local_provider,
+            remote_watch_provider=lambda **kwargs: remote_session,
+        )
+
+        self.assertEqual(3, code)
+        self.assertEqual("local-event", json.loads(stdout.getvalue())["session_id"])
+        self.assertIn("watch: local source failed\n", stderr.getvalue())
+        self.assertNotIn("private", stderr.getvalue())
+        self.assertTrue(remote_session.closed)
+
+    def test_partial_remote_failure_after_event_keeps_healthy_host_success(self):
+        failed_event = RemoteWatchEvent(
+            "bad",
+            "t1",
+            "codex",
+            "bad-event",
+            "assistant",
+            "before failure",
+            {},
+        )
+        remote_session = FakeRemoteWatchSession(
+            (
+                RemoteWatchReady("bad"),
+                failed_event,
+                RemoteWatchFailure("bad", "remote"),
+                RemoteWatchReady("good"),
+            ),
+            hosts=("bad", "good"),
+            all_failed=True,
+        )
+        stdout = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner(),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            remote_watch_provider=lambda **kwargs: remote_session,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual("bad-event", json.loads(stdout.getvalue())["session_id"])
+        self.assertTrue(remote_session.closed)
+
+    def test_local_only_event_then_crash_exits_one(self):
+        event = Event(
+            "t",
+            "claude",
+            "local-event",
+            "assistant",
+            "delivered before crash",
+        )
+
+        def provider(*args, **kwargs):
+            del args, kwargs
+
+            def events():
+                yield event
+                raise RuntimeError("private local crash")
+
+            return events()
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = main(
+            ["watch", "--all", "--from-start", "--json"],
+            scanner=FakeScanner([make_session("local")]),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=stderr,
+            watch_provider=provider,
+        )
+
+        self.assertEqual(1, code)
+        self.assertEqual("local-event", json.loads(stdout.getvalue())["session_id"])
+        self.assertEqual("watch: local source failed\n", stderr.getvalue())
+        self.assertNotIn("private", stderr.getvalue())
+
+    def test_local_only_keyboard_interrupt_remains_130(self):
+        def provider(*args, **kwargs):
+            del args, kwargs
+            raise KeyboardInterrupt
+
+        stderr = io.StringIO()
+        code = main(
+            ["watch", "--all", "--from-start", "--json"],
+            scanner=FakeScanner([make_session("local")]),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=stderr,
+            watch_provider=provider,
+        )
+
+        self.assertEqual(130, code)
+        self.assertEqual("", stderr.getvalue())
+
+    def test_local_runtime_failure_does_not_count_as_existing_success(self):
+        def broken_local(*args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("private local iterator detail")
+
+        cases = (
+            (
+                "all remote failed",
+                FakeRemoteWatchSession(
+                    (RemoteWatchFailure("old", "python_too_old"),),
+                    hosts=("old",),
+                    all_failed=False,
+                ),
+                3,
+            ),
+            (
+                "remote survivor",
+                FakeRemoteWatchSession(
+                    (
+                        RemoteWatchReady("good"),
+                        RemoteWatchFailure("old", "python_too_old"),
+                    ),
+                    hosts=("good", "old"),
+                    all_failed=True,
+                ),
+                0,
+            ),
+        )
+        for name, remote_session, expected in cases:
+            with self.subTest(name=name):
+                stderr = io.StringIO()
+                code = main(
+                    [
+                        "watch",
+                        "--all",
+                        "--remote",
+                        "--from-start",
+                        "--json",
+                    ],
+                    scanner=FakeScanner([make_session("local")]),
+                    client=OfflineClient(),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                    watch_provider=broken_local,
+                    remote_watch_provider=lambda **kwargs: remote_session,
+                )
+
+                self.assertEqual(expected, code)
+                self.assertIn("watch: local source failed\n", stderr.getvalue())
+                self.assertNotIn("private", stderr.getvalue())
+                self.assertNotIn("traceback", stderr.getvalue().casefold())
+                self.assertTrue(remote_session.closed)
+
+    def test_local_clean_end_survives_remote_failure_without_events(self):
+        remote_session = FakeRemoteWatchSession(
+            (RemoteWatchFailure("old", "python_too_old"),),
+            hosts=("old",),
+            all_failed=True,
+        )
+
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner([make_session("local")]),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            watch_provider=lambda *args, **kwargs: iter(()),
+            remote_watch_provider=lambda **kwargs: remote_session,
+        )
+
+        self.assertEqual(0, code)
+        self.assertTrue(remote_session.closed)
+
+    def test_local_producer_start_failure_is_sanitized_setup_error(self):
+        remote_session = FakeRemoteWatchSession(hosts=("edge",))
+
+        def fail_start(thread):
+            self.assertEqual("sidecar-watch-local", thread.name)
+            raise RuntimeError("private thread startup detail")
+
+        stderr = io.StringIO()
+        with mock.patch(
+            "sidecar.cli.threading.Thread.start",
+            new=fail_start,
+        ):
+            code = main(
+                ["watch", "--all", "--remote", "--from-start", "--json"],
+                scanner=FakeScanner([make_session("local")]),
+                client=OfflineClient(),
+                stdout=io.StringIO(),
+                stderr=stderr,
+                remote_watch_provider=lambda **kwargs: remote_session,
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual(
+            "watch: local producer setup failed\n",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("private", stderr.getvalue())
+        self.assertTrue(remote_session.closed)
+        self.assertFalse(
+            any(
+                thread.name.startswith("sidecar-watch-")
+                for thread in threading.enumerate()
+            )
+        )
+
+    def test_remote_producer_start_failure_cleans_started_local_source(self):
+        real_start = threading.Thread.start
+        local_cancel = []
+
+        class BlockingRemote(FakeRemoteWatchSession):
+            def __init__(self):
+                super().__init__(hosts=("edge",))
+                self.stop = threading.Event()
+
+            def __iter__(self):
+                self.stop.wait(2)
+                return
+                yield
+
+            def close(self):
+                super().close()
+                self.stop.set()
+
+        remote_session = BlockingRemote()
+
+        def local_provider(sessions, from_start=False, cancel_event=None):
+            del sessions, from_start
+            local_cancel.append(cancel_event)
+
+            def events():
+                cancel_event.wait(2)
+                return
+                yield
+
+            return events()
+
+        def fail_remote_start(thread):
+            if thread.name == "sidecar-watch-remote":
+                real_start(thread)
+                raise RuntimeError("private remote thread startup detail")
+            return real_start(thread)
+
+        stderr = io.StringIO()
+        with mock.patch(
+            "sidecar.cli.threading.Thread.start",
+            new=fail_remote_start,
+        ):
+            code = main(
+                ["watch", "--all", "--remote", "--from-start", "--json"],
+                scanner=FakeScanner([make_session("local")]),
+                client=OfflineClient(),
+                stdout=io.StringIO(),
+                stderr=stderr,
+                watch_provider=local_provider,
+                remote_watch_provider=lambda **kwargs: remote_session,
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual(
+            "watch: remote producer setup failed\n",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("private", stderr.getvalue())
+        self.assertTrue(local_cancel[0].is_set())
+        self.assertTrue(remote_session.closed)
+        self.assertFalse(
+            any(
+                thread.name.startswith("sidecar-watch-")
+                for thread in threading.enumerate()
+            )
+        )
+
+    def test_remote_watch_empty_fleet_continues_local_or_exits_one(self):
+        local = Event("t", "claude", "local", "assistant", "still local")
+        for has_local, expected in ((True, 0), (False, 1)):
+            with self.subTest(has_local=has_local):
+                session = FakeRemoteWatchSession(hosts=())
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                code = main(
+                    [
+                        "watch",
+                        "--all",
+                        "--remote",
+                        "--from-start",
+                        "--json",
+                    ],
+                    scanner=FakeScanner(
+                        [make_session("local")] if has_local else []
+                    ),
+                    client=OfflineClient(),
+                    stdout=stdout,
+                    stderr=stderr,
+                    watch_provider=lambda *args, **kwargs: iter((local,)),
+                    remote_watch_provider=lambda **kwargs: session,
+                )
+
+                self.assertEqual(expected, code)
+                self.assertIn(
+                    "remote: no eligible hosts; showing local sessions only\n",
+                    stderr.getvalue(),
+                )
+                self.assertEqual(
+                    [local.to_dict()] if has_local else [],
+                    [
+                        {
+                            key: value
+                            for key, value in json.loads(line).items()
+                            if key != "host"
+                        }
+                        for line in stdout.getvalue().splitlines()
+                    ],
+                )
+                self.assertTrue(session.closed)
+
+    def test_remote_watch_setup_errors_are_typed_and_hide_raw_details(self):
+        cases = (
+            (RemoteInventoryError(), "watch: remote inventory\n"),
+            (OSError("private setup path"), "watch: remote setup\n"),
+            (
+                ValueError("selected secret-alias is not eligible"),
+                "watch: remote selection\n",
+            ),
+        )
+        for error, expected in cases:
+            with self.subTest(error=error.__class__.__name__):
+                stderr = io.StringIO()
+
+                def fail(**kwargs):
+                    del kwargs
+                    raise error
+
+                code = main(
+                    ["watch", "--all", "--remote", "--host", "secret-alias"],
+                    scanner=FakeScanner([make_session("local")]),
+                    client=OfflineClient(),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                    remote_watch_provider=fail,
+                )
+
+                self.assertEqual(2, code)
+                self.assertEqual(expected, stderr.getvalue())
+                self.assertNotIn("private", stderr.getvalue())
+                self.assertNotIn("secret-alias", stderr.getvalue())
+
+    def test_remote_watch_json_and_human_outputs_control_host_rendering(self):
+        text = "\x1b]0;pwned\x07\x1b[31m完成\r覆写\x9b2J"
+        event = RemoteWatchEvent(
+            "very-long-edge-host",
+            "2026-08-23T04:00:00+08:00",
+            "codex",
+            "remote",
+            "assistant",
+            text,
+            {"nested": ["value"]},
+        )
+
+        outputs = {}
+        for as_json in (False, True):
+            stdout = io.StringIO()
+            code = main(
+                ["watch", "--all", "--remote", "--from-start"]
+                + (["--json"] if as_json else []),
+                scanner=FakeScanner(),
+                client=OfflineClient(),
+                stdout=stdout,
+                stderr=io.StringIO(),
+                remote_watch_provider=lambda **kwargs: FakeRemoteWatchSession(
+                    (event,),
+                    hosts=("very-long-edge-host",),
+                ),
+            )
+            self.assertEqual(0, code)
+            outputs[as_json] = stdout.getvalue()
+
+        payload = json.loads(outputs[True])
+        self.assertEqual(
+            {
+                "ts",
+                "agent",
+                "session_id",
+                "kind",
+                "text",
+                "extra",
+                "host",
+            },
+            set(payload),
+        )
+        self.assertEqual(text, payload["text"])
+        human = outputs[False]
+        self.assertTrue(human.startswith("very-long-edge-h "))
+        self.assertIn("完成 覆写", human)
+        self.assertNotIn("pwned", human)
+        self.assertNotIn("\x1b", human)
+        self.assertNotIn("\r", human)
+
+    def test_remote_watch_queue_pressure_preserves_all_events(self):
+        count = 80
+        local_events = [
+            Event("t", "claude", "local-{}".format(index), "assistant", "x")
+            for index in range(count)
+        ]
+        remote_events = [
+            RemoteWatchEvent(
+                "edge",
+                "t",
+                "codex",
+                "remote-{}".format(index),
+                "assistant",
+                "x",
+                {},
+            )
+            for index in range(count)
+        ]
+        stdout = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner([make_session("local")]),
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            watch_provider=lambda *args, **kwargs: iter(local_events),
+            remote_watch_provider=lambda **kwargs: FakeRemoteWatchSession(
+                remote_events
+            ),
+            local_watch_queue=queue.Queue(maxsize=1),
+            remote_watch_queue=queue.Queue(maxsize=1),
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(count * 2, len(stdout.getvalue().splitlines()))
+        self.assertFalse(
+            any(
+                thread.name.startswith("sidecar-watch-")
+                for thread in threading.enumerate()
+            )
+        )
+
+    def test_remote_watch_keyboard_interrupt_closes_and_joins_producers(self):
+        class BlockingRemote(FakeRemoteWatchSession):
+            def __init__(self):
+                super().__init__(hosts=("edge",))
+                self.stopped = threading.Event()
+
+            def __iter__(self):
+                while not self.closed:
+                    self.stopped.wait(0.01)
+                return
+                yield
+
+            def close(self):
+                super().close()
+                self.stopped.set()
+
+        class InterruptQueue(queue.Queue):
+            def get(self, block=True, timeout=None):
+                del block, timeout
+                raise KeyboardInterrupt
+
+        remote_session = BlockingRemote()
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner(),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            remote_watch_provider=lambda **kwargs: remote_session,
+            remote_watch_queue=InterruptQueue(maxsize=1),
+        )
+
+        self.assertEqual(130, code)
+        self.assertTrue(remote_session.closed)
+        self.assertFalse(
+            any(
+                thread.name.startswith("sidecar-watch-")
+                for thread in threading.enumerate()
+            )
+        )
+
     @mock.patch("sidecar.cli.subprocess.Popen")
     def test_daemon_start_spawns_detached_and_waits_for_ping(self, popen):
         class StartingClient:
@@ -1459,6 +2979,8 @@ class CLITests(unittest.TestCase):
                     raise SidecarClientError("offline", code="connection_failed")
                 return {"ok": True, "op": "ping", "pid": 7654}
 
+        popen.return_value.pid = 7654
+        popen.return_value.returncode = None
         popen.return_value.poll.return_value = None
         stdout = io.StringIO()
         code = main(
@@ -1471,11 +2993,9 @@ class CLITests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn("7654", stdout.getvalue())
         command = popen.call_args.args[0]
-        self.assertEqual(["-m", "sidecar", "daemon", "run"], command[1:])
-        self.assertEqual(
-            str(Path(__file__).resolve().parents[1]),
-            popen.call_args.kwargs["cwd"],
-        )
+        self.assertTrue(Path(command[0]).is_absolute())
+        self.assertEqual(["daemon", "run"], command[-2:])
+        self.assertNotIn("cwd", popen.call_args.kwargs)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
     @mock.patch("sidecar.cli.subprocess.Popen")
@@ -1492,6 +3012,501 @@ class CLITests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn("already running", stdout.getvalue())
         popen.assert_not_called()
+
+    def test_daemon_start_timeout_terminates_reaps_and_cleans_owned_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            socket_path = runtime / "daemon.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            listener.close()
+            process = FakeDaemonProcess()
+            (runtime / "daemon.pid").write_text(
+                "{}\n".format(process.pid),
+                encoding="ascii",
+            )
+            client = SequencedPingClient(
+                [SidecarClientError("offline", code="connection_failed")],
+                socket_path=socket_path,
+            )
+            signals, killpg = controlled_process_group(process)
+
+            with (
+                mock.patch("sidecar.cli.subprocess.Popen", return_value=process),
+                mock.patch("sidecar.cli.DAEMON_START_TIMEOUT", 0.0),
+                mock.patch(
+                    "sidecar.cli.os.getpgid",
+                    return_value=process.pid,
+                ),
+                mock.patch("sidecar.cli.os.killpg", side_effect=killpg),
+            ):
+                code = main(
+                    ["daemon", "start"],
+                    client=client,
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+
+            self.assertEqual(1, code)
+            self.assertIn(signal.SIGTERM, signals)
+            self.assertTrue(process.wait_calls)
+            self.assertFalse(socket_path.exists())
+            self.assertFalse((runtime / "daemon.pid").exists())
+
+    def test_daemon_start_final_ping_preserves_late_ready_child(self):
+        process = FakeDaemonProcess()
+        client = SequencedPingClient(
+            [
+                SidecarClientError("offline", code="connection_failed"),
+                {"ok": True, "op": "ping", "pid": process.pid},
+            ]
+        )
+        stdout = io.StringIO()
+
+        with (
+            mock.patch("sidecar.cli.subprocess.Popen", return_value=process),
+            mock.patch("sidecar.cli.DAEMON_START_TIMEOUT", 0.0),
+            mock.patch("sidecar.cli.os.killpg") as killpg,
+        ):
+            code = main(
+                ["daemon", "start"],
+                client=client,
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(0, code)
+        self.assertIn("started", stdout.getvalue())
+        killpg.assert_not_called()
+        self.assertEqual([], process.wait_calls)
+
+    def test_daemon_start_http_mismatch_terminates_owned_child(self):
+        process = FakeDaemonProcess()
+        mismatch = {
+            "ok": True,
+            "op": "ping",
+            "pid": process.pid,
+            "http": {"enabled": False},
+        }
+        client = SequencedPingClient(
+            [
+                SidecarClientError("offline", code="connection_failed"),
+                mismatch,
+                mismatch,
+            ]
+        )
+        signals, killpg = controlled_process_group(process)
+        stderr = io.StringIO()
+
+        with (
+            mock.patch("sidecar.cli.subprocess.Popen", return_value=process),
+            mock.patch(
+                "sidecar.cli.os.getpgid",
+                return_value=process.pid,
+            ),
+            mock.patch("sidecar.cli.os.killpg", side_effect=killpg),
+        ):
+            code = main(
+                ["daemon", "start", "--http"],
+                client=client,
+                stdout=io.StringIO(),
+                stderr=stderr,
+            )
+
+        self.assertEqual(1, code)
+        self.assertIn(signal.SIGTERM, signals)
+        self.assertIn("HTTP configuration", stderr.getvalue())
+
+    def test_daemon_start_poll_exception_still_terminates_and_reaps(self):
+        process = FakeDaemonProcess(poll_error=RuntimeError("poll failed"))
+        client = SequencedPingClient(
+            [SidecarClientError("offline", code="connection_failed")]
+        )
+        signals, killpg = controlled_process_group(process)
+        stderr = io.StringIO()
+
+        with (
+            mock.patch("sidecar.cli.subprocess.Popen", return_value=process),
+            mock.patch(
+                "sidecar.cli.os.getpgid",
+                return_value=process.pid,
+            ),
+            mock.patch("sidecar.cli.os.killpg", side_effect=killpg),
+        ):
+            code = main(
+                ["daemon", "start"],
+                client=client,
+                stdout=io.StringIO(),
+                stderr=stderr,
+            )
+
+        self.assertEqual(1, code)
+        self.assertIn(signal.SIGTERM, signals)
+        self.assertTrue(process.wait_calls)
+        self.assertIn("polling failed", stderr.getvalue())
+
+    def test_daemon_start_keyboard_interrupt_cleans_child_and_returns_130(self):
+        process = FakeDaemonProcess()
+        client = SequencedPingClient(
+            [
+                SidecarClientError("offline", code="connection_failed"),
+                KeyboardInterrupt(),
+                SidecarClientError("offline", code="connection_failed"),
+            ]
+        )
+        signals, killpg = controlled_process_group(process)
+
+        with (
+            mock.patch("sidecar.cli.subprocess.Popen", return_value=process),
+            mock.patch(
+                "sidecar.cli.os.getpgid",
+                return_value=process.pid,
+            ),
+            mock.patch("sidecar.cli.os.killpg", side_effect=killpg),
+        ):
+            code = main(
+                ["daemon", "start"],
+                client=client,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(130, code)
+        self.assertIn(signal.SIGTERM, signals)
+        self.assertTrue(process.wait_calls)
+
+    def test_daemon_start_kills_surviving_descendants_with_group_fallback(self):
+        process = FakeDaemonProcess()
+        client = SequencedPingClient(
+            [SidecarClientError("offline", code="connection_failed")]
+        )
+        signals, killpg = controlled_process_group(
+            process,
+            survive_term=True,
+        )
+
+        with (
+            mock.patch("sidecar.cli.subprocess.Popen", return_value=process),
+            mock.patch("sidecar.cli.DAEMON_START_TIMEOUT", 0.0),
+            mock.patch("sidecar.cli.DAEMON_CHILD_TERM_TIMEOUT", 0.0),
+            mock.patch(
+                "sidecar.cli.os.getpgid",
+                return_value=process.pid,
+            ),
+            mock.patch("sidecar.cli.os.killpg", side_effect=killpg),
+        ):
+            code = main(
+                ["daemon", "start"],
+                client=client,
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(1, code)
+        self.assertIn(signal.SIGTERM, signals)
+        self.assertIn(signal.SIGKILL, signals)
+        self.assertTrue(process.wait_calls)
+
+    def test_daemon_start_timeout_cleans_real_descendant_process_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_path = Path(temporary) / "pids"
+            script = (
+                "import os,signal,subprocess,sys,time;"
+                "child=subprocess.Popen([sys.executable,'-c',"
+                "\"import signal,time;"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                "time.sleep(30)\"]);"
+                "open(sys.argv[1],'w').write("
+                "str(os.getpid())+' '+str(child.pid));"
+                "time.sleep(30)"
+            )
+            client = SequencedPingClient(
+                [SidecarClientError("offline", code="connection_failed")]
+            )
+            process_group = None
+            try:
+                with (
+                    mock.patch(
+                        "sidecar.cli.resolve_runtime_prefix",
+                        return_value=(
+                            sys.executable,
+                            "-c",
+                            script,
+                            str(pid_path),
+                        ),
+                    ),
+                    mock.patch("sidecar.cli.DAEMON_START_TIMEOUT", 0.2),
+                    mock.patch("sidecar.cli.DAEMON_POLL_INTERVAL", 0.01),
+                    mock.patch("sidecar.cli.DAEMON_CHILD_TERM_TIMEOUT", 0.1),
+                    mock.patch("sidecar.cli.DAEMON_CHILD_KILL_TIMEOUT", 1.0),
+                ):
+                    code = main(
+                        ["daemon", "start"],
+                        client=client,
+                        stdout=io.StringIO(),
+                        stderr=io.StringIO(),
+                    )
+
+                self.assertEqual(1, code)
+                self.assertTrue(pid_path.exists())
+                process_group, descendant = [
+                    int(value)
+                    for value in pid_path.read_text(encoding="ascii").split()
+                ]
+                self.assertGreater(descendant, 0)
+                with self.assertRaises(ProcessLookupError):
+                    os.killpg(process_group, 0)
+            finally:
+                if process_group is not None:
+                    try:
+                        os.killpg(process_group, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_daemon_start_does_not_signal_reused_child_pid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            socket_path = runtime / "daemon.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(socket_path))
+            listener.listen(1)
+            process = FakeDaemonProcess()
+            (runtime / "daemon.pid").write_text(
+                "{}\n".format(process.pid),
+                encoding="ascii",
+            )
+
+            def exited_poll():
+                process.returncode = 0
+                return 0
+
+            process.poll = exited_poll
+            ready = {"ok": True, "op": "ping", "pid": process.pid}
+            client = SequencedPingClient(
+                [
+                    SidecarClientError("offline", code="connection_failed"),
+                    SidecarClientError("offline", code="connection_failed"),
+                    ready,
+                ],
+                socket_path=socket_path,
+            )
+            stdout = io.StringIO()
+
+            try:
+                with (
+                    mock.patch(
+                        "sidecar.cli.subprocess.Popen",
+                        return_value=process,
+                    ),
+                    mock.patch("sidecar.cli.os.killpg") as killpg,
+                ):
+                    code = main(
+                        ["daemon", "start"],
+                        client=client,
+                        stdout=stdout,
+                        stderr=io.StringIO(),
+                    )
+            finally:
+                listener.close()
+
+            self.assertEqual(0, code)
+            self.assertIn("already running", stdout.getvalue())
+            killpg.assert_not_called()
+            self.assertTrue(process.wait_calls)
+            self.assertTrue(socket_path.exists())
+            self.assertTrue((runtime / "daemon.pid").exists())
+
+    def test_daemon_start_preserves_unrelated_ready_daemon(self):
+        process = FakeDaemonProcess()
+        unrelated_pid = process.pid + 1
+        ready = {"ok": True, "op": "ping", "pid": unrelated_pid}
+        client = SequencedPingClient(
+            [
+                SidecarClientError("offline", code="connection_failed"),
+                ready,
+                ready,
+            ]
+        )
+        signals, killpg = controlled_process_group(process)
+        stdout = io.StringIO()
+
+        def getpgid(pid):
+            return pid
+
+        with (
+            mock.patch("sidecar.cli.subprocess.Popen", return_value=process),
+            mock.patch("sidecar.cli.os.getpgid", side_effect=getpgid),
+            mock.patch("sidecar.cli.os.killpg", side_effect=killpg),
+        ):
+            code = main(
+                ["daemon", "start"],
+                client=client,
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(0, code)
+        self.assertIn("already running", stdout.getvalue())
+        self.assertIn(signal.SIGTERM, signals)
+
+    def test_daemon_http_parser_defaults_and_port_validation(self):
+        default = build_parser().parse_args(["daemon", "start", "--http"])
+        selected = build_parser().parse_args(
+            ["daemon", "run", "--http", "--http-port", "65535"]
+        )
+
+        self.assertTrue(default.http)
+        self.assertIsNone(default.http_port)
+        self.assertTrue(selected.http)
+        self.assertEqual(65535, selected.http_port)
+        for value in ("-1", "65536", "invalid"):
+            with self.subTest(value=value):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        build_parser().parse_args(
+                            ["daemon", "start", "--http", "--http-port", value]
+                        )
+                self.assertEqual(2, raised.exception.code)
+
+    @mock.patch("sidecar.cli.subprocess.Popen")
+    def test_daemon_http_port_requires_http_without_starting(self, popen):
+        for command in ("start", "run"):
+            with self.subTest(command=command):
+                stderr = io.StringIO()
+                code = main(
+                    ["daemon", command, "--http-port", "0"],
+                    client=OfflineClient(),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+                self.assertEqual(2, code)
+                self.assertIn("--http-port requires --http", stderr.getvalue())
+        popen.assert_not_called()
+
+    @mock.patch("sidecar.cli.subprocess.Popen")
+    def test_daemon_start_forwards_exact_http_flags_and_waits_for_http_ping(
+        self,
+        popen,
+    ):
+        class StartingHttpClient:
+            socket_path = Path("/tmp/private-runtime/daemon.sock")
+
+            def __init__(self):
+                self.calls = 0
+
+            def ping(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise SidecarClientError("offline", code="connection_failed")
+                return {
+                    "ok": True,
+                    "op": "ping",
+                    "pid": 7654,
+                    "http": {
+                        "enabled": True,
+                        "host": "127.0.0.1",
+                        "port": 43123,
+                    },
+                }
+
+        popen.return_value.pid = 7654
+        popen.return_value.returncode = None
+        popen.return_value.poll.return_value = None
+        stdout = io.StringIO()
+        code = main(
+            ["daemon", "start", "--http", "--http-port", "43123"],
+            client=StartingHttpClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual(
+            [
+                "daemon",
+                "run",
+                "--http",
+                "--http-port",
+                "43123",
+            ],
+            popen.call_args.args[0][-5:],
+        )
+        self.assertIn("http://127.0.0.1:43123", stdout.getvalue())
+        self.assertIn("/tmp/private-runtime/http.token", stdout.getvalue())
+
+    @mock.patch("sidecar.cli.subprocess.Popen")
+    def test_daemon_start_http_rejects_existing_off_or_wrong_port(self, popen):
+        cases = (
+            (None, ["daemon", "start", "--http"]),
+            (
+                {
+                    "enabled": True,
+                    "host": "127.0.0.1",
+                    "port": 43123,
+                },
+                [
+                    "daemon",
+                    "start",
+                    "--http",
+                    "--http-port",
+                    "43124",
+                ],
+            ),
+        )
+        for http, argv in cases:
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                code = main(
+                    argv,
+                    client=FakeClient(pid=99, http=http),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+                self.assertEqual(1, code)
+                self.assertIn("does not match", stderr.getvalue())
+        popen.assert_not_called()
+
+    @mock.patch("sidecar.cli.subprocess.Popen")
+    def test_daemon_start_http_port_zero_accepts_existing_bound_port(self, popen):
+        stdout = io.StringIO()
+        code = main(
+            ["daemon", "start", "--http"],
+            client=FakeClient(
+                pid=99,
+                http={
+                    "enabled": True,
+                    "host": "127.0.0.1",
+                    "port": 43123,
+                },
+            ),
+            stdout=stdout,
+            stderr=io.StringIO(),
+        )
+
+        self.assertEqual(0, code)
+        self.assertIn("already running", stdout.getvalue())
+        self.assertIn("43123", stdout.getvalue())
+        popen.assert_not_called()
+
+    @mock.patch("sidecar.cli.run_foreground")
+    def test_daemon_run_passes_http_configuration_to_foreground(self, run):
+        for argv, expected in (
+            (["daemon", "run", "--http"], 0),
+            (
+                ["daemon", "run", "--http", "--http-port", "43123"],
+                43123,
+            ),
+        ):
+            with self.subTest(argv=argv):
+                run.reset_mock()
+                code = main(
+                    argv,
+                    client=OfflineClient(),
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                )
+                self.assertEqual(0, code)
+                self.assertEqual(expected, run.call_args.kwargs["http_port"])
 
     @mock.patch("sidecar.cli.os.kill")
     @mock.patch("sidecar.cli.read_pid", return_value=98)
@@ -1562,29 +3577,241 @@ class CLITests(unittest.TestCase):
         self.assertIn("44", running_output.getvalue())
         self.assertIn("not running", stopped_output.getvalue())
 
+    def test_daemon_status_reports_http_url_and_token_path_not_token(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            secret = "do-not-print-this-token"
+            (runtime / "http.token").write_text(secret, encoding="ascii")
+            stdout = io.StringIO()
+
+            code = main(
+                ["daemon", "status"],
+                client=FakeClient(
+                    pid=44,
+                    socket_path=runtime / "daemon.sock",
+                    http={
+                        "enabled": True,
+                        "host": "127.0.0.1",
+                        "port": 43123,
+                    },
+                ),
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(0, code)
+        self.assertIn("http://127.0.0.1:43123", stdout.getvalue())
+        self.assertIn(str(runtime / "http.token"), stdout.getvalue())
+        self.assertNotIn(secret, stdout.getvalue())
+
+    def test_service_parser_and_install_forward_exact_options(self):
+        parsed = build_parser().parse_args(
+            [
+                "service",
+                "install",
+                "--http",
+                "--http-port",
+                "43123",
+                "--force",
+            ]
+        )
+        calls = []
+        client = object()
+
+        def install(**kwargs):
+            calls.append(kwargs)
+            return ServiceResult(0, "service installed and running")
+
+        stdout = io.StringIO()
+        code = main(
+            [
+                "service",
+                "install",
+                "--http",
+                "--http-port",
+                "43123",
+                "--force",
+            ],
+            client=client,
+            stdout=stdout,
+            stderr=io.StringIO(),
+            service_installer=install,
+        )
+
+        self.assertEqual("install", parsed.service_command)
+        self.assertTrue(parsed.http)
+        self.assertEqual(43123, parsed.http_port)
+        self.assertTrue(parsed.force)
+        self.assertEqual(0, code)
+        self.assertEqual(
+            {
+                "http": True,
+                "http_port": 43123,
+                "force": True,
+                "client": client,
+            },
+            calls[0],
+        )
+        self.assertIn("installed", stdout.getvalue())
+
+    def test_service_http_port_requires_http_before_install(self):
+        install = mock.Mock()
+        stderr = io.StringIO()
+
+        code = main(
+            ["service", "install", "--http-port", "43123"],
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=stderr,
+            service_installer=install,
+        )
+
+        self.assertEqual(2, code)
+        self.assertIn("--http-port requires --http", stderr.getvalue())
+        install.assert_not_called()
+
+    def test_service_status_exit_one_is_reported_on_stdout(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["service", "status"],
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=stderr,
+            service_status_provider=lambda **kwargs: ServiceResult(
+                1,
+                "service is unloaded",
+            ),
+        )
+
+        self.assertEqual(1, code)
+        self.assertEqual("service is unloaded\n", stdout.getvalue())
+        self.assertEqual("", stderr.getvalue())
+
+    def test_service_control_error_is_sanitized_to_stderr(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["service", "uninstall"],
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=stderr,
+            service_uninstaller=lambda **kwargs: ServiceResult(
+                2,
+                "unsupported\rplatform\x1b[31m",
+            ),
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertNotIn("\r", stderr.getvalue())
+        self.assertNotIn("\x1b", stderr.getvalue())
+
     def test_tui_command_passes_once_to_runner(self):
         calls = []
 
         def runner(**kwargs):
             calls.append(kwargs)
+            kwargs["client"].status()
+            kwargs["client"].status()
             return 7
 
         stdout = io.StringIO()
+        stderr = io.StringIO()
         code = main(
             ["tui", "--once"],
             scanner=FakeScanner(),
-            client=OfflineClient(),
+            client=FakeClient(
+                tail_errors=[
+                    {
+                        "agent": "cursor-cli",
+                        "session_id": "tui-tail",
+                        "code": "CursorChatSourceError",
+                    }
+                ]
+            ),
             stdout=stdout,
-            stderr=io.StringIO(),
+            stderr=stderr,
             tui_runner=runner,
         )
 
         self.assertEqual(7, code)
         self.assertTrue(calls[0]["once"])
         self.assertIs(stdout, calls[0]["stdout"])
+        self.assertEqual(
+            "tail error: cursor-cli session=tui-tail "
+            "code=CursorChatSourceError\n",
+            stderr.getvalue(),
+        )
+
+    def test_tui_tail_error_dedupe_rotates_at_bound(self):
+        source = FakeClient()
+
+        def tail_error(index):
+            return {
+                "agent": "cursor-cli",
+                "session_id": "tui-tail-{}".format(index),
+                "code": "CursorChatSourceError",
+            }
+
+        def runner(**kwargs):
+            client = kwargs["client"]
+            for index in range(TAIL_ERROR_DEDUPE_LIMIT + 1):
+                source.tail_errors = [tail_error(index)]
+                client.status()
+            source.tail_errors = [tail_error(0)]
+            client.status()
+            client.status()
+            return 0
+
+        stderr = io.StringIO()
+        code = main(
+            ["tui", "--once"],
+            scanner=FakeScanner(),
+            client=source,
+            stdout=io.StringIO(),
+            stderr=stderr,
+            tui_runner=runner,
+        )
+        lines = stderr.getvalue().splitlines()
+
+        self.assertEqual(0, code)
+        self.assertEqual(TAIL_ERROR_DEDUPE_LIMIT + 2, len(lines))
+        self.assertEqual(
+            2,
+            sum(" session=tui-tail-0 " in line for line in lines),
+        )
+        self.assertEqual(
+            "tail error: cursor-cli session=tui-tail-0 "
+            "code=CursorChatSourceError",
+            lines[-1],
+        )
+        self.assertEqual(TAIL_ERROR_DEDUPE_LIMIT + 3, source.status_calls)
 
 
 class SendCLITests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.home = Path(self.temporary.name).resolve() / "home"
+        self.home.mkdir(mode=0o700)
+        self.home_environment = mock.patch.dict(
+            os.environ,
+            {"HOME": str(self.home)},
+        )
+        self.home_environment.start()
+        self.account_home = mock.patch(
+            "sidecar.send_audit.pwd.getpwuid",
+            return_value=mock.Mock(pw_dir=str(self.home)),
+        )
+        self.account_home.start()
+
+    def tearDown(self):
+        self.account_home.stop()
+        self.home_environment.stop()
+        self.temporary.cleanup()
+
     def result(
         self,
         session,
@@ -1593,6 +3820,8 @@ class SendCLITests(unittest.TestCase):
         response="",
         stderr="",
         error_code=None,
+        request_id="",
+        replayed=False,
     ):
         return SendResult(
             agent=session.agent,
@@ -1603,7 +3832,75 @@ class SendCLITests(unittest.TestCase):
             response=response,
             stderr=stderr,
             error_code=error_code,
+            request_id=request_id,
+            replayed=replayed,
         )
+
+    def test_audit_reset_requires_both_confirmations_without_mutation(self):
+        cases = (
+            ["audit", "reset"],
+            ["audit", "reset", "--allow-write"],
+            ["audit", "reset", "--confirm", "CLEAR-SEND-AUDIT"],
+            [
+                "audit",
+                "reset",
+                "--allow-write",
+                "--confirm",
+                "clear-send-audit",
+            ],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv):
+                calls = []
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                code = main(
+                    argv,
+                    stdout=stdout,
+                    stderr=stderr,
+                    audit_resetter=lambda: calls.append(True),
+                )
+                self.assertEqual(2, code)
+                self.assertEqual([], calls)
+                self.assertEqual("", stdout.getvalue())
+                self.assertIn("requires --allow-write", stderr.getvalue())
+
+    def test_audit_reset_success_and_busy_output(self):
+        argv = [
+            "audit",
+            "reset",
+            "--allow-write",
+            "--confirm",
+            "CLEAR-SEND-AUDIT",
+        ]
+        calls = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = main(
+            argv,
+            stdout=stdout,
+            stderr=stderr,
+            audit_resetter=lambda: calls.append(True),
+        )
+        self.assertEqual(0, code)
+        self.assertEqual([True], calls)
+        self.assertEqual("send audit reset\n", stdout.getvalue())
+        self.assertIn("idempotency history has been lost", stderr.getvalue())
+
+        def busy():
+            raise AuditError("audit_busy")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = main(
+            argv,
+            stdout=stdout,
+            stderr=stderr,
+            audit_resetter=busy,
+        )
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("send audit is active", stderr.getvalue())
 
     def test_parser_and_help_describe_mutating_local_headless_resume(self):
         parser = build_parser()
@@ -1618,6 +3915,9 @@ class SendCLITests(unittest.TestCase):
         hyphen = parser.parse_args(
             ["send", "abc", "--allow-write", "--", "-private"]
         )
+        explicit = parser.parse_args(
+            ["send", "abc", "hello", "--request-id", "request-explicit"]
+        )
 
         self.assertIn("Observation commands are read-only", global_help)
         self.assertIn("may modify agent state", global_help)
@@ -1626,12 +3926,15 @@ class SendCLITests(unittest.TestCase):
         self.assertIn("may modify agent state", send_help)
         self.assertIn("--allow-write", send_help)
         self.assertIn("--timeout SEC", send_help)
+        self.assertIn("--request-id ID", send_help)
         self.assertIn("--json", send_help)
         self.assertNotIn("--remote", send_help)
         self.assertEqual("abc", args.session_prefix)
         self.assertEqual("hello", args.message)
         self.assertFalse(args.allow_write)
         self.assertEqual(DEFAULT_SEND_TIMEOUT_SECONDS, args.timeout)
+        self.assertIsNone(args.request_id)
+        self.assertEqual("request-explicit", explicit.request_id)
         self.assertEqual("-private", hyphen.message)
         self.assertTrue(hyphen.allow_write)
 
@@ -1661,6 +3964,66 @@ class SendCLITests(unittest.TestCase):
                 self.assertIn("unrecognized arguments", argparse_stderr.getvalue())
                 self.assertEqual([], scanner.recent_calls)
                 self.assertEqual([], calls)
+
+    def test_request_id_rejects_abbreviation_and_unsafe_values(self):
+        parser = build_parser()
+        for abbreviation in ("--r", "--request", "--request-i"):
+            with self.subTest(abbreviation=abbreviation):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        parser.parse_args(
+                            [
+                                "send",
+                                "abc",
+                                "private",
+                                abbreviation,
+                                "request-safe",
+                            ]
+                        )
+                self.assertEqual(2, raised.exception.code)
+        for unsafe in ("-leading", "contains space", "雪", "x" * 129):
+            with self.subTest(unsafe=unsafe):
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    with self.assertRaises(SystemExit) as raised:
+                        parser.parse_args(
+                            [
+                                "send",
+                                "abc",
+                                "private",
+                                "--request-id",
+                                unsafe,
+                            ]
+                        )
+                self.assertEqual(2, raised.exception.code)
+                self.assertNotIn(unsafe, errors.getvalue())
+
+    def test_omitted_request_id_is_generated_and_returned(self):
+        session = make_session("auto-request")
+        captured = []
+        stdout = io.StringIO()
+
+        def executor(plan, **kwargs):
+            del plan
+            request_id = kwargs["request_id"]
+            captured.append(request_id)
+            return self.result(session, request_id=request_id)
+
+        code = main(
+            ["send", "auto", "private", "--allow-write", "--json"],
+            scanner=FakeScanner([session]),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            send_planner=lambda selected, message: object(),
+            send_executor=executor,
+        )
+        payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(captured))
+        self.assertEqual(captured[0], payload["request_id"])
+        self.assertFalse(payload["replayed"])
+        self.assertGreaterEqual(len(captured[0]), 32)
 
     def test_missing_allow_write_stops_before_scan_plan_or_execute(self):
         message = "DO-NOT-ECHO"
@@ -1771,6 +4134,9 @@ class SendCLITests(unittest.TestCase):
             return plan
 
         def executor(selected_plan, **kwargs):
+            refresher = kwargs.pop("refresher")
+            self.assertTrue(callable(refresher))
+            self.assertEqual([session], refresher())
             executor_calls.append((selected_plan, kwargs))
             return self.result(session, response="done")
 
@@ -1782,6 +4148,8 @@ class SendCLITests(unittest.TestCase):
                 "--allow-write",
                 "--timeout",
                 "42.5",
+                "--request-id",
+                "request-contract",
                 "--json",
             ],
             scanner=scanner,
@@ -1798,15 +4166,93 @@ class SendCLITests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual([(session, "private prompt")], planner_calls)
         self.assertEqual(
-            [(plan, {"allow_write": True, "timeout": 42.5})],
+            [
+                (
+                    plan,
+                    {
+                        "allow_write": True,
+                        "timeout": 42.5,
+                        "request_id": "request-contract",
+                    },
+                )
+            ],
             executor_calls,
         )
-        self.assertEqual([None], scanner.recent_calls)
+        self.assertEqual([None, None], scanner.recent_calls)
         self.assertEqual(0, client.status_calls)
         self.assertEqual(
-            self.result(session, response="done").to_dict(),
+            self.result(
+                session,
+                response="done",
+                request_id="request-contract",
+            ).to_dict(),
             json.loads(stdout.getvalue()),
         )
+
+    def test_send_refreshes_directly_and_blocks_source_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            transcript = root / "session.jsonl"
+            transcript.write_text("{}\n", encoding="utf-8")
+            executable = root / "agent"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o700)
+            session = Session(
+                agent="claude",
+                session_id="fresh-session",
+                project=str(root),
+                transcript=str(transcript),
+                updated_at=1.0,
+                status=Status.WAITING,
+                extra={},
+            )
+            scanner = FakeScanner([session])
+            runner_calls = []
+
+            def planner(selected, message):
+                plan = build_send_plan(
+                    selected,
+                    message,
+                    executable_resolver=lambda _name: str(executable),
+                )
+                transcript.write_text('{"changed":true}\n', encoding="utf-8")
+                return plan
+
+            def executor(plan, **kwargs):
+                def runner(*args, **runner_kwargs):
+                    runner_kwargs["pre_spawn"]()
+                    runner_calls.append((args, runner_kwargs))
+
+                return execute_send(
+                    plan,
+                    allow_write=kwargs["allow_write"],
+                    timeout=kwargs["timeout"],
+                    refresher=kwargs["refresher"],
+                    executable_resolver=lambda _name: str(executable),
+                    runtime_dir=root / "runtime",
+                    runner=runner,
+                )
+
+            stderr = io.StringIO()
+            code = main(
+                [
+                    "send",
+                    "fresh",
+                    "SOURCE-MUTATION-SECRET",
+                    "--allow-write",
+                ],
+                scanner=scanner,
+                stdout=io.StringIO(),
+                stderr=stderr,
+                send_planner=planner,
+                send_executor=executor,
+            )
+
+        self.assertEqual(2, code)
+        self.assertEqual([None, None], scanner.recent_calls)
+        self.assertEqual([], runner_calls)
+        self.assertIn("session changed", stderr.getvalue())
+        self.assertNotIn("SOURCE-MUTATION-SECRET", stderr.getvalue())
 
     def test_json_success_is_exact_and_preserves_raw_result_text(self):
         session = make_session("json-session")
@@ -1814,12 +4260,21 @@ class SendCLITests(unittest.TestCase):
             session,
             response="\x1b[31mraw response\r",
             stderr="\x1b]0;raw warning\x07",
+            request_id="request-json",
         )
         stdout = io.StringIO()
         stderr = io.StringIO()
 
         code = main(
-            ["send", "json", "private", "--allow-write", "--json"],
+            [
+                "send",
+                "json",
+                "private",
+                "--allow-write",
+                "--request-id",
+                "request-json",
+                "--json",
+            ],
             scanner=FakeScanner([session]),
             stdout=stdout,
             stderr=stderr,
@@ -1831,6 +4286,45 @@ class SendCLITests(unittest.TestCase):
         self.assertEqual(result.to_dict(), json.loads(stdout.getvalue()))
         self.assertEqual("", stderr.getvalue())
         self.assertIn("\x1b", json.loads(stdout.getvalue())["response"])
+
+    def test_json_send_hygiene_handles_escapes_surrogates_and_large_text(self):
+        session = make_session("json-hygiene")
+        message = 'secret "line"\n雪'
+        escaped = json.dumps(message, ensure_ascii=False)[1:-1]
+        ascii_escaped = json.dumps(message, ensure_ascii=True)[1:-1]
+        prefix = "x" * (256 * 1024)
+        result = self.result(
+            session,
+            response="{}controls \x1b[31m\t{}|{}|{}".format(
+                prefix,
+                message,
+                escaped,
+                ascii_escaped,
+            ),
+            stderr="\r{} surrogate \ud800".format(message),
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["send", "json", message, "--allow-write", "--json"],
+            scanner=FakeScanner([session]),
+            stdout=stdout,
+            stderr=stderr,
+            send_planner=lambda selected, private_message: object(),
+            send_executor=lambda plan, **kwargs: result,
+        )
+        payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        self.assertTrue(payload["response"].startswith(prefix))
+        self.assertIn("controls \x1b[31m\t", payload["response"])
+        self.assertEqual(3, payload["response"].count("[message redacted]"))
+        self.assertEqual("\r[message redacted] surrogate \ufffd", payload["stderr"])
+        self.assertNotIn(message, payload["response"] + payload["stderr"])
+        self.assertNotIn(escaped, payload["response"])
+        self.assertNotIn(ascii_escaped, payload["response"])
 
     def test_human_success_sanitizes_response_stderr_and_redacts_message(self):
         session = make_session("human-session")
@@ -1956,7 +4450,14 @@ class SendCLITests(unittest.TestCase):
         stdout = io.StringIO()
 
         code = main(
-            ["send", "empty", "private", "--allow-write"],
+            [
+                "send",
+                "empty",
+                "private",
+                "--allow-write",
+                "--request-id",
+                "request-empty",
+            ],
             scanner=FakeScanner([session]),
             stdout=stdout,
             stderr=io.StringIO(),
@@ -1966,6 +4467,7 @@ class SendCLITests(unittest.TestCase):
 
         self.assertEqual(0, code)
         self.assertEqual(
+            "request_id=request-empty replayed=false\n"
             "delivered to cursor-cli:empty-response\n",
             stdout.getvalue(),
         )
@@ -1986,6 +4488,7 @@ class SendCLITests(unittest.TestCase):
                         outcome=outcome,
                         stderr="native detail [message redacted]",
                         error_code=error_code,
+                        request_id="request-" + outcome,
                     )
                     stdout = io.StringIO()
                     stderr = io.StringIO()
@@ -1994,6 +4497,8 @@ class SendCLITests(unittest.TestCase):
                         "runtime",
                         message,
                         "--allow-write",
+                        "--request-id",
+                        "request-" + outcome,
                     ]
                     if as_json:
                         argv.append("--json")
@@ -2015,8 +4520,10 @@ class SendCLITests(unittest.TestCase):
                         )
                     else:
                         self.assertEqual(
+                            "request_id=request-{} replayed=false\n"
                             "delivery unknown for claude:runtime-session ({})\n".format(
-                                outcome
+                                outcome,
+                                outcome,
                             ),
                             stdout.getvalue(),
                         )
@@ -2069,7 +4576,14 @@ class SendCLITests(unittest.TestCase):
         stderr = io.StringIO()
 
         code = main(
-            ["send", "interrupt", message, "--allow-write"],
+            [
+                "send",
+                "interrupt",
+                message,
+                "--allow-write",
+                "--request-id",
+                "request-interrupt",
+            ],
             scanner=FakeScanner([session]),
             stdout=stdout,
             stderr=stderr,
@@ -2080,7 +4594,11 @@ class SendCLITests(unittest.TestCase):
         )
 
         self.assertEqual(130, code)
-        self.assertEqual("", stdout.getvalue())
+        self.assertEqual(
+            "request_id=request-interrupt replayed=false\n"
+            "delivery unknown for claude:interrupt-session (failed)\n",
+            stdout.getvalue(),
+        )
         self.assertIn("delivery status is unknown", stderr.getvalue())
         self.assertNotIn(message, stderr.getvalue())
 
