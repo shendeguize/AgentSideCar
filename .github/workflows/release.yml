@@ -50,6 +50,26 @@ jobs:
       - name: Install development dependencies
         run: python -m pip install '.[dev]'
 
+      - name: Harden Python toolchain permissions
+        run: |
+          python - <<'PY'
+          import stat
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          executable = Path(sys.executable)
+          candidates = []
+          for entry in (executable, executable.resolve()):
+              candidates.extend((entry,) + tuple(entry.parents))
+          for path in dict.fromkeys(candidates):
+              details = path.lstat()
+              mode = stat.S_IMODE(details.st_mode)
+              if path.is_symlink() or mode & 0o022 == 0:
+                  continue
+              subprocess.run(("sudo", "chmod", "go-w", str(path)), check=True)
+          PY
+
       - name: Validate immutable release tag
         id: guard
         run: |
@@ -57,8 +77,38 @@ jobs:
             --notes-file dist/release-notes.md \
             --github-output "${GITHUB_OUTPUT}"
 
-      - name: Run full repository quality gate
-        run: python scripts/check.py
+      - name: Run portable Ubuntu quality gate
+        run: |
+          ruff check .
+          python - <<'PY'
+          import unittest
+
+          darwin_only = (
+              "test_supervisor_preserves_exact_stdin_argv_and_hides_target_argv",
+              "test_kqueue_fork_is_permanent_incomplete_without_pid_kill",
+              "test_kqueue_event_overflow_is_cleanup_incomplete",
+          )
+
+          def cases(suite):
+              for item in suite:
+                  if isinstance(item, unittest.TestSuite):
+                      yield from cases(item)
+                  else:
+                      yield item
+
+          suite = unittest.defaultTestLoader.discover("tests")
+          for case in cases(suite):
+              if case.id().endswith(darwin_only):
+                  method = getattr(case.__class__, case._testMethodName)
+                  method.__unittest_skip__ = True
+                  method.__unittest_skip_why__ = "Darwin containment test"
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(not result.wasSuccessful())
+          PY
+          python scripts/check.py \
+            --only pack \
+            --only cli \
+            --only skill
 
       - name: Build deterministic release artifact
         id: package
@@ -93,6 +143,39 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install development dependencies
+        run: python -m pip install '.[dev]'
+
+      - name: Harden Python toolchain permissions
+        run: |
+          python - <<'PY'
+          import stat
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          executable = Path(sys.executable)
+          candidates = []
+          for entry in (executable, executable.resolve()):
+              candidates.extend((entry,) + tuple(entry.parents))
+          for path in dict.fromkeys(candidates):
+              details = path.lstat()
+              mode = stat.S_IMODE(details.st_mode)
+              if path.is_symlink() or mode & 0o022 == 0:
+                  continue
+              subprocess.run(("sudo", "chmod", "go-w", str(path)), check=True)
+          PY
+
+      - name: Run full repository quality gate
+        run: python scripts/check.py
 
       - name: Download checked release bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
