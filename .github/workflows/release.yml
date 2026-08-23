@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing immutable release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: 1. Build and check
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      version: ${{ steps.guard.outputs.version }}
+      prerelease: ${{ steps.guard.outputs.prerelease }}
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+
+    steps:
+      # A dispatch builds its selected branch; a tag push builds the tagged SHA.
+      - name: Check out release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.9"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install development dependencies
+        run: python -m pip install '.[dev]'
+
+      - name: Validate immutable release tag
+        id: guard
+        run: |
+          python scripts/release_guard.py "${RELEASE_TAG}" \
+            --notes-file dist/release-notes.md \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Run full repository quality gate
+        run: python scripts/check.py
+
+      - name: Build deterministic release artifact
+        id: package
+        run: |
+          artifact_name="agent-sidecar-${{ steps.guard.outputs.version }}.pyz"
+          python -m sidecar package build --output "dist/${artifact_name}"
+          (
+            cd dist
+            sha256sum "${artifact_name}" > SHA256SUMS
+          )
+          echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload checked release bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ env.RELEASE_TAG }}
+          path: |
+            dist/${{ steps.package.outputs.artifact_name }}
+            dist/SHA256SUMS
+            dist/release-notes.md
+          if-no-files-found: error
+          retention-days: 30
+
+  verify:
+    name: 2. Verify on macOS
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out installer source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Download checked release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-${{ env.RELEASE_TAG }}
+          path: dist
+
+      - name: Verify checksum and executable
+        run: |
+          (
+            cd dist
+            shasum -a 256 -c SHA256SUMS
+          )
+          actual="$(python3 "dist/${{ needs.build.outputs.artifact_name }}" --version)"
+          test "${actual}" = "agent-sidecar ${{ needs.build.outputs.version }}"
+
+      - name: Probe skill installer in temporary home
+        run: |
+          probe_home="$(mktemp -d)"
+          trap 'rm -rf "${probe_home}"' EXIT
+          HOME="${probe_home}" sh scripts/install-skill.sh
+          test -L "${probe_home}/.cursor/skills/agent-sidecar"
+          test -L "${probe_home}/.claude/skills/agent-sidecar"
+          test -L "${probe_home}/.local/bin/agent-sidecar"
+          HOME="${probe_home}" sh scripts/install-skill.sh --uninstall
+          test ! -e "${probe_home}/.cursor/skills/agent-sidecar"
+          test ! -e "${probe_home}/.claude/skills/agent-sidecar"
+          test ! -e "${probe_home}/.local/bin/agent-sidecar"
+
+  release:
+    name: 3. Attest and publish
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download verified release bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-${{ env.RELEASE_TAG }}
+          path: dist
+
+      - name: Attest build provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/${{ needs.build.outputs.artifact_name }}
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.build.outputs.prerelease }}
+          ARTIFACT_NAME: ${{ needs.build.outputs.artifact_name }}
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --verify-tag \
+              --title "Agent Sidecar ${RELEASE_TAG}" \
+              --notes-file dist/release-notes.md \
+              --prerelease="${PRERELEASE}"
+            gh release upload "${RELEASE_TAG}" \
+              "dist/${ARTIFACT_NAME}" \
+              dist/SHA256SUMS \
+              --clobber
+          else
+            release_flags=()
+            if [[ "${PRERELEASE}" == "true" ]]; then
+              release_flags+=(--prerelease)
+            fi
+            gh release create "${RELEASE_TAG}" \
+              "dist/${ARTIFACT_NAME}" \
+              dist/SHA256SUMS \
+              --verify-tag \
+              --title "Agent Sidecar ${RELEASE_TAG}" \
+              --notes-file dist/release-notes.md \
+              "${release_flags[@]}"
+          fi
