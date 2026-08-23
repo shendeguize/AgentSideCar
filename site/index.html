@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07110f">
+  <meta name="description" content="Agent Sidecar is a local-first, zero-runtime-dependency CLI for observing AI-agent sessions without moving transcript data to a hosted service.">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Agent Sidecar">
+  <meta property="og:title" content="Agent Sidecar — local-first agent observability">
+  <meta property="og:description" content="See active AI-agent sessions, normalized events, and status from one local-first CLI.">
+  <meta property="og:url" content="https://shendeguize.github.io/AgentSideCar/">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="Agent Sidecar — local-first agent observability">
+  <meta name="twitter:description" content="Observe AI-agent sessions locally, with zero runtime Python dependencies.">
+  <title>Agent Sidecar — local-first agent observability</title>
+  <link rel="canonical" href="https://shendeguize.github.io/AgentSideCar/">
+  <link rel="icon" href="${BASE_PATH}favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="${BASE_PATH}landing.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="${BASE_PATH}" aria-label="Agent Sidecar home">
+      <span class="brand-mark" aria-hidden="true">AS</span>
+      <span>Agent Sidecar</span>
+    </a>
+    <nav aria-label="Primary navigation">
+      <a href="#architecture">Architecture</a>
+      <a href="#security">Security</a>
+      <a href="#install">Install</a>
+      <a href="#中文摘要" lang="zh-CN">中文</a>
+      <a class="nav-cta" href="${BASE_PATH}demo/">Live demo</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow">Local-first agent observability</p>
+        <h1 id="hero-title">Know what your agents are doing. Keep the data local.</h1>
+        <p class="lede">Agent Sidecar unifies persisted sessions from Cursor, Claude Code, Codex, Copilot CLI, DSH, and Kimi into one read-oriented command line and an opt-in loopback panel.</p>
+        <div class="hero-actions">
+          <a class="button primary" href="${BASE_PATH}demo/">Explore the synthetic demo</a>
+          <a class="button secondary" href="https://github.com/shendeguize/AgentSideCar">View on GitHub</a>
+        </div>
+        <ul class="proof" aria-label="Project highlights">
+          <li>Python 3.9+</li>
+          <li>Zero runtime dependencies</li>
+          <li>macOS primary · Linux best-effort</li>
+        </ul>
+      </div>
+
+      <div class="product-preview" aria-label="Example Agent Sidecar terminal output">
+        <div class="preview-bar">
+          <span class="preview-dot"></span><span class="preview-dot"></span><span class="preview-dot"></span>
+          <span>agent-sidecar status</span>
+        </div>
+        <div class="preview-body">
+          <div class="preview-row preview-head"><span>AGENT</span><span>STATUS</span><span>SESSION</span></div>
+          <div class="preview-row"><span><i class="status working"></i>cursor-ide</span><strong>working</strong><span>landing-page</span></div>
+          <div class="preview-row"><span><i class="status waiting"></i>claude</span><strong>waiting</strong><span>api-review</span></div>
+          <div class="event-line"><b>12:04:21</b> tool · ReadFile <em>sidecar/http_server.py</em></div>
+          <div class="event-line"><b>12:04:24</b> assistant · <em>Security boundary verified.</em></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="statement" aria-label="Product proposition">
+      <p>One normalized view across agent-owned persistence formats—without a cloud collector, analytics SDK, or transcript upload.</p>
+    </section>
+
+    <section id="architecture" class="section" aria-labelledby="architecture-title">
+      <div class="section-heading">
+        <p class="eyebrow">How it works</p>
+        <h2 id="architecture-title">Observe through a narrow sidecar boundary</h2>
+        <p>The architecture keeps source adapters, normalization, and presentation separate, so one unreadable source cannot take down the rest.</p>
+      </div>
+      <ol class="architecture-grid">
+        <li>
+          <span class="step">01</span>
+          <h3>Discover locally</h3>
+          <p>Read supported agent-owned metadata and transcripts without installing hooks into the observed tools.</p>
+        </li>
+        <li>
+          <span class="step">02</span>
+          <h3>Normalize safely</h3>
+          <p>Map diverse records into stable session, status, and event contracts while isolating adapter failures.</p>
+        </li>
+        <li>
+          <span class="step">03</span>
+          <h3>Present your way</h3>
+          <p>Use text, JSON, the terminal dashboard, remote SSH snapshots, or the opt-in local HTTP panel.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section class="section" aria-labelledby="features-title">
+      <div class="section-heading">
+        <p class="eyebrow">Built for the operator</p>
+        <h2 id="features-title">Useful visibility, bounded behavior</h2>
+      </div>
+      <div class="card-grid">
+        <article>
+          <span class="card-icon" aria-hidden="true">◎</span>
+          <h3>Unified sessions</h3>
+          <p>List active work across supported local sources with consistent lifecycle states.</p>
+        </article>
+        <article>
+          <span class="card-icon" aria-hidden="true">↯</span>
+          <h3>Normalized event tails</h3>
+          <p>Follow agent activity as stable JSONL or a focused terminal stream.</p>
+        </article>
+        <article>
+          <span class="card-icon" aria-hidden="true">⌁</span>
+          <h3>Remote snapshots</h3>
+          <p>Aggregate bounded, noninteractive read-only views over SSH with host provenance.</p>
+        </article>
+        <article>
+          <span class="card-icon" aria-hidden="true">◇</span>
+          <h3>Deterministic packaging</h3>
+          <p>Run from a checkout, pipx Git install, or verified reproducible zipapp.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="install" class="section install" aria-labelledby="install-title">
+      <div class="section-heading">
+        <p class="eyebrow">Start small</p>
+        <h2 id="install-title">Install from GitHub, then observe</h2>
+        <p>Agent Sidecar is not claimed as a PyPI publication. Install directly from the repository or use a verified GitHub Release.</p>
+      </div>
+      <div class="commands">
+        <div>
+          <p>Install with pipx</p>
+          <pre><code>pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'</code></pre>
+        </div>
+        <div>
+          <p>See working and waiting sessions</p>
+          <pre><code>agent-sidecar status
+agent-sidecar tui</code></pre>
+        </div>
+        <div>
+          <p>Opt in to the read-only local panel</p>
+          <pre><code>agent-sidecar daemon start --http</code></pre>
+        </div>
+      </div>
+      <p class="install-links">
+        <a href="https://github.com/shendeguize/AgentSideCar/blob/main/README.md#installation">Installation guide</a>
+        <a href="https://github.com/shendeguize/AgentSideCar/releases/latest">Latest release</a>
+        <a href="https://github.com/shendeguize/AgentSideCar/blob/main/README.md#commands">Command reference</a>
+      </p>
+    </section>
+
+    <section id="security" class="section security" aria-labelledby="security-title">
+      <div>
+        <p class="eyebrow">Security boundary</p>
+        <h2 id="security-title">Local by default. Network only by explicit opt-in.</h2>
+        <p>The daemon normally exposes only a private Unix socket. The optional web panel binds numeric IPv4 loopback only, requires a bearer token held in page memory, sends no CORS allow headers, and offers no mutation endpoint.</p>
+        <a href="https://github.com/shendeguize/AgentSideCar/blob/main/SECURITY.md">Read the security policy →</a>
+      </div>
+      <ul class="boundary-list">
+        <li><span>Default listener</span><strong>Private Unix socket</strong></li>
+        <li><span>Optional HTTP</span><strong>127.0.0.1 only</strong></li>
+        <li><span>Panel API</span><strong>Read-only + bearer auth</strong></li>
+        <li><span>Browser storage</span><strong>None for the token</strong></li>
+      </ul>
+    </section>
+
+    <section class="section support" aria-labelledby="support-title">
+      <div class="section-heading">
+        <p class="eyebrow">Support status · v0.4.1</p>
+        <h2 id="support-title">Honest platform boundaries</h2>
+      </div>
+      <div class="support-grid">
+        <article><h3>macOS</h3><p><strong>Primary.</strong> Full local quality-gate target, including daemon, panel, remote monitoring, packaging, and the user LaunchAgent.</p></article>
+        <article><h3>Linux</h3><p><strong>Best-effort.</strong> Portable observation, remote monitoring, daemon/HTTP, TUI, and packaging paths are exercised in CI.</p></article>
+        <article><h3>Windows</h3><p><strong>Unsupported.</strong> Current contracts depend on POSIX permissions, locking, process groups, and Unix sockets.</p></article>
+      </div>
+    </section>
+
+    <section id="中文摘要" class="section chinese-summary" lang="zh-CN" aria-labelledby="chinese-title">
+      <p class="eyebrow">中文摘要</p>
+      <h2 id="chinese-title">本地优先的 AI Agent 会话观测工具</h2>
+      <p>Agent Sidecar 读取本机已有的 Agent 会话数据，统一展示会话状态和事件流。默认不开放网络端口、无需运行时依赖，也不会把 transcript 上传到托管服务。可选 Web 面板仅监听 <code>127.0.0.1</code>，并使用只保存在页面内存中的令牌。</p>
+      <div class="hero-actions">
+        <a class="button primary" href="${BASE_PATH}demo/">查看合成数据演示</a>
+        <a class="button secondary" href="https://github.com/shendeguize/AgentSideCar/blob/main/README.zh.md">阅读中文文档</a>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p><strong>Agent Sidecar</strong> · Local-first tools for understanding agent work.</p>
+    <nav aria-label="Footer navigation">
+      <a href="https://github.com/shendeguize/AgentSideCar">GitHub</a>
+      <a href="https://github.com/shendeguize/AgentSideCar/releases">Releases</a>
+      <a href="https://github.com/shendeguize/AgentSideCar/issues">Issues</a>
+      <a href="https://github.com/shendeguize/AgentSideCar/blob/main/LICENSE">MIT License</a>
+    </nav>
+  </footer>
+</body>
+</html>
