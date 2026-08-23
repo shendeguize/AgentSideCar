@@ -2142,6 +2142,248 @@ class CLITests(unittest.TestCase):
             stderr.getvalue(),
         )
 
+    def test_stream_ready_is_hidden_and_rejects_non_internal_combinations(self):
+        parser = build_parser()
+        watch_parser = next(
+            action.choices["watch"]
+            for action in parser._actions
+            if getattr(action, "dest", None) == "command"
+        )
+        parsed = parser.parse_args(
+            ["watch", "--all", "--json", "--stream-ready"]
+        )
+
+        self.assertTrue(parsed.stream_ready)
+        self.assertNotIn("stream-ready", watch_parser.format_help())
+        invalid = (
+            ["watch", "--all", "--stream-ready"],
+            ["watch", "--json", "--stream-ready"],
+            ["watch", "prefix", "--all", "--json", "--stream-ready"],
+            [
+                "watch",
+                "--all",
+                "--json",
+                "--remote",
+                "--stream-ready",
+            ],
+        )
+        for argv in invalid:
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                code = main(
+                    argv,
+                    scanner=FakeScanner(),
+                    client=OfflineClient(),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+                self.assertEqual(2, code)
+                self.assertEqual(
+                    "watch: --stream-ready requires local --all --json\n",
+                    stderr.getvalue(),
+                )
+
+    def test_stream_ready_waits_for_scan_and_precedes_direct_events(self):
+        event = Event("t", "claude", "direct", "assistant", "event")
+
+        class SlowScanner(FakeScanner):
+            def __init__(self):
+                super().__init__([make_session("direct")])
+                self.complete = False
+
+            def scan(self, recent_seconds=None):
+                time.sleep(0.01)
+                rows = super().scan(recent_seconds=recent_seconds)
+                self.complete = True
+                return rows
+
+        scanner = SlowScanner()
+        callbacks = []
+
+        def provider(sessions, from_start=False, on_ready=None):
+            self.assertEqual(["direct"], [row.session_id for row in sessions])
+            self.assertFalse(from_start)
+
+            def events():
+                self.assertTrue(scanner.complete)
+                callbacks.append(on_ready)
+                on_ready()
+                yield event
+
+            return events()
+
+        stdout = io.StringIO()
+        code = main(
+            ["watch", "--all", "--json", "--stream-ready"],
+            scanner=scanner,
+            client=OfflineClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            watch_provider=provider,
+        )
+        lines = stdout.getvalue().splitlines()
+
+        self.assertEqual(0, code)
+        self.assertEqual('{"type":"ready"}', lines[0])
+        self.assertEqual(event.to_dict(), json.loads(lines[1]))
+        self.assertEqual(1, len(callbacks))
+
+    def test_stream_ready_empty_or_unsupported_sources_emit_nothing(self):
+        cases = (
+            FakeScanner(),
+            FakeScanner(
+                [
+                    make_session(
+                        "unsupported",
+                        agent="copilot",
+                        transcript="",
+                    )
+                ]
+            ),
+        )
+        for scanner in cases:
+            with self.subTest(sessions=len(scanner.sessions)):
+                stdout = io.StringIO()
+                code = main(
+                    [
+                        "watch",
+                        "--all",
+                        "--from-start",
+                        "--json",
+                        "--stream-ready",
+                    ],
+                    scanner=scanner,
+                    client=OfflineClient(),
+                    stdout=stdout,
+                    stderr=io.StringIO(),
+                )
+                self.assertEqual(1, code)
+                self.assertEqual("", stdout.getvalue())
+
+    def test_stream_ready_tailer_initialization_failure_emits_nothing(self):
+        stdout = io.StringIO()
+        with mock.patch(
+            "sidecar.tail.SessionTailer",
+            side_effect=RuntimeError("private initialization detail"),
+        ):
+            code = main(
+                [
+                    "watch",
+                    "--all",
+                    "--from-start",
+                    "--json",
+                    "--stream-ready",
+                ],
+                scanner=FakeScanner([make_session("local")]),
+                client=OfflineClient(),
+                stdout=stdout,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(1, code)
+        self.assertEqual("", stdout.getvalue())
+
+    def test_stream_ready_daemon_fallback_emits_exactly_once(self):
+        daemon_event = Event(
+            "t1",
+            "claude",
+            "daemon",
+            "assistant",
+            "before drop",
+        )
+        direct_event = Event(
+            "t2",
+            "claude",
+            "direct",
+            "assistant",
+            "after drop",
+        )
+
+        class AckThenDropClient(FakeClient):
+            def subscribe(self, on_ready=None):
+                self.subscribe_calls += 1
+
+                def events():
+                    on_ready()
+                    yield daemon_event.to_dict()
+                    raise SidecarClientError(
+                        "private",
+                        code="connection_closed",
+                    )
+
+                return events()
+
+        direct_ready = []
+
+        def direct_provider(sessions, from_start=False, on_ready=None):
+            del sessions, from_start
+
+            def events():
+                direct_ready.append(on_ready)
+                on_ready()
+                yield direct_event
+
+            return events()
+
+        stdout = io.StringIO()
+        code = main(
+            ["watch", "--all", "--json", "--stream-ready"],
+            scanner=FakeScanner([make_session("direct")]),
+            client=AckThenDropClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            watch_provider=direct_provider,
+        )
+        lines = stdout.getvalue().splitlines()
+
+        self.assertEqual(0, code)
+        self.assertEqual(1, lines.count('{"type":"ready"}'))
+        self.assertEqual(
+            ["daemon", "direct"],
+            [json.loads(line)["session_id"] for line in lines[1:]],
+        )
+        self.assertEqual(1, len(direct_ready))
+
+    def test_stream_ready_pre_ack_failure_defers_to_direct_source(self):
+        direct_event = Event(
+            "t",
+            "claude",
+            "direct",
+            "assistant",
+            "after failed ack",
+        )
+
+        class PreAckFailureClient(FakeClient):
+            def subscribe(self, on_ready=None):
+                del on_ready
+                self.subscribe_calls += 1
+                raise SidecarClientError("private", code="invalid_response")
+
+        def direct_provider(sessions, from_start=False, on_ready=None):
+            del sessions, from_start
+
+            def events():
+                on_ready()
+                yield direct_event
+
+            return events()
+
+        stdout = io.StringIO()
+        code = main(
+            ["watch", "--all", "--json", "--stream-ready"],
+            scanner=FakeScanner([make_session("direct")]),
+            client=PreAckFailureClient(),
+            stdout=stdout,
+            stderr=io.StringIO(),
+            watch_provider=direct_provider,
+        )
+        lines = stdout.getvalue().splitlines()
+
+        self.assertEqual(0, code)
+        self.assertEqual('{"type":"ready"}', lines[0])
+        self.assertEqual("direct", json.loads(lines[1])["session_id"])
+        self.assertEqual(1, lines.count('{"type":"ready"}'))
+
     def test_remote_watch_validation_stops_before_setup(self):
         cases = (
             (

@@ -519,6 +519,7 @@ class WatchSessionsCancellationTests(unittest.TestCase):
     def test_pre_cancelled_watch_does_not_construct_tailers(self):
         cancel = threading.Event()
         cancel.set()
+        ready = []
         with mock.patch("sidecar.tail.SessionTailer") as tailer:
             self.assertEqual(
                 [],
@@ -526,10 +527,12 @@ class WatchSessionsCancellationTests(unittest.TestCase):
                     watch_sessions(
                         [make_dsh_session(0)],
                         cancel_event=cancel,
+                        on_ready=lambda: ready.append(True),
                     )
                 ),
             )
         tailer.assert_not_called()
+        self.assertEqual([], ready)
 
     def test_cancel_event_interrupts_long_poll_wait_without_busy_loop(self):
         cancel = threading.Event()
@@ -569,6 +572,112 @@ class WatchSessionsCancellationTests(unittest.TestCase):
         self.assertTrue(finished.is_set())
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertEqual(1, len(poll_calls))
+
+    def test_ready_follows_all_tailer_construction_and_precedes_poll(self):
+        cancel = threading.Event()
+        calls = []
+
+        class OrderedTailer:
+            def __init__(self, session, from_start=False):
+                del from_start
+                self.session_id = session.session_id
+                calls.append(("init", self.session_id))
+
+            def poll(self):
+                calls.append(("poll", self.session_id))
+                cancel.set()
+                return []
+
+            def close(self):
+                calls.append(("close", self.session_id))
+
+        sessions = [make_dsh_session(0), make_dsh_session(1)]
+        sessions[1].session_id = "dsh-second"
+        with mock.patch("sidecar.tail.SessionTailer", OrderedTailer):
+            self.assertEqual(
+                [],
+                list(
+                    watch_sessions(
+                        sessions,
+                        cancel_event=cancel,
+                        on_ready=lambda: calls.append(("ready", None)),
+                    )
+                ),
+            )
+
+        self.assertEqual(
+            [
+                ("init", "dsh-session"),
+                ("init", "dsh-second"),
+                ("ready", None),
+                ("poll", "dsh-session"),
+                ("close", "dsh-second"),
+                ("close", "dsh-session"),
+            ],
+            calls,
+        )
+
+    def test_empty_or_failed_initialization_never_signals_ready(self):
+        ready = []
+        self.assertEqual(
+            [],
+            list(watch_sessions([], on_ready=lambda: ready.append(True))),
+        )
+
+        constructed = []
+
+        class FailingTailer:
+            def __init__(self, session, from_start=False):
+                del from_start
+                if constructed:
+                    raise RuntimeError("initialization failed")
+                self.session = session
+                constructed.append(self)
+
+            def close(self):
+                self.closed = True
+
+        sessions = [make_dsh_session(0), make_dsh_session(1)]
+        with mock.patch("sidecar.tail.SessionTailer", FailingTailer):
+            with self.assertRaises(RuntimeError):
+                list(
+                    watch_sessions(
+                        sessions,
+                        on_ready=lambda: ready.append(True),
+                    )
+                )
+
+        self.assertEqual([], ready)
+        self.assertTrue(constructed[0].closed)
+
+    def test_ready_callback_exception_closes_initialized_tailers(self):
+        tailers = []
+
+        class ClosableTailer:
+            def __init__(self, session, from_start=False):
+                del session, from_start
+                self.closed = False
+                tailers.append(self)
+
+            def close(self):
+                self.closed = True
+
+        callback_error = RuntimeError("ready callback failed")
+
+        def fail_ready():
+            raise callback_error
+
+        with mock.patch("sidecar.tail.SessionTailer", ClosableTailer):
+            with self.assertRaises(RuntimeError) as raised:
+                list(
+                    watch_sessions(
+                        [make_dsh_session(0)],
+                        on_ready=fail_ready,
+                    )
+                )
+
+        self.assertIs(callback_error, raised.exception)
+        self.assertTrue(tailers[0].closed)
 
 
 if __name__ == "__main__":

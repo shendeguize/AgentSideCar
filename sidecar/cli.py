@@ -110,6 +110,19 @@ class _WatchQueueEntry:
     value: object = None
 
 
+class _WatchReadyWriter:
+    def __init__(self, stdout: TextIO) -> None:
+        self._stdout = stdout
+        self.emitted = False
+
+    def __call__(self) -> None:
+        if self.emitted:
+            return
+        self.emitted = True
+        self._stdout.write('{"type":"ready"}\n')
+        self._stdout.flush()
+
+
 @dataclass
 class _WatchSourceLifecycle:
     name: str
@@ -270,6 +283,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="replay existing records before following",
     )
     watch_parser.add_argument("--json", action="store_true", help="emit one JSON event per line")
+    watch_parser.add_argument(
+        "--stream-ready",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     watch_parser.add_argument(
         "--remote",
         action="store_true",
@@ -2351,6 +2369,18 @@ def main(
         errors.flush()
         return 2
 
+    if args.command == "watch" and args.stream_ready and (
+        not args.all
+        or not args.json
+        or args.remote
+        or args.session_prefix
+    ):
+        errors.write(
+            "watch: --stream-ready requires local --all --json\n"
+        )
+        errors.flush()
+        return 2
+
     if args.command == "watch" and args.host and not args.remote:
         errors.write("watch: --host requires --remote\n")
         errors.flush()
@@ -2547,11 +2577,17 @@ def main(
         return 2
 
     provider = watch_sessions if watch_provider is None else watch_provider
+    ready_writer = _WatchReadyWriter(output) if args.stream_ready else None
     if args.all and not args.from_start:
         daemon_rows = _client_status(active_client, errors)
         if daemon_rows is not None:
             try:
-                for event in active_client.subscribe():
+                subscription = (
+                    active_client.subscribe()
+                    if ready_writer is None
+                    else active_client.subscribe(on_ready=ready_writer)
+                )
+                for event in subscription:
                     _write_event(event, args.json, output)
                 return 0
             except KeyboardInterrupt:
@@ -2606,7 +2642,10 @@ def main(
             return 2
 
     try:
-        for event in provider(selected, from_start=args.from_start):
+        provider_arguments = {"from_start": args.from_start}
+        if ready_writer is not None:
+            provider_arguments["on_ready"] = ready_writer
+        for event in provider(selected, **provider_arguments):
             _write_event(event, args.json, output)
     except KeyboardInterrupt:
         return 130

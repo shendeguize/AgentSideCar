@@ -7,7 +7,7 @@ import socket
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from sidecar.daemon import SOCKET_NAME, default_runtime_dir
 
@@ -272,6 +272,26 @@ class SidecarClient:
             message = str(error or code)
         raise SidecarClientError(message, code=code)
 
+    def _validate_subscribe_acknowledgement(
+        self,
+        response: object,
+    ) -> None:
+        if not isinstance(response, Mapping):
+            raise SidecarClientError(
+                "daemon returned an invalid subscribe acknowledgement",
+                code="invalid_response",
+            )
+        self._raise_daemon_error(response)
+        if (
+            response.get("ok") is not True
+            or response.get("op") != "subscribe"
+            or "error" in response
+        ):
+            raise SidecarClientError(
+                "daemon returned an invalid subscribe acknowledgement",
+                code="invalid_response",
+            )
+
     def _request(self, operation: str) -> Dict[str, Any]:
         connection = self._connect()
         try:
@@ -341,13 +361,17 @@ class SidecarClient:
     def subscribe(
         self,
         cancel_event: Optional[threading.Event] = None,
+        on_ready: Optional[Callable[[], None]] = None,
     ) -> Iterator[Dict[str, Any]]:
         """Yield normalized event dictionaries until disconnected or closed."""
 
         if cancel_event is not None:
             if cancel_event.is_set():
                 return
-            yield from self._subscribe_cancelable(cancel_event)
+            yield from self._subscribe_cancelable(
+                cancel_event,
+                on_ready=on_ready,
+            )
             return
 
         connection = self._connect()
@@ -364,12 +388,11 @@ class SidecarClient:
                             code="request_failed",
                         ) from error
                     acknowledgement = self._read_response(stream)
-                    self._raise_daemon_error(acknowledgement)
-                    if acknowledgement.get("op") != "subscribe":
-                        raise SidecarClientError(
-                            "daemon returned an invalid subscribe acknowledgement",
-                            code="invalid_response",
-                        )
+                    self._validate_subscribe_acknowledgement(
+                        acknowledgement
+                    )
+                    if on_ready is not None:
+                        on_ready()
 
                     # The connection may remain idle indefinitely after its bounded
                     # connect/handshake phase.
@@ -389,6 +412,8 @@ class SidecarClient:
     def _subscribe_cancelable(
         self,
         cancel_event: threading.Event,
+        *,
+        on_ready: Optional[Callable[[], None]] = None,
     ) -> Iterator[Dict[str, Any]]:
         connection = self._connect()
         pending = bytearray()
@@ -411,12 +436,9 @@ class SidecarClient:
                 )
                 if acknowledgement is None:
                     return
-                self._raise_daemon_error(acknowledgement)
-                if acknowledgement.get("op") != "subscribe":
-                    raise SidecarClientError(
-                        "daemon returned an invalid subscribe acknowledgement",
-                        code="invalid_response",
-                    )
+                self._validate_subscribe_acknowledgement(acknowledgement)
+                if on_ready is not None:
+                    on_ready()
 
                 while not cancel_event.is_set():
                     event = self._read_cancelable_response(
@@ -443,9 +465,13 @@ def status(**kwargs: Any) -> List[Dict[str, Any]]:
 def subscribe(
     *,
     cancel_event: Optional[threading.Event] = None,
+    on_ready: Optional[Callable[[], None]] = None,
     **kwargs: Any
 ) -> Iterator[Dict[str, Any]]:
-    return SidecarClient(**kwargs).subscribe(cancel_event=cancel_event)
+    return SidecarClient(**kwargs).subscribe(
+        cancel_event=cancel_event,
+        on_ready=on_ready,
+    )
 
 
 __all__ = [

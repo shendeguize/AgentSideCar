@@ -809,9 +809,9 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
         payload = event_line(session_id="real")
         source = (
             "import os,sys,time\n"
-            "if sys.argv[1:] == ['--version']:\n"
-            "    raise SystemExit(0)\n"
-            "assert sys.argv[1:] == ['watch','--all','--json']\n"
+            "assert sys.argv[1:] == "
+            "['watch','--all','--json','--stream-ready']\n"
+            'os.write(1,b\'{"type":"ready"}\\n\')\n'
             "os.write(1," + repr(payload[:25]) + ")\n"
             "time.sleep(.02)\n"
             "os.write(1," + repr(payload[25:] + b"\n") + ")\n"
@@ -828,9 +828,56 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
         )
         self.assertEqual([], files)
 
+    def test_real_bootstrap_requires_exact_internal_ready_ordering(self):
+        payload = event_line(session_id="too-early")
+        invalid_first_lines = (
+            payload,
+            b'{"type": "ready"}',
+            PING_FRAME,
+            END_FRAME,
+            b'{"type":"error","code":"remote"}',
+            b'{"type":"ready","extra":{}}',
+            b"not-json",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for first_line in invalid_first_lines:
+                with self.subTest(first_line=first_line):
+                    source = "import os;os.write(1," + repr(first_line + b"\n") + ")"
+                    result = self._run(root, source)
+                    self.assertEqual(
+                        [b'{"type":"error","code":"protocol"}'],
+                        result.stdout.splitlines(),
+                    )
+
+            duplicate = self._run(
+                root,
+                'import os;os.write(1,b\'{"type":"ready"}\\n{"type":"ready"}\\n\')',
+            )
+
+        self.assertEqual(
+            [READY_FRAME, b'{"type":"error","code":"protocol"}'],
+            duplicate.stdout.splitlines(),
+        )
+
+    def test_real_delayed_empty_child_never_infers_ready(self):
+        source = "import time;time.sleep(1.25);raise SystemExit(1)"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            started = time.monotonic()
+            result = self._run(root, source, timeout=4)
+            elapsed = time.monotonic() - started
+
+        self.assertGreaterEqual(elapsed, 1.0)
+        self.assertEqual(
+            [b'{"type":"error","code":"remote"}'],
+            result.stdout.splitlines(),
+        )
+
     def test_real_bootstrap_from_start_argv_invalid_and_oversize(self):
         source = (
-            "import json,sys;"
+            "import json,os,sys;"
+            'os.write(1,b\'{"type":"ready"}\\n\');'
             "print(json.dumps({"
             "'ts':'t','agent':'a','session_id':'s','kind':'k','text':"
             "str(sys.argv[1:]),'extra':{}},separators=(',',':')))"
@@ -847,15 +894,32 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
                 source,
                 args=("watch", "--all", "--json", "injected"),
             )
+            hidden_external = self._run(
+                root,
+                source,
+                args=("watch", "--all", "--json", "--stream-ready"),
+            )
             oversized = self._run(
                 root,
-                "import os;os.write(1,b'x'*({}+1)+b'\\n')".format(MAX_WATCH_LINE_BYTES),
+                "import os;"
+                'os.write(1,b\'{{"type":"ready"}}\\n\');'
+                "os.write(1,b'x'*({}+1)+b'\\n')".format(MAX_WATCH_LINE_BYTES),
             )
 
+        self.assertEqual(READY_FRAME, accepted.stdout.splitlines()[0])
+        accepted_event = json.loads(accepted.stdout.splitlines()[1])
+        self.assertEqual(
+            "['watch', '--all', '--from-start', '--json', '--stream-ready']",
+            accepted_event["text"],
+        )
         self.assertEqual(END_FRAME, accepted.stdout.splitlines()[-1])
         self.assertEqual(
             {"type": "error", "code": "protocol"},
             json.loads(rejected.stdout),
+        )
+        self.assertEqual(
+            {"type": "error", "code": "protocol"},
+            json.loads(hidden_external.stdout),
         )
         self.assertEqual(
             {"type": "error", "code": "resource_limit"},
@@ -863,11 +927,7 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
         )
 
     def test_real_bootstrap_flushes_bounded_heartbeat_while_silent(self):
-        source = (
-            "import sys,time;"
-            "sys.exit(0) if sys.argv[1:] == ['--version'] else None;"
-            "time.sleep(2)"
-        )
+        source = 'import os,time;os.write(1,b\'{"type":"ready"}\\n\');time.sleep(2)'
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             environment = os.environ.copy()
@@ -905,14 +965,17 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
             self.assertEqual(0, returncode, stderr)
             self.assertGreaterEqual(elapsed, 0.4)
             self.assertLessEqual(elapsed, 1.1)
-            self.assertEqual([END_FRAME], remaining)
+            self.assertEqual(END_FRAME, remaining[-1])
+            self.assertTrue(remaining[:-1])
+            self.assertLessEqual(len(remaining[:-1]), 2)
+            self.assertTrue(all(frame == PING_FRAME for frame in remaining[:-1]))
             self.assertEqual([], list(root.glob("agent-sidecar-watch-*.pyz")))
 
     @unittest.skipUnless(os.name == "posix", "pipe cleanup requires POSIX")
     def test_real_silent_pipe_disconnect_kills_child_and_unlinks_temp(self):
         source = (
-            "import os,sys,time;"
-            "sys.exit(0) if sys.argv[1:] == ['--version'] else None;"
+            "import os,time;"
+            'os.write(1,b\'{"type":"ready"}\\n\');'
             "open(os.environ['WATCH_CHILD_PID'],'w').write(str(os.getpid()));"
             "time.sleep(60)"
         )
@@ -969,10 +1032,69 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
             self.assertEqual([], list(root.glob("agent-sidecar-watch-*.pyz")))
 
     @unittest.skipUnless(os.name == "posix", "signals require POSIX")
+    def test_real_cancel_before_ready_kills_child_and_unlinks_temp(self):
+        source = (
+            "import os,time;"
+            "open(os.environ['WATCH_CHILD_PID'],'w').write(str(os.getpid()));"
+            "time.sleep(60)"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pid_path = root / "pre-ready-child.pid"
+            environment = os.environ.copy()
+            environment["TMPDIR"] = str(root)
+            environment["WATCH_CHILD_PID"] = str(pid_path)
+            process = subprocess.Popen(
+                [sys.executable, "-I", "-c", remote.REMOTE_WATCH_BOOTSTRAP]
+                + ["watch", "--all", "--json"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+            child_pid = None
+            stdout = b""
+            stderr = b""
+            try:
+                assert process.stdin is not None
+                process.stdin.write(self._zipapp(source))
+                process.stdin.close()
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and not pid_path.exists():
+                    time.sleep(0.01)
+                self.assertTrue(pid_path.exists())
+                child_pid = int(pid_path.read_text(encoding="ascii"))
+                self.assertTrue(list(root.glob("agent-sidecar-watch-*.pyz")))
+
+                os.kill(process.pid, signal.SIGTERM)
+                returncode = process.wait(timeout=3)
+                assert process.stdout is not None
+                stdout = process.stdout.read()
+                assert process.stderr is not None
+                stderr = process.stderr.read()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+                if child_pid is not None and process_exists(child_pid):
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+            self.assertEqual(0, returncode, stderr)
+            self.assertEqual(b"", stdout)
+            self.assertFalse(process_exists(child_pid))
+            self.assertEqual([], list(root.glob("agent-sidecar-watch-*.pyz")))
+
+    @unittest.skipUnless(os.name == "posix", "signals require POSIX")
     def test_real_bootstrap_signal_kills_child_and_unlinks_temp(self):
         source = (
-            "import os,sys,time;"
-            "sys.exit(0) if sys.argv[1:] == ['--version'] else None;"
+            "import os,time;"
+            'os.write(1,b\'{"type":"ready"}\\n\');'
             "open(os.environ['WATCH_CHILD_PID'],'w').write(str(os.getpid()));"
             "time.sleep(60)"
         )
@@ -1029,27 +1151,44 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
 
     def test_real_zipapp_clean_home_fails_without_false_ready(self):
         artifact = remote.build_zipapp_bytes()
+        with zipfile.ZipFile(io.BytesIO(artifact)) as archive:
+            members = set(archive.namelist())
+            self.assertTrue(
+                {
+                    "sidecar/cli.py",
+                    "sidecar/client.py",
+                    "sidecar/tail.py",
+                }.issubset(members)
+            )
+            self.assertIn(
+                b"--stream-ready",
+                archive.read("sidecar/cli.py"),
+            )
+            self.assertIn(b"on_ready", archive.read("sidecar/client.py"))
+            self.assertIn(b"on_ready", archive.read("sidecar/tail.py"))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             environment = os.environ.copy()
             environment["HOME"] = str(root / "home")
             environment["TMPDIR"] = str(root)
-            result = subprocess.run(
-                [sys.executable, "-I", "-c", remote.REMOTE_WATCH_BOOTSTRAP]
-                + ["watch", "--all", "--json"],
-                input=artifact,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=environment,
-                check=False,
-                timeout=15,
-            )
+            for run in range(20):
+                result = subprocess.run(
+                    [sys.executable, "-I", "-c", remote.REMOTE_WATCH_BOOTSTRAP]
+                    + ["watch", "--all", "--json"],
+                    input=artifact,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    check=False,
+                    timeout=15,
+                )
 
-            self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual(
-                [b'{"type":"error","code":"remote"}'],
-                result.stdout.splitlines(),
-            )
+                self.assertEqual(0, result.returncode, (run, result.stderr))
+                self.assertEqual(
+                    [b'{"type":"error","code":"remote"}'],
+                    result.stdout.splitlines(),
+                    run,
+                )
             self.assertEqual([], list(root.glob("agent-sidecar-watch-*.pyz")))
 
 

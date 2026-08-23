@@ -195,10 +195,16 @@ class SidecarClientTests(unittest.TestCase):
         cancel = threading.Event()
         finished = threading.Event()
         failures = []
+        ready = []
 
         def consume():
             try:
-                list(client.subscribe(cancel_event=cancel))
+                list(
+                    client.subscribe(
+                        cancel_event=cancel,
+                        on_ready=lambda: ready.append(True),
+                    )
+                )
             except BaseException as error:
                 failures.append(error)
             finally:
@@ -213,7 +219,9 @@ class SidecarClientTests(unittest.TestCase):
                     daemon_socket.recv(1024),
                 )
                 daemon_socket.sendall(b'{"ok":true,"op":"subscribe"}\n')
-                time.sleep(0.06)
+                deadline = time.monotonic() + 1.0
+                while not ready and time.monotonic() < deadline:
+                    time.sleep(0.005)
                 started = time.monotonic()
                 cancel.set()
                 worker.join(timeout=1.0)
@@ -226,14 +234,150 @@ class SidecarClientTests(unittest.TestCase):
         self.assertTrue(finished.is_set())
         self.assertLess(elapsed, 1.0)
         self.assertEqual([], failures)
+        self.assertEqual([True], ready)
 
     def test_pre_cancelled_subscribe_does_not_connect(self):
         client = SidecarClient(socket_path="/tmp/unused-agent-sidecar.sock")
         cancel = threading.Event()
         cancel.set()
+        ready = []
         with mock.patch.object(client, "_connect") as connect:
-            self.assertEqual([], list(client.subscribe(cancel_event=cancel)))
+            self.assertEqual(
+                [],
+                list(
+                    client.subscribe(
+                        cancel_event=cancel,
+                        on_ready=lambda: ready.append(True),
+                    )
+                ),
+            )
         connect.assert_not_called()
+        self.assertEqual([], ready)
+
+    def test_subscribe_ack_failure_does_not_signal_ready(self):
+        client_socket, daemon_socket = socket.socketpair()
+        client = SidecarClient(
+            socket_path="/tmp/unused-agent-sidecar.sock",
+            timeout=0.2,
+        )
+        ready = []
+
+        def reject():
+            daemon_socket.recv(1024)
+            daemon_socket.sendall(
+                b'{"ok":false,"error":{"code":"denied","message":"no"}}\n'
+            )
+
+        daemon = threading.Thread(target=reject)
+        daemon.start()
+        try:
+            with mock.patch.object(client, "_connect", return_value=client_socket):
+                with self.assertRaises(SidecarClientError):
+                    list(client.subscribe(on_ready=lambda: ready.append(True)))
+        finally:
+            daemon.join(timeout=1.0)
+            daemon_socket.close()
+
+        self.assertEqual([], ready)
+
+    def test_subscribe_rejects_non_exact_ack_on_both_read_paths(self):
+        acknowledgements = (
+            [],
+            {},
+            {"ok": False, "op": "subscribe"},
+            {
+                "ok": False,
+                "op": "subscribe",
+                "error": {"code": "denied", "message": "no"},
+            },
+            {"ok": "true", "op": "subscribe"},
+            {"ok": 1, "op": "subscribe"},
+            {"ok": True},
+            {"ok": True, "op": "status"},
+            {"ok": True, "op": "subscribe", "error": None},
+        )
+        for cancelable in (False, True):
+            for acknowledgement in acknowledgements:
+                with self.subTest(
+                    cancelable=cancelable,
+                    acknowledgement=acknowledgement,
+                ):
+                    client_socket, daemon_socket = socket.socketpair()
+                    client = SidecarClient(
+                        socket_path="/tmp/unused-agent-sidecar.sock",
+                        timeout=0.2,
+                    )
+                    ready = []
+                    raw = (
+                        json.dumps(
+                            acknowledgement,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                        + b"\n"
+                    )
+
+                    def respond(payload=raw):
+                        daemon_socket.recv(1024)
+                        daemon_socket.sendall(payload)
+
+                    daemon = threading.Thread(target=respond)
+                    daemon.start()
+                    arguments = {
+                        "on_ready": lambda: ready.append(True),
+                    }
+                    if cancelable:
+                        arguments["cancel_event"] = threading.Event()
+                    try:
+                        with mock.patch.object(
+                            client,
+                            "_connect",
+                            return_value=client_socket,
+                        ):
+                            with self.assertRaises(
+                                SidecarClientError
+                            ) as raised:
+                                list(client.subscribe(**arguments))
+                    finally:
+                        daemon.join(timeout=1.0)
+                        daemon_socket.close()
+
+                    self.assertIn(
+                        raised.exception.code,
+                        ("daemon_error", "denied", "invalid_response"),
+                    )
+                    self.assertEqual([], ready)
+
+    def test_subscribe_ready_callback_exception_closes_connection(self):
+        client_socket, daemon_socket = socket.socketpair()
+        daemon_socket.settimeout(1.0)
+        client = SidecarClient(
+            socket_path="/tmp/unused-agent-sidecar.sock",
+            timeout=0.2,
+        )
+        closed = []
+
+        def acknowledge():
+            daemon_socket.recv(1024)
+            daemon_socket.sendall(b'{"ok":true,"op":"subscribe"}\n')
+            closed.append(daemon_socket.recv(1024))
+
+        daemon = threading.Thread(target=acknowledge)
+        daemon.start()
+        callback_error = RuntimeError("ready callback failed")
+
+        def fail_ready():
+            raise callback_error
+
+        try:
+            with mock.patch.object(client, "_connect", return_value=client_socket):
+                with self.assertRaises(RuntimeError) as raised:
+                    list(client.subscribe(on_ready=fail_ready))
+        finally:
+            daemon.join(timeout=1.0)
+            daemon_socket.close()
+
+        self.assertIs(callback_error, raised.exception)
+        self.assertEqual([b""], closed)
 
 
 if __name__ == "__main__":

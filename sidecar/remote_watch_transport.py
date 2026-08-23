@@ -64,11 +64,10 @@ import time
 MAX_ARTIFACT = 4194304
 MAX_LINE = 262144
 MAX_ERROR = 65536
-READY_GRACE = 1.0
-PREFLIGHT_TIMEOUT = 3.0
 HEARTBEAT_INTERVAL = 0.75
 EVENT_KEYS = frozenset(("ts", "agent", "session_id", "kind", "text", "extra"))
 READY = b'{"type":"ready"}\n'
+INTERNAL_READY = b'{"type":"ready"}'
 END = b'{"type":"end"}\n'
 PING = b'{"type":"ping"}\n'
 MANAGED_SIGNALS = tuple(
@@ -206,31 +205,10 @@ def allowed_args(args):
         ["watch", "--all", "--from-start", "--json"],
     )
 
-def run_preflight():
-    global process
-    process = subprocess.Popen(
-        [sys.executable, "-I", path, "--version"],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    deadline = time.monotonic() + PREFLIGHT_TIMEOUT
-    while process.poll() is None:
-        if time.monotonic() >= deadline:
-            kill_group()
-            process.wait(timeout=1)
-            return False
-        time.sleep(0.01)
-    returncode = process.wait()
-    kill_group()
-    process = None
-    return returncode == 0
-
 def run_child(child_args):
     global process, selector
     process = subprocess.Popen(
-        [sys.executable, "-I", path] + child_args,
+        [sys.executable, "-I", path] + child_args + ["--stream-ready"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -246,84 +224,12 @@ def run_child(child_args):
 
     pending = bytearray()
     errors = bytearray()
-    pre_ready_lines = []
     stdout_eof = False
     stderr_eof = False
     failure = None
     group_terminated = False
-    ready_deadline = time.monotonic() + READY_GRACE
-    while failure is None:
-        remaining = ready_deadline - time.monotonic()
-        if remaining <= 0:
-            if process.poll() is None:
-                break
-            failure = "protocol" if pending else "remote"
-            break
-        events = selector.select(min(0.05, remaining))
-        for key, _mask in events:
-            kind, stream = key.data
-            if kind == "stderr":
-                available = MAX_ERROR - len(errors)
-                try:
-                    chunk = os.read(stream.fileno(), max(1, min(65536, available + 1)))
-                except BlockingIOError:
-                    continue
-                except OSError:
-                    chunk = b""
-                if not chunk:
-                    stderr_eof = True
-                    close_stream(stream)
-                    continue
-                errors.extend(chunk[:available])
-                if len(chunk) > available:
-                    failure = "protocol"
-                    break
-                continue
-            try:
-                chunk = os.read(stream.fileno(), 65536)
-            except BlockingIOError:
-                continue
-            except OSError:
-                chunk = b""
-            if not chunk:
-                stdout_eof = True
-                close_stream(stream)
-                continue
-            pending.extend(chunk)
-            while True:
-                newline = pending.find(b"\n")
-                if newline < 0:
-                    if len(pending) > MAX_LINE:
-                        failure = "resource_limit"
-                    break
-                if newline > MAX_LINE:
-                    failure = "resource_limit"
-                    break
-                line = bytes(pending[:newline])
-                del pending[:newline + 1]
-                line_error = event_line_error(line)
-                if line_error is not None:
-                    failure = line_error
-                    break
-                pre_ready_lines.append(line)
-            if failure is not None:
-                break
-        if pre_ready_lines:
-            break
-        if process.poll() is not None:
-            failure = "protocol" if pending else "remote"
-            break
-    if failure is not None:
-        kill_group()
-    else:
-        if process.poll() is not None and not pre_ready_lines:
-            failure = "remote"
-            kill_group()
-        else:
-            emit_bytes(READY)
-            for line in pre_ready_lines:
-                emit_bytes(line + b"\n")
-    next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL
+    ready_seen = False
+    next_heartbeat = None
 
     while True:
         if failure is not None:
@@ -371,6 +277,17 @@ def run_child(child_args):
                     break
                 line = bytes(pending[:newline])
                 del pending[:newline + 1]
+                if not ready_seen:
+                    if line != INTERNAL_READY:
+                        failure = "protocol"
+                        break
+                    ready_seen = True
+                    emit_bytes(READY)
+                    next_heartbeat = time.monotonic() + HEARTBEAT_INTERVAL
+                    continue
+                if line == INTERNAL_READY:
+                    failure = "protocol"
+                    break
                 line_error = event_line_error(line)
                 if line_error is not None:
                     failure = line_error
@@ -385,10 +302,11 @@ def run_child(child_args):
 
         returncode = process.poll()
         if returncode is None:
-            now = time.monotonic()
-            if now >= next_heartbeat:
-                emit_bytes(PING)
-                next_heartbeat = now + HEARTBEAT_INTERVAL
+            if ready_seen:
+                now = time.monotonic()
+                if next_heartbeat is not None and now >= next_heartbeat:
+                    emit_bytes(PING)
+                    next_heartbeat = now + HEARTBEAT_INTERVAL
             continue
         if not group_terminated:
             kill_group()
@@ -398,6 +316,8 @@ def run_child(child_args):
         if pending:
             failure = "protocol"
         elif returncode != 0:
+            failure = "remote"
+        elif not ready_seen:
             failure = "remote"
         break
 
@@ -427,10 +347,7 @@ try:
             with os.fdopen(fd, "wb") as stream:
                 fd = None
                 stream.write(data)
-            if not run_preflight():
-                terminal = "remote"
-            else:
-                terminal = run_child(child_args)
+            terminal = run_child(child_args)
 except ExitRequested:
     exit_requested = True
 except OutputClosed:
@@ -690,10 +607,8 @@ def open_remote_watch_host(
 ) -> Tuple[Optional[RemoteWatchHostStream], Optional[RemoteFailure]]:
     """Probe and open one host watch stream without reconnecting.
 
-    Bootstrap readiness proves a successful ``--version`` preflight followed
-    by either one valid watch event or one second of child liveness. The
-    current watch CLI has no internal ready flag, so a silent initialization
-    failure occurring after that bounded grace can still follow a ready item.
+    Bootstrap readiness is emitted only after the child watch command emits
+    its exact hidden ``--stream-ready`` control frame.
     """
 
     if not isinstance(host, RemoteHost):

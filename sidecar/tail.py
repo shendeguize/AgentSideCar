@@ -8,7 +8,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Deque, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple, cast
+from typing import Callable, Deque, Dict, Iterable, Iterator, List, Mapping, Optional, Tuple, cast
 
 from sidecar.adapters import get_adapter
 from sidecar.adapters.base import Adapter
@@ -613,31 +613,49 @@ def watch_sessions(
     from_start: bool = False,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     cancel_event: Optional[threading.Event] = None,
+    on_ready: Optional[Callable[[], None]] = None,
 ) -> Iterator[Event]:
     """Poll several direct followers forever, yielding normalized events."""
 
     if poll_interval <= 0:
         raise ValueError("poll_interval must be positive")
     tailers = []
-    for session in sessions:
-        if cancel_event is not None and cancel_event.is_set():
-            return
-        tailers.append(SessionTailer(session, from_start=from_start))
-    while tailers and not (cancel_event is not None and cancel_event.is_set()):
-        for tailer in tailers:
+    try:
+        for session in sessions:
             if cancel_event is not None and cancel_event.is_set():
                 return
-            yield from tailer.poll()
-        if cancel_event is None:
-            time.sleep(poll_interval)
-            continue
-        remaining = poll_interval
-        while remaining > 0:
-            wait_seconds = min(remaining, 1.0)
-            started = time.monotonic()
-            if cancel_event.wait(wait_seconds):
-                return
-            remaining -= max(wait_seconds, time.monotonic() - started)
+            tailers.append(SessionTailer(session, from_start=from_start))
+        if not tailers or (
+            cancel_event is not None and cancel_event.is_set()
+        ):
+            return
+        if on_ready is not None:
+            on_ready()
+        while not (cancel_event is not None and cancel_event.is_set()):
+            for tailer in tailers:
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+                yield from tailer.poll()
+            if cancel_event is None:
+                time.sleep(poll_interval)
+                continue
+            remaining = poll_interval
+            while remaining > 0:
+                wait_seconds = min(remaining, 1.0)
+                started = time.monotonic()
+                if cancel_event.wait(wait_seconds):
+                    return
+                remaining -= max(wait_seconds, time.monotonic() - started)
+    finally:
+        for tailer in reversed(tailers):
+            closer = getattr(tailer, "close", None)
+            if not callable(closer):
+                closer = getattr(getattr(tailer, "follower", None), "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except BaseException:
+                    pass
 
 
 __all__ = [
