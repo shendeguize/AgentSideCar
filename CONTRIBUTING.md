@@ -42,10 +42,44 @@ Pull requests target `main`, contain one coherent change, and merge by squash
 only. The PR title becomes the commit subject and must match:
 
 ```text
-^(feat|fix|docs|test|chore|refactor|ci)(\([a-z0-9][a-z0-9._-]*\))?: .+
+^(feat|fix|docs|test|chore|refactor|ci)(\([a-z0-9][a-z0-9._-]*\))?!?: .+
 ```
 
-Examples: `feat(remote): bound watch startup` and `docs: clarify installation`.
+Examples: `feat(remote): bound watch startup`, `fix!: reject legacy tokens`, and
+`docs: clarify installation`.
+
+## Weekly regression and golden fixture drift
+
+The weekly workflow runs the full Python 3.13 gate on current Ubuntu and macOS
+runner images. It catches runner, Python, packaging, CLI, skill, and committed
+Cursor-store fixture regressions; it does not read a developer's live private
+Cursor store.
+
+To refresh `tests/fixtures/cursor_cli_store_3_16_17_golden.json`, start from a
+private local copy of a representative upstream Cursor store and sanitize it
+before exporting anything into the repository. Preserve SQLite columns, JSON
+key/type shapes, protobuf field numbers/order, and message ordering, but replace
+all prompts, responses, tool data, identifiers, paths, timestamps, and numeric
+payloads with synthetic fixture values. Recompute each blob SHA-256 plus every
+root and metadata reference after replacement, export only the sanitized
+`meta`/`blobs` rows as hex, and update the fixture's `provenance` and `expected`
+sections.
+
+Fixture changes require review of the decoded hex as well as the JSON: no user,
+machine, project, credential, or other private content may remain. The golden
+decode, nested mutation, structural/sanitization, and full repository contract
+tests must pass:
+
+```bash
+python3 -m unittest tests.test_cursor_chat.CursorChatSnapshotTests
+python3 scripts/check.py
+```
+
+Run the cross-platform regression on demand with:
+
+```bash
+gh workflow run weekly.yml --ref main
+```
 
 ## Changelog and versions
 
