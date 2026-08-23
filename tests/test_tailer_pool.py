@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from sidecar.adapters.base import Adapter
 from sidecar.bus import EventBus
@@ -57,7 +58,8 @@ def make_session(
     session_id="one",
     updated_at=None,
     status=Status.WORKING,
-    agent="fake"
+    agent="fake",
+    extra=None,
 ):
     return Session(
         agent=agent,
@@ -67,6 +69,7 @@ def make_session(
         updated_at=time.time() if updated_at is None else updated_at,
         title="fake session",
         status=status,
+        extra={} if extra is None else dict(extra),
     )
 
 
@@ -78,6 +81,83 @@ class RecordingTailer:
 
     def poll(self):
         return []
+
+
+class SinglePollTailer:
+    single_poll_per_refresh = True
+
+    def __init__(self, session):
+        self.session = session
+        self.poll_calls = 0
+        self.has_pending_records = True
+
+    def poll(self):
+        self.poll_calls += 1
+        if self.poll_calls == 1:
+            return []
+        self.has_pending_records = False
+        return [
+            Event(
+                "2026-08-23T04:00:00+08:00",
+                self.session.agent,
+                self.session.session_id,
+                "assistant",
+                "second page",
+            )
+        ]
+
+
+class StatefulCursorFollower:
+    records = []
+    instances = []
+
+    def __init__(self, path, from_start=False, max_records=256):
+        self.path = Path(path).resolve()
+        self.from_start = from_start
+        self.max_records = max_records
+        self.position = 0
+        self.initialized = False
+        self.last_error = None
+        self.poll_calls = 0
+        self.__class__.instances.append(self)
+
+    @property
+    def has_pending_records(self):
+        return self.initialized and self.position < len(self.records)
+
+    def poll(self):
+        self.poll_calls += 1
+        if not self.initialized:
+            self.initialized = True
+            if not self.from_start:
+                self.position = len(self.records)
+                return []
+        end = min(len(self.records), self.position + self.max_records)
+        page = [dict(record) for record in self.records[self.position:end]]
+        self.position = end
+        return page
+
+    def export_checkpoint(self):
+        return {
+            "version": 1,
+            "kind": "cursor_chat",
+            "path": str(self.path),
+            "position": self.position,
+            "initialized": self.initialized,
+        }
+
+    def restore_checkpoint(self, checkpoint):
+        if (
+            checkpoint.get("version") != 1
+            or checkpoint.get("kind") != "cursor_chat"
+            or checkpoint.get("path") != str(self.path)
+            or not isinstance(checkpoint.get("position"), int)
+            or not isinstance(checkpoint.get("initialized"), bool)
+        ):
+            return False
+        self.position = checkpoint["position"]
+        self.initialized = checkpoint["initialized"]
+        return True
 
 
 class TailerPoolPolicyTests(unittest.TestCase):
@@ -137,6 +217,25 @@ class TailerPoolPolicyTests(unittest.TestCase):
                 },
                 pool.state.active,
             )
+
+    def test_cursor_kind_requires_database_transcript(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cursor = make_session(
+                root / "store.db",
+                agent="cursor-cli",
+                extra={"transcript_kind": "cursor-chat-sqlite"},
+            )
+            arbitrary_db = make_session(root / "other.db", agent="cursor-cli")
+            wrong_shape = make_session(
+                root / "events.jsonl",
+                agent="cursor-cli",
+                extra={"transcript_kind": "cursor-chat-sqlite"},
+            )
+
+            self.assertTrue(TailerPool.supports_tailing(cursor))
+            self.assertFalse(TailerPool.supports_tailing(arbitrary_db))
+            self.assertFalse(TailerPool.supports_tailing(wrong_shape))
 
     def test_pool_accepts_event_bus_and_callable_publishers(self):
         bus = EventBus()
@@ -309,6 +408,68 @@ class TailerPoolCheckpointTests(unittest.TestCase):
 
             self.assertEqual(["startup gap"], [event.text for event in events])
             self.assertEqual([2], adapter.after_seqs)
+
+    def test_startup_expired_cursor_anchors_root_and_emits_only_append(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = Path(temporary) / "store.db"
+            transcript.write_bytes(b"fake cursor store")
+            key = ("cursor-cli", "one")
+            expired = make_session(
+                transcript,
+                updated_at=800.0,
+                status=Status.IDLE,
+                agent="cursor-cli",
+                extra={"transcript_kind": "cursor-chat-sqlite"},
+            )
+            events = []
+            StatefulCursorFollower.records = [
+                {"role": "assistant", "content": "history"}
+            ]
+            StatefulCursorFollower.instances = []
+
+            with mock.patch(
+                "sidecar.tail.CursorChatFollower",
+                StatefulCursorFollower,
+            ):
+                pool = TailerPool(
+                    events.append,
+                    tail_recent_seconds=100,
+                )
+                pool.refresh(
+                    [expired],
+                    changed_keys={key},
+                    initial=True,
+                    now=1_000.0,
+                )
+
+                self.assertEqual({key}, pool.state.checkpoints)
+                self.assertEqual(
+                    1,
+                    StatefulCursorFollower.instances[0].poll_calls,
+                )
+
+                StatefulCursorFollower.records.append(
+                    {"role": "assistant", "content": "startup gap"}
+                )
+                resumed = make_session(
+                    transcript,
+                    updated_at=1_001.0,
+                    agent="cursor-cli",
+                    extra={"transcript_kind": "cursor-chat-sqlite"},
+                )
+                pool.refresh(
+                    [resumed],
+                    changed_keys={key},
+                    now=1_001.0,
+                )
+
+            self.assertEqual(["startup gap"], [event.text for event in events])
+            self.assertEqual(2, len(StatefulCursorFollower.instances))
+            self.assertEqual(
+                1,
+                StatefulCursorFollower.instances[1].poll_calls,
+            )
+            self.assertEqual(frozenset(), pool.state.checkpoints)
 
     def test_expired_indexed_dsh_resumes_from_last_sequence(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -516,6 +677,45 @@ class TailerPoolPollingTests(unittest.TestCase):
 
             pool.refresh([session], changed_keys=set())
             self.assertEqual([0, 2], adapter.after_seqs)
+
+    def test_cursor_pending_page_uses_generic_one_poll_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = Path(temporary) / "store.db"
+            transcript.write_bytes(b"fake cursor store")
+            events = []
+            tailers = []
+
+            def factory(session):
+                tailer = SinglePollTailer(session)
+                tailers.append(tailer)
+                return tailer
+
+            pool = TailerPool(
+                events.append,
+                max_event_polls=8,
+                tailer_factory=factory,
+            )
+            session = make_session(
+                transcript,
+                agent="cursor-cli",
+                extra={"transcript_kind": "cursor-chat-sqlite"},
+            )
+            key = ("cursor-cli", "one")
+            pool.refresh(
+                [session],
+                changed_keys={key},
+                initial=True,
+            )
+
+            pool.refresh([session], changed_keys={key})
+            self.assertEqual(1, tailers[0].poll_calls)
+            self.assertEqual({key}, pool.state.pending)
+            self.assertEqual([], events)
+
+            pool.refresh([session], changed_keys=set())
+            self.assertEqual(2, tailers[0].poll_calls)
+            self.assertEqual(["second page"], [event.text for event in events])
+            self.assertEqual(frozenset(), pool.state.pending)
 
 
 if __name__ == "__main__":

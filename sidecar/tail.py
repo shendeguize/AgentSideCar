@@ -11,12 +11,14 @@ from typing import Deque, Dict, Iterable, Iterator, List, Mapping, Optional, Tup
 
 from sidecar.adapters import get_adapter
 from sidecar.adapters.base import Adapter
+from sidecar.cursor_chat import CursorChatError, CursorChatFollower
 from sidecar.model import Event, Session
 
 DEFAULT_POLL_INTERVAL = 0.5
 DEFAULT_READ_BYTES = 64 * 1024
 DEFAULT_LINE_BYTES = 1024 * 1024
 DEFAULT_RECORDS = 256
+MAX_TAILER_DIAGNOSTICS = 16
 
 DSHSignature = Tuple[int, int, int, int, int, int]
 
@@ -280,14 +282,19 @@ class SessionTailer:
         max_read_bytes: int = DEFAULT_READ_BYTES,
         max_line_bytes: int = DEFAULT_LINE_BYTES,
         max_records: int = DEFAULT_RECORDS,
+        _initial_checkpoint: Optional[Mapping[str, object]] = None,
     ) -> None:
         self.session = session
         self.adapter = adapter if adapter is not None else get_adapter(session.agent)
         self.from_start = bool(from_start)
         self.max_records = int(max_records)
         self.errors: List[str] = []
+        self._cursor_error_class: Optional[str] = None
         self._replay = getattr(self.adapter, "replay", None)
         self._is_dsh = self.adapter.name == "dsh" and callable(self._replay)
+        self._is_cursor_chat = (
+            session.extra.get("transcript_kind") == "cursor-chat-sqlite"
+        )
         self._dsh_initialized = self.from_start
         self._last_seq: Optional[int] = None
         self._dsh_page_pending = False
@@ -302,6 +309,20 @@ class SessionTailer:
                     self._last_seq = seq
                     self._dsh_initialized = True
             self.follower: Optional[JSONLFollower] = None
+        elif self._is_cursor_chat:
+            self.follower = CursorChatFollower(
+                Path(session.transcript)
+                if session.transcript
+                else Path("__missing_transcript__"),
+                from_start=from_start,
+                max_records=max_records,
+            )
+            restored = bool(
+                _initial_checkpoint is not None
+                and self.restore_checkpoint(_initial_checkpoint)
+            )
+            if not restored and not self.from_start:
+                self._poll_cursor_records()
         else:
             self.follower = JSONLFollower(
                 Path(session.transcript) if session.transcript else Path("__missing_transcript__"),
@@ -311,6 +332,36 @@ class SessionTailer:
                 max_records=max_records,
             )
 
+    def _append_diagnostic(self, diagnostic: str) -> None:
+        self.errors.append(diagnostic)
+        del self.errors[:-MAX_TAILER_DIAGNOSTICS]
+
+    def _record_cursor_error(self, error: CursorChatError) -> None:
+        diagnostic = error.__class__.__name__
+        if diagnostic == self._cursor_error_class:
+            return
+        self._cursor_error_class = diagnostic
+        self._append_diagnostic(diagnostic)
+
+    def _poll_cursor_records(self) -> List[Dict[str, object]]:
+        if self.follower is None:
+            return []
+        try:
+            records = self.follower.poll()
+        except CursorChatError as error:
+            self._record_cursor_error(error)
+            return []
+        error = getattr(self.follower, "last_error", None)
+        if isinstance(error, CursorChatError):
+            self._record_cursor_error(error)
+        else:
+            self._cursor_error_class = None
+        return [
+            dict(record)
+            for record in records
+            if isinstance(record, Mapping)
+        ]
+
     def _normalize(self, record: Mapping[str, object]) -> List[Event]:
         try:
             return [
@@ -319,7 +370,9 @@ class SessionTailer:
                 if isinstance(event, Event)
             ]
         except Exception as error:
-            self.errors.append("{}: {}".format(error.__class__.__name__, error))
+            self._append_diagnostic(
+                "{}: {}".format(error.__class__.__name__, error)
+            )
             return []
 
     @property
@@ -329,6 +382,12 @@ class SessionTailer:
         if self._is_dsh:
             return self._dsh_page_pending
         return bool(self.follower and self.follower.has_pending_records)
+
+    @property
+    def single_poll_per_refresh(self) -> bool:
+        """Whether one source snapshot/replay is the refresh-tick budget."""
+
+        return self._is_dsh or self._is_cursor_chat
 
     @property
     def is_dsh(self) -> bool:
@@ -349,6 +408,28 @@ class SessionTailer:
                 "page_pending": self._dsh_page_pending,
                 "signature": self._dsh_signature,
                 "force_replay": self._dsh_force_replay,
+            }
+        if self._is_cursor_chat:
+            follower_checkpoint = (
+                self.follower.export_checkpoint()
+                if self.follower is not None
+                else None
+            )
+            if (
+                not self.from_start
+                and isinstance(follower_checkpoint, Mapping)
+                and follower_checkpoint.get("kind") == "cursor_chat"
+                and follower_checkpoint.get("initialized") is not True
+            ):
+                error = getattr(self.follower, "last_error", None)
+                if isinstance(error, CursorChatError):
+                    raise error
+                raise RuntimeError("Cursor chat baseline is not initialized")
+            return {
+                "version": 1,
+                "kind": "cursor_chat_session",
+                "path": self.session.transcript,
+                "follower": follower_checkpoint,
             }
         return {
             "version": 1,
@@ -413,6 +494,15 @@ class SessionTailer:
             return True
 
         follower_checkpoint = checkpoint.get("follower")
+        if self._is_cursor_chat:
+            return bool(
+                set(checkpoint)
+                == {"version", "kind", "path", "follower"}
+                and checkpoint.get("kind") == "cursor_chat_session"
+                and self.follower is not None
+                and isinstance(follower_checkpoint, Mapping)
+                and self.follower.restore_checkpoint(follower_checkpoint)
+            )
         return bool(
             checkpoint.get("kind") == "jsonl_session"
             and self.follower is not None
@@ -473,7 +563,9 @@ class SessionTailer:
                 max_records=self.max_records,
             )
         except Exception as error:
-            self.errors.append("{}: {}".format(error.__class__.__name__, error))
+            self._append_diagnostic(
+                "{}: {}".format(error.__class__.__name__, error)
+            )
             self._dsh_force_replay = True
             return []
 
@@ -506,7 +598,12 @@ class SessionTailer:
         if self.follower is None:
             return []
         events: List[Event] = []
-        for record in self.follower.poll():
+        records = (
+            self._poll_cursor_records()
+            if self._is_cursor_chat
+            else self.follower.poll()
+        )
+        for record in records:
             events.extend(self._normalize(record))
         return events
 
@@ -541,6 +638,7 @@ def follow_session(
 
 __all__ = [
     "JSONLFollower",
+    "MAX_TAILER_DIAGNOSTICS",
     "SessionTailer",
     "follow_session",
     "watch_sessions",

@@ -100,12 +100,15 @@ class TailerPool:
     def supports_tailing(session: Session) -> bool:
         """Return whether the session has a supported transcript source."""
 
+        transcript = session.transcript
+        if not transcript:
+            return False
+        suffix = Path(transcript).suffix.lower()
+        if session.extra.get("transcript_kind") == "cursor-chat-sqlite":
+            return suffix in (".db", ".sqlite", ".sqlite3")
         if session.agent == "dsh":
-            return bool(session.transcript)
-        return bool(
-            session.transcript
-            and Path(session.transcript).suffix.lower() == ".jsonl"
-        )
+            return True
+        return suffix == ".jsonl"
 
     def should_tail(self, session: Session, now: Optional[float] = None) -> bool:
         """Apply active-status and recency policy to a supported session."""
@@ -128,8 +131,8 @@ class TailerPool:
 
         Missing keys are real removals and lose checkpoints. Sessions that
         merely age outside the recency window retain a checkpoint for resume.
-        DSH tailers are polled once per refresh; JSONL tailers may drain up to
-        ``max_event_polls`` bounded batches.
+        Snapshot/replay tailers are polled once per refresh; JSONL tailers may
+        drain up to ``max_event_polls`` bounded batches.
         """
 
         current = {session_key(session): session for session in sessions}
@@ -265,6 +268,29 @@ class TailerPool:
             return self.tailer_factory(session, from_start=from_start)
         return self.tailer_factory(session)
 
+    def _make_resumable_tailer(
+        self,
+        session: Session,
+        from_start: bool,
+        checkpoint: Optional[Mapping[str, object]],
+    ) -> Tuple[Any, bool]:
+        """Build a tailer and restore without a duplicate Cursor snapshot."""
+
+        if (
+            self.tailer_factory is None
+            and checkpoint is not None
+            and session.extra.get("transcript_kind") == "cursor-chat-sqlite"
+        ):
+            return (
+                SessionTailer(
+                    session,
+                    from_start=from_start,
+                    _initial_checkpoint=checkpoint,
+                ),
+                True,
+            )
+        return self._make_tailer(session, from_start), False
+
     @staticmethod
     def _has_unread_data(tailer: Any) -> bool:
         pending = getattr(tailer, "has_pending_records", False)
@@ -286,10 +312,12 @@ class TailerPool:
 
     def _poll(self, tailer: Any) -> bool:
         try:
-            is_dsh = bool(getattr(tailer, "is_dsh", False))
+            single_poll = bool(
+                getattr(tailer, "single_poll_per_refresh", False)
+            )
         except Exception:
-            is_dsh = False
-        poll_limit = 1 if is_dsh else self.max_event_polls
+            single_poll = False
+        poll_limit = 1 if single_poll else self.max_event_polls
         for _ in range(poll_limit):
             try:
                 events = tailer.poll()
@@ -300,7 +328,7 @@ class TailerPool:
                 if isinstance(event, (Event, Mapping)):
                     self._publish(event)
                     emitted = True
-            if is_dsh:
+            if single_poll:
                 return self._has_unread_data(tailer)
             if not emitted and not self._has_unread_data(tailer):
                 return False
@@ -336,13 +364,14 @@ class TailerPool:
                 else:
                     self._checkpoints.pop(key, None)
             try:
-                tailer = self._make_tailer(
+                tailer, checkpoint_consumed = self._make_resumable_tailer(
                     session,
                     from_start=bool(new_session and not initial),
+                    checkpoint=checkpoint,
                 )
             except (KeyError, OSError, RuntimeError, TypeError, ValueError):
                 return
-            if checkpoint is not None:
+            if checkpoint is not None and not checkpoint_consumed:
                 restore = getattr(tailer, "restore_checkpoint", None)
                 if callable(restore):
                     try:

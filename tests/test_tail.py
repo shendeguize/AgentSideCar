@@ -1,7 +1,12 @@
+import hashlib
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from sidecar.cursor_chat import CursorChatSourceError
 from sidecar.model import Event, Session
 from sidecar.tail import JSONLFollower, SessionTailer
 
@@ -50,6 +55,130 @@ def make_dsh_session(seq, transcript="/tmp/session.jsonl.zstd"):
         transcript=str(transcript),
         updated_at=1_787_429_064.0,
         extra={"seq": seq},
+    )
+
+
+def make_cursor_session(transcript):
+    return Session(
+        agent="cursor-cli",
+        session_id="cursor-session",
+        project="/tmp/project",
+        transcript=str(transcript),
+        updated_at=1_787_429_064.0,
+        extra={"transcript_kind": "cursor-chat-sqlite"},
+    )
+
+
+class CursorAdapterStub:
+    name = "cursor"
+
+    def normalize(self, record, session):
+        text = record.get("content")
+        if not isinstance(text, str):
+            return []
+        return [
+            Event(
+                "2026-08-23T04:00:00+08:00",
+                session.agent,
+                session.session_id,
+                str(record.get("role") or "message"),
+                text,
+            )
+        ]
+
+
+class FakeCursorChatFollower:
+    def __init__(self, responses=(), error=None):
+        self.responses = list(responses)
+        self.last_error = error
+        self.poll_calls = 0
+        self.restore_calls = []
+        self.has_pending_records = bool(self.responses)
+
+    def poll(self):
+        self.poll_calls += 1
+        records = self.responses.pop(0) if self.responses else []
+        self.has_pending_records = bool(self.responses)
+        return records
+
+    def export_checkpoint(self):
+        return {"version": 1, "kind": "fake-cursor"}
+
+    def restore_checkpoint(self, checkpoint):
+        self.restore_calls.append(checkpoint)
+        return checkpoint.get("kind") == "fake-cursor"
+
+
+def _varint(value):
+    encoded = bytearray()
+    while value >= 0x80:
+        encoded.append((value & 0x7F) | 0x80)
+        value >>= 7
+    encoded.append(value)
+    return bytes(encoded)
+
+
+def _install_cursor_store(path, messages):
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS blobs (id TEXT PRIMARY KEY, data BLOB)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        message_ids = []
+        for message in messages:
+            payload = json.dumps(
+                message,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            message_id = hashlib.sha256(payload).hexdigest()
+            connection.execute(
+                "INSERT OR IGNORE INTO blobs (id, data) VALUES (?, ?)",
+                (message_id, payload),
+            )
+            message_ids.append(message_id)
+        root = b"".join(
+            _varint((1 << 3) | 2)
+            + _varint(32)
+            + bytes.fromhex(message_id)
+            for message_id in message_ids
+        )
+        root_id = hashlib.sha256(root).hexdigest()
+        connection.execute(
+            "INSERT OR IGNORE INTO blobs (id, data) VALUES (?, ?)",
+            (root_id, root),
+        )
+        metadata = {
+            "agentId": "production-shaped",
+            "latestRootBlobId": root_id,
+            "name": "Cursor test",
+            "mode": "agent",
+            "createdAt": 1_700_000_000_000,
+        }
+        connection.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (
+                "0",
+                json.dumps(metadata, separators=(",", ":")).encode("utf-8").hex(),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _source_signature(path):
+    details = path.stat()
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_mtime_ns,
+        details.st_ctime_ns,
     )
 
 
@@ -261,6 +390,127 @@ class DSHFollowerBoundaryTests(unittest.TestCase):
             self.assertEqual(["truncated"], [event.text for event in tailer.poll()])
             self.assertEqual([], tailer.poll())
             self.assertEqual([0, 1, 2], adapter.after_seqs)
+
+
+class CursorChatSessionTailerTests(unittest.TestCase):
+    def test_selects_cursor_follower_and_baselines_without_jsonl(self):
+        follower = FakeCursorChatFollower()
+        with mock.patch(
+            "sidecar.tail.CursorChatFollower",
+            return_value=follower,
+        ) as cursor_follower, mock.patch(
+            "sidecar.tail.JSONLFollower"
+        ) as jsonl_follower:
+            tailer = SessionTailer(
+                make_cursor_session("/tmp/store.db"),
+                adapter=CursorAdapterStub(),
+            )
+
+        cursor_follower.assert_called_once()
+        jsonl_follower.assert_not_called()
+        self.assertIs(follower, tailer.follower)
+        self.assertEqual(1, follower.poll_calls)
+        self.assertTrue(tailer.single_poll_per_refresh)
+
+    def test_from_start_pages_and_normalizes_through_adapter(self):
+        follower = FakeCursorChatFollower(
+            responses=[
+                [{"role": "user", "content": "historical request"}],
+                [{"role": "assistant", "content": "historical answer"}],
+            ]
+        )
+        with mock.patch(
+            "sidecar.tail.CursorChatFollower",
+            return_value=follower,
+        ):
+            tailer = SessionTailer(
+                make_cursor_session("/tmp/store.db"),
+                adapter=CursorAdapterStub(),
+                from_start=True,
+                max_records=1,
+            )
+
+        self.assertEqual(0, follower.poll_calls)
+        self.assertEqual(
+            ["historical request"],
+            [event.text for event in tailer.poll()],
+        )
+        self.assertTrue(tailer.has_pending_records)
+        self.assertEqual(
+            ["historical answer"],
+            [event.text for event in tailer.poll()],
+        )
+        self.assertFalse(tailer.has_pending_records)
+
+    def test_cursor_checkpoint_is_strict_and_delegated(self):
+        follower = FakeCursorChatFollower()
+        with mock.patch(
+            "sidecar.tail.CursorChatFollower",
+            return_value=follower,
+        ):
+            original = SessionTailer(
+                make_cursor_session("/tmp/store.db"),
+                adapter=CursorAdapterStub(),
+                from_start=True,
+            )
+            checkpoint = original.export_checkpoint()
+            resumed = SessionTailer(
+                make_cursor_session("/tmp/store.db"),
+                adapter=CursorAdapterStub(),
+                from_start=True,
+            )
+
+        self.assertEqual("cursor_chat_session", checkpoint["kind"])
+        wrong_kind = dict(checkpoint, kind="jsonl_session")
+        wrong_path = dict(checkpoint, path="/tmp/other.db")
+        extra_key = dict(checkpoint, unexpected=True)
+        self.assertFalse(resumed.restore_checkpoint(wrong_kind))
+        self.assertFalse(resumed.restore_checkpoint(wrong_path))
+        self.assertFalse(resumed.restore_checkpoint(extra_key))
+        self.assertEqual([], follower.restore_calls)
+        self.assertTrue(resumed.restore_checkpoint(checkpoint))
+        self.assertEqual([checkpoint["follower"]], follower.restore_calls)
+
+    def test_typed_cursor_errors_are_bounded_class_only_and_deduplicated(self):
+        follower = FakeCursorChatFollower(
+            error=CursorChatSourceError("private source and user content")
+        )
+        with mock.patch(
+            "sidecar.tail.CursorChatFollower",
+            return_value=follower,
+        ):
+            tailer = SessionTailer(
+                make_cursor_session("/tmp/store.db"),
+                adapter=CursorAdapterStub(),
+            )
+
+        for _ in range(32):
+            self.assertEqual([], tailer.poll())
+
+        self.assertEqual(["CursorChatSourceError"], tailer.errors)
+        self.assertNotIn("private", " ".join(tailer.errors))
+
+    def test_production_store_baseline_append_normalizes_without_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "store.db"
+            user = {
+                "role": "user",
+                "content": "<user_query>Watch this chat</user_query>",
+            }
+            assistant = {"role": "assistant", "content": "fresh answer"}
+            _install_cursor_store(path, [user])
+            initial_signature = _source_signature(path)
+
+            tailer = SessionTailer(make_cursor_session(path))
+
+            self.assertEqual(initial_signature, _source_signature(path))
+            _install_cursor_store(path, [user, assistant])
+            appended_signature = _source_signature(path)
+            events = tailer.poll()
+
+            self.assertEqual(["fresh answer"], [event.text for event in events])
+            self.assertEqual(["assistant"], [event.kind for event in events])
+            self.assertEqual(appended_signature, _source_signature(path))
 
 
 if __name__ == "__main__":
