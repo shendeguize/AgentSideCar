@@ -11,6 +11,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 RULESETS = ROOT / ".github" / "rulesets"
 DOCUMENTATION = (
     ROOT / "README.md",
+    ROOT / "README.zh.md",
     ROOT / "skills" / "agent-sidecar" / "SKILL.md",
     ROOT / "skills" / "agent-sidecar" / "reference.md",
 )
@@ -34,6 +35,75 @@ EXPECTED_REQUIRED_CONTEXTS = {
     "main": {"check (ubuntu-latest, Python 3.9)"},
     "release": {"check (macos-latest, Python 3.9)"},
     "version-tags": set(),
+}
+README_HEADING_PAIRS = (
+    (1, "Agent Sidecar", "Agent Sidecar"),
+    (2, "Version 0.4.0", "版本 0.4.0"),
+    (2, "Support matrix", "支持矩阵"),
+    (2, "Supported local sources", "支持的本地数据源"),
+    (2, "Installation", "安装"),
+    (3, "Install with pipx", "使用 pipx 安装"),
+    (3, "Install a GitHub Release zipapp", "安装 GitHub Release zipapp"),
+    (3, "Build the deterministic zipapp", "构建确定性 zipapp"),
+    (3, "Use a repository checkout", "使用仓库检出版本"),
+    (2, "Uninstall", "卸载"),
+    (2, "Commands", "命令"),
+    (3, "Remote list and status", "远程列表与状态"),
+    (3, "Remote watch", "远程监视"),
+    (3, "Experimental local send", "实验性本地发送"),
+    (3, "Persistent macOS user service", "持久化 macOS 用户服务"),
+    (2, "Status semantics", "状态语义"),
+    (2, "Daemon, fallback, and local protocol", "守护进程、回退与本地协议"),
+    (3, "Opt-in loopback HTTP", "可选启用的回环 HTTP"),
+    (2, "Agent skill integration", "Agent Skill 集成"),
+    (2, "Development", "开发与质量门禁"),
+    (3, "Release and version checklist", "发布与版本清单"),
+    (2, "Security and reporting", "安全与问题报告"),
+    (2, "Current scope and deferred work", "当前范围与后续工作"),
+    (2, "FAQ", "常见问题"),
+    (3, "Is Agent Sidecar published on PyPI?", "Agent Sidecar 发布到 PyPI 了吗？"),
+    (
+        3,
+        "Can I use Agent Sidecar on Linux or Windows?",
+        "可以在 Linux 或 Windows 上使用 Agent Sidecar 吗？",
+    ),
+    (
+        3,
+        "Why can a completed session still appear working?",
+        "为什么已完成的会话仍显示为 working？",
+    ),
+    (
+        3,
+        "Can Agent Sidecar control remote sessions?",
+        "Agent Sidecar 可以控制远程会话吗？",
+    ),
+    (
+        3,
+        "Where does Agent Sidecar store its own state?",
+        "Agent Sidecar 在哪里存储自己的状态？",
+    ),
+    (2, "License", "许可证"),
+)
+README_REQUIRED_OPTIONS = {
+    "--allow-write",
+    "--force",
+    "--from-start",
+    "--host",
+    "--http",
+    "--http-port",
+    "--json",
+    "--remote",
+    "--request-id",
+    "--uninstall",
+}
+README_REQUIRED_LINK_TARGETS = {
+    "README.md",
+    "README.zh.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE",
+    "https://github.com/shendeguize/AgentSideCar/releases/latest",
+    "https://shendeguize.github.io/AgentSideCar/",
 }
 
 
@@ -124,11 +194,43 @@ def _required_contexts(ruleset):
     return contexts
 
 
-def _heading_levels(document):
+def _markdown_headings(document):
+    headings = []
+    inside_fence = False
+    for line in document.splitlines():
+        if re.match(r"^\s*```", line):
+            inside_fence = not inside_fence
+            continue
+        if inside_fence:
+            continue
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if match is not None:
+            headings.append((len(match.group(1)), match.group(2)))
+    if inside_fence:
+        raise AssertionError("README has an unterminated fenced code block")
+    return tuple(headings)
+
+
+def _shell_command_blocks(document):
     return tuple(
-        len(match.group(1))
-        for match in re.finditer(r"(?m)^(#{1,6})\s+\S", document)
+        match.group("body").strip()
+        for match in re.finditer(
+            r"(?ms)^```(?:sh|bash)\s*$\n(?P<body>.*?)^```\s*$",
+            document,
+        )
     )
+
+
+def _documented_long_options(document):
+    return frozenset(re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", document))
+
+
+def _markdown_link_targets(document):
+    return frozenset(re.findall(r"\]\(([^)\s]+)", document))
+
+
+def _html_anchor_ids(document):
+    return frozenset(re.findall(r'<a\s+id="([^"]+)"></a>', document))
 
 
 class GovernanceContractTests(unittest.TestCase):
@@ -192,21 +294,53 @@ class GovernanceContractTests(unittest.TestCase):
                 self.assertIn("usage:", completed.stdout.lower())
                 self.assertIn(" ".join(command), completed.stdout)
 
-    def test_dual_language_readme_structure_when_translation_exists(self):
+    def test_dual_language_readmes_keep_structure_commands_and_links_in_sync(self):
         english_path = ROOT / "README.md"
         translated_path = ROOT / "README.zh.md"
-        if not translated_path.exists():
-            self.skipTest(
-                "README.zh.md is introduced in the next documentation batch; "
-                "this contract activates automatically once it exists"
-            )
-
         english = english_path.read_text(encoding="utf-8")
         translated = translated_path.read_text(encoding="utf-8")
-        self.assertEqual(_heading_levels(english), _heading_levels(translated))
+
+        expected_english = tuple(
+            (level, english_heading)
+            for level, english_heading, _ in README_HEADING_PAIRS
+        )
+        expected_translated = tuple(
+            (level, translated_heading)
+            for level, _, translated_heading in README_HEADING_PAIRS
+        )
+        self.assertEqual(expected_english, _markdown_headings(english))
+        self.assertEqual(expected_translated, _markdown_headings(translated))
+        self.assertEqual(
+            _shell_command_blocks(english),
+            _shell_command_blocks(translated),
+        )
+        english_options = _documented_long_options(english)
+        self.assertEqual(english_options, _documented_long_options(translated))
+        self.assertLessEqual(README_REQUIRED_OPTIONS, english_options)
+        self.assertEqual(
+            _markdown_link_targets(english),
+            _markdown_link_targets(translated),
+        )
+
+        link_targets = _markdown_link_targets(english)
+        self.assertLessEqual(README_REQUIRED_LINK_TARGETS, link_targets)
+        for target in link_targets:
+            if target.startswith("#"):
+                anchor = target[1:]
+                with self.subTest(anchor=anchor):
+                    self.assertIn(anchor, _html_anchor_ids(english))
+                    self.assertIn(anchor, _html_anchor_ids(translated))
+                continue
+            if "://" in target:
+                continue
+            relative_path = target.partition("#")[0]
+            with self.subTest(target=target):
+                self.assertTrue((ROOT / relative_path).is_file())
+
         for command in CANONICAL_COMMAND_INVENTORY:
             documented = "agent-sidecar " + " ".join(command)
             with self.subTest(command=documented):
+                self.assertIn(documented, english)
                 self.assertIn(documented, translated)
 
     def test_three_ruleset_files_are_valid_and_target_expected_refs(self):

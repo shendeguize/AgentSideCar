@@ -1,9 +1,16 @@
 # Agent Sidecar
 
+[English](README.md) | [简体中文](README.zh.md)
+
 [![CI](https://github.com/shendeguize/AgentSideCar/actions/workflows/ci.yml/badge.svg)](https://github.com/shendeguize/AgentSideCar/actions/workflows/ci.yml)
 [![Python >=3.9](https://img.shields.io/badge/Python-%3E%3D3.9-3776AB?logo=python&logoColor=white)](https://github.com/shendeguize/AgentSideCar/blob/main/pyproject.toml)
 [![Runtime dependencies: 0](https://img.shields.io/badge/runtime%20dependencies-0-brightgreen)](https://github.com/shendeguize/AgentSideCar/blob/main/pyproject.toml)
+[![Release](https://img.shields.io/github/v/release/shendeguize/AgentSideCar?display_name=tag)](https://github.com/shendeguize/AgentSideCar/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/shendeguize/AgentSideCar/blob/main/LICENSE)
+
+[Latest release](https://github.com/shendeguize/AgentSideCar/releases/latest) ·
+[Website/demo](https://shendeguize.github.io/AgentSideCar/) (the planned GitHub
+Pages destination; deployment follows this documentation change)
 
 Agent Sidecar is a local-first CLI for observing AI-agent sessions. It
 discovers persisted session metadata, infers lifecycle state, follows
@@ -34,6 +41,21 @@ durable private send auditing and request-ID idempotency, and provides the
 opt-in numeric-loopback HTTP panel. It also adds a deterministic executable
 zipapp, package metadata suitable for `pipx`, an explicit macOS user
 LaunchAgent, and bounded private daemon diagnostics with log rotation.
+
+<a id="support-matrix"></a>
+
+## Support matrix
+
+| Environment | Support boundary |
+| --- | --- |
+| macOS | Primary platform and full quality-gate target. Local observation, remote monitoring, the daemon and HTTP panel, deterministic zipapps, experimental local `send`, and the user LaunchAgent are supported. |
+| Linux | Portable observation, remote monitoring, daemon/HTTP, TUI, and packaging paths are exercised in CI. The macOS LaunchAgent is unavailable, and experimental `send` fails closed before execution because its required Darwin `kqueue` descendant containment is unavailable. Linux support is best-effort where agent-owned persistence formats or desktop integrations differ. |
+| Windows | Unsupported. The current runtime and security contracts require POSIX permissions, file locking, process groups, Unix sockets, and related primitives. |
+| Python | Python 3.9 or newer is required locally and on SSH targets. CI exercises Python 3.9 and 3.13; Agent Sidecar has zero runtime Python dependencies. |
+
+Support for an operating system does not imply support for every observed
+agent on that system. The source-specific boundaries below and the mutating
+`send` restrictions remain authoritative.
 
 ## Supported local sources
 
@@ -71,7 +93,7 @@ to this project.
 
 ### Install with pipx
 
-Install the console command from an existing checkout:
+Install the console command from an existing Git checkout:
 
 ```sh
 pipx install .
@@ -88,14 +110,43 @@ the Git URL after that tag is available. Both forms create an isolated
 environment and install `agent-sidecar`; the package has no runtime Python
 dependencies.
 
+### Install a GitHub Release zipapp
+
+GitHub Releases publish the executable zipapp and its checksum file. For
+version 0.4.0:
+
+```sh
+version=0.4.0
+curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/agent-sidecar-${version}.pyz"
+curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/SHA256SUMS"
+shasum -a 256 -c SHA256SUMS
+chmod +x "agent-sidecar-${version}.pyz"
+./agent-sidecar-${version}.pyz --version
+```
+
+Use the matching checksum file from the same release. To expose the verified
+artifact as `agent-sidecar` without a package installation:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "agent-sidecar-${version}.pyz" "$HOME/.local/bin/agent-sidecar"
+agent-sidecar --version
+```
+
+Ensure `~/.local/bin` is on `PATH`. The release workflow verifies the zipapp on
+macOS before publication and attaches build provenance. Release artifacts do
+not represent a PyPI publication.
+
 ### Build the deterministic zipapp
 
 Build through the active Agent Sidecar command:
 
 ```sh
 agent-sidecar package build --output dist/agent-sidecar.pyz
-# From a checkout, ./agent-sidecar is equivalent.
 ```
+
+From a checkout, `./agent-sidecar package build --output
+dist/agent-sidecar.pyz` is equivalent.
 
 The command atomically creates a mode-`0755` executable and prints its path,
 SHA-256 digest, and size. It packages the active installed `sidecar` package:
@@ -114,7 +165,7 @@ If an artifact lost its executable bit during transfer, restore it with
 `chmod +x agent-sidecar.pyz` before using it to start a background daemon or
 install a service.
 
-### Install symlinks into an existing checkout
+### Use a repository checkout
 
 From the repository root:
 
@@ -131,12 +182,8 @@ The installer creates symlinks at:
 Ensure `~/.local/bin` is on `PATH`. The links point into this checkout, so keep
 the repository in place or rerun the installer after moving it. Reinstalling is
 idempotent for links into this repository; the script refuses to overwrite
-unrelated files, directories, or symlinks. To remove only links owned by this
-checkout:
-
-```sh
-sh scripts/install-skill.sh --uninstall
-```
+unrelated files, directories, or symlinks. See [Uninstall](#uninstall) to
+remove only links owned by this checkout.
 
 This checkout installer is retained for users who want the CLI and both agent
 skill links to follow a working tree. It is an alternative to a `pipx` CLI
@@ -157,6 +204,43 @@ checkout shim to a stable absolute command before detaching. The daemon
 therefore starts independently of the shell's current working directory. Keep
 a checkout or zipapp at the resolved location while it is in use; follow the
 service update procedure below before moving or removing it.
+
+<a id="uninstall"></a>
+
+## Uninstall
+
+Use only the steps that match how Agent Sidecar was installed. Stop persistent
+processes before removing the executable they use:
+
+```sh
+agent-sidecar service uninstall
+agent-sidecar daemon stop
+```
+
+`service uninstall` applies only to the macOS LaunchAgent. It retains the
+private runtime directory, diagnostics, HTTP token, and any send-audit files.
+For a `pipx` installation:
+
+```sh
+pipx uninstall agent-sidecar
+```
+
+For links created by the checkout installer, run this from that checkout:
+
+```sh
+sh scripts/install-skill.sh --uninstall
+```
+
+For a release zipapp copied manually to the exact path shown above, remove that
+file only after verifying it is the Agent Sidecar artifact you installed:
+
+```sh
+rm "$HOME/.local/bin/agent-sidecar"
+```
+
+Deleting `~/.agent_sidecar` is not part of normal uninstall. It can destroy
+diagnostics, the HTTP token, send-audit records, and request-ID idempotency
+history. Do not use `audit reset` as an uninstall command.
 
 ## Commands
 
@@ -605,27 +689,49 @@ invokes audit reset automatically.
 
 ## Development
 
-Run the complete standard-library test suite from the repository root:
+Install the development-only tools and run the canonical local quality gate
+from the repository root:
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m pip install -e '.[dev]'
+ruff check .
+python3 -m unittest tests.test_governance -v
+python3 scripts/check.py
 ```
+
+`scripts/check.py` runs Ruff, the complete standard-library test suite,
+coverage policy, deterministic package smoke tests, CLI checks, and skill
+checks in the same stable order used by CI. See [Contributing](CONTRIBUTING.md)
+for branch, pull-request, review, changelog, and release governance.
 
 ### Release and version checklist
 
 1. Set the intended version in `sidecar/__init__.py` and update documentation
    references that describe the current release; retain explicitly historical
    references.
-2. Run the complete test suite, focused skill/docs/help tests, shell syntax
-   checks, and whitespace/lint checks.
+2. Run `python3 scripts/check.py` and all release-specific checks.
 3. Build `dist/agent-sidecar.pyz` twice from the same source and verify the
    reported SHA-256 values match.
 4. Smoke-test both executable and `python3 -I` zipapp invocation from a
    directory outside the checkout, and verify a wheel exposes the
    `agent-sidecar` console script with no `Requires-Dist` metadata.
-5. Review the release diff, create the version commit and `v0.4.0` tag, then
-   publish only the artifacts and channels intentionally configured for the
-   project. PyPI publication is not currently claimed by this documentation.
+5. Follow the authoritative
+   [release procedure](CONTRIBUTING.md#release-procedure): release from a
+   CI-green `main` commit, fast-forward the `release` branch for a final
+   release, create one immutable `v<version>` tag, and let the guarded GitHub
+   workflow verify and publish the zipapp, checksums, and provenance. PyPI
+   publication is not currently claimed by this documentation.
+
+## Security and reporting
+
+Read the [Security Policy](SECURITY.md) for supported security versions, trust
+boundaries, safe diagnostic handling, and the private vulnerability-reporting
+channel. Do not disclose suspected vulnerabilities in a public issue.
+
+For non-security defects and feature requests, use the repository's
+[issue forms](https://github.com/shendeguize/AgentSideCar/issues/new/choose).
+Before sharing logs, JSON output, screenshots, transcripts, databases, or
+runtime files, follow the sanitization requirements in the Security Policy.
 
 ## Current scope and deferred work
 
@@ -638,3 +744,45 @@ Remote prefix watch and remote send remain unsupported. Kimi and DSH injection
 remain deferred; Cursor IDE and Copilot send are unsupported. The opt-in HTTP
 panel and read-only API remain numeric-IPv4-loopback-only and do not extend
 remote monitoring or provide a control plane.
+
+## FAQ
+
+### Is Agent Sidecar published on PyPI?
+
+No publication is claimed. Use `pipx` with a checkout or Git URL, or download a
+verified executable zipapp from the
+[GitHub Releases](https://github.com/shendeguize/AgentSideCar/releases) page.
+Do not assume that an unqualified package from PyPI is this project.
+
+### Can I use Agent Sidecar on Linux or Windows?
+
+Linux supports the portable, read-oriented paths described in the
+[support matrix](#support-matrix), with CI coverage and explicit exclusions
+for the macOS LaunchAgent and experimental `send`. Windows is currently
+unsupported because required POSIX security and daemon primitives are absent.
+
+### Why can a completed session still appear working?
+
+Status is inferred from persisted evidence rather than a native control-plane
+signal. Some tools flush state lazily, so a completed turn—especially in Cursor
+IDE—can remain `working` for several minutes before becoming `waiting`.
+
+### Can Agent Sidecar control remote sessions?
+
+No. Remote `list`, `status`, and `watch --all --remote` are observation-only.
+Remote prefix watch and remote message delivery are unsupported. Experimental
+`send` is local-only, limited to eligible sources, explicitly gated by
+`--allow-write`, and available only where its containment contract is
+supported.
+
+### Where does Agent Sidecar store its own state?
+
+The default runtime directory is `~/.agent_sidecar`. It can contain the Unix
+socket, PID file, bounded diagnostics, HTTP token and transient port record,
+and, only after mutating send operations, private audit state. See
+[Uninstall](#uninstall) before removing anything; normal uninstall deliberately
+retains security-relevant history.
+
+## License
+
+Agent Sidecar is released under the [MIT License](LICENSE).
