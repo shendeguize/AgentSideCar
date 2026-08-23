@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence, TextIO, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGE_ORDER = ("lint", "tests", "coverage", "pack", "cli", "skill")
+STAGE_ORDER = ("lint", "tests", "coverage", "pack", "cli", "skill", "site")
 StageRunner = Callable[[str, bool], int]
 
 
@@ -124,6 +124,8 @@ def _run_stage(stage: str, full_tests_ran: bool) -> int:
             print("skill tests already covered by full discovery", flush=True)
             return 0
         return _run_command((python, "-m", "unittest", "-v", "tests.test_skill"))
+    if stage == "site":
+        return _run_command((python, str(ROOT / "scripts" / "site_check.py")))
     raise ValueError("unknown stage: {}".format(stage))
 
 

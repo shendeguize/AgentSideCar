@@ -22,6 +22,8 @@ venv/
 .ruff_cache/
 build/
 dist/
+_site/
+site/assets/shots/.*.tmp.png
 
 # macOS
 .DS_Store

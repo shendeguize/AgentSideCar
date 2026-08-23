@@ -1,4 +1,5 @@
 import hashlib
+import struct
 import tempfile
 import unittest
 from html.parser import HTMLParser
@@ -10,6 +11,15 @@ from scripts.build_site import (
     ROOT,
     build_site,
     normalize_base_path,
+)
+from scripts.site_check import inspect_site
+from scripts.site_shots import (
+    PNG_SIGNATURE,
+    VIEWPORT,
+    ScreenshotError,
+    build_parser as build_shots_parser,
+    create_server,
+    validate_png,
 )
 from sidecar.web_panel import NONCE_PLACEHOLDER, PANEL_HTML, render_panel
 
@@ -214,6 +224,133 @@ class StaticSiteTests(unittest.TestCase):
         landing = (self.output / "index.html").read_text(encoding="utf-8")
         self.assertIn('href="./landing.css"', landing)
         self.assertIn('href="./demo/"', landing)
+
+
+class SiteVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.output = self.root / "_site"
+        build_site(self.output)
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    @staticmethod
+    def help_runner(command):
+        help_by_command = {
+            ("daemon", "start"): "usage: agent-sidecar daemon start [--http]\n",
+            ("status",): "usage: agent-sidecar status [--json]\n",
+            ("tui",): "usage: agent-sidecar tui [--once]\n",
+        }
+        return 0, help_by_command.get(command, "usage: agent-sidecar\n"), ""
+
+    def test_site_verifier_accepts_complete_generated_tree(self):
+        summary = inspect_site(
+            self.output,
+            source_root=self.root / "source-without-shots",
+            help_runner=self.help_runner,
+        )
+
+        self.assertTrue(summary.ok, "\n".join(summary.errors))
+        self.assertGreater(summary.checks, 40)
+
+    def test_site_verifier_rejects_broken_and_escaping_links(self):
+        landing_path = self.output / "index.html"
+        landing = landing_path.read_text(encoding="utf-8")
+        landing = landing.replace(
+            "</main>",
+            (
+                '<a href="/AgentSideCar/missing/">broken</a>'
+                '<a href="/outside/">escape</a></main>'
+            ),
+        )
+        landing_path.write_text(landing, encoding="utf-8")
+
+        summary = inspect_site(
+            self.output,
+            source_root=self.root / "source-without-shots",
+            validate_cli=False,
+        )
+
+        self.assertFalse(summary.ok)
+        self.assertTrue(
+            any("broken local reference" in error for error in summary.errors),
+            summary.errors,
+        )
+        self.assertTrue(
+            any("escapes /AgentSideCar/" in error for error in summary.errors),
+            summary.errors,
+        )
+
+    def test_site_verifier_checks_documented_cli_options_against_help(self):
+        landing_path = self.output / "index.html"
+        landing = landing_path.read_text(encoding="utf-8")
+        landing_path.write_text(
+            landing.replace(
+                "agent-sidecar status",
+                "agent-sidecar status --not-a-real-option",
+            ),
+            encoding="utf-8",
+        )
+
+        summary = inspect_site(
+            self.output,
+            source_root=self.root / "source-without-shots",
+            help_runner=self.help_runner,
+        )
+
+        self.assertTrue(
+            any("unsupported option --not-a-real-option" in error for error in summary.errors),
+            summary.errors,
+        )
+
+    def test_screenshot_server_is_ephemeral_numeric_loopback_only(self):
+        server = create_server(self.output)
+        try:
+            self.assertEqual("127.0.0.1", server.server_address[0])
+            self.assertGreater(server.server_port, 0)
+        finally:
+            server.server_close()
+
+        with self.assertRaises(ScreenshotError):
+            create_server(self.output, host="localhost")
+
+
+class ScreenshotValidationTests(unittest.TestCase):
+    @staticmethod
+    def png_prefix(width, height):
+        return (
+            PNG_SIGNATURE
+            + struct.pack(">I", 13)
+            + b"IHDR"
+            + struct.pack(">II", width, height)
+            + b"\x08\x06\x00\x00\x00"
+            + b"\x00\x00\x00\x00"
+        )
+
+    def test_png_validator_accepts_signature_and_expected_dimensions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "shot.png"
+            path.write_bytes(self.png_prefix(*VIEWPORT))
+
+            self.assertEqual(VIEWPORT, validate_png(path))
+
+    def test_png_validator_rejects_bad_signature_and_dimensions(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "shot.png"
+            path.write_bytes(b"not a png")
+            with self.assertRaisesRegex(ScreenshotError, "not a PNG"):
+                validate_png(path)
+
+            path.write_bytes(self.png_prefix(800, 600))
+            with self.assertRaisesRegex(ScreenshotError, "expected 1440x960"):
+                validate_png(path)
+
+    def test_screenshot_argument_parser_keeps_check_side_effect_free(self):
+        args = build_shots_parser().parse_args(["--check"])
+        self.assertTrue(args.check)
+        self.assertIsNone(args.chrome)
 
 
 if __name__ == "__main__":
