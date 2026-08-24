@@ -150,6 +150,49 @@ bounded, sanitized tailer diagnostics on stderr. If an established daemon
 subscription drops, `watch --all` warns before switching to direct tailing
 because events during the transition may be missed.
 
+## Daemon Unix-socket protocol
+
+The daemon socket speaks bounded newline-delimited JSON requests and
+responses. Its operations are `ping`, `status`, `subscribe`, and `replay`.
+`ping` returns the daemon PID, version, and HTTP self-description. `status`
+returns the current session snapshot plus scan and tailer diagnostics.
+
+`subscribe` acknowledges the request and then streams normalized event
+objects on the same connection. The request may carry an optional nonempty
+`agents` array of agent names; the daemon then streams only events from those
+agents and echoes the sorted allowlist in its acknowledgement. Omitting
+`agents` keeps the full stream. Filtered-out events never consume the
+subscriber's bounded queue. An empty or non-string `agents` value fails with
+`invalid_request`.
+
+`replay {"session_id": ..., "after_seq": ..., "limit": ...}` returns one
+bounded page of a session's historical normalized events whose `seq` cursor
+is greater than `after_seq`. `session_id` is a required nonempty string.
+`after_seq` is a nonnegative integer defaulting to `0`, meaning from the
+start of the retained transcript. `limit` accepts `1` through `1024` records
+per page and defaults to `256`. The response carries the normalized `events`,
+their `count`, the highest observed `last_seq` cursor, and a `truncated`
+flag.
+
+`truncated` is true whenever more retained events may remain after the
+returned cursor: the page reached `limit`, or the adapter's own bounded
+decode stopped the page early on its byte or time budget while making cursor
+progress. Keep paging with the returned `last_seq` as the next `after_seq`
+until a page reports `truncated: false` at the true end of the retained
+transcript. An early-stopped page without cursor progress reports
+`truncated: false` because re-requesting the same page cannot retrieve more.
+
+The replay data source is the session adapter's own bounded local-transcript
+replay — currently only `dsh` sessions provide one — so it returns only
+events that are still retained in that transcript and carry a `seq` cursor.
+It cannot recover events the source never persisted or that exceed the
+bounded decode. Sessions of other agents report `replay_unsupported`, a
+session absent from the current snapshot reports `unknown_session`, malformed
+arguments report `invalid_request`, and an adapter decode failure reports
+`replay_failed`. Events dropped from a slow subscriber's bounded live queue
+can be backfilled through `replay` only while they remain in the retained
+transcript.
+
 ## Opt-in loopback HTTP
 
 ```text

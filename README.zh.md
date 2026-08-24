@@ -192,6 +192,7 @@ sh scripts/install-skill.sh
 - `~/.local/bin/agent-sidecar`
 - `~/.cursor/skills/agent-sidecar`
 - `~/.claude/skills/agent-sidecar`
+- `~/.dsh/skills/agent-sidecar`
 
 请确保 `~/.local/bin` 位于 `PATH` 中。这些链接指向当前检出版本，因此请保持仓库
 位置不变；移动后应重新运行安装程序。对指向当前仓库的链接重复安装是幂等的；

@@ -1,6 +1,7 @@
 ---
 name: agent-sidecar
 description: Monitors readonly local AI agent sessions and reports their state and progress, with remote monitoring only on request and explicit local send support. Use when the user asks for agent status, session progress, to monitor agents, which agent is waiting or working, or explicitly asks to send a message or feedback to an agent.
+user-invocable: true
 ---
 
 # Agent Sidecar
@@ -241,6 +242,26 @@ request-ID idempotency history. Report that consequence before acting.
 
 Outside an explicit send request, never edit agent configuration, install
 hooks, inject messages, or modify transcript stores.
+
+## DSH injection goes through the plugin
+
+DSH discovers this skill through the `~/.dsh/skills/agent-sidecar` link
+created by `scripts/install-skill.sh`. Inside DSH, observation is unchanged:
+run `status`, `list`, `ps`, `watch`, `tui`, and the daemon lifecycle commands
+exactly as documented above.
+
+Injection is different inside DSH. When a DSH user asks to inject or send a
+message into a monitored session, do not construct an `agent-sidecar send`
+command; direct them to the injection panel of the
+`@shendeguize/dsh-agent-sidecar` plugin, which submits to the plugin's
+`/plugins/agent-sidecar/api/action` endpoint. That path injects `dsh`
+sessions in-process, routes eligible external targets through the same
+audited `send` contract, and enforces the plugin's `inject.enabled` gate plus
+its per-injection confirmation. A direct send to a `dsh` session is
+impossible regardless: DSH has neither session resume nor a stdin prompt
+transport, so `send` rejects it as unsupported. If the plugin is not
+installed, `dsh` sessions remain observation-only, and external `claude`,
+`codex`, and `cursor-cli` targets keep the explicit send workflow above.
 
 ## Interpretation limits
 

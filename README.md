@@ -215,6 +215,7 @@ The installer creates symlinks at:
 - `~/.local/bin/agent-sidecar`
 - `~/.cursor/skills/agent-sidecar`
 - `~/.claude/skills/agent-sidecar`
+- `~/.dsh/skills/agent-sidecar`
 
 Ensure `~/.local/bin` is on `PATH`. The links point into this checkout, so keep
 the repository in place or rerun the installer after moving it. Reinstalling is

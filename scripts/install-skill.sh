@@ -138,23 +138,28 @@ CLI_SOURCE=$(canonical_path "$REPO_ROOT/agent-sidecar") ||
 
 CURSOR_DESTINATION=$HOME/.cursor/skills/agent-sidecar
 CLAUDE_DESTINATION=$HOME/.claude/skills/agent-sidecar
+DSH_DESTINATION=$HOME/.dsh/skills/agent-sidecar
 CLI_DESTINATION=$HOME/.local/bin/agent-sidecar
 
 if [ "$action" = "uninstall" ]; then
     uninstall_link "$CURSOR_DESTINATION"
     uninstall_link "$CLAUDE_DESTINATION"
+    uninstall_link "$DSH_DESTINATION"
     uninstall_link "$CLI_DESTINATION"
     exit 0
 fi
 
 preflight_destination "$CURSOR_DESTINATION"
 preflight_destination "$CLAUDE_DESTINATION"
+preflight_destination "$DSH_DESTINATION"
 preflight_destination "$CLI_DESTINATION"
 
-mkdir -p "$HOME/.cursor/skills" "$HOME/.claude/skills" "$HOME/.local/bin"
+mkdir -p "$HOME/.cursor/skills" "$HOME/.claude/skills" "$HOME/.dsh/skills" \
+    "$HOME/.local/bin"
 
 install_link "$SKILL_SOURCE" "$CURSOR_DESTINATION"
 install_link "$SKILL_SOURCE" "$CLAUDE_DESTINATION"
+install_link "$SKILL_SOURCE" "$DSH_DESTINATION"
 install_link "$CLI_SOURCE" "$CLI_DESTINATION"
 
 printf '%s\n' \
