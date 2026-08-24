@@ -1,17 +1,21 @@
 # @shendeguize/dsh-agent-sidecar
 
-[Agent Sidecar](../README.md) 的原生 dsh 插件:在 dsh Web 里跨 agent 监控本机 AI agent 会话——看板、状态小件、设置卡,以及对 sidecar daemon 的自动托管。消息注入与 AI 旁路分析为后续里程碑。
+[Agent Sidecar](../README.md) 的原生 dsh 插件:在 dsh Web 里跨 agent 监控本机 AI agent 会话——看板、会话详情时间线、消息注入(默认关)、AI 旁路分析(默认关)、skill 内嵌提供,以及对 sidecar daemon 的自动托管。
 
-## 能力(当前已交付,M1)
+## 能力(当前已交付,M1-M3 + skill/sidebar)
 
 - **跨 agent 会话看板**:会话页新增「Sidecar」Tab,展示本机受支持 agent(cursor IDE/CLI、claude、codex、copilot、dsh、kimi)的会话卡片与状态徽标(`working` / `waiting` / `idle` / `dead`;状态为从持久化数据推断的观察值,可能滞后)。
+- **会话详情视图**:统一时间线(融合 sidecar 规范化事件与 dsh 进程内实时事件,分页回溯历史,事件缺口如实标注);dsh 会话专属谱系树与全文检索(经 `sessionQuery`,该服务缺席时优雅降级——检索退化为标题/项目过滤,谱系显示不可用提示);项目分组视图(同一项目下跨 agent 会话并排呈现)。
+- **消息注入(默认关)**:`inject.enabled` 开启后,对 waiting/idle 目标经两阶段确认(服务端签发一次性 confirmToken)注入消息——dsh 会话走进程内 queue/steer(`ctx.agents` followup/steer),外部 agent(claude/codex/cursor-cli)经 `agent-sidecar send --message-stdin --allow-write --json` 子进程执行(消息经 stdin 传输,绝不进 sidecar argv)。`delivery: unknown` 回执不提供重试按钮;copilot/kimi/cursor-ide 无注入通道,入口置灰。
+- **AI 旁路分析(默认关)**:`analysis.enabled` 开启后,可对被观测会话/项目拉起专用 dsh 分析会话(有界摘要注入 + 增量追问 + 随时停止);模型路由见配置表 `analysis.provider` / `analysis.model`。分析正文绝不写入插件日志。
 - **footer 状态小件**:侧边栏底部常驻连接状态点(sidecar 连接态 + 速览)。
+- **`/sidecar` 斜杠命令**:会话输入框内的只读状态速览(daemon 状态、连接健康度、working/waiting 计数、按项目分组的活跃会话)。
 - **设置卡**:dsh 设置页出现「Agent Sidecar」卡片(设置命名空间 `agent-sidecar`)。
 - **daemon 托管**:探测-领养-否则托管(probe-adopt-else-host)策略管理 sidecar daemon 生命周期,详见[下文](#daemon-托管策略)。
 - **实时数据面**:host 半区经 Unix socket 消费 daemon(`status` 快照对账 + `subscribe` 事件触发),浏览器经同源 SSE 实时刷新。
+- **skill 内嵌提供**:`skill.provide`(默认开)经 dsh skill 注册表提供 agent-sidecar skill,装插件即得、无需运行安装脚本;文件系统已安装的同名 skill 自动优先(dsh 注册表按名合并,文件系统层胜出,无需探测)。
+- **better-sidebar 可选 Tab**(软依赖):装有 `dsh-better-sidebar` 时注册紧凑「Sidecar」侧边 Tab(连接点 + 计数 + 最近会话);未装静默跳过;Tab 不可见时释放订阅,不额外轮询、不另建 SSE。
 - **中英双语界面**(默认中文)。
-
-**即将到来(M2+,当前版本不提供)**:消息注入(queue/steer 双模式)、AI 旁路分析、skill 内嵌提供。看板上对应入口在实装前不可用;写接口 `POST /plugins/agent-sidecar/api/action` 已带写门但返回 501。
 
 ## 前置条件
 
@@ -48,7 +52,7 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 2. 侧边栏 footer → 状态小件;
 3. 设置页插件区 →「Agent Sidecar」设置卡。
 
-命令行验证:`curl http://127.0.0.1:<port>/plugins/agent-sidecar/api/state` 应返回含 `daemon` / `board` / `capabilities` 的 JSON 快照;`GET …/api/stream` 为 SSE 流;`GET …/api/session/<id>` 为单会话详情。
+命令行验证:`curl http://127.0.0.1:<port>/plugins/agent-sidecar/api/state` 应返回含 `daemon` / `board` / `capabilities` 的 JSON 快照;`GET …/api/stream` 为 SSE 流;`GET …/api/session/<id>` 为单会话详情(含融合时间线首页),`GET …/api/session/<id>/timeline?cursor=&limit=` 分页回溯历史;`GET …/api/lineage/<id>`、`GET …/api/search?q=`、`GET …/api/projects` 为 M3 读面;`POST …/api/action` 为幂等动作信封(`inject.prepare` / `inject.execute` / `analysis.*` / `daemon.retry`)。
 
 ## 配置
 
@@ -77,16 +81,20 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 | `stream.reconcileActiveMs` | 自然数(≥100) | `2000` | 对账快照周期(有会话工作中,毫秒) |
 | `stream.reconcileIdleMs` | 自然数(≥100) | `10000` | 对账快照周期(空闲,毫秒) |
 | **`inject.enabled`** | `boolean` | **`false`(默认关)** | **注入总开关**:关闭时看板隐藏全部注入入口,写接口在服务端同步拒绝(403)。多用户主机不建议开启 |
-| `inject.defaultMode` | `'queue'` \| `'steer'` | `queue` | 注入面板默认模式:`queue` 排队下一轮,`steer` 中途注入(面板为 M2) |
-| `analysis.enabled` | `boolean` | `false` | AI 旁路分析开关(M3;消耗模型 token,默认关闭) |
+| `inject.defaultMode` | `'queue'` \| `'steer'` | `queue` | 注入面板默认模式:`queue` 排队下一轮,`steer` 中途注入 |
+| `analysis.enabled` | `boolean` | `false` | AI 旁路分析开关(消耗模型 token,默认关闭) |
+| `analysis.provider` | `string` | `''` | 分析代理的 provider 路由:留空(默认)复用宿主默认模型(`agentDefaultModel` 服务,与 dsh 自身入口同源);与 `analysis.model` 同时非空才生效 |
+| `analysis.model` | `string` | `''` | 分析代理的模型 id:留空(默认)复用宿主默认模型;与 `analysis.provider` 同时非空才生效。两者留空且宿主无默认模型时,`analysis.request` 被拒为 `analysis_model_unconfigured` |
 | `ui.timeWindowHours` | 自然数(≥1) | `24` | 看板会话时间窗(小时) |
 | `ui.showDead` | `boolean` | `false` | 是否显示 dead 会话 |
-| `skill.provide` | `boolean` | `false` | 是否内嵌提供 agent-sidecar skill(M4 启用) |
+| `skill.provide` | `boolean` | **`true`(默认开)** | 是否经 registerProvider 内嵌提供 agent-sidecar skill;文件系统已安装的同名 skill 自动优先;装配时读取,改动需重载插件生效 |
 
 ### 生效方式(如实说明)
 
 - `inject.enabled`:**即时生效**(host 侧实时读取,守卫立即响应)。
+- `analysis.*`:**即时生效**(开关与 provider/model 均按次实时读取)。
 - `ui.*`:**即时生效**(浏览器侧实时读取,作为看板筛选默认值;用户手动筛选后以用户选择为准)。
+- `skill.provide`:**装配时读取**(重启语义)——改动需重载插件生效。
 - `daemon.*` / `stream.*` / `sidecar.*`:当前**以组合配置(patch 的 `config:` 块)为准**,在插件装配时烘焙定型;设置卡内对这三组的修改暂不驱动运行时(完整的重启重读接线属后续里程碑)。要改这三组,请改 profile patch 后重启 dsh。
 
 ## daemon 托管策略
@@ -102,8 +110,10 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 
 - 插件自开路由 `/plugins/agent-sidecar/api` 不在 dsh `/api` 栅栏覆盖内,故自带五层守卫;**即使 dsh 以 `--host 0.0.0.0` 启动,本插件路由对非回环请求一律 403**。
 - 五层守卫:① 对端地址必须为 loopback;② `Host` 必须为回环权威(防 DNS rebinding);③ `Origin`(出现时)必须与 Host 同源,显式 `sec-fetch-site: cross-site` 拒绝;④ POST/PUT/PATCH 强制 `Content-Type: application/json`(否则 415,阻断跨站简单请求);⑤ 写动作门——`inject.enabled` 默认关,关闭时服务端直接 403。
-- M2 注入实装后,在写门之上还有逐次确认:服务端签发一次性 confirmToken 的两阶段流程,无批量/定时注入。
-- **诚实边界**:五层守卫防御的是浏览器介导攻击(CSRF、DNS rebinding、跨站请求),**不防**能直接连 loopback 的本机任意进程——这与 dsh 自身 `/api` 的无认证信任水位持平。因此多用户主机不建议开启 `inject.enabled`,读面(会话事件数据)对本机进程可见这一事实请知悉。
+- 在写门之上还有逐次确认:每次注入必经服务端签发一次性短时效 confirmToken 的两阶段流程(`inject.prepare` → 确认对话框 → `inject.execute`),无批量/定时注入;`delivery: "unknown"` 一律不自动重试、UI 不提供重发按钮。
+- 外部 agent 注入的消息经 `send --message-stdin` 走 stdin,不进 sidecar argv;cursor-cli 的原生子进程 argv 暴露为其上游恢复契约,确认框如实警示(见主仓 [SECURITY.md](../SECURITY.md))。
+- AI 旁路分析默认关(消耗模型 token);分析会话有界(输入截断、回合超时、并发上限)、可随时停止,无自动/周期分析;分析正文(摘要、追问、模型回复)绝不写入插件日志。
+- **诚实边界**:五层守卫防御的是浏览器介导攻击(CSRF、DNS rebinding、跨站请求),**不防**能直接连 loopback 的本机任意进程——这与 dsh 自身 `/api` 的无认证信任水位持平,弱于 sidecar 自身两面(Unix socket 靠同 UID 0600 文件权限,HTTP 读面要求 Bearer token),属显式声明的权衡而非沉默继承。因此多用户主机不建议开启 `inject.enabled`,读面(会话事件数据)对本机进程可见这一事实请知悉;confirmToken 对直连 loopback 的本机进程不设防,「用户同回合明确请求」在此信道上退化为 UX 约定。
 - host 经 Unix socket(同 UID、socket 0600)直连 daemon,不读也绝不外泄 sidecar 的 `http.token`;浏览器永不直连 sidecar HTTP。
 - sidecar 本体(CLI/daemon)的威胁模型与红线见主仓 [SECURITY.md](../SECURITY.md)。
 
@@ -130,12 +140,19 @@ plugin/
 │   ├── supervisor.ts       #   daemon 生命周期状态机(probe-adopt-else-host)
 │   ├── bridge.ts           #   Unix socket 客户端 + 快照对账器
 │   ├── session-store.ts    #   会话快照缓存
-│   ├── routes.ts           #   /plugins/agent-sidecar/api 路由(state / stream / session / action)
-│   └── guard.ts            #   五层请求守卫
+│   ├── routes.ts           #   /plugins/agent-sidecar/api 路由(state / stream / session / timeline / lineage / search / projects / action)
+│   ├── guard.ts            #   五层请求守卫
+│   ├── inject-gateway.ts   #   注入网关(两阶段 confirmToken + 双通路分派)
+│   ├── dsh-inject.ts / send-cli.ts   # dsh 进程内注入 / 外部 agent send CLI 执行器
+│   ├── fusion.ts           #   sessionQuery × sidecar 事件融合(时间线/谱系/检索/项目)
+│   ├── analysis.ts         #   AI 旁路分析引擎(专用 dsh 分析会话,有界)
+│   └── skills-provider.ts  #   skill 内嵌提供器(registerProvider 路径)
 ├── src/client/             # browser 半区(React 18,exports "./client",lazy-CJS 注入 dsh Web)
-│   ├── index.ts            #   三挂载点注册 + apply-guard 幂等 + 样式生命周期
+│   ├── index.ts            #   挂载点注册 + apply-guard 幂等 + 样式生命周期
 │   ├── controller.ts / api.ts / sse.ts      # 数据控制器与同源 fetch / SSE 传输
 │   ├── board/ · widget.tsx · settings-card.tsx · mount.tsx   # 看板 / 小件 / 设置卡
+│   ├── detail/ · dsh-tools/ · inject/ · analysis/   # 详情时间线 / 谱系与检索 / 注入面板 / 分析面板
+│   ├── commands.ts · sidebar-tab.tsx   # /sidecar 斜杠命令 / better-sidebar 可选 Tab
 │   └── locales/            #   中英双语文案(默认 zh)
 ├── test/                   # vitest 单测与集成测试
 ├── lib/                    # 预构建产物(随 npm 发布,安装免构建)

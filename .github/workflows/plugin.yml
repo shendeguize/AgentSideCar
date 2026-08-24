@@ -1,0 +1,77 @@
+name: Plugin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "plugin/**"
+      - ".github/workflows/plugin.yml"
+  pull_request:
+    paths:
+      - "plugin/**"
+      - ".github/workflows/plugin.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin:
+    name: plugin (test, typecheck, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: plugin
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Corepack ships with the runner's preinstalled Node. Installing the
+      # exact hashed packageManager spec globally keeps setup-node's pnpm
+      # cache resolution (which runs from the repository root, outside the
+      # plugin/ package) on the same pnpm version as the install itself.
+      - name: Set up pnpm via corepack
+        run: |
+          corepack enable pnpm
+          corepack install --global \
+            "$(node -p 'require("./package.json").packageManager')"
+          pnpm --version
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: plugin/pnpm-lock.yaml
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Typecheck host and client surfaces
+        run: pnpm typecheck
+
+      - name: Build lib/ bundles
+        run: pnpm build
+
+      # plugin/lib/ is a tracked build output on purpose: dsh loads the
+      # prebuilt lib/ from git installs. A non-empty diff after rebuilding
+      # means the commit changed src/ without rebuilding lib/.
+      - name: Verify committed lib/ matches sources
+        run: |
+          if [[ -n "$(git status --porcelain -- lib)" ]]; then
+            git status --porcelain -- lib >&2
+            git diff --stat -- lib >&2
+            echo "plugin/lib/ is out of sync with src/;" \
+              "run 'pnpm build' in plugin/ and commit the result" >&2
+            exit 1
+          fi
+          echo "committed lib/ matches rebuilt output"

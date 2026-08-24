@@ -223,7 +223,7 @@ idempotent for links into this repository; the script refuses to overwrite
 unrelated files, directories, or symlinks. See [Uninstall](#uninstall) to
 remove only links owned by this checkout.
 
-This checkout installer is retained for users who want the CLI and both agent
+This checkout installer is retained for users who want the CLI and the agent
 skill links to follow a working tree. It is an alternative to a `pipx` CLI
 install because both normally use `~/.local/bin/agent-sidecar`.
 
@@ -759,7 +759,7 @@ event streams.
 
 ## Agent skill integration
 
-The installed Cursor and Claude skill links expose the same
+The installed Cursor, Claude, and dsh skill links expose the same
 `skills/agent-sidecar` bundle. The skill instructs agents to query
 `agent-sidecar status --json` first for local observation, use remote monitoring
 only on request, never hide remote watch failures or gap warnings, never
@@ -774,6 +774,54 @@ or action; that request supplies the permission represented by `--allow-write`,
 so no second confirmation is required. It never infers send consent from
 monitoring, never retries an unknown delivery or pending request, and never
 invokes audit reset automatically.
+
+## DSH plugin
+
+The `plugin/` directory ships `@shendeguize/dsh-agent-sidecar`, a native DSH
+plugin that brings Agent Sidecar into the dsh web interface: a cross-agent
+monitoring board, session-detail timelines with dsh lineage and search, opt-in
+message injection into observed sessions, opt-in AI bypass analysis, and an
+embedded agent-sidecar skill provider. The plugin consumes the sidecar daemon
+over its Unix socket and manages the daemon lifecycle with a
+probe-adopt-else-host strategy; it never installs the sidecar CLI itself.
+
+Install it into a dsh profile; the command delegates package resolution to
+pnpm:
+
+```sh
+dsh plugin --profile web add @shendeguize/dsh-agent-sidecar
+```
+
+Every configuration key has a default, so a bare plugin row mounts with zero
+configuration. To override defaults, add a `config:` block to the plugin's row
+in the profile's `cordis.patch.yml`:
+
+```yaml
+- id: agent-sidecar
+  config:
+    daemon:
+      policy: adopt-only
+```
+
+Key configuration, summarized:
+
+- `daemon.policy` (default `adopt-or-host`) selects daemon lifecycle
+  management: probe and adopt an existing daemon, otherwise host one.
+  `adopt-only` never spawns, and `off` leaves the lifecycle alone.
+- `inject.enabled` (default **off**) is the master write gate. While off,
+  injection affordances are hidden and write actions are refused server-side.
+  Do not enable it on multi-user hosts; see the
+  [Security Policy](SECURITY.md).
+- `analysis.enabled` (default **off**) gates AI bypass analysis, which
+  consumes model tokens. `analysis.provider` and `analysis.model` optionally
+  route analysis sessions to an explicit model; when unset, the host's
+  default model selection is reused.
+- `skill.provide` (default on) embeds the agent-sidecar skill through the dsh
+  skill registry; a filesystem-installed skill of the same name automatically
+  takes precedence.
+
+The full configuration table, daemon supervision semantics, guard details,
+and development workflow live in the [plugin manual](plugin/README.md).
 
 ## Development
 

@@ -99,6 +99,47 @@ commit, the publishing workflow marks them as pre-releases, and they do not
 advance the stable `release` branch. The final `X.Y.Z` release advances
 `release` normally.
 
+## dsh plugin development and releases
+
+The `plugin/` directory is an independent npm package,
+`@shendeguize/dsh-agent-sidecar`, and the only sanctioned exception to the
+standard-library runtime boundary: its Node toolchain — pnpm, vitest,
+TypeScript with the dual `tsconfig.host.json`/`tsconfig.client.json`
+programs, and the tsdown builds that produce the tracked prebuilt `lib/`
+output — stays confined to `plugin/`, and `[project].dependencies` stays
+empty. The plugin consumes the sidecar only through public contracts: the
+daemon Unix-socket protocol, CLI JSON, and read-only audit surfaces.
+
+Run the plugin gate before handing off any change under `plugin/`:
+
+```bash
+cd plugin
+pnpm install
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+The repository-level `python3 scripts/check.py` gate remains required for
+every change, including plugin-only ones.
+
+Releases run on two independent tracks with independent version lines:
+
+- The Python product follows the release procedure below: its version source
+  is `sidecar/__init__.py`, its tags are `v<version>`, and the tag-triggered
+  workflow publishes the zipapp and checksums to a GitHub Release. A `v*` tag
+  makes no claim about the plugin.
+- The plugin's version source is `plugin/package.json`. Plugin releases are
+  tagged `plugin-v<version>` (for example `plugin-v0.1.0`) and published to
+  npm from `plugin/` with `npm publish --access public`; `publishConfig` pins
+  the official npm registry, and `prepublishOnly` reruns the typecheck and
+  both builds so the package ships current prebuilt `lib/` output. A
+  `plugin-v*` tag never advances the `release` branch and makes no claim
+  about the Python product.
+
+Record user-observable plugin changes in `CHANGELOG.md` under `[Unreleased]`
+like any other change.
+
 ## Review checklist
 
 Record evidence for each applicable item before merge:

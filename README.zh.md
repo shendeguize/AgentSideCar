@@ -199,7 +199,7 @@ sh scripts/install-skill.sh
 脚本会拒绝覆盖无关文件、目录或符号链接。若只删除当前检出版本拥有的链接，请参见
 [卸载](#uninstall)。
 
-希望 CLI 和两个 Agent Skill 链接持续跟随工作树的用户可以使用此检出版本安装
+希望 CLI 和各 Agent Skill 链接持续跟随工作树的用户可以使用此检出版本安装
 程序。它与 `pipx` CLI 安装互为替代方案，因为两者通常都使用
 `~/.local/bin/agent-sidecar`。
 
@@ -642,7 +642,8 @@ Bearer Authorization Header 提供令牌。适配器没有 send、audit-reset、
 
 ## Agent Skill 集成
 
-已安装的 Cursor 和 Claude Skill 链接公开同一个 `skills/agent-sidecar` Bundle。
+已安装的 Cursor、Claude 和 dsh Skill 链接公开同一个 `skills/agent-sidecar`
+Bundle。
 该 Skill 指示 Agent：本地观察先查询 `agent-sidecar status --json`；只有用户要求
 时才使用远程监控；绝不隐藏远程监视故障或缺口警告；绝不自动重试远程监视；只有
 用户要求时才启动或停止守护进程。
@@ -654,6 +655,46 @@ Unix 守护进程。该 Skill 只有在同一 turn 的明确请求包含精确�
 `send`；该请求已经提供 `--allow-write` 所代表的权限，因此无需二次确认。它绝不
 从监控行为推断发送许可，不重试未知投递或 pending 请求，也绝不自动调用 audit
 reset。
+
+## DSH 插件
+
+`plugin/` 目录提供 `@shendeguize/dsh-agent-sidecar`——一个原生 DSH 插件，把
+Agent Sidecar 带进 dsh Web 界面：跨 agent 监控看板、带 dsh 谱系与检索的
+会话详情时间线、可选启用的消息注入、可选启用的 AI 旁路分析，以及内嵌的
+agent-sidecar Skill 提供器。插件通过 Unix 套接字消费 sidecar 守护进程，并以
+「探测—领养—否则托管」策略管理守护进程生命周期；它绝不代装 sidecar CLI。
+
+将其安装到 dsh profile；该命令把包解析委托给 pnpm：
+
+```sh
+dsh plugin --profile web add @shendeguize/dsh-agent-sidecar
+```
+
+每个配置键都有默认值，因此一行裸插件配置即可零配置挂载。若要覆盖默认值，
+请在 profile 的 `cordis.patch.yml` 中对应插件行添加 `config:` 块：
+
+```yaml
+- id: agent-sidecar
+  config:
+    daemon:
+      policy: adopt-only
+```
+
+关键配置摘要：
+
+- `daemon.policy`（默认 `adopt-or-host`）选择守护进程生命周期管理策略：探测
+  并领养既有守护进程，否则自行托管。`adopt-only` 绝不拉起，`off` 不管理生命
+  周期。
+- `inject.enabled`（默认**关闭**）是写路径总开关。关闭时注入入口全部隐藏，
+  写动作在服务端被拒绝。多用户主机不要开启；参见[安全策略](SECURITY.md)。
+- `analysis.enabled`（默认**关闭**）控制 AI 旁路分析，该功能消耗模型 token。
+  `analysis.provider` 与 `analysis.model` 可选地把分析会话路由到指定模型；
+  未设置时复用宿主的默认模型选择。
+- `skill.provide`（默认开启）经 dsh Skill 注册表内嵌提供 agent-sidecar
+  Skill；文件系统已安装的同名 Skill 自动优先。
+
+完整配置表、守护进程托管语义、守卫细节与开发流程见
+[插件手册](plugin/README.md)。
 
 ## 开发与质量门禁
 

@@ -14,6 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bridge with snapshot reconciliation, plugin API routes with SSE streaming
   behind a five-layer loopback guard, a cross-agent monitoring board, and a
   settings namespace with its settings card.
+- The dsh plugin M2 injection milestone: two-phase, confirm-token message
+  injection behind the default-off `inject.enabled` gate, with in-process
+  queue/steer delivery for dsh sessions, `send --message-stdin` delivery for
+  external agents, and a read-only `/sidecar` slash-command overview.
+- The dsh plugin M3 fusion milestone: paged session-detail timelines, dsh
+  lineage and full-text search with honest degradation, project grouping,
+  and default-off AI bypass analysis in bounded dedicated sessions with
+  optional `analysis.provider`/`analysis.model` model routing.
+- An embedded agent-sidecar skill provider in the dsh plugin
+  (`skill.provide`, default on; a filesystem-installed skill of the same
+  name automatically wins) and an optional better-sidebar monitor tab.
+- A dsh target in the checkout skill installer: `scripts/install-skill.sh`
+  now also links `~/.dsh/skills/agent-sidecar`, and the skill documents
+  dsh-specific guidance that routes dsh-session injection through the dsh
+  plugin because `send` does not support dsh sessions.
 - A `send --message-stdin` option that reads the message from standard input
   instead of the positional argument, keeping it out of the `agent-sidecar`
   command line while reusing the same validation, injection pipeline, audit
