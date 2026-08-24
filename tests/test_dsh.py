@@ -13,7 +13,7 @@ from sidecar.adapters.base import (
     local_timestamp,
     read_json_object,
 )
-from sidecar.adapters.dsh import DSHAdapter, replay_dsh_events
+from sidecar.adapters.dsh import DSHAdapter, ReplayPage, replay_dsh_events
 from sidecar.model import Session
 from sidecar.tail import SessionTailer
 
@@ -55,6 +55,18 @@ def _write_large_transcript(path):
                 },
             )
     return boundary_seq, (boundary_seq + 1, boundary_seq + 2)
+
+
+def _make_slow_binary(path):
+    """One record immediately, then a stall far past the replay deadline."""
+
+    path.write_text(
+        "#!/bin/sh\n"
+        "printf '{\"seq\":1,\"type\":\"turn/start\"}\\n'\n"
+        "sleep 30\n",
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o755)
 
 
 def _make_passthrough_binary(path):
@@ -290,6 +302,8 @@ class DSHReplayTests(unittest.TestCase):
         )
 
         self.assertEqual([], records)
+        # The scan-byte ceiling stopped before the end of the stream.
+        self.assertFalse(records.exhausted)
 
     def test_retained_bytes_bound_returns_progressive_pages(self):
         transcript = self.root / "retained.jsonl.zstd"
@@ -311,6 +325,57 @@ class DSHReplayTests(unittest.TestCase):
 
         self.assertEqual([1], [record["seq"] for record in first])
         self.assertEqual([2], [record["seq"] for record in second])
+        # The first page stopped early because the second record exceeded its
+        # remaining byte budget; the second page then read to end-of-stream.
+        self.assertFalse(first.exhausted)
+        self.assertTrue(second.exhausted)
+
+    def test_replay_page_reports_exhausted_only_at_true_end(self):
+        transcript = self.root / "exhausted.jsonl.zstd"
+        with transcript.open("wb") as stream:
+            first_size = _write_record(stream, {"seq": 1, "value": "a" * 128})
+            _write_record(stream, {"seq": 2, "value": "b" * 128})
+
+        stopped = replay_dsh_events(
+            transcript,
+            max_retained_bytes=first_size,
+            zstd_binary=str(self.passthrough),
+        )
+        final = replay_dsh_events(
+            transcript,
+            after_seq=1,
+            zstd_binary=str(self.passthrough),
+        )
+        empty = replay_dsh_events(
+            transcript,
+            after_seq=2,
+            zstd_binary=str(self.passthrough),
+        )
+
+        self.assertIsInstance(stopped, ReplayPage)
+        self.assertEqual([1], [record["seq"] for record in stopped])
+        self.assertFalse(stopped.exhausted)
+        # Paging on from the byte-budget stop retrieves the remaining record
+        # and only the page that read to end-of-stream reports exhaustion.
+        self.assertEqual([2], [record["seq"] for record in final])
+        self.assertTrue(final.exhausted)
+        self.assertEqual([], list(empty))
+        self.assertTrue(empty.exhausted)
+
+    def test_timeout_early_stop_reports_not_exhausted(self):
+        transcript = self.root / "slow.jsonl.zstd"
+        transcript.write_bytes(b"placeholder\n")
+        slow = self.root / "slow.py"
+        _make_slow_binary(slow)
+
+        records = replay_dsh_events(
+            transcript,
+            timeout=1.0,
+            zstd_binary=str(slow),
+        )
+
+        self.assertEqual([1], [record["seq"] for record in records])
+        self.assertFalse(records.exhausted)
 
     def test_oversized_line_is_dropped_without_blocking_later_records(self):
         transcript = self.root / "oversized.jsonl.zstd"
@@ -324,6 +389,8 @@ class DSHReplayTests(unittest.TestCase):
         )
 
         self.assertEqual([2], [record["seq"] for record in records])
+        # Dropping an oversized line is not an early budget stop.
+        self.assertTrue(records.exhausted)
 
     def test_incomplete_tail_degrades_to_complete_records(self):
         transcript = self.root / "incomplete.jsonl.zstd"
@@ -337,6 +404,9 @@ class DSHReplayTests(unittest.TestCase):
         )
 
         self.assertEqual([1], [record["seq"] for record in records])
+        # The stream itself was fully read; the dangling partial line is not
+        # retrievable by another page, so the page counts as exhausted.
+        self.assertTrue(records.exhausted)
 
     def test_missing_zstd_degrades_to_no_records(self):
         transcript = self.root / "missing.jsonl.zstd"
@@ -348,6 +418,8 @@ class DSHReplayTests(unittest.TestCase):
         )
 
         self.assertEqual([], records)
+        # Degraded sources have nothing retrievable, so paging on is futile.
+        self.assertTrue(records.exhausted)
 
     @unittest.skipUnless(ZSTD, "zstd binary is unavailable")
     def test_real_zstd_fixture_reaches_records_after_eight_mib(self):
@@ -367,6 +439,8 @@ class DSHReplayTests(unittest.TestCase):
         )
 
         self.assertEqual(list(tail_seqs), [record["seq"] for record in records])
+        # A record-budget stop cannot prove the transcript ended with it.
+        self.assertFalse(records.exhausted)
 
 
 if __name__ == "__main__":

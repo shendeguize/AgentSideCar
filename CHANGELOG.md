@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exclusive. Interactive terminals are refused with a usage error instead of
   blocking, unreadable standard input reports a dedicated diagnostic, and
   interrupting the read exits `130` cleanly before any delivery.
+- A daemon protocol `replay` operation that returns one bounded page of a
+  session's transcript-retained events after a `seq` cursor, with `limit`,
+  `last_seq`, and `truncated` paging semantics. It is backed by the session
+  adapter's bounded local-transcript replay, which currently only `dsh`
+  sessions provide; other agents report `replay_unsupported` and unknown
+  sessions report `unknown_session`.
+- An optional `agents` allowlist on the daemon `subscribe` operation for
+  server-side filtered event streams; filtered-out events never consume the
+  subscriber's bounded queue. `SidecarClient` gains a paging `replay(...)`
+  method and a `subscribe(agents=...)` parameter. Requests without the new
+  fields keep the existing full-stream behavior, so old clients are
+  unaffected.
 
 ## [0.4.4] - 2026-08-24
 

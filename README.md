@@ -667,10 +667,32 @@ and `daemon stop` signals a process only after the socket PID and PID file
 agree.
 
 The socket uses bounded newline-delimited JSON requests and responses. Its
-operations are `ping`, `status`, and `subscribe`: `status` returns the current
-session snapshot plus scan and tailer diagnostics, while `subscribe`
-acknowledges the request and then streams normalized event objects. User-facing
-daemon consumers report bounded, sanitized tailer diagnostics on stderr.
+operations are `ping`, `status`, `subscribe`, and `replay`: `status` returns
+the current session snapshot plus scan and tailer diagnostics, while
+`subscribe` acknowledges the request and then streams normalized event
+objects. A `subscribe` request may carry an optional nonempty `agents` array
+so the daemon streams only events from those agent names; omitting the field
+keeps the existing full stream, and filtered-out events never consume the
+subscriber's bounded queue.
+
+`replay` returns one bounded page of a session's historical events whose
+`seq` cursor is greater than `after_seq` (default 0, meaning from the start),
+reading at most `limit` records per page (1024 maximum) and reporting a
+`last_seq` cursor plus a `truncated` flag for paging. `truncated` is true
+whenever more retained events may remain after the returned cursor — the page
+reached `limit`, or the adapter's own bounded decode stopped the page early
+on its byte or time budget — so paging consumers keep fetching until a page
+reports `truncated: false` at the true end of the retained transcript. Its
+data source is the
+session adapter's own bounded local-transcript replay — currently only `dsh`
+sessions provide one — so it returns only events that are still retained in
+that transcript and carry a `seq` cursor. It cannot recover events the source
+never persisted or that exceed the bounded decode; sessions of other agents
+report `replay_unsupported`, and a session absent from the current snapshot
+reports `unknown_session`. Events dropped from a slow subscriber's bounded
+live queue can be backfilled through `replay` only while they remain in the
+retained transcript. User-facing daemon consumers report bounded, sanitized
+tailer diagnostics on stderr.
 
 The daemon also writes structured diagnostics to private `daemon.jsonl` in the
 mode-`0700` runtime directory. The current mode-`0600` file is bounded to 2 MiB

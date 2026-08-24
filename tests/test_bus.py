@@ -97,6 +97,37 @@ class EventBusTests(unittest.TestCase):
         with self.assertRaises(SubscriptionClosed):
             late.get(timeout=0.1)
 
+    def test_agents_filter_delivers_only_selected_agents_with_bounds(self):
+        bus = EventBus(queue_size=2)
+        filtered = bus.subscribe(agents=("dsh",))
+        unfiltered = bus.subscribe()
+
+        self.assertEqual(frozenset({"dsh"}), filtered.agents)
+        self.assertIsNone(unfiltered.agents)
+        bus.publish({"agent": "dsh", "value": 1})
+        bus.publish({"agent": "claude", "value": 2})
+        bus.publish({"value": 3})
+        bus.publish({"agent": "dsh", "value": 4})
+        bus.publish({"agent": "dsh", "value": 5})
+
+        self.assertEqual(1, filtered.dropped)
+        self.assertEqual({"agent": "dsh", "value": 4}, filtered.get(timeout=0.1))
+        self.assertEqual({"agent": "dsh", "value": 5}, filtered.get(timeout=0.1))
+        self.assertTrue(filtered.queue.empty())
+        self.assertEqual(3, unfiltered.dropped)
+        self.assertEqual({"agent": "dsh", "value": 4}, unfiltered.get(timeout=0.1))
+        self.assertEqual({"agent": "dsh", "value": 5}, unfiltered.get(timeout=0.1))
+        bus.close()
+
+    def test_agents_filter_rejects_empty_and_non_string_names(self):
+        bus = EventBus()
+        for agents in ((), ("",), ("dsh", None), (1,)):
+            with self.subTest(agents=agents):
+                with self.assertRaisesRegex(ValueError, "agents filter"):
+                    bus.subscribe(agents=agents)
+        self.assertEqual(0, bus.subscriber_count)
+        bus.close()
+
     def test_concurrent_publish_reaches_each_subscriber_without_loss(self):
         publisher_count = 4
         events_per_publisher = 50
