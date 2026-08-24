@@ -25,6 +25,13 @@ dist/
 _site/
 site/assets/shots/.*.tmp.png
 
+# dsh plugin (TypeScript npm sub-package under plugin/)
+# plugin/lib/ is a tracked build output on purpose: dsh loads the prebuilt
+# lib/ from the npm package and git installs need it — never ignore it.
+plugin/node_modules/
+plugin/coverage/
+plugin/**/*.tsbuildinfo
+
 # macOS
 .DS_Store
 

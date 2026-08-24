@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A native dsh plugin M1 monitoring milestone in the `plugin/` npm
+  sub-package: a probe-adopt-else-host daemon supervisor, a Unix-socket
+  bridge with snapshot reconciliation, plugin API routes with SSE streaming
+  behind a five-layer loopback guard, a cross-agent monitoring board, and a
+  settings namespace with its settings card.
+- A `send --message-stdin` option that reads the message from standard input
+  instead of the positional argument, keeping it out of the `agent-sidecar`
+  command line while reusing the same validation, injection pipeline, audit
+  identity, receipts, and exit codes. The two message sources are mutually
+  exclusive. Interactive terminals are refused with a usage error instead of
+  blocking, unreadable standard input reports a dedicated diagnostic, and
+  interrupting the read exits `130` cleanly before any delivery.
+
 ## [0.4.4] - 2026-08-24
 
 ### Fixed
