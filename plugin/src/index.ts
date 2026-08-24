@@ -116,6 +116,27 @@ export interface SubprocessService {
   spawn(spec: SubprocessSpawnSpec): SubprocessHandle
 }
 
+/** Owner scope returned by `ctx.settings.register` (read/observe subset). */
+export interface SettingsScopeFace<T> {
+  get(): T
+  watch(callback: (next: T, prev: T) => void): () => void
+}
+
+/**
+ * `ctx.settings` face (namespace registration only). Source:
+ * dsh-settings SettingsProvider.register — `register(ns, schema, {base,
+ * applies})` → owner scope; the namespace brand is compile-time only, so a
+ * plain string is structurally sound. Registration rides the CALLER's
+ * fiber (service proxy binds this.ctx), so disposal is automatic.
+ */
+export interface SettingsServiceFace {
+  register<T>(
+    ns: string,
+    schema: unknown,
+    options?: { base?: Partial<T>; applies?: 'live' | 'restart' },
+  ): SettingsScopeFace<T>
+}
+
 /** The plugin context with the two hard-injected services visible. */
 export type HostContext = Context & {
   webServer: WebServerService
@@ -270,8 +291,12 @@ export function apply(ctx: HostContext, config: Config): void {
     { ping: () => client.ping(), spawnDaemon, detectLaunchAgent, log },
     { policy: config.daemon.policy, backoffLimit: config.daemon.backoffLimit },
   )
+  // `effective` tracks the settings-resolved config once the settings
+  // namespace registers below; until then (and in compositions without
+  // dsh-settings) it IS the entry config.
+  let effective: Config = config
   const guardOptions: GuardOptions = {
-    allowWriteActions: () => config.inject.enabled,
+    allowWriteActions: () => effective.inject.enabled,
   }
   const routes = createRoutes({ store, supervisor, guardOptions, log })
 
@@ -290,6 +315,35 @@ export function apply(ctx: HostContext, config: Config): void {
       removeRoute()
     }
   }, 'agent-sidecar: host assembly (route + reconciler + supervisor)')
+
+  // Settings namespace 'agent-sidecar' (T2.4): pairs the browser settings
+  // card (keyed `settings.plugin.item` slot) and persists user edits into
+  // dsh's settings document. Lazy inject: compositions without dsh-settings
+  // simply never run this, and nothing else depends on it.
+  // `applies: 'restart'` is the honest signal for daemon/stream/sidecar —
+  // those values are baked into this assembly at apply time; only
+  // inject.enabled is consumed live (through `effective`), and the ui.*
+  // group is read live by the browser half via its settings scope.
+  ctx.inject(['settings'], (injected) => {
+    try {
+      const sctx = injected as HostContext & { settings: SettingsServiceFace }
+      const scope = sctx.settings.register<Config>(name, Config, {
+        base: config,
+        applies: 'restart',
+      })
+      effective = scope.get()
+      const unwatch = scope.watch((next) => {
+        effective = next
+      })
+      sctx.effect(() => () => {
+        unwatch()
+        effective = config
+      }, 'agent-sidecar: settings scope release')
+      log('debug', 'settings namespace registered', { applies: 'restart' })
+    } catch (err) {
+      log('warn', `settings namespace registration failed: ${String(err)}`)
+    }
+  })
 
   // Single startup line; the stable "host half assembled" marker is what the
   // S0 triple evidence chain greps for (info does not reach the terminal in

@@ -126,6 +126,24 @@ interface SubprocessHandle {
 interface SubprocessService {
   spawn(spec: SubprocessSpawnSpec): SubprocessHandle;
 }
+/** Owner scope returned by `ctx.settings.register` (read/observe subset). */
+interface SettingsScopeFace<T> {
+  get(): T;
+  watch(callback: (next: T, prev: T) => void): () => void;
+}
+/**
+ * `ctx.settings` face (namespace registration only). Source:
+ * dsh-settings SettingsProvider.register — `register(ns, schema, {base,
+ * applies})` → owner scope; the namespace brand is compile-time only, so a
+ * plain string is structurally sound. Registration rides the CALLER's
+ * fiber (service proxy binds this.ctx), so disposal is automatic.
+ */
+interface SettingsServiceFace {
+  register<T>(ns: string, schema: unknown, options?: {
+    base?: Partial<T>;
+    applies?: 'live' | 'restart';
+  }): SettingsScopeFace<T>;
+}
 /** The plugin context with the two hard-injected services visible. */
 type HostContext = Context & {
   webServer: WebServerService;
@@ -146,4 +164,4 @@ type HostContext = Context & {
  */
 declare function apply(ctx: HostContext, config: Config): void;
 //#endregion
-export { Config, HostContext, SubprocessCollectSpec, SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessService, SubprocessSpawnSpec, WebServerService, apply, inject, name };
+export { Config, HostContext, SettingsScopeFace, SettingsServiceFace, SubprocessCollectSpec, SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessService, SubprocessSpawnSpec, WebServerService, apply, inject, name };

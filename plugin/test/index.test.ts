@@ -58,6 +58,12 @@ function createFakeCtx(): FakeCtx {
       disposers.push(disposer)
       return disposer
     },
+    // Lazy service request (T2.4 settings namespace). The fake mirrors a
+    // composition WITHOUT dsh-settings: the dependency never resolves, so
+    // the callback never runs — the entry must work fully without it.
+    inject(_deps: string[], _callback: (ctx: unknown) => void) {
+      return undefined
+    },
     webServer: {
       register(route: RecordedRoute) {
         routes.push(route)
