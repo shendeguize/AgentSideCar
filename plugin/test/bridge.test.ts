@@ -177,11 +177,14 @@ class StubClient implements ReconcilerClient {
   statusCalls = 0
   subscribeCalls = 0
   sessions: SessionRow[] = []
+  /** Simulates "daemon socket absent / not ready": status resolves null. */
+  failStatus = false
   autoReady = true
   handlers: SubscribeHandlers | null = null
 
   async status(): Promise<StatusSnapshot | null> {
     this.statusCalls += 1
+    if (this.failStatus) return null
     return { sessions: this.sessions, scanErrors: [], tailErrors: [], diagnostics: [] }
   }
 
@@ -472,6 +475,91 @@ describe('Reconciler', () => {
     expect(client.subscribeCalls).toBe(10)
 
     reconciler.stop()
+  })
+
+  it('retries a failed reconcile on a short doubling backoff, never a full idle wait (M1 ②)', async () => {
+    const client = new StubClient()
+    client.failStatus = true
+    const store = new SessionStore()
+    const reconciler = new Reconciler(client, store, OPTS)
+
+    reconciler.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.statusCalls).toBe(1) // initial reconcile failed (no daemon yet)
+
+    // Short backoff ladder: 250 → 500 → 1000 → 2000 → 4000 → 8000ms…
+    await vi.advanceTimersByTimeAsync(249)
+    expect(client.statusCalls).toBe(1)
+    await vi.advanceTimersByTimeAsync(1) // t=250
+    expect(client.statusCalls).toBe(2)
+    await vi.advanceTimersByTimeAsync(500) // t=750
+    expect(client.statusCalls).toBe(3)
+    await vi.advanceTimersByTimeAsync(1000) // t=1750
+    expect(client.statusCalls).toBe(4)
+    await vi.advanceTimersByTimeAsync(2000) // t=3750
+    expect(client.statusCalls).toBe(5)
+    await vi.advanceTimersByTimeAsync(4000) // t=7750
+    expect(client.statusCalls).toBe(6)
+    await vi.advanceTimersByTimeAsync(8000) // t=15750
+    expect(client.statusCalls).toBe(7)
+
+    // …then capped at the idle cadence: no extra steady-state load.
+    await vi.advanceTimersByTimeAsync(9999)
+    expect(client.statusCalls).toBe(7)
+    await vi.advanceTimersByTimeAsync(1) // t=25750
+    expect(client.statusCalls).toBe(8)
+
+    // Recovery resets the streak: snapshot lands, cadence returns to idle.
+    client.failStatus = false
+    client.sessions = [row()]
+    await vi.advanceTimersByTimeAsync(10000) // t=35750
+    expect(client.statusCalls).toBe(9)
+    expect(store.getBoardState().sessions).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(9999)
+    expect(client.statusCalls).toBe(9)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(client.statusCalls).toBe(10)
+
+    reconciler.stop()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('reconcileNow() (supervisor hand-off) snapshots immediately and supersedes the pending retry', async () => {
+    const client = new StubClient()
+    client.failStatus = true
+    const store = new SessionStore()
+    const reconciler = new Reconciler(client, store, OPTS)
+
+    // Cold start: the first status races the daemon socket and loses.
+    reconciler.start()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.statusCalls).toBe(1)
+    expect(store.getBoardState().sessions).toHaveLength(0)
+
+    // The daemon becomes reachable (ADOPTED/HOSTED are ping-gated); the
+    // supervisor hand-off reconciles with zero further timer advancement.
+    client.failStatus = false
+    client.sessions = [row()]
+    await reconciler.reconcileNow()
+    expect(client.statusCalls).toBe(2)
+    expect(store.getBoardState().sessions).toHaveLength(1)
+
+    // The short-backoff retry pending at t=250 was superseded by the
+    // success reschedule: the next poll runs on the idle cadence.
+    await vi.advanceTimersByTimeAsync(250)
+    expect(client.statusCalls).toBe(2)
+    await vi.advanceTimersByTimeAsync(9749) // t=9999
+    expect(client.statusCalls).toBe(2)
+    await vi.advanceTimersByTimeAsync(1) // t=10000
+    expect(client.statusCalls).toBe(3)
+
+    reconciler.stop()
+    expect(vi.getTimerCount()).toBe(0)
+
+    // Stopped reconciler: the hand-off is a safe no-op.
+    await reconciler.reconcileNow()
+    expect(client.statusCalls).toBe(3)
+    expect(vi.getTimerCount()).toBe(0)
   })
 })
 

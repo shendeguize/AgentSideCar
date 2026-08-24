@@ -44,8 +44,13 @@ interface FakeCtx {
  * `ctx.inject`): a callback whose deps are ALL present runs immediately on
  * an extended ctx; any missing dep means the callback never runs (the
  * composition-without-that-service case, e.g. no dsh-settings/dsh-agent).
+ * @param spawnOutcome - when set, every fake child's `done` resolves with
+ * it (so e.g. LaunchAgent detection can complete); default: never settles.
  */
-function createFakeCtx(services: Record<string, unknown> = {}): FakeCtx {
+function createFakeCtx(
+  services: Record<string, unknown> = {},
+  spawnOutcome?: { exitCode: number | null; signal: NodeJS.Signals | null },
+): FakeCtx {
   const disposers: Array<() => unknown> = []
   const routes: RecordedRoute[] = []
   const removedRoutes: string[] = []
@@ -87,7 +92,7 @@ function createFakeCtx(services: Record<string, unknown> = {}): FakeCtx {
           stdout: undefined,
           stderr: undefined,
           collected: {},
-          done: new Promise<never>(() => {}),
+          done: spawnOutcome === undefined ? new Promise<never>(() => {}) : Promise.resolve(spawnOutcome),
           terminate: noop,
           waitForExit: async () => true,
         }
@@ -393,6 +398,72 @@ describe('apply', () => {
     }
     expect(vi.getTimerCount()).toBeGreaterThan(0)
 
+    await fake.disposeAll()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cold-start reconcile wiring (M1 acceptance ②): the supervisor's
+// ADOPTED/HOSTED transition must trigger one immediate reconcile, so the
+// board fills the moment a daemon becomes reachable instead of waiting out
+// the reconciler's pending poll.
+// ---------------------------------------------------------------------------
+
+describe('cold-start reconcile wiring (M1 ②)', () => {
+  /** Advance fake timers in small steps, letting real socket I/O settle between them. */
+  async function advanceWithIo(ms: number, step = 250): Promise<void> {
+    let remaining = ms
+    while (remaining > 0) {
+      const chunk = Math.min(step, remaining)
+      await vi.advanceTimersByTimeAsync(chunk)
+      await flushIo(5)
+      remaining -= chunk
+    }
+  }
+
+  it('adoption of a late-appearing daemon reconciles immediately, not on the pending poll', async () => {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    })
+    // Spawn outcome 2 = `service status` control failure → LaunchAgent read
+    // as absent, so the adopt-only supervisor lands in DEFER and re-probes.
+    const fake = createFakeCtx({}, { exitCode: 2, signal: null })
+    const runtimeDir = await tempRuntimeDir()
+    apply(fake.ctx, Config({ daemon: { policy: 'adopt-only' }, sidecar: { runtimeDir } }))
+    cleanups.push(() => fake.disposeAll())
+    await flushIo(10)
+
+    // t≈0: no socket. The initial reconcile and probe ping both failed; the
+    // supervisor defers (re-probe at t=5000), the reconciler's short-backoff
+    // retries (t=250/750/1750/3750) all fail too — next own retry t=7750.
+    await advanceWithIo(4000)
+    let state = await fetchState(fake.routes[0]!)
+    expect(state.json.daemon.state).toBe('defer')
+    expect(state.json.board.sessions).toHaveLength(0)
+
+    // t=4000: the daemon appears (externally started, adopt-only never spawns).
+    const server = await startMiniDaemon(join(runtimeDir, 'daemon.sock'), [DSH_SESSION_ROW])
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve())
+        }),
+    )
+
+    // t=5000: the defer re-probe adopts. With no reconciler timer due until
+    // t=7750, only the ADOPTED hand-off can fill the board this instant —
+    // I/O flushes only, zero further timer advancement.
+    await advanceWithIo(1000)
+    for (let i = 0; i < 50; i += 1) {
+      state = await fetchState(fake.routes[0]!)
+      if (state.json.board.sessions.length > 0) break
+      await flushIo(2)
+    }
+    expect(state.json.daemon.state).toBe('adopted')
+    expect(state.json.board.sessions).toHaveLength(1)
+
+    // The wiring's listener and reconcile timers all tear down cleanly.
     await fake.disposeAll()
     expect(vi.getTimerCount()).toBe(0)
   })

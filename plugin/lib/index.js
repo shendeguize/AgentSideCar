@@ -337,6 +337,14 @@ var SidecarSocketClient = class {
 *   cadence and are applied as the authoritative full state.
 * - each subscribe event is folded into the store as a hint and schedules
 *   one debounced early reconcile.
+* - a FAILED snapshot (daemon absent or not yet ready) retries on a short
+*   backoff (250ms doubling, capped at the current cadence) instead of
+*   sleeping a whole cadence period — a cold start where the very first
+*   `status` races the daemon socket must not cost a full `idleMs`
+*   (M1 acceptance ②). A success resets the streak to the steady cadence.
+* - `reconcileNow()` is public so the supervisor can hand off "daemon just
+*   became reachable" (ADOPTED/HOSTED are ping-gated) as one immediate
+*   reconcile.
 * - a dropped stream marks `streamHealth=degraded` and reconnects with
 *   bounded exponential backoff (1s doubling to a 30s cap, retrying
 *   forever); a validated ack restores `streamHealth=ok` and resets the
@@ -350,8 +358,11 @@ var Reconciler = class {
 	debounceMs;
 	reconnectMinMs;
 	reconnectMaxMs;
+	failureBackoffMs;
 	running = false;
 	backoffMs;
+	/** Consecutive failed reconciles; drives the short retry backoff. */
+	failStreak = 0;
 	pollTimer = null;
 	kickTimer = null;
 	reconnectTimer = null;
@@ -366,12 +377,14 @@ var Reconciler = class {
 		this.debounceMs = opts.debounceMs ?? 200;
 		this.reconnectMinMs = opts.reconnectMinMs ?? 1e3;
 		this.reconnectMaxMs = opts.reconnectMaxMs ?? 3e4;
+		this.failureBackoffMs = opts.failureBackoffMs ?? 250;
 		this.backoffMs = this.reconnectMinMs;
 	}
 	start() {
 		if (this.running) return;
 		this.running = true;
 		this.backoffMs = this.reconnectMinMs;
+		this.failStreak = 0;
 		this.openSubscription();
 		this.reconcileNow();
 	}
@@ -388,6 +401,13 @@ var Reconciler = class {
 		this.subscription = null;
 		subscription?.close();
 	}
+	/**
+	* Run one immediate `status` reconcile and reschedule the next poll from
+	* its outcome. Public as the supervisor hand-off seam: the plugin entry
+	* calls this on the ADOPTED/HOSTED transition (both are gated on a
+	* successful ping, so the socket is known-reachable at that moment).
+	* Coalesces with an in-flight reconcile; a no-op when stopped.
+	*/
 	async reconcileNow() {
 		if (!this.running) return;
 		if (this.reconcileInFlight) {
@@ -397,7 +417,11 @@ var Reconciler = class {
 		this.reconcileInFlight = true;
 		try {
 			const snapshot = await this.client.status();
-			if (this.running && snapshot !== null) this.store.applySnapshot(snapshot.sessions);
+			if (snapshot === null) this.failStreak += 1;
+			else {
+				this.failStreak = 0;
+				if (this.running) this.store.applySnapshot(snapshot.sessions);
+			}
 		} finally {
 			this.reconcileInFlight = false;
 		}
@@ -411,7 +435,8 @@ var Reconciler = class {
 	}
 	scheduleNext() {
 		if (this.pollTimer !== null) clearTimeout(this.pollTimer);
-		const delay = this.store.hasWorkingSessions() ? this.activeMs : this.idleMs;
+		const cadence = this.store.hasWorkingSessions() ? this.activeMs : this.idleMs;
+		const delay = this.failStreak > 0 ? Math.min(this.failureBackoffMs * 2 ** (this.failStreak - 1), cadence) : cadence;
 		this.pollTimer = setTimeout(() => {
 			this.pollTimer = null;
 			this.reconcileNow();
@@ -2256,9 +2281,13 @@ function apply(ctx, config) {
 			path: API_PREFIX,
 			handler: routes.handle
 		});
+		const offStateChange = supervisor.onStateChange((state) => {
+			if (state === "adopted" || state === "hosted") reconciler.reconcileNow();
+		});
 		reconciler.start();
 		supervisor.start();
 		return async () => {
+			offStateChange();
 			await supervisor.stop();
 			reconciler.stop();
 			routes.dispose();

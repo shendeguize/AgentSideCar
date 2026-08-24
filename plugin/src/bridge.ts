@@ -466,6 +466,8 @@ export interface ReconcilerOptions {
   reconnectMinMs?: number
   /** Reconnect delay cap (bounded backoff, never circuit-broken). */
   reconnectMaxMs?: number
+  /** First retry delay after a failed reconcile (doubles per consecutive failure, capped at the cadence). */
+  failureBackoffMs?: number
 }
 
 export const DEFAULT_ACTIVE_MS = 2000
@@ -473,6 +475,7 @@ export const DEFAULT_IDLE_MS = 10000
 export const DEFAULT_DEBOUNCE_MS = 200
 export const DEFAULT_RECONNECT_MIN_MS = 1000
 export const DEFAULT_RECONNECT_MAX_MS = 30000
+export const DEFAULT_FAILURE_BACKOFF_MS = 250
 
 /**
  * Dual-cadence status reconciliation plus subscribe-stream supervision:
@@ -480,6 +483,14 @@ export const DEFAULT_RECONNECT_MAX_MS = 30000
  *   cadence and are applied as the authoritative full state.
  * - each subscribe event is folded into the store as a hint and schedules
  *   one debounced early reconcile.
+ * - a FAILED snapshot (daemon absent or not yet ready) retries on a short
+ *   backoff (250ms doubling, capped at the current cadence) instead of
+ *   sleeping a whole cadence period — a cold start where the very first
+ *   `status` races the daemon socket must not cost a full `idleMs`
+ *   (M1 acceptance ②). A success resets the streak to the steady cadence.
+ * - `reconcileNow()` is public so the supervisor can hand off "daemon just
+ *   became reachable" (ADOPTED/HOSTED are ping-gated) as one immediate
+ *   reconcile.
  * - a dropped stream marks `streamHealth=degraded` and reconnects with
  *   bounded exponential backoff (1s doubling to a 30s cap, retrying
  *   forever); a validated ack restores `streamHealth=ok` and resets the
@@ -491,9 +502,12 @@ export class Reconciler {
   private readonly debounceMs: number
   private readonly reconnectMinMs: number
   private readonly reconnectMaxMs: number
+  private readonly failureBackoffMs: number
 
   private running = false
   private backoffMs: number
+  /** Consecutive failed reconciles; drives the short retry backoff. */
+  private failStreak = 0
   private pollTimer: ReturnType<typeof setTimeout> | null = null
   private kickTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -511,6 +525,7 @@ export class Reconciler {
     this.debounceMs = opts.debounceMs ?? DEFAULT_DEBOUNCE_MS
     this.reconnectMinMs = opts.reconnectMinMs ?? DEFAULT_RECONNECT_MIN_MS
     this.reconnectMaxMs = opts.reconnectMaxMs ?? DEFAULT_RECONNECT_MAX_MS
+    this.failureBackoffMs = opts.failureBackoffMs ?? DEFAULT_FAILURE_BACKOFF_MS
     this.backoffMs = this.reconnectMinMs
   }
 
@@ -518,6 +533,7 @@ export class Reconciler {
     if (this.running) return
     this.running = true
     this.backoffMs = this.reconnectMinMs
+    this.failStreak = 0
     this.openSubscription()
     void this.reconcileNow()
   }
@@ -536,7 +552,14 @@ export class Reconciler {
     subscription?.close()
   }
 
-  private async reconcileNow(): Promise<void> {
+  /**
+   * Run one immediate `status` reconcile and reschedule the next poll from
+   * its outcome. Public as the supervisor hand-off seam: the plugin entry
+   * calls this on the ADOPTED/HOSTED transition (both are gated on a
+   * successful ping, so the socket is known-reachable at that moment).
+   * Coalesces with an in-flight reconcile; a no-op when stopped.
+   */
+  async reconcileNow(): Promise<void> {
     if (!this.running) return
     if (this.reconcileInFlight) {
       this.reconcileQueued = true
@@ -545,8 +568,11 @@ export class Reconciler {
     this.reconcileInFlight = true
     try {
       const snapshot = await this.client.status()
-      if (this.running && snapshot !== null) {
-        this.store.applySnapshot(snapshot.sessions)
+      if (snapshot === null) {
+        this.failStreak += 1
+      } else {
+        this.failStreak = 0
+        if (this.running) this.store.applySnapshot(snapshot.sessions)
       }
     } finally {
       this.reconcileInFlight = false
@@ -562,7 +588,14 @@ export class Reconciler {
 
   private scheduleNext(): void {
     if (this.pollTimer !== null) clearTimeout(this.pollTimer)
-    const delay = this.store.hasWorkingSessions() ? this.activeMs : this.idleMs
+    const cadence = this.store.hasWorkingSessions() ? this.activeMs : this.idleMs
+    // After a failure, retry on the short doubling backoff; the cadence cap
+    // means a persistently absent daemon converges to the steady-state poll
+    // rate instead of adding load.
+    const delay =
+      this.failStreak > 0
+        ? Math.min(this.failureBackoffMs * 2 ** (this.failStreak - 1), cadence)
+        : cadence
     this.pollTimer = setTimeout(() => {
       this.pollTimer = null
       void this.reconcileNow()

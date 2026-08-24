@@ -423,9 +423,17 @@ export function apply(ctx: HostContext, config: Config): void {
       path: API_PREFIX,
       handler: routes.handle,
     })
+    // Cold-start latency (M1 acceptance ②): the moment the supervisor
+    // confirms a reachable daemon — ADOPTED and HOSTED are both entered off
+    // a successful ping, so the socket exists — reconcile immediately
+    // instead of waiting out whatever poll the reconciler has pending.
+    const offStateChange = supervisor.onStateChange((state) => {
+      if (state === 'adopted' || state === 'hosted') void reconciler.reconcileNow()
+    })
     reconciler.start()
     supervisor.start()
     return async () => {
+      offStateChange()
       await supervisor.stop()
       reconciler.stop()
       routes.dispose()
