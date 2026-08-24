@@ -1,21 +1,149 @@
 import z from "@deepseek-ai/schemastery";
+import { IncomingMessage, ServerResponse } from "node:http";
+import { Readable } from "node:stream";
 import { Context } from "@deepseek-ai/cordis";
 
+//#region src/supervisor.d.ts
+type SupervisorPolicy = 'adopt-or-host' | 'adopt-only' | 'off';
+//#endregion
+//#region src/config.d.ts
+/** Daemon lifecycle governance (design §4.a). */
+interface DaemonConfig {
+  /** adopt-or-host: probe→adopt→else spawn; adopt-only: never spawn; off: no lifecycle management (read-only reconcile still runs). */
+  policy: SupervisorPolicy;
+  /** Consecutive hosting failures before the supervisor trips FAILED. */
+  backoffLimit: number;
+}
+/** How to reach/launch the sidecar itself. */
+interface SidecarInvocationConfig {
+  /** argv prefix of the sidecar executable (PATH name, absolute path, or e.g. python3+zipapp as multiple entries). */
+  command: string[];
+  /** Empty = default `~/.agent_sidecar` (honoring AGENT_SIDECAR_RUNTIME_DIR); non-empty redirects via env for spawned daemons. */
+  runtimeDir: string;
+}
+/** Reconciler snapshot cadences (design §4.b / ADR-2). */
+interface StreamConfig {
+  /** `status` snapshot cadence while any session is working (ms). */
+  reconcileActiveMs: number;
+  /** `status` snapshot cadence otherwise (ms). */
+  reconcileIdleMs: number;
+}
+/** Write-path master switch and defaults (M2 consumes defaultMode). */
+interface InjectConfig {
+  /** Master gate: false hides all inject affordances and 403s write actions server-side. */
+  enabled: boolean;
+  /** Default injection mode offered by the inject panel. */
+  defaultMode: 'queue' | 'steer';
+}
+/** AI bypass-analysis switch (M3). */
+interface AnalysisConfig {
+  enabled: boolean;
+}
+/** Board rendering knobs (client half). */
+interface UiConfig {
+  /** Session recency window shown on the board (hours). */
+  timeWindowHours: number;
+  /** Whether dead sessions are listed. */
+  showDead: boolean;
+}
+/** Skill provider switch (M4). */
+interface SkillConfig {
+  provide: boolean;
+}
+/** Validated composition config (all defaults filled by the schema). */
+interface Config {
+  daemon: DaemonConfig;
+  sidecar: SidecarInvocationConfig;
+  stream: StreamConfig;
+  inject: InjectConfig;
+  analysis: AnalysisConfig;
+  ui: UiConfig;
+  skill: SkillConfig;
+}
+declare const Config: z<Config>;
+//#endregion
 //#region src/index.d.ts
 declare const name = "agent-sidecar";
-/**
- * Empty for the smoke stage: the hello plugin consumes no services, so it
- * must not gate its activation on any (ctx.logger is a cordis built-in).
- */
+/** Required services; see the module doc for why `agents` is deferred to M2. */
 declare const inject: string[];
-/** Composition config (schemastery-validated; all defaults, zero-config mount). */
-interface Config {}
-declare const Config: z<Config>;
+/** `ctx.webServer` face (route registration only). */
+interface WebServerService {
+  register(route: {
+    kind: 'exact' | 'prefix';
+    path: string;
+    handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
+  }): () => void;
+}
+/** Bounded in-memory collection for one child output stream. */
+interface SubprocessCollectSpec {
+  maxBytes: number;
+  spill?: {
+    maxBytes: number;
+  };
+}
+/** Fully-specified spawn request (`ctx.subprocess` applies no defaults). */
+interface SubprocessSpawnSpec {
+  argv: readonly string[];
+  cwd: string;
+  stdio: {
+    stdin: 'ignore' | 'pipe' | {
+      readonly data: string;
+    };
+    stdout: 'pipe' | 'inherit' | SubprocessCollectSpec;
+    stderr: 'pipe' | 'inherit' | SubprocessCollectSpec;
+  };
+  graceMs: number;
+  signal?: AbortSignal;
+  env?: NodeJS.ProcessEnv;
+}
+/** Exit facts of one closed process (Node `close`-event vocabulary). */
+interface SubprocessOutcome {
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+}
+/** Offset-based, non-consuming reader over one collect-mode stream. */
+interface SubprocessOutputReader {
+  readFrom(fromByte: number): {
+    text: string;
+    nextOffset: number;
+    lossy: boolean;
+  };
+}
+/** Live child-process handle rooted in its own process tree. */
+interface SubprocessHandle {
+  readonly pid: number;
+  readonly stdout: Readable | undefined;
+  readonly stderr: Readable | undefined;
+  readonly collected: {
+    readonly stdout?: SubprocessOutputReader;
+    readonly stderr?: SubprocessOutputReader;
+  };
+  readonly done: Promise<SubprocessOutcome>;
+  terminate(): void;
+  waitForExit(signal?: AbortSignal): Promise<boolean>;
+}
+/** `ctx.subprocess` face (managed pipe-process primitive only). */
+interface SubprocessService {
+  spawn(spec: SubprocessSpawnSpec): SubprocessHandle;
+}
+/** The plugin context with the two hard-injected services visible. */
+type HostContext = Context & {
+  webServer: WebServerService;
+  subprocess: SubprocessService;
+};
 /**
- * Hello-slot smoke: prove the host half loads inside the dsh process.
+ * Assemble the M1 host half.
+ *
+ * Teardown is order-sensitive, so the whole assembly lives in ONE
+ * `ctx.effect` disposer (design §4.a: "顺序敏感拆除放同一 disposer"):
+ * supervisor first (terminates a self-hosted daemon, never an adopted one),
+ * then the reconciler (closes the subscribe stream and timers), then
+ * `routes.dispose()` (ends SSE clients, unsubscribes), and the webServer
+ * route disposer last.
+ *
  * @param ctx - plugin context handed by the cordis loader.
- * @param _config - schema-validated composition config (unused at this stage).
+ * @param config - schema-validated composition config (defaults filled).
  */
-declare function apply(ctx: Context, _config: Config): void;
+declare function apply(ctx: HostContext, config: Config): void;
 //#endregion
-export { Config, apply, inject, name };
+export { Config, HostContext, SubprocessCollectSpec, SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessService, SubprocessSpawnSpec, WebServerService, apply, inject, name };
