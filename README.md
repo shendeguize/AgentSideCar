@@ -31,17 +31,21 @@ edit transcripts or agent configuration; a resumed native agent can do so as
 described above. The release installer writes only the selected executable and
 optional skill bundle; the checkout installer creates integration symlinks.
 
-Version 0.4.4 requires Python 3.9+ and has no runtime Python dependencies. DSH
+Version 0.5.0 requires Python 3.9+ and has no runtime Python dependencies. DSH
 event watching additionally requires an external `zstd` executable.
 
-## Version 0.4.4
+## Version 0.5.0
 
-Version 0.4.4 provides concurrent local/remote `watch --all --remote`, durable
+Version 0.5.0 provides concurrent local/remote `watch --all --remote`, durable
 private send auditing and request-ID idempotency, and the opt-in
 numeric-loopback HTTP panel. It also includes a deterministic executable
 zipapp, package metadata suitable for `pipx`, an explicit macOS user
 LaunchAgent, bounded private daemon diagnostics with log rotation, immutable
 private status snapshots, and recoverable serialized release installation.
+New in 0.5.0 are a paged daemon `replay` operation, an optional `agents`
+filter on daemon `subscribe` streams, a `send --message-stdin` input mode, a
+dsh target in the checkout skill installer, and the native dsh plugin
+`@shendeguize/dsh-agent-sidecar`.
 
 ![Agent Sidecar read-only panel showing synthetic sessions and events](site/assets/shots/panel.png)
 
@@ -77,7 +81,7 @@ The agent names below are also the exact values accepted by `list --agent`:
 - `codex`: Codex CLI rollout JSONL plus read-only native status SQLite when
   available.
 - `copilot`: GitHub Copilot CLI `workspace.yaml` metadata only. It has no event
-  source in v0.4.4 and is reported as `idle`.
+  source in v0.5.0 and is reported as `idle`.
 - `dsh`: DeepSeek DSH projection-cache metadata for listing and status, plus
   compressed transcript events for watching. Listing and status work without
   `zstd`; watching does not.
@@ -103,11 +107,11 @@ installer="$(mktemp)"
 curl --fail --location --proto '=https' --tlsv1.2 --output "$installer" \
   https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh
 ${PAGER:-less} "$installer"
-sh "$installer" --version v0.4.4
+sh "$installer" --version v0.5.0
 rm "$installer"
 ```
 
-Omit `--version v0.4.4` to resolve the latest stable GitHub Release. The script
+Omit `--version v0.5.0` to resolve the latest stable GitHub Release. The script
 parses release metadata with Python, requires the exact versioned zipapp and
 `SHA256SUMS` assets, verifies the checksum with `shasum -a 256` on macOS or
 `sha256sum` on Linux, and only then atomically replaces
@@ -142,7 +146,7 @@ Or install directly from Git:
 pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'
 ```
 
-For a released, immutable revision, append its tag, for example `@v0.4.4`, to
+For a released, immutable revision, append its tag, for example `@v0.5.0`, to
 the Git URL after that tag is available. Both forms create an isolated
 environment and install `agent-sidecar`; the package has no runtime Python
 dependencies.
@@ -150,10 +154,10 @@ dependencies.
 ### Install a GitHub Release zipapp
 
 For manual installation, GitHub Releases publish the executable zipapp and its
-checksum file. For version 0.4.4:
+checksum file. For version 0.5.0:
 
 ```sh
-version=0.4.4
+version=0.5.0
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/agent-sidecar-${version}.pyz"
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -871,15 +875,16 @@ runtime files, follow the sanitization requirements in the Security Policy.
 
 ## Current scope and deferred work
 
-Version 0.4.4 provides local observation for the supported sources, Cursor CLI
+Version 0.5.0 provides local observation for the supported sources, Cursor CLI
 event watching, remote `list`/`status` snapshots, concurrent local and remote
 `watch --all --remote`, and experimental local send for Claude, Codex, and
 Cursor CLI. It packages the CLI for pipx and deterministic zipapp use, and adds
 explicit macOS LaunchAgent management plus private rotating daemon diagnostics.
-Remote prefix watch and remote send remain unsupported. Kimi and DSH injection
-remain deferred; Cursor IDE and Copilot send are unsupported. The opt-in HTTP
-panel and read-only API remain numeric-IPv4-loopback-only and do not extend
-remote monitoring or provide a control plane.
+Remote prefix watch and remote send remain unsupported. Kimi injection remains
+deferred; `send` does not support dsh sessions, whose injection is available
+only through the dsh plugin; Cursor IDE and Copilot send are unsupported. The
+opt-in HTTP panel and read-only API remain numeric-IPv4-loopback-only and do
+not extend remote monitoring or provide a control plane.
 
 ## FAQ
 
