@@ -815,15 +815,18 @@ raise SystemExit(result.returncode)
         target = self.home / ".local" / "bin" / "agent-sidecar"
         cursor_skill = self.home / ".cursor" / "skills" / "agent-sidecar"
         claude_skill = self.home / ".claude" / "skills" / "agent-sidecar"
+        dsh_skill = self.home / ".dsh" / "skills" / "agent-sidecar"
         self.assertTrue(target.is_file())
         self.assertFalse(target.is_symlink())
         self.assertTrue(cursor_skill.is_symlink())
         self.assertTrue(claude_skill.is_symlink())
+        self.assertTrue(dsh_skill.is_symlink())
         self.assertEqual(
             (REPO_ROOT / "skills" / "agent-sidecar").resolve(),
             cursor_skill.resolve(),
         )
         self.assertEqual(cursor_skill.resolve(), claude_skill.resolve())
+        self.assertEqual(cursor_skill.resolve(), dsh_skill.resolve())
 
         repeated = self.run_installer("--with-skill")
         self.assertEqual(0, repeated.returncode, repeated.stderr)

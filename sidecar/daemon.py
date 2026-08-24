@@ -19,6 +19,7 @@ from typing import (
     Callable,
     Deque,
     Dict,
+    FrozenSet,
     Iterable,
     List,
     Mapping,
@@ -32,7 +33,7 @@ from sidecar import bus
 from sidecar.cursor_chat import default_snapshot_broker
 from sidecar.daemon_log import DaemonLog, DaemonLogError
 from sidecar.index import IncrementalIndex, SessionKey
-from sidecar.model import Session, Status
+from sidecar.model import Event, Session, Status
 from sidecar.scan import Scanner
 from sidecar.tailer_pool import (
     DEFAULT_EVENT_POLLS,
@@ -60,6 +61,8 @@ DEFAULT_CLIENT_TIMEOUT = 1.0
 DEFAULT_SHUTDOWN_TIMEOUT = 30.0
 MAX_LOG_ERROR_DEDUPE = 256
 MAX_SHUTDOWN_DIAGNOSTICS = 8
+REPLAY_DEFAULT_LIMIT = 256
+REPLAY_MAX_LIMIT = 1024
 
 
 class DaemonError(RuntimeError):
@@ -879,10 +882,156 @@ class SidecarDaemon:
             "diagnostics": diagnostics,
         }
 
-    def _serve_subscription(self, connection: socket.socket) -> None:
-        subscription = self.event_bus.subscribe()
+    @staticmethod
+    def _parse_subscribe_agents(
+        request: Mapping[str, Any],
+    ) -> Optional[FrozenSet[str]]:
+        """Return the optional agents allowlist or raise ``ValueError``."""
+
+        agents = request.get("agents")
+        if agents is None:
+            return None
+        if (
+            not isinstance(agents, list)
+            or not agents
+            or any(not isinstance(name, str) or not name for name in agents)
+        ):
+            raise ValueError(
+                "agents must be a nonempty array of nonempty agent names"
+            )
+        return frozenset(agents)
+
+    def _find_session(self, session_id: str) -> Optional[Session]:
+        """Return the newest indexed session matching ``session_id``."""
+
+        for session in self.index.sessions():
+            if session.session_id == session_id:
+                return session
+        return None
+
+    def _replay_response(self, request: Mapping[str, Any]) -> Dict[str, Any]:
+        """Return one bounded page of normalized historical events.
+
+        The data source is the session adapter's own bounded transcript
+        replay (currently only ``dsh`` sessions provide one), so only events
+        still retained in the local transcript and carrying a ``seq`` cursor
+        can be returned.
+
+        ``truncated`` is true whenever more retained events may be fetched
+        with the returned ``last_seq`` cursor: the page reached ``limit``,
+        or the adapter reported stopping early on its own byte or time
+        budget (an ``exhausted=False`` page) before the true end of the
+        transcript. An early-stopped page without any cursor progress still
+        reports ``truncated: false`` because re-requesting the same page
+        cannot retrieve more.
+        """
+
+        session_id = request.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return self._error(
+                "invalid_request",
+                "session_id must be a nonempty string",
+            )
+        after_seq = request.get("after_seq", 0)
+        if (
+            isinstance(after_seq, bool)
+            or not isinstance(after_seq, int)
+            or after_seq < 0
+        ):
+            return self._error(
+                "invalid_request",
+                "after_seq must be a nonnegative integer",
+            )
+        limit = request.get("limit", REPLAY_DEFAULT_LIMIT)
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= REPLAY_MAX_LIMIT
+        ):
+            return self._error(
+                "invalid_request",
+                "limit must be an integer from 1 through {}".format(
+                    REPLAY_MAX_LIMIT
+                ),
+            )
+
+        session = self._find_session(session_id)
+        if session is None:
+            return self._error(
+                "unknown_session",
+                "no session {!r} in the current snapshot".format(session_id),
+            )
+
+        from sidecar.adapters import registry
+
+        adapter = registry.get(session.agent)
+        replay = getattr(adapter, "replay", None)
+        normalize = getattr(adapter, "normalize", None)
+        if not callable(replay) or not callable(normalize):
+            return self._error(
+                "replay_unsupported",
+                "agent {!r} has no replay-capable adapter".format(
+                    session.agent
+                ),
+            )
+
+        events: List[Dict[str, Any]] = []
+        last_seq: Optional[int] = None
+        record_count = 0
+        exhausted = True
         try:
-            self._write_json(connection, {"ok": True, "op": "subscribe"})
+            records = replay(session, after_seq=after_seq, max_records=limit)
+            # Adapters that page on their own byte/time budgets report the
+            # end of the retrievable transcript explicitly (dsh returns a
+            # ReplayPage); adapters without the signal keep the plain
+            # record-count semantics.
+            exhausted = bool(getattr(records, "exhausted", True))
+            for record in records:
+                record_count += 1
+                if not isinstance(record, Mapping):
+                    continue
+                seq = record.get("seq")
+                if (
+                    isinstance(seq, int)
+                    and not isinstance(seq, bool)
+                    and (last_seq is None or seq > last_seq)
+                ):
+                    last_seq = seq
+                for event in normalize(record, session):
+                    events.append(
+                        event.to_dict()
+                        if isinstance(event, Event)
+                        else dict(event)
+                    )
+        except Exception as error:
+            return self._error(
+                "replay_failed",
+                "replay failed: {}".format(error.__class__.__name__),
+            )
+        return {
+            "ok": True,
+            "op": "replay",
+            "session_id": session_id,
+            "agent": session.agent,
+            "after_seq": after_seq,
+            "events": events,
+            "count": len(events),
+            "last_seq": last_seq,
+            "truncated": record_count >= limit
+            or (not exhausted and last_seq is not None),
+        }
+
+    def _serve_subscription(
+        self,
+        connection: socket.socket,
+        agents: Optional[FrozenSet[str]] = None,
+    ) -> None:
+        subscription = self.event_bus.subscribe(agents=agents)
+        try:
+            acknowledgement: Dict[str, Any] = {"ok": True, "op": "subscribe"}
+            if agents is not None:
+                acknowledgement["agents"] = sorted(agents)
+            self._write_json(connection, acknowledgement)
             while not self._stop.is_set():
                 try:
                     event = subscription.get(timeout=0.2)
@@ -951,8 +1100,21 @@ class SidecarDaemon:
                             )
                         elif operation == "status":
                             self._write_json(connection, self._status_response())
+                        elif operation == "replay":
+                            self._write_json(
+                                connection,
+                                self._replay_response(request),
+                            )
                         elif operation == "subscribe":
-                            self._serve_subscription(connection)
+                            try:
+                                agents = self._parse_subscribe_agents(request)
+                            except ValueError as error:
+                                self._write_json(
+                                    connection,
+                                    self._error("invalid_request", str(error)),
+                                )
+                                continue
+                            self._serve_subscription(connection, agents=agents)
                             return
                         else:
                             rendered = operation if isinstance(operation, str) else ""
@@ -1183,6 +1345,8 @@ def run_foreground(
 
 __all__ = [
     "DEFAULT_SHUTDOWN_TIMEOUT",
+    "REPLAY_DEFAULT_LIMIT",
+    "REPLAY_MAX_LIMIT",
     "DaemonAlreadyRunning",
     "DaemonError",
     "RuntimePathError",

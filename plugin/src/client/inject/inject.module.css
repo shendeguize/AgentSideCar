@@ -1,0 +1,447 @@
+/* Inject panel (design §5.1 view 3). Every color rides a dsh --dsw-alias-*
+ * design token WITH a neutral fallback (UX-16: same token+fallback
+ * discipline as every other CSS module), and error tones ride the
+ * state-error-* family the board uses. The confirm-injection button is
+ * the one danger affordance: eye-catching (error-toned border/text,
+ * filled on hover) but restrained (no permanent solid red block). */
+
+.panel {
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── header ────────────────────────────────────────────────────────────── */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+/* ── body ──────────────────────────────────────────────────────────────── */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px 14px;
+}
+
+.capabilityOff {
+  margin: 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+/* ── notices (editor banners after a failed/expired attempt) ───────────── */
+
+.noticeWarn,
+.noticeError {
+  margin: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+.noticeError {
+  border: 1px solid var(--dsw-alias-state-error-primary, #cf222e);
+  color: var(--dsw-alias-state-error-primary, #cf222e);
+}
+
+.noticeDetail {
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+}
+
+/* ── target row ────────────────────────────────────────────────────────── */
+
+.targetRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.noTarget {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+}
+
+.agentTag {
+  flex: none;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 17px;
+  font-weight: 500;
+  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+.planTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+/* ── editor field ──────────────────────────────────────────────────────── */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+.textarea {
+  appearance: none;
+  resize: vertical;
+  min-height: 96px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-3, #ffffff);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+.textarea:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+}
+
+.textarea::placeholder {
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+}
+
+.textarea:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Byte counter: thin progress track + numeric readout. */
+.byteRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.byteBar {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
+  overflow: hidden;
+}
+
+.byteFill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  transition: width .12s;
+}
+
+/* Modifier applied ALONGSIDE .byteFill (no `composes`; see settings card). */
+.byteFillOver {
+  background: var(--dsw-alias-state-error-primary, #cf222e);
+}
+
+.byteText,
+.byteTextOver {
+  flex: none;
+  font-size: 11px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+}
+
+.byteTextOver {
+  color: var(--dsw-alias-state-error-primary, #cf222e);
+}
+
+.invalid {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-state-error-primary, #cf222e);
+}
+
+/* ── mode radios ───────────────────────────────────────────────────────── */
+
+.modes {
+  margin: 0;
+  border: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.modeOption {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.modeOption input {
+  accent-color: var(--dsw-alias-brand-primary, #4d6bfe);
+  width: 14px;
+  height: 14px;
+  margin: 3px 0 0;
+  cursor: pointer;
+}
+
+.modeOption input:disabled {
+  cursor: default;
+}
+
+.modeText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.modeLabel {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+.modeHint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+}
+
+/* ── warnings & audit note ─────────────────────────────────────────────── */
+
+.warnBar {
+  margin: 0;
+  border: 1px solid var(--dsw-alias-state-error-primary, #cf222e);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
+  color: var(--dsw-alias-state-error-primary, #cf222e);
+}
+
+.auditNote {
+  margin: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+/* ── confirm plan ──────────────────────────────────────────────────────── */
+
+.planBox {
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-3, #ffffff);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.planRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.planKey {
+  flex: none;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+}
+
+.planValue {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+.observedNote {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+}
+
+.planPreview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.preview {
+  margin: 0;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
+  padding: 8px 10px;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+.countdown {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+/* ── results ───────────────────────────────────────────────────────────── */
+
+.resultOk,
+.resultFail,
+.resultUnknown {
+  margin: 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+.resultOk {
+  border: 1px solid var(--dsw-alias-brand-primary, #4d6bfe);
+}
+
+.resultFail {
+  border: 1px solid var(--dsw-alias-state-error-primary, #cf222e);
+  color: var(--dsw-alias-state-error-primary, #cf222e);
+}
+
+.resultUnknown {
+  border: 1px solid var(--dsw-alias-label-dimmed, #8c959f);
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+.resultDetail {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+}
+
+/* ── footer buttons ────────────────────────────────────────────────────── */
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.btn,
+.btnPrimary,
+.btnDanger {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 5px 14px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.btn {
+  border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  background: none;
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+.btn:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary, #1f2328);
+  border-color: var(--dsw-alias-label-dimmed, #8c959f);
+}
+
+.btnPrimary {
+  background: var(--dsw-alias-label-primary, #1f2328);
+  color: var(--dsw-alias-bg-layer-3, #ffffff);
+}
+
+/* The danger action: outlined error tone at rest, fills on hover. */
+.btnDanger {
+  border-color: var(--dsw-alias-state-error-primary, #cf222e);
+  background: none;
+  color: var(--dsw-alias-state-error-primary, #cf222e);
+  font-weight: 600;
+}
+
+.btnDanger:hover:not(:disabled) {
+  background: var(--dsw-alias-state-error-primary, #cf222e);
+  color: var(--dsw-alias-bg-layer-3, #ffffff);
+}
+
+.btn:disabled,
+.btnPrimary:disabled,
+.btnDanger:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.btn:focus-visible,
+.btnPrimary:focus-visible,
+.btnDanger:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline-offset: 1px;
+}

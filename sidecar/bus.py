@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Any, Mapping, Optional, Set
+from typing import Any, FrozenSet, Iterable, Mapping, Optional, Set
 
 from sidecar.model import Event
 
@@ -21,11 +21,32 @@ class SubscriptionClosed(BusError):
     """Raised after the event bus closes a subscription."""
 
 
+def _normalized_agents(
+    agents: Optional[Iterable[str]],
+) -> Optional[FrozenSet[str]]:
+    if agents is None:
+        return None
+    names = frozenset(agents)
+    if not names or any(
+        not isinstance(name, str) or not name for name in names
+    ):
+        raise ValueError(
+            "agents filter must be a nonempty collection of nonempty strings"
+        )
+    return names
+
+
 class Subscription:
     """One bounded event queue owned by :class:`EventBus`."""
 
-    def __init__(self, bus: "EventBus", maxsize: int) -> None:
+    def __init__(
+        self,
+        bus: "EventBus",
+        maxsize: int,
+        agents: Optional[Iterable[str]] = None,
+    ) -> None:
         self._bus = bus
+        self.agents = _normalized_agents(agents)
         self.queue: "queue.Queue[object]" = queue.Queue(maxsize=maxsize)
         self._lock = threading.Lock()
         self._closed = False
@@ -41,6 +62,11 @@ class Subscription:
             return self._closed
 
     def _offer(self, event: Mapping[str, Any]) -> None:
+        # Filtered-out events never consume a bounded queue slot and never
+        # count as dropped, so the 256-slot semantics apply per subscriber
+        # to its own selected agents only.
+        if self.agents is not None and event.get("agent") not in self.agents:
+            return
         with self._lock:
             if self._closed:
                 return
@@ -106,8 +132,13 @@ class EventBus:
         with self._lock:
             return len(self._subscriptions)
 
-    def subscribe(self) -> Subscription:
-        subscription = Subscription(self, self.queue_size)
+    def subscribe(
+        self,
+        agents: Optional[Iterable[str]] = None,
+    ) -> Subscription:
+        """Register one subscriber, optionally filtered to ``agents`` names."""
+
+        subscription = Subscription(self, self.queue_size, agents=agents)
         with self._lock:
             if self._closed:
                 subscription._finish()

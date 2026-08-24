@@ -1,0 +1,22 @@
+/* Modal host for the inject panel (S5 wiring): a centered dialog over the
+ * board, opened by selecting a session card. Backdrop rides the dsh mask
+ * token --dsw-alias-bg-mask-1 (the ui-attachment / ui-settings-general
+ * modal precedent) — same no-literal-colors discipline as the panel. */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.45));
+}
+
+.dialog {
+  width: min(560px, 100%);
+  max-height: min(85vh, 720px);
+  overflow: auto;
+  border-radius: 12px;
+}

@@ -1,0 +1,183 @@
+/*
+ * AI bypass-analysis panel styles (design §4.e.3 / §5.1 view 2): every
+ * color rides a --dsw-alias-* design token with a neutral fallback — no
+ * theme colors are hardcoded as the only value. Same posture as
+ * dsh-tools.module.css.
+ */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.closeButton,
+.textButton {
+  flex: none;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #57606a);
+  cursor: pointer;
+}
+
+.closeButton:hover,
+.textButton:hover {
+  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
+}
+
+.primaryButton {
+  align-self: flex-start;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
+  color: var(--dsw-alias-label-primary, #1f2328);
+  cursor: pointer;
+}
+
+.primaryButton:disabled,
+.textButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mutedLine {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+/* Capability-off / terminal-error note. */
+.noteCard {
+  font-size: 12px;
+  line-height: 18px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px dashed var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+.errorCard {
+  font-size: 12px;
+  line-height: 18px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--dsw-alias-state-error-primary, #cf222e);
+  background: var(--dsw-alias-state-error-secondary, rgba(207, 34, 46, 0.08));
+  border: 1px solid var(--dsw-alias-state-error-secondary, rgba(207, 34, 46, 0.24));
+}
+
+/* Non-terminal retryable notice. */
+.noticeBar {
+  font-size: 12px;
+  line-height: 18px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  color: var(--dsw-alias-state-warning-primary, #9a6700);
+  background: var(--dsw-alias-state-warning-secondary, rgba(154, 103, 0, 0.1));
+  border: 1px solid var(--dsw-alias-state-warning-secondary, rgba(154, 103, 0, 0.28));
+}
+
+.exchange {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.exchangeLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary, #57606a);
+}
+
+.question {
+  font-size: 12px;
+  line-height: 18px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
+  color: var(--dsw-alias-label-primary, #1f2328);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.summary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  color: var(--dsw-alias-label-primary, #1f2328);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.truncated {
+  font-size: 11px;
+  color: var(--dsw-alias-state-warning-primary, #9a6700);
+}
+
+/* The §5.3 honesty line — always visible with results. */
+.disclaimer {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary, #57606a);
+  border-top: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
+  padding-top: 6px;
+}
+
+.followupForm {
+  display: flex;
+  gap: 6px;
+}
+
+.followupInput {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.16));
+  background: var(--dsw-alias-bg-layer-0, #fff);
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+.actionsRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

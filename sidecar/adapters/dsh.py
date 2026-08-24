@@ -114,6 +114,28 @@ def _stop_process(process: subprocess.Popen) -> None:
             pass
 
 
+class ReplayPage(List[Dict[str, Any]]):
+    """One bounded replay page plus an explicit end-of-transcript signal.
+
+    ``exhausted`` is ``True`` only when the scan truly consumed the
+    retrievable transcript: it reached the end of the decoded stream, or a
+    degraded source (missing file, missing ``zstd``, failed decoder start)
+    had nothing retrievable at all. It is ``False`` when the page stopped
+    early on the record, retained-byte, scan-byte, or time budget, so
+    callers know more retained records may remain past this page.
+    """
+
+    __slots__ = ("exhausted",)
+
+    def __init__(
+        self,
+        records: Iterable[Dict[str, Any]] = (),
+        exhausted: bool = True,
+    ) -> None:
+        super().__init__(records)
+        self.exhausted = bool(exhausted)
+
+
 def replay_dsh_events(
     path: Path,
     after_seq: Optional[int] = None,
@@ -122,13 +144,18 @@ def replay_dsh_events(
     timeout: float = _REPLAY_TIMEOUT_S,
     zstd_binary: str = "zstd",
     max_retained_bytes: int = _REPLAY_RETAINED_BYTES,
-) -> List[Dict[str, Any]]:
+) -> ReplayPage:
     """Stream a bounded zstd replay for scanners and seq-based watchers.
 
     ``max_output_bytes`` bounds the total decompressed stream scan, while
     ``max_retained_bytes`` and ``max_records`` independently bound memory used
     by matching records. Missing ``zstd``, incomplete live frames, malformed
     rows, and timeouts all degrade to the complete records decoded so far.
+
+    The returned :class:`ReplayPage` reports ``exhausted=False`` whenever one
+    of those budgets ended the page before the true end of the stream, so
+    paging callers can tell "this is everything retained" apart from "there
+    may be more after this page's last ``seq``".
     """
 
     if (
@@ -137,14 +164,14 @@ def replay_dsh_events(
         or max_records <= 0
         or timeout <= 0
     ):
-        return []
+        return ReplayPage()
     try:
         if not path.is_file():
-            return []
+            return ReplayPage()
     except OSError:
-        return []
+        return ReplayPage()
     if os.path.sep not in zstd_binary and shutil.which(zstd_binary) is None:
-        return []
+        return ReplayPage()
 
     try:
         process = subprocess.Popen(
@@ -155,10 +182,10 @@ def replay_dsh_events(
             bufsize=0,
         )
     except OSError:
-        return []
+        return ReplayPage()
     if process.stdout is None:
         _stop_process(process)
-        return []
+        return ReplayPage()
 
     records: List[Dict[str, Any]] = []
     pending = bytearray()
@@ -220,10 +247,10 @@ def replay_dsh_events(
                 return True
         return False
 
+    stop = False
+    eof = False
     try:
         selector.register(process.stdout, selectors.EVENT_READ)
-        stop = False
-        eof = False
         while not stop and scanned < max_output_bytes:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -247,12 +274,15 @@ def replay_dsh_events(
             if consume_chunk(chunk):
                 stop = True
         if eof and pending and not dropping_line and not stop:
-            consume(bytes(pending))
+            stop = consume(bytes(pending))
     finally:
         selector.close()
         process.stdout.close()
         _stop_process(process)
-    return records
+    # Reaching end-of-stream without a budget stop is the only proof that no
+    # retained record was left behind; every other exit (record, retained-byte,
+    # scan-byte, or time budget) may have stopped before later records.
+    return ReplayPage(records, exhausted=eof and not stop)
 
 
 def _sequence(record: Mapping[str, Any]) -> Optional[int]:
@@ -510,9 +540,9 @@ class DSHAdapter(Adapter):
         max_records: int = _REPLAY_RECORDS,
         timeout: float = _REPLAY_TIMEOUT_S,
         max_retained_bytes: int = _REPLAY_RETAINED_BYTES,
-    ) -> List[Dict[str, Any]]:
+    ) -> ReplayPage:
         if not session.transcript:
-            return []
+            return ReplayPage()
         return replay_dsh_events(
             Path(session.transcript),
             after_seq=after_seq,
@@ -523,4 +553,4 @@ class DSHAdapter(Adapter):
         )
 
 
-__all__ = ["DSHAdapter", "replay_dsh_events"]
+__all__ = ["DSHAdapter", "ReplayPage", "replay_dsh_events"]

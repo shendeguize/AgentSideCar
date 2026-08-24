@@ -110,18 +110,61 @@ is separate from observation. It requires an explicit request and
 agent to contact its provider, run tools, modify its session, or change
 workspace files. It is not a sandbox or a policy-enforcement boundary.
 
-The message is present in the Sidecar command line and, for Cursor CLI, the
-native child command line, so it may appear in shell history or process
-listings. Never send secrets. Private audit records avoid storing message and
-response content, but their key and logs remain sensitive local state.
-Delivery reported as unknown must not be retried automatically because the
-agent may already have acted.
+A positional message is present in the Sidecar command line, so it may appear
+in shell history or process listings; `send --message-stdin` reads the message
+from standard input and keeps it out of the Sidecar command line. For Cursor
+CLI the prompt is still passed on the native child command line whichever
+source is used, because that upstream resume contract requires argv transport,
+so this residual exposure remains. Never send secrets. Private audit records
+avoid storing message and response content, but their key and logs remain
+sensitive local state. Delivery reported as unknown must not be retried
+automatically because the agent may already have acted.
 
 Agent Sidecar makes no general claim of sandboxing, process isolation, data-at-
 rest encryption, or end-to-end encryption. Platform permissions, SSH, and
 provider transports retain their own independent security properties. See the
 [product reference](skills/agent-sidecar/reference.md) for the exact command,
 protocol, and compatibility boundaries.
+
+### DSH plugin routes and trust posture
+
+The optional DSH plugin (`plugin/`, published as
+`@shendeguize/dsh-agent-sidecar`) registers its own routes on the dsh web
+server under `/plugins/agent-sidecar/api`. The dsh web server has no
+authentication layer and its `/api` fence does not cover plugin routes, so
+the plugin carries its own guard: it refuses non-loopback peers even when dsh
+binds a wider address, requires a loopback `Host` authority, requires a
+same-origin `Origin` when one is present, refuses declared cross-site
+fetches, and forces JSON bodies on state-changing methods. The plugin reaches
+the daemon over the Unix socket only; it never reads `http.token` and never
+hands any credential to the browser.
+
+Those checks defend against browser-mediated attacks such as CSRF and DNS
+rebinding. They do not authenticate the caller: any process on the same
+machine that can open a loopback TCP connection can read the plugin's
+normalized session-event data and, when injection is enabled, complete the
+write flow. That is the same trust posture as dsh's own unauthenticated
+`/api` surface, and it is deliberately weaker than the sidecar's own
+boundaries, where the Unix socket relies on same-user mode-`0600` file
+permissions and the optional HTTP read surface requires a bearer token. Treat
+this as an explicitly declared trade-off, not silent inheritance.
+
+Injection through the plugin is off by default (`inject.enabled: false`), and
+every injection requires a server-issued, one-time, short-lived confirm token
+in a two-phase prepare/execute flow. That confirmation is verifiable against
+browser-mediated requests, but it cannot bind a local process to user
+consent, so on the plugin channel the explicit same-turn user-request rule of
+`send` degrades to a UX convention rather than a technical guarantee. Do not
+enable `inject.enabled` on a multi-user host, and be aware that normalized
+session-event content is readable by same-host processes while the plugin is
+mounted.
+
+AI bypass analysis is likewise off by default (`analysis.enabled: false`)
+because it consumes model tokens. Analysis runs in dedicated, individually
+stoppable dsh sessions with bounded input truncation, bounded turn timeouts,
+and a bounded number of concurrent sessions; there is no automatic or
+periodic analysis. Analyzed session content, follow-up questions, and model
+replies are never written to the plugin's logs.
 
 ## Sharing diagnostics safely
 

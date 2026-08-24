@@ -57,6 +57,7 @@ README_HEADING_PAIRS = (
     (2, "Daemon, fallback, and local protocol", "守护进程、回退与本地协议"),
     (3, "Opt-in loopback HTTP", "可选启用的回环 HTTP"),
     (2, "Agent skill integration", "Agent Skill 集成"),
+    (2, "DSH plugin", "DSH 插件"),
     (2, "Development", "开发与质量门禁"),
     (3, "Release and version checklist", "发布与版本清单"),
     (2, "Security and reporting", "安全与问题报告"),

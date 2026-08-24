@@ -5,6 +5,9 @@
 - Keep `[project].dependencies` empty; Agent Sidecar has zero runtime dependencies.
 - Support Python 3.9 and newer in production code and public tooling.
 - Keep the installed product within the Python standard-library boundary; add non-stdlib tools only to development extras.
+- Treat `plugin/` (the dsh host-bridge TypeScript npm package) as the only sanctioned runtime-boundary exception; keep its Node toolchain — pnpm, vitest, and the tracked prebuilt `lib/` output — confined to `plugin/`.
+- Let `plugin/` consume Agent Sidecar only through public contracts — the daemon Unix-socket protocol, CLI JSON, and read-only audit surfaces — never through Python internals.
+- Keep the Python-side rules above unaffected by `plugin/`: `[project].dependencies` stays empty and the installed Python product stays standard-library only.
 
 ## Verification and contracts
 

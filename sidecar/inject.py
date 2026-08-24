@@ -99,6 +99,10 @@ _ERROR_MESSAGES = {
     "blank_message": "message must not be blank",
     "message_nul": "message must not contain NUL",
     "message_too_large": "message exceeds the size limit",
+    "stdin_interactive": (
+        "standard input is an interactive terminal; pipe or redirect the message"
+    ),
+    "stdin_unreadable": "standard input could not be read as bytes",
     "invalid_session": "session is invalid",
     "unsupported_agent": "session agent is unsupported",
     "unsupported_cursor_ide": "Cursor IDE sessions cannot be resumed by cursor-agent",

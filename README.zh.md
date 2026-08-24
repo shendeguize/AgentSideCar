@@ -192,13 +192,14 @@ sh scripts/install-skill.sh
 - `~/.local/bin/agent-sidecar`
 - `~/.cursor/skills/agent-sidecar`
 - `~/.claude/skills/agent-sidecar`
+- `~/.dsh/skills/agent-sidecar`
 
 请确保 `~/.local/bin` 位于 `PATH` 中。这些链接指向当前检出版本，因此请保持仓库
 位置不变；移动后应重新运行安装程序。对指向当前仓库的链接重复安装是幂等的；
 脚本会拒绝覆盖无关文件、目录或符号链接。若只删除当前检出版本拥有的链接，请参见
 [卸载](#uninstall)。
 
-希望 CLI 和两个 Agent Skill 链接持续跟随工作树的用户可以使用此检出版本安装
+希望 CLI 和各 Agent Skill 链接持续跟随工作树的用户可以使用此检出版本安装
 程序。它与 `pipx` CLI 安装互为替代方案，因为两者通常都使用
 `~/.local/bin/agent-sidecar`。
 
@@ -390,10 +391,21 @@ agent-sidecar send <session-prefix> "Please review the latest test failure." --a
 agent-sidecar send <session-prefix> "Summarize your result." --allow-write --timeout 120 --json
 agent-sidecar send <session-prefix> "Retry-safe request." --allow-write --request-id <stable-unique-id> --json
 agent-sidecar send <session-prefix> --allow-write -- "-message beginning with a hyphen"
+printf '%s' "Keep this out of the agent-sidecar argv." | agent-sidecar send <session-prefix> --message-stdin --allow-write
 ```
 
 只能在用户明确要求该消息或操作时使用。`--allow-write` 是强制参数，因为原生
 Agent 可以联系其服务提供方、运行工具并修改会话或工作区状态。
+
+`--message-stdin` 从标准输入读取消息以替代位置参数，因此消息不会出现在
+`agent-sidecar` 的 argv、Shell 历史或进程列表中。两种消息来源互斥：必须恰好
+提供一种。标准输入按字节读入并施加相同的字节上限，随后必须按严格 UTF-8
+解码；消息经过与位置参数完全相同的校验、注入管线、审计身份、回执和退出码。
+标准输入必须来自管道或重定向：交互式终端会被用法错误拒绝（退出码 `2`），
+而不会静默等待键盘输入；读取期间被中断时以退出码 `130` 退出，且不会发起
+任何投递。输入字节按原样使用，因此尾随换行（例如来自 `echo`）会被保留、
+计入字节上限并改变审计指纹；上面的示例使用 `printf '%s'` 以避免引入尾随
+换行。
 
 `--request-id` 是可选参数。省略时 Sidecar 会创建一个加密随机的不透明 ID；可能
 需要重试安全性的调用方应提供并保留自己稳定且唯一的 ID。对相同本地目标、项目和
@@ -459,8 +471,9 @@ Sidecar 发送，以及已经改变或消失的目标，并持锁直到原生进
 结果产生前的预检或用法拒绝；中断时退出码为 `130`，投递状态未知。
 
 位置参数消息会出现在 `agent-sidecar` 命令 argv 中，可能被 Shell 历史记录保存，
-也可能在进程列表中可见。对于 Cursor CLI，它还会出现在原生子进程 argv 中。不要
-使用此命令发送机密。
+也可能在进程列表中可见；`--message-stdin` 可以让消息不出现在 Sidecar 命令行
+中。无论使用哪种来源，对于 Cursor CLI，提示词仍会出现在原生子进程 argv 中，
+因为该上游恢复契约要求 argv 传输。不要使用此命令发送机密。
 
 针对损坏、不安全或被替换的发送审计命名空间，唯一的恢复命令是：
 
@@ -559,10 +572,24 @@ agent-sidecar service install --http --http-port 43123 --force
 套接字和 PID 文件的权限模式为 `0600`。守护进程拒绝替换不安全的非套接字/非普通
 文件路径；`daemon stop` 只有在套接字 PID 与 PID 文件一致后才会向进程发信号。
 
-套接字使用有界的换行分隔 JSON 请求和响应。操作包括 `ping`、`status` 和
-`subscribe`：`status` 返回当前会话快照以及扫描器和 tailer 诊断；`subscribe`
-先确认请求，再流式传输规范化事件对象。面向用户的守护进程消费者会在 stderr
-报告有界、已净化的 tailer 诊断。
+套接字使用有界的换行分隔 JSON 请求和响应。操作包括 `ping`、`status`、
+`subscribe` 和 `replay`：`status` 返回当前会话快照以及扫描器和 tailer 诊断；
+`subscribe` 先确认请求，再流式传输规范化事件对象。`subscribe` 请求可以携带
+可选的非空 `agents` 数组，让守护进程只推送这些 agent 名称的事件；省略该字段
+保持现有的全量事件流，且被过滤掉的事件不会占用订阅者的有界队列。
+
+`replay` 返回某个会话历史事件的一个有界分页，只包含 `seq` 游标大于
+`after_seq`（默认 0，即从头开始）的事件，每页最多读取 `limit` 条记录
+（上限 1024），并报告 `last_seq` 游标和 `truncated` 标志用于翻页。只要返回
+的游标之后可能还有仍保留的事件——本页达到了 `limit`，或适配器自身的有界解码
+因字节/时间预算提前结束了本页——`truncated` 就为 true，翻页消费者应持续
+拉取，直到某页在保留转录的真正末尾报告 `truncated: false`。其数据源
+是会话适配器自身的有界本地转录回放——当前只有 `dsh` 会话提供——因此只能
+返回仍保留在该转录中且携带 `seq` 游标的事件。它无法找回数据源从未持久化或
+超出有界解码范围的事件；其他 agent 的会话返回 `replay_unsupported`，不在
+当前快照中的会话返回 `unknown_session`。慢消费者有界实时队列中被丢弃的
+事件，只有在仍保留于转录中时才能通过 `replay` 补齐。面向用户的守护进程
+消费者会在 stderr 报告有界、已净化的 tailer 诊断。
 
 守护进程还会在权限模式为 `0700` 的私有运行时目录中写入结构化诊断
 `daemon.jsonl`。当前权限模式为 `0600` 的文件上限为 2 MiB，并轮转为两个权限模式
@@ -615,7 +642,8 @@ Bearer Authorization Header 提供令牌。适配器没有 send、audit-reset、
 
 ## Agent Skill 集成
 
-已安装的 Cursor 和 Claude Skill 链接公开同一个 `skills/agent-sidecar` Bundle。
+已安装的 Cursor、Claude 和 dsh Skill 链接公开同一个 `skills/agent-sidecar`
+Bundle。
 该 Skill 指示 Agent：本地观察先查询 `agent-sidecar status --json`；只有用户要求
 时才使用远程监控；绝不隐藏远程监视故障或缺口警告；绝不自动重试远程监视；只有
 用户要求时才启动或停止守护进程。
@@ -627,6 +655,46 @@ Unix 守护进程。该 Skill 只有在同一 turn 的明确请求包含精确�
 `send`；该请求已经提供 `--allow-write` 所代表的权限，因此无需二次确认。它绝不
 从监控行为推断发送许可，不重试未知投递或 pending 请求，也绝不自动调用 audit
 reset。
+
+## DSH 插件
+
+`plugin/` 目录提供 `@shendeguize/dsh-agent-sidecar`——一个原生 DSH 插件，把
+Agent Sidecar 带进 dsh Web 界面：跨 agent 监控看板、带 dsh 谱系与检索的
+会话详情时间线、可选启用的消息注入、可选启用的 AI 旁路分析，以及内嵌的
+agent-sidecar Skill 提供器。插件通过 Unix 套接字消费 sidecar 守护进程，并以
+「探测—领养—否则托管」策略管理守护进程生命周期；它绝不代装 sidecar CLI。
+
+将其安装到 dsh profile；该命令把包解析委托给 pnpm：
+
+```sh
+dsh plugin --profile web add @shendeguize/dsh-agent-sidecar
+```
+
+每个配置键都有默认值，因此一行裸插件配置即可零配置挂载。若要覆盖默认值，
+请在 profile 的 `cordis.patch.yml` 中对应插件行添加 `config:` 块：
+
+```yaml
+- id: agent-sidecar
+  config:
+    daemon:
+      policy: adopt-only
+```
+
+关键配置摘要：
+
+- `daemon.policy`（默认 `adopt-or-host`）选择守护进程生命周期管理策略：探测
+  并领养既有守护进程，否则自行托管。`adopt-only` 绝不拉起，`off` 不管理生命
+  周期。
+- `inject.enabled`（默认**关闭**）是写路径总开关。关闭时注入入口全部隐藏，
+  写动作在服务端被拒绝。多用户主机不要开启；参见[安全策略](SECURITY.md)。
+- `analysis.enabled`（默认**关闭**）控制 AI 旁路分析，该功能消耗模型 token。
+  `analysis.provider` 与 `analysis.model` 可选地把分析会话路由到指定模型；
+  未设置时复用宿主的默认模型选择。
+- `skill.provide`（默认开启）经 dsh Skill 注册表内嵌提供 agent-sidecar
+  Skill；文件系统已安装的同名 Skill 自动优先。
+
+完整配置表、守护进程托管语义、守卫细节与开发流程见
+[插件手册](plugin/README.md)。
 
 ## 开发与质量门禁
 

@@ -35,6 +35,7 @@ from sidecar.daemon import (
 )
 from sidecar.inject import (
     DEFAULT_SEND_TIMEOUT_SECONDS,
+    MAX_MESSAGE_BYTES,
     SendError,
     SendResult,
     build_send_plan,
@@ -207,6 +208,37 @@ def _add_http_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+class _PendingTailArgumentParser(argparse.ArgumentParser):
+    """Backport CPython 3.13's zero-width trailing-positional fix for send.
+
+    Python 3.9's greedy partial matcher consumes an optional trailing
+    positional with zero strings in an early chunk, which would break
+    ``send <prefix> --allow-write -- <hyphen-message>`` once the message
+    positional became optional. CPython 3.13's ``_match_arguments_partial``
+    fixed this upstream by dropping a zero-width tail only when the match is
+    followed by an option string, so a later chunk (for example after ``--``)
+    can still fill it while end-of-input keeps upstream semantics: a trailing
+    ``nargs='?'`` positional keeps its parser default and a trailing
+    ``nargs='*'`` positional is still assigned its empty match. This subclass
+    mirrors that exact condition (it is a no-op on Python 3.13 and newer) and
+    is applied to the ``send`` subparser only.
+    """
+
+    def _match_arguments_partial(self, actions, arg_strings_pattern):
+        counts = super()._match_arguments_partial(
+            actions,
+            arg_strings_pattern,
+        )
+        consumed = sum(counts)
+        if (
+            consumed < len(arg_strings_pattern)
+            and arg_strings_pattern[consumed] == "O"
+        ):
+            while counts and counts[-1] == 0:
+                counts.pop()
+        return counts
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-sidecar",
@@ -307,12 +339,31 @@ def build_parser() -> argparse.ArgumentParser:
         description="Starts a local headless resume and may modify agent state.",
         allow_abbrev=False,
     )
+    # Scope the Python 3.9 partial-match backport to the send subparser, the
+    # only parser with an optional trailing positional that must remain
+    # fillable after ``--``. add_parser offers no per-command parser class,
+    # so retype the freshly built instance (the subclass adds no state).
+    send_parser.__class__ = _PendingTailArgumentParser
     send_parser.add_argument(
         "session_prefix",
         metavar="session-prefix",
         help="exact session ID or unique prefix",
     )
-    send_parser.add_argument("message", help="message delivered to the resumed agent")
+    send_parser.add_argument(
+        "message",
+        nargs="?",
+        default=None,
+        help="message delivered to the resumed agent",
+    )
+    send_parser.add_argument(
+        "--message-stdin",
+        action="store_true",
+        help=(
+            "read the message from piped or redirected standard input "
+            "instead of a positional argument, keeping it out of the "
+            "agent-sidecar command line; interactive terminals are refused"
+        ),
+    )
     send_parser.add_argument(
         "--allow-write",
         action="store_true",
@@ -2234,12 +2285,54 @@ def _write_send_result(
     return 1
 
 
+def _read_stdin_message(stream: object) -> str:
+    """Read a byte-bounded piped stdin message and decode it fail-closed.
+
+    Interactive terminals are rejected before any read so the command never
+    silently blocks waiting for typed input, and read-mechanics failures
+    (a detached ``sys.stdin``, closed or unreadable streams, non-byte
+    chunks) report the dedicated stdin vocabulary instead of a misleading
+    message-validation diagnostic.
+    """
+
+    binary = None if stream is None else getattr(stream, "buffer", stream)
+    if binary is None:
+        raise SendError("stdin_unreadable")
+    try:
+        interactive = binary.isatty()
+    except (AttributeError, OSError, ValueError):
+        interactive = False
+    if interactive:
+        raise SendError("stdin_interactive")
+    chunks: List[bytes] = []
+    received = 0
+    while received <= MAX_MESSAGE_BYTES:
+        try:
+            chunk = binary.read(MAX_MESSAGE_BYTES + 1 - received)
+        except (AttributeError, OSError, ValueError) as error:
+            raise SendError("stdin_unreadable") from error
+        if not chunk:
+            break
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise SendError("stdin_unreadable")
+        chunks.append(bytes(chunk))
+        received += len(chunks[-1])
+    data = b"".join(chunks)
+    if len(data) > MAX_MESSAGE_BYTES:
+        raise SendError("message_too_large")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise SendError("invalid_message_utf8") from error
+
+
 def _run_send(
     args: argparse.Namespace,
     *,
     scanner: Optional[Scanner],
     stdout: TextIO,
     stderr: TextIO,
+    stdin: Optional[object] = None,
     planner=None,
     executor=None,
 ) -> int:
@@ -2248,12 +2341,38 @@ def _run_send(
         stderr.flush()
         return 2
 
+    if args.message_stdin == (args.message is not None):
+        stderr.write(
+            "send: provide the message exactly once, either as the "
+            "positional argument or through --message-stdin\n"
+        )
+        stderr.flush()
+        return 2
+
+    if args.message_stdin:
+        try:
+            message = _read_stdin_message(
+                sys.stdin if stdin is None else stdin
+            )
+        except KeyboardInterrupt:
+            stderr.write(
+                "send: interrupted while reading the message from "
+                "standard input; nothing was delivered\n"
+            )
+            stderr.flush()
+            return 130
+        except SendError as error:
+            _report_send_error(error, "", stderr)
+            return 2
+    else:
+        message = args.message
+
     active_scanner = Scanner() if scanner is None else scanner
     sessions = _scan_sessions(active_scanner, stderr, None)
     try:
         selected = resolve_session_prefix(sessions, args.session_prefix)
     except (LookupError, ValueError) as error:
-        _report_send_error(error, args.message, stderr)
+        _report_send_error(error, message, stderr)
         return 2
 
     plan_builder = build_send_plan if planner is None else planner
@@ -2264,7 +2383,7 @@ def _run_send(
         return _scan_sessions(active_scanner, stderr, None)
 
     try:
-        plan = plan_builder(selected, args.message)
+        plan = plan_builder(selected, message)
         result = send_executor(
             plan,
             allow_write=args.allow_write,
@@ -2275,7 +2394,7 @@ def _run_send(
         if result.request_id != request_id:
             result = replace(result, request_id=request_id)
     except SendError as error:
-        _report_send_error(error, args.message, stderr)
+        _report_send_error(error, message, stderr)
         return 2
     except KeyboardInterrupt:
         result = SendResult(
@@ -2289,7 +2408,7 @@ def _run_send(
         _write_send_result(
             result,
             as_json=args.json,
-            message=args.message,
+            message=message,
             stdout=stdout,
             stderr=stderr,
         )
@@ -2297,7 +2416,7 @@ def _run_send(
     return _write_send_result(
         result,
         as_json=args.json,
-        message=args.message,
+        message=message,
         stdout=stdout,
         stderr=stderr,
     )
@@ -2386,6 +2505,7 @@ def main(
     client: Optional[SidecarClient] = None,
     stdout: Optional[TextIO] = None,
     stderr: Optional[TextIO] = None,
+    stdin: Optional[object] = None,
     process_provider=None,
     watch_provider=None,
     remote_watch_provider=None,
@@ -2471,6 +2591,7 @@ def main(
             scanner=scanner,
             stdout=output,
             stderr=errors,
+            stdin=stdin,
             planner=send_planner,
             executor=send_executor,
         )

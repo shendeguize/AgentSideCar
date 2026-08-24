@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The dsh plugin board and detail views got a UX overhaul (plugin 0.1.1):
+  board header status counts with one-click filtering, collapsible groups
+  with bounded card rendering, a conversation-first timeline filter that
+  aggregates streaming chunks, newest-first detail positioning, a
+  post-injection observe loop (auto-refresh plus a listen shortcut),
+  keyboard support (Esc, Cmd+Enter, autofocus), copyable session ids, and
+  absolute short timestamps.
+
+### Added
+
+- A native dsh plugin M1 monitoring milestone in the `plugin/` npm
+  sub-package: a probe-adopt-else-host daemon supervisor, a Unix-socket
+  bridge with snapshot reconciliation, plugin API routes with SSE streaming
+  behind a five-layer loopback guard, a cross-agent monitoring board, and a
+  settings namespace with its settings card.
+- The dsh plugin M2 injection milestone: two-phase, confirm-token message
+  injection behind the default-off `inject.enabled` gate, with in-process
+  queue/steer delivery for dsh sessions, `send --message-stdin` delivery for
+  external agents, and a read-only `/sidecar` slash-command overview.
+- The dsh plugin M3 fusion milestone: paged session-detail timelines, dsh
+  lineage and full-text search with honest degradation, project grouping,
+  and default-off AI bypass analysis in bounded dedicated sessions with
+  optional `analysis.provider`/`analysis.model` model routing.
+- An embedded agent-sidecar skill provider in the dsh plugin
+  (`skill.provide`, default on; a filesystem-installed skill of the same
+  name automatically wins) and an optional better-sidebar monitor tab.
+- A dsh target in the checkout skill installer: `scripts/install-skill.sh`
+  now also links `~/.dsh/skills/agent-sidecar`, and the skill documents
+  dsh-specific guidance that routes dsh-session injection through the dsh
+  plugin because `send` does not support dsh sessions.
+- A `send --message-stdin` option that reads the message from standard input
+  instead of the positional argument, keeping it out of the `agent-sidecar`
+  command line while reusing the same validation, injection pipeline, audit
+  identity, receipts, and exit codes. The two message sources are mutually
+  exclusive. Interactive terminals are refused with a usage error instead of
+  blocking, unreadable standard input reports a dedicated diagnostic, and
+  interrupting the read exits `130` cleanly before any delivery.
+- A daemon protocol `replay` operation that returns one bounded page of a
+  session's transcript-retained events after a `seq` cursor, with `limit`,
+  `last_seq`, and `truncated` paging semantics. It is backed by the session
+  adapter's bounded local-transcript replay, which currently only `dsh`
+  sessions provide; other agents report `replay_unsupported` and unknown
+  sessions report `unknown_session`.
+- An optional `agents` allowlist on the daemon `subscribe` operation for
+  server-side filtered event streams; filtered-out events never consume the
+  subscriber's bounded queue. `SidecarClient` gains a paging `replay(...)`
+  method and a `subscribe(agents=...)` parameter. Requests without the new
+  fields keep the existing full-stream behavior, so old clients are
+  unaffected.
+
 ## [0.4.4] - 2026-08-24
 
 ### Fixed

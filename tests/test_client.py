@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 
 from sidecar.client import (
+    DEFAULT_REPLAY_TIMEOUT,
     HttpPingInfo,
     MAX_RESPONSE_BYTES,
     PingInfo,
@@ -185,6 +186,197 @@ class SidecarClientTests(unittest.TestCase):
 
         self.assertEqual("response_too_large", raised.exception.code)
         self.assertEqual(33, stream.tell())
+
+    def test_replay_sends_cursor_fields_and_returns_validated_response(self):
+        response = {
+            "ok": True,
+            "op": "replay",
+            "session_id": "one",
+            "agent": "dsh",
+            "after_seq": 2,
+            "events": [{"kind": "assistant", "text": "hello"}],
+            "count": 1,
+            "last_seq": 3,
+            "truncated": False,
+        }
+
+        class RecordingClient(SidecarClient):
+            def __init__(self):
+                super().__init__(
+                    socket_path="/tmp/unused-agent-sidecar.sock"
+                )
+                self.requests = []
+
+            def _request(self, operation, *, timeout=None, **fields):
+                self.requests.append((operation, timeout, fields))
+                return response
+
+        client = RecordingClient()
+        self.assertIs(response, client.replay("one", 2, limit=16))
+        self.assertEqual(
+            [
+                (
+                    "replay",
+                    DEFAULT_REPLAY_TIMEOUT,
+                    {"session_id": "one", "after_seq": 2, "limit": 16},
+                )
+            ],
+            client.requests,
+        )
+
+        client.replay("one", timeout=None)
+        self.assertEqual(
+            ("replay", None, {"session_id": "one", "after_seq": 0}),
+            client.requests[1],
+        )
+
+    def test_replay_rejects_invalid_arguments_before_connecting(self):
+        client = SidecarClient(socket_path="/tmp/unused-agent-sidecar.sock")
+        invalid = (
+            {"session_id": ""},
+            {"session_id": 5},
+            {"session_id": "one", "after_seq": -1},
+            {"session_id": "one", "after_seq": True},
+            {"session_id": "one", "after_seq": "3"},
+            {"session_id": "one", "limit": 0},
+            {"session_id": "one", "limit": 1025},
+            {"session_id": "one", "limit": True},
+            {"session_id": "one", "timeout": 0},
+        )
+        with mock.patch.object(client, "_connect") as connect:
+            for arguments in invalid:
+                with self.subTest(arguments=arguments):
+                    with self.assertRaises(ValueError):
+                        client.replay(
+                            arguments["session_id"],
+                            arguments.get("after_seq", 0),
+                            limit=arguments.get("limit"),
+                            timeout=arguments.get(
+                                "timeout",
+                                DEFAULT_REPLAY_TIMEOUT,
+                            ),
+                        )
+        connect.assert_not_called()
+
+    def test_replay_rejects_response_without_valid_events_list(self):
+        class StubReplayClient(SidecarClient):
+            def __init__(self, response):
+                super().__init__(
+                    socket_path="/tmp/unused-agent-sidecar.sock"
+                )
+                self.response = response
+
+            def _request(self, operation, *, timeout=None, **fields):
+                del operation, timeout, fields
+                return self.response
+
+        for response in (
+            {"ok": True, "op": "status", "events": []},
+            {"ok": True, "op": "replay"},
+            {"ok": True, "op": "replay", "events": "nope"},
+            {"ok": True, "op": "replay", "events": [1]},
+        ):
+            with self.subTest(response=response):
+                client = StubReplayClient(response)
+                with self.assertRaises(SidecarClientError) as raised:
+                    client.replay("one")
+                self.assertEqual(
+                    "invalid_response",
+                    raised.exception.code,
+                )
+
+    def test_subscribe_with_agents_sends_allowlist_and_accepts_extended_ack(self):
+        client_socket, daemon_socket = socket.socketpair()
+        client = SidecarClient(
+            socket_path="/tmp/unused-agent-sidecar.sock",
+            timeout=0.2,
+        )
+        received = []
+
+        def respond():
+            received.append(daemon_socket.recv(1024))
+            daemon_socket.sendall(
+                b'{"ok":true,"op":"subscribe","agents":["dsh"]}\n'
+                b'{"agent":"dsh","kind":"assistant","text":"hi"}\n'
+            )
+            daemon_socket.close()
+
+        daemon = threading.Thread(target=respond)
+        daemon.start()
+        events = []
+        try:
+            with mock.patch.object(
+                client,
+                "_connect",
+                return_value=client_socket,
+            ):
+                with self.assertRaises(SidecarClientError) as raised:
+                    for event in client.subscribe(agents=["dsh"]):
+                        events.append(event)
+        finally:
+            daemon.join(timeout=1.0)
+
+        self.assertEqual("connection_closed", raised.exception.code)
+        self.assertEqual(
+            [b'{"op":"subscribe","agents":["dsh"]}\n'],
+            received,
+        )
+        self.assertEqual(
+            [{"agent": "dsh", "kind": "assistant", "text": "hi"}],
+            events,
+        )
+
+    def test_subscribe_rejects_invalid_agents_before_connecting(self):
+        client = SidecarClient(socket_path="/tmp/unused-agent-sidecar.sock")
+        with mock.patch.object(client, "_connect") as connect:
+            for agents in ([], [""], [1], ["dsh", ""]):
+                with self.subTest(agents=agents):
+                    with self.assertRaises(ValueError):
+                        list(client.subscribe(agents=agents))
+        connect.assert_not_called()
+
+    def test_module_level_replay_and_subscribe_forward_arguments(self):
+        from sidecar import client as client_module
+
+        instance = mock.Mock()
+        instance.replay.return_value = {"ok": True, "op": "replay"}
+        instance.subscribe.return_value = iter(())
+        with mock.patch.object(
+            client_module,
+            "SidecarClient",
+            return_value=instance,
+        ) as factory:
+            self.assertEqual(
+                {"ok": True, "op": "replay"},
+                client_module.replay(
+                    "one",
+                    after_seq=2,
+                    limit=3,
+                    timeout=None,
+                    socket_path="/tmp/unused-agent-sidecar.sock",
+                ),
+            )
+            list(
+                client_module.subscribe(
+                    agents=["dsh"],
+                    socket_path="/tmp/unused-agent-sidecar.sock",
+                )
+            )
+
+        factory.assert_any_call(
+            socket_path="/tmp/unused-agent-sidecar.sock"
+        )
+        instance.replay.assert_called_once_with(
+            "one",
+            2,
+            limit=3,
+            timeout=None,
+        )
+        instance.subscribe.assert_called_once_with(
+            cancel_event=None,
+            on_ready=None,
+            agents=["dsh"],
+        )
 
     def test_cancelable_subscribe_stops_idle_socket_within_one_second(self):
         client_socket, daemon_socket = socket.socketpair()

@@ -26,11 +26,14 @@ from sidecar.client import SidecarClientError
 from sidecar.cli import (
     RECENT_SECONDS,
     TAIL_ERROR_DEDUPE_LIMIT,
+    _PendingTailArgumentParser,
+    _read_stdin_message,
     build_parser,
     main,
 )
 from sidecar.inject import (
     DEFAULT_SEND_TIMEOUT_SECONDS,
+    MAX_MESSAGE_BYTES,
     SendError,
     SendResult,
     build_send_plan,
@@ -49,7 +52,7 @@ from sidecar.remote import (
 )
 from sidecar.release import ReleaseArtifact, ReleaseError
 from sidecar.scan import ScanError
-from sidecar.send_audit import AuditError
+from sidecar.send_audit import AuditError, make_audit_identity
 from sidecar.tail import JSONLFollower, SessionTailer
 from sidecar.text_utils import normalize_scalar_text, redact_message
 
@@ -5181,6 +5184,402 @@ class SendCLITests(unittest.TestCase):
         )
         self.assertIn("delivery status is unknown", stderr.getvalue())
         self.assertNotIn(message, stderr.getvalue())
+
+    def test_send_parser_and_help_expose_message_stdin_flag(self):
+        parser = build_parser()
+        command_parsers = next(
+            action.choices
+            for action in parser._actions
+            if getattr(action, "dest", None) == "command"
+        )
+        send_help = command_parsers["send"].format_help()
+        stdin_args = parser.parse_args(["send", "abc", "--message-stdin"])
+        positional_args = parser.parse_args(["send", "abc", "hello"])
+
+        self.assertIn("--message-stdin", send_help)
+        self.assertIn("standard input", send_help)
+        self.assertTrue(stdin_args.message_stdin)
+        self.assertIsNone(stdin_args.message)
+        self.assertFalse(positional_args.message_stdin)
+        self.assertEqual("hello", positional_args.message)
+
+    def test_message_sources_are_mutually_exclusive_usage_errors(self):
+        cases = (
+            (
+                [
+                    "send",
+                    "abc",
+                    "POSITIONAL-SECRET",
+                    "--message-stdin",
+                    "--allow-write",
+                ],
+                b"STDIN-SECRET",
+            ),
+            (["send", "abc", "--allow-write"], b""),
+        )
+        for argv, stdin_bytes in cases:
+            with self.subTest(argv=argv):
+                scanner = FakeScanner([make_session("abc")])
+                calls = []
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                code = main(
+                    argv,
+                    scanner=scanner,
+                    stdout=stdout,
+                    stderr=stderr,
+                    stdin=io.BytesIO(stdin_bytes),
+                    send_planner=lambda *args, **kwargs: calls.append(
+                        ("plan", args)
+                    ),
+                    send_executor=lambda *args, **kwargs: calls.append(
+                        ("execute", args)
+                    ),
+                )
+                diagnostic = stderr.getvalue()
+
+                self.assertEqual(2, code)
+                self.assertEqual("", stdout.getvalue())
+                self.assertEqual(1, diagnostic.count("\n"))
+                self.assertIn("send: ", diagnostic)
+                self.assertIn("--message-stdin", diagnostic)
+                self.assertNotIn("SECRET", diagnostic)
+                self.assertEqual([], scanner.recent_calls)
+                self.assertEqual([], calls)
+
+    def test_message_stdin_channel_matches_positional_channel(self):
+        message = "channel prompt 雪\nsecond line"
+        session = make_session("channel-session")
+        planner_calls = []
+        payloads = []
+
+        def planner(selected, received):
+            planner_calls.append((selected, received))
+            return object()
+
+        def executor(plan, **kwargs):
+            return self.result(
+                session,
+                response="done",
+                request_id="request-channel",
+            )
+
+        argv_cases = (
+            (
+                [
+                    "send",
+                    "channel",
+                    message,
+                    "--allow-write",
+                    "--request-id",
+                    "request-channel",
+                    "--json",
+                ],
+                io.BytesIO(b""),
+            ),
+            (
+                [
+                    "send",
+                    "channel",
+                    "--message-stdin",
+                    "--allow-write",
+                    "--request-id",
+                    "request-channel",
+                    "--json",
+                ],
+                io.TextIOWrapper(
+                    io.BytesIO(message.encode("utf-8")),
+                    encoding="utf-8",
+                ),
+            ),
+        )
+        for argv, stdin in argv_cases:
+            with self.subTest(argv=argv[2]):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                code = main(
+                    argv,
+                    scanner=FakeScanner([session]),
+                    stdout=stdout,
+                    stderr=stderr,
+                    stdin=stdin,
+                    send_planner=planner,
+                    send_executor=executor,
+                )
+
+                self.assertEqual(0, code)
+                self.assertEqual("", stderr.getvalue())
+                payloads.append(json.loads(stdout.getvalue()))
+
+        self.assertEqual([(session, message), (session, message)], planner_calls)
+        self.assertEqual(payloads[0], payloads[1])
+        identities = [
+            make_audit_identity(
+                agent=session.agent,
+                session_id=session.session_id,
+                project=session.project,
+                executable_basename="claude",
+                confirmation_mode="allow_write",
+                message=received.encode("utf-8"),
+            )
+            for _selected, received in planner_calls
+        ]
+        self.assertEqual(identities[0], identities[1])
+
+    def test_stdin_message_reuses_existing_validation_fail_closed(self):
+        cases = (
+            (b"", "message must not be blank"),
+            (b" \t\n", "message must not be blank"),
+            (b"nul\x00byte", "message must not contain NUL"),
+        )
+        for stdin_bytes, expected in cases:
+            with self.subTest(expected=expected, stdin_bytes=stdin_bytes):
+                scanner = FakeScanner([make_session("validated-session")])
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                code = main(
+                    ["send", "validated", "--message-stdin", "--allow-write"],
+                    scanner=scanner,
+                    stdout=stdout,
+                    stderr=stderr,
+                    stdin=io.BytesIO(stdin_bytes),
+                    send_executor=lambda *args, **kwargs: self.fail(
+                        "executor must not run"
+                    ),
+                )
+
+                self.assertEqual(2, code)
+                self.assertEqual("", stdout.getvalue())
+                self.assertIn("send: " + expected, stderr.getvalue())
+
+    def test_oversized_stdin_message_fails_closed_before_scanning(self):
+        scanner = FakeScanner([make_session("large-session")])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["send", "large", "--message-stdin", "--allow-write"],
+            scanner=scanner,
+            stdout=stdout,
+            stderr=stderr,
+            stdin=io.BytesIO(b"x" * (MAX_MESSAGE_BYTES + 1)),
+            send_planner=lambda *args, **kwargs: self.fail(
+                "planner must not run"
+            ),
+            send_executor=lambda *args, **kwargs: self.fail(
+                "executor must not run"
+            ),
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("send: message exceeds the size limit", stderr.getvalue())
+        self.assertEqual([], scanner.recent_calls)
+
+    def test_exact_limit_stdin_message_is_accepted(self):
+        message = "x" * MAX_MESSAGE_BYTES
+        session = make_session("limit-session")
+        received = []
+
+        def planner(selected, value):
+            received.append(value)
+            return object()
+
+        code = main(
+            ["send", "limit", "--message-stdin", "--allow-write"],
+            scanner=FakeScanner([session]),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            stdin=io.BytesIO(message.encode("utf-8")),
+            send_planner=planner,
+            send_executor=lambda plan, **kwargs: self.result(session),
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual([message], received)
+
+    def test_invalid_utf8_stdin_message_fails_closed_without_echo(self):
+        scanner = FakeScanner([make_session("utf8-session")])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["send", "utf8", "--message-stdin", "--allow-write"],
+            scanner=scanner,
+            stdout=stdout,
+            stderr=stderr,
+            stdin=io.BytesIO(b"\xff\xfe UTF8-SECRET"),
+            send_planner=lambda *args, **kwargs: self.fail(
+                "planner must not run"
+            ),
+            send_executor=lambda *args, **kwargs: self.fail(
+                "executor must not run"
+            ),
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn(
+            "send: message must contain valid Unicode scalars",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("UTF8-SECRET", stderr.getvalue())
+        self.assertEqual([], scanner.recent_calls)
+
+    def test_interactive_stdin_is_refused_before_reading(self):
+        class InteractiveStdin(io.BytesIO):
+            def isatty(self):
+                return True
+
+            def read(self, *args, **kwargs):
+                raise AssertionError(
+                    "must not block reading an interactive terminal"
+                )
+
+        scanner = FakeScanner([make_session("tty-session")])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["send", "tty", "--message-stdin", "--allow-write"],
+            scanner=scanner,
+            stdout=stdout,
+            stderr=stderr,
+            stdin=InteractiveStdin(b"TYPED-SECRET"),
+            send_planner=lambda *args, **kwargs: self.fail(
+                "planner must not run"
+            ),
+            send_executor=lambda *args, **kwargs: self.fail(
+                "executor must not run"
+            ),
+        )
+        diagnostic = stderr.getvalue()
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual(1, diagnostic.count("\n"))
+        self.assertIn(
+            "send: standard input is an interactive terminal; "
+            "pipe or redirect the message",
+            diagnostic,
+        )
+        self.assertNotIn("TYPED-SECRET", diagnostic)
+        self.assertEqual([], scanner.recent_calls)
+
+    def test_keyboard_interrupt_during_stdin_read_exits_130_cleanly(self):
+        class InterruptedStdin(io.BytesIO):
+            def read(self, *args, **kwargs):
+                raise KeyboardInterrupt
+
+        scanner = FakeScanner([make_session("interrupt-session")])
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            ["send", "interrupt", "--message-stdin", "--allow-write"],
+            scanner=scanner,
+            stdout=stdout,
+            stderr=stderr,
+            stdin=InterruptedStdin(),
+            send_planner=lambda *args, **kwargs: self.fail(
+                "planner must not run"
+            ),
+            send_executor=lambda *args, **kwargs: self.fail(
+                "executor must not run"
+            ),
+        )
+        diagnostic = stderr.getvalue()
+
+        self.assertEqual(130, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual(1, diagnostic.count("\n"))
+        self.assertIn(
+            "send: interrupted while reading the message from standard "
+            "input; nothing was delivered",
+            diagnostic,
+        )
+        self.assertNotIn("Traceback", diagnostic)
+        self.assertEqual([], scanner.recent_calls)
+
+    def test_unreadable_stdin_reports_dedicated_diagnostic(self):
+        class BrokenStdin(io.BytesIO):
+            def read(self, *args, **kwargs):
+                raise OSError("stdin is closed")
+
+        cases = (
+            ("read raises OSError", BrokenStdin()),
+            ("text stream yields str chunks", io.StringIO("text chunk")),
+        )
+        for label, stdin in cases:
+            with self.subTest(label=label):
+                scanner = FakeScanner([make_session("unreadable-session")])
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                code = main(
+                    ["send", "unreadable", "--message-stdin", "--allow-write"],
+                    scanner=scanner,
+                    stdout=stdout,
+                    stderr=stderr,
+                    stdin=stdin,
+                    send_executor=lambda *args, **kwargs: self.fail(
+                        "executor must not run"
+                    ),
+                )
+                diagnostic = stderr.getvalue()
+
+                self.assertEqual(2, code)
+                self.assertEqual("", stdout.getvalue())
+                self.assertIn(
+                    "send: standard input could not be read as bytes",
+                    diagnostic,
+                )
+                self.assertNotIn("message must be text", diagnostic)
+                self.assertEqual([], scanner.recent_calls)
+
+    def test_detached_stdin_raises_send_error_not_attribute_error(self):
+        with self.assertRaises(SendError) as raised:
+            _read_stdin_message(None)
+
+        self.assertEqual("stdin_unreadable", raised.exception.code)
+
+    def test_pending_tail_backport_is_scoped_to_send_subparser(self):
+        parser = build_parser()
+        command_parsers = next(
+            action.choices
+            for action in parser._actions
+            if getattr(action, "dest", None) == "command"
+        )
+
+        self.assertNotIsInstance(parser, _PendingTailArgumentParser)
+        self.assertIsInstance(
+            command_parsers["send"],
+            _PendingTailArgumentParser,
+        )
+        for name, subparser in command_parsers.items():
+            if name != "send":
+                self.assertNotIsInstance(
+                    subparser,
+                    _PendingTailArgumentParser,
+                    "backport must stay scoped to send: {}".format(name),
+                )
+
+    def test_pending_tail_matcher_mirrors_upstream_zero_width_semantics(self):
+        parser = _PendingTailArgumentParser(prog="probe", add_help=False)
+        parser.add_argument("--flag", action="store_true")
+        parser.add_argument("head")
+        parser.add_argument("tail", nargs="*")
+
+        filled = parser.parse_args(["a", "--flag", "--", "-b"])
+        empty = parser.parse_args(["a", "--flag"])
+
+        self.assertEqual("a", filled.head)
+        self.assertEqual(["-b"], filled.tail)
+        self.assertEqual("a", empty.head)
+        self.assertEqual([], empty.tail)
 
 
 class RegistryTests(unittest.TestCase):

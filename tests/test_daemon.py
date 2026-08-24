@@ -19,7 +19,8 @@ import sidecar.daemon as daemon_module
 from sidecar import bus
 from sidecar.adapters.base import Adapter
 from sidecar.adapters.cursor import CursorAdapter
-from sidecar.client import SidecarClient
+from sidecar.adapters.dsh import ReplayPage
+from sidecar.client import SidecarClient, SidecarClientError
 from sidecar.cursor_chat import (
     default_snapshot_broker,
     reset_default_snapshot_broker,
@@ -52,6 +53,70 @@ class FakeAdapter(Adapter):
                 text,
             )
         ]
+
+
+class FakeReplayAdapter(FakeAdapter):
+    def __init__(self, records=(), failure=None):
+        self.records = list(records)
+        self.failure = failure
+        self.calls = []
+
+    def replay(self, session, after_seq=None, max_records=1024, **kwargs):
+        del kwargs
+        self.calls.append((session.session_id, after_seq, max_records))
+        if self.failure is not None:
+            raise self.failure
+        floor = 0 if after_seq is None else after_seq
+        matched = [
+            record
+            for record in self.records
+            if not isinstance(record, dict)
+            or (
+                isinstance(record.get("seq"), int)
+                and record["seq"] > floor
+            )
+        ]
+        return matched[:max_records]
+
+    def normalize(self, record, session):
+        if record.get("type") == "mapping":
+            return [
+                {
+                    "agent": session.agent,
+                    "session_id": session.session_id,
+                    "kind": "mapping",
+                    "text": record.get("text"),
+                }
+            ]
+        return super().normalize(record, session)
+
+
+class BudgetStoppedReplayAdapter(FakeReplayAdapter):
+    """Serve one record per page with an honest ``exhausted`` signal.
+
+    Mimics the dsh adapter ending a page on its retained-byte or decode-time
+    budget with fewer records than ``max_records``.
+    """
+
+    def replay(self, session, after_seq=None, max_records=1024, **kwargs):
+        del kwargs
+        self.calls.append((session.session_id, after_seq, max_records))
+        floor = 0 if after_seq is None else after_seq
+        matched = [
+            record
+            for record in self.records
+            if isinstance(record.get("seq"), int) and record["seq"] > floor
+        ]
+        page = matched[: min(1, max_records)]
+        return ReplayPage(page, exhausted=len(page) == len(matched))
+
+
+class StalledReplayAdapter(FakeReplayAdapter):
+    """Mimic a replay that budget-stops before finding any matching record."""
+
+    def replay(self, session, after_seq=None, max_records=1024, **kwargs):
+        del session, after_seq, max_records, kwargs
+        return ReplayPage([], exhausted=False)
 
 
 class FlakyAliasAdapter(FakeAdapter):
@@ -574,8 +639,12 @@ class DaemonIntegrationTests(unittest.TestCase):
         with connection:
             stream = connection.makefile("rwb", buffering=0)
             stream.write(b'{"op":"subscribe"}\n')
-            acknowledgement = json.loads(stream.readline())
-            self.assertEqual({"ok": True, "op": "subscribe"}, acknowledgement)
+            # Byte-exact legacy acknowledgement: old clients depend on this
+            # exact serialization, not just on JSON-equivalent content.
+            self.assertEqual(
+                b'{"ok":true,"op":"subscribe"}\n',
+                stream.readline(),
+            )
 
             with self.transcript.open("a", encoding="utf-8") as output:
                 for _ in range(256):
@@ -590,6 +659,306 @@ class DaemonIntegrationTests(unittest.TestCase):
 
         self.assertEqual("assistant", event["kind"])
         self.assertEqual("after ignored rows", event["text"])
+
+    def _open_protocol_stream(self, connection):
+        connection.settimeout(2.0)
+        connection.connect(str(self.daemon.socket_path))
+        return connection.makefile("rwb", buffering=0)
+
+    def _register_replay_adapter(self, adapter):
+        import sidecar.adapters as adapters_package
+
+        saved = dict(adapters_package.registry)
+
+        def restore():
+            adapters_package.registry.clear()
+            adapters_package.registry.update(saved)
+
+        self.addCleanup(restore)
+        adapters_package.register_adapter(adapter)
+        return adapter
+
+    def test_subscribe_agents_filter_streams_only_selected_agents(self):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        with connection:
+            stream = self._open_protocol_stream(connection)
+            stream.write(b'{"op":"subscribe","agents":["other"]}\n')
+            acknowledgement = json.loads(stream.readline())
+            self.assertEqual(
+                {"ok": True, "op": "subscribe", "agents": ["other"]},
+                acknowledgement,
+            )
+
+            self.daemon._publish_event(
+                Event(
+                    "2026-08-24T20:00:00+08:00",
+                    "fake",
+                    "one",
+                    "assistant",
+                    "unwanted noise",
+                )
+            )
+            self.daemon._publish_event(
+                Event(
+                    "2026-08-24T20:00:01+08:00",
+                    "other",
+                    "two",
+                    "assistant",
+                    "wanted event",
+                )
+            )
+
+            event = json.loads(stream.readline())
+
+        self.assertEqual("other", event["agent"])
+        self.assertEqual("two", event["session_id"])
+        self.assertEqual("wanted event", event["text"])
+
+    def test_subscribe_null_agents_keeps_full_stream_and_legacy_ack(self):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        with connection:
+            stream = self._open_protocol_stream(connection)
+            stream.write(b'{"op":"subscribe","agents":null}\n')
+            # An explicit null allowlist must keep the legacy acknowledgement
+            # byte-for-byte identical to a request without the field.
+            self.assertEqual(
+                b'{"ok":true,"op":"subscribe"}\n',
+                stream.readline(),
+            )
+
+            self.daemon._publish_event(
+                Event(
+                    "2026-08-24T20:00:00+08:00",
+                    "fake",
+                    "one",
+                    "assistant",
+                    "first",
+                )
+            )
+            self.daemon._publish_event(
+                Event(
+                    "2026-08-24T20:00:01+08:00",
+                    "other",
+                    "two",
+                    "assistant",
+                    "second",
+                )
+            )
+
+            agents = [
+                json.loads(stream.readline())["agent"]
+                for _ in range(2)
+            ]
+
+        self.assertEqual(["fake", "other"], agents)
+
+    def test_subscribe_invalid_agents_reject_without_disconnecting(self):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        with connection:
+            stream = self._open_protocol_stream(connection)
+            payloads = (
+                b'{"op":"subscribe","agents":[]}\n',
+                b'{"op":"subscribe","agents":"dsh"}\n',
+                b'{"op":"subscribe","agents":[""]}\n',
+                b'{"op":"subscribe","agents":[1]}\n',
+                b'{"op":"subscribe","agents":{"dsh":true}}\n',
+            )
+            for payload in payloads:
+                stream.write(payload)
+                response = json.loads(stream.readline())
+                self.assertFalse(response["ok"], payload)
+                self.assertEqual(
+                    "invalid_request",
+                    response["error"]["code"],
+                    payload,
+                )
+            stream.write(b'{"op":"ping"}\n')
+            self.assertTrue(json.loads(stream.readline())["ok"])
+
+    def test_replay_pages_seq_filtered_events_with_cursor_and_bounds(self):
+        adapter = self._register_replay_adapter(
+            FakeReplayAdapter(
+                [
+                    {"seq": index, "type": "assistant", "text": "event {}".format(index)}
+                    for index in range(1, 6)
+                ]
+            )
+        )
+        client = SidecarClient(runtime_dir=self.runtime, timeout=2.0)
+
+        full = client.replay("one")
+        self.assertEqual("replay", full["op"])
+        self.assertEqual("fake", full["agent"])
+        self.assertEqual(0, full["after_seq"])
+        self.assertEqual(
+            ["event 1", "event 2", "event 3", "event 4", "event 5"],
+            [event["text"] for event in full["events"]],
+        )
+        self.assertEqual(5, full["count"])
+        self.assertEqual(5, full["last_seq"])
+        self.assertFalse(full["truncated"])
+        self.assertEqual(
+            ("one", 0, daemon_module.REPLAY_DEFAULT_LIMIT),
+            adapter.calls[0],
+        )
+
+        incremental = client.replay("one", 3)
+        self.assertEqual(3, incremental["after_seq"])
+        self.assertEqual(
+            ["event 4", "event 5"],
+            [event["text"] for event in incremental["events"]],
+        )
+        self.assertEqual(5, incremental["last_seq"])
+        self.assertFalse(incremental["truncated"])
+
+        first_page = client.replay("one", limit=2)
+        self.assertEqual(
+            ["event 1", "event 2"],
+            [event["text"] for event in first_page["events"]],
+        )
+        self.assertEqual(2, first_page["last_seq"])
+        self.assertTrue(first_page["truncated"])
+
+        second_page = client.replay(
+            "one",
+            first_page["last_seq"],
+            limit=2,
+        )
+        self.assertEqual(
+            ["event 3", "event 4"],
+            [event["text"] for event in second_page["events"]],
+        )
+        self.assertTrue(second_page["truncated"])
+
+        empty = client.replay("one", 5, limit=2)
+        self.assertEqual([], empty["events"])
+        self.assertEqual(0, empty["count"])
+        self.assertIsNone(empty["last_seq"])
+        self.assertFalse(empty["truncated"])
+
+    def test_replay_budget_stopped_pages_stay_truncated_until_true_end(self):
+        # Regression for the truncated false negative: when the adapter's
+        # byte/time budget ends a page with fewer records than `limit`, the
+        # daemon must still report truncated:true so paging consumers keep
+        # fetching the retained events instead of silently stopping early.
+        self._register_replay_adapter(
+            BudgetStoppedReplayAdapter(
+                [
+                    {
+                        "seq": index,
+                        "type": "assistant",
+                        "text": "event {}".format(index),
+                    }
+                    for index in (1, 2, 3)
+                ]
+            )
+        )
+        client = SidecarClient(runtime_dir=self.runtime, timeout=2.0)
+
+        pages = []
+        cursor = 0
+        for _ in range(4):
+            page = client.replay("one", cursor, limit=8)
+            pages.append(page)
+            if not page["truncated"]:
+                break
+            cursor = page["last_seq"]
+
+        self.assertEqual(
+            [["event 1"], ["event 2"], ["event 3"]],
+            [[event["text"] for event in page["events"]] for page in pages],
+        )
+        self.assertEqual([1, 2, 3], [page["last_seq"] for page in pages])
+        self.assertEqual(
+            [True, True, False],
+            [page["truncated"] for page in pages],
+        )
+
+    def test_replay_early_stopped_page_without_cursor_is_not_truncated(self):
+        # A budget stop before any matching record leaves no cursor to page
+        # with, so reporting truncated:true would only send consumers into a
+        # no-progress retry of the identical page.
+        self._register_replay_adapter(StalledReplayAdapter())
+        client = SidecarClient(runtime_dir=self.runtime, timeout=2.0)
+
+        page = client.replay("one")
+
+        self.assertEqual([], page["events"])
+        self.assertEqual(0, page["count"])
+        self.assertIsNone(page["last_seq"])
+        self.assertFalse(page["truncated"])
+
+    def test_replay_skips_non_record_values_and_accepts_mapping_events(self):
+        self._register_replay_adapter(
+            FakeReplayAdapter(
+                [
+                    {"seq": 1, "type": "assistant", "text": "typed event"},
+                    "junk-not-a-record",
+                    {"seq": 2, "type": "mapping", "text": "mapping event"},
+                    {"seq": 3, "type": "assistant"},
+                ]
+            )
+        )
+        client = SidecarClient(runtime_dir=self.runtime, timeout=2.0)
+
+        response = client.replay("one")
+
+        self.assertEqual(
+            ["typed event", "mapping event"],
+            [event["text"] for event in response["events"]],
+        )
+        self.assertEqual("mapping", response["events"][1]["kind"])
+        self.assertEqual(3, response["last_seq"])
+        self.assertFalse(response["truncated"])
+
+    def test_replay_unknown_session_unsupported_agent_and_failure(self):
+        client = SidecarClient(runtime_dir=self.runtime, timeout=2.0)
+
+        with self.assertRaises(SidecarClientError) as unsupported:
+            client.replay("one")
+        self.assertEqual("replay_unsupported", unsupported.exception.code)
+
+        adapter = self._register_replay_adapter(
+            FakeReplayAdapter(
+                [{"seq": 1, "type": "assistant", "text": "kept"}]
+            )
+        )
+        with self.assertRaises(SidecarClientError) as missing:
+            client.replay("missing")
+        self.assertEqual("unknown_session", missing.exception.code)
+
+        adapter.failure = RuntimeError("/private/transcript boom")
+        with self.assertRaises(SidecarClientError) as failed:
+            client.replay("one")
+        self.assertEqual("replay_failed", failed.exception.code)
+        self.assertNotIn("private", str(failed.exception))
+
+    def test_replay_invalid_parameters_reject_without_disconnecting(self):
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        with connection:
+            stream = self._open_protocol_stream(connection)
+            payloads = (
+                b'{"op":"replay"}\n',
+                b'{"op":"replay","session_id":""}\n',
+                b'{"op":"replay","session_id":5}\n',
+                b'{"op":"replay","session_id":"one","after_seq":-1}\n',
+                b'{"op":"replay","session_id":"one","after_seq":true}\n',
+                b'{"op":"replay","session_id":"one","after_seq":"3"}\n',
+                b'{"op":"replay","session_id":"one","limit":0}\n',
+                b'{"op":"replay","session_id":"one","limit":1025}\n',
+                b'{"op":"replay","session_id":"one","limit":true}\n',
+            )
+            for payload in payloads:
+                stream.write(payload)
+                response = json.loads(stream.readline())
+                self.assertFalse(response["ok"], payload)
+                self.assertEqual(
+                    "invalid_request",
+                    response["error"]["code"],
+                    payload,
+                )
+            stream.write(b'{"op":"ping"}\n')
+            self.assertTrue(json.loads(stream.readline())["ok"])
 
 
 class DaemonHttpIntegrationTests(unittest.TestCase):

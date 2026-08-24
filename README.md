@@ -215,6 +215,7 @@ The installer creates symlinks at:
 - `~/.local/bin/agent-sidecar`
 - `~/.cursor/skills/agent-sidecar`
 - `~/.claude/skills/agent-sidecar`
+- `~/.dsh/skills/agent-sidecar`
 
 Ensure `~/.local/bin` is on `PATH`. The links point into this checkout, so keep
 the repository in place or rerun the installer after moving it. Reinstalling is
@@ -222,7 +223,7 @@ idempotent for links into this repository; the script refuses to overwrite
 unrelated files, directories, or symlinks. See [Uninstall](#uninstall) to
 remove only links owned by this checkout.
 
-This checkout installer is retained for users who want the CLI and both agent
+This checkout installer is retained for users who want the CLI and the agent
 skill links to follow a working tree. It is an alternative to a `pipx` CLI
 install because both normally use `~/.local/bin/agent-sidecar`.
 
@@ -439,11 +440,26 @@ agent-sidecar send <session-prefix> "Please review the latest test failure." --a
 agent-sidecar send <session-prefix> "Summarize your result." --allow-write --timeout 120 --json
 agent-sidecar send <session-prefix> "Retry-safe request." --allow-write --request-id <stable-unique-id> --json
 agent-sidecar send <session-prefix> --allow-write -- "-message beginning with a hyphen"
+printf '%s' "Keep this out of the agent-sidecar argv." | agent-sidecar send <session-prefix> --message-stdin --allow-write
 ```
 
 Use it only when the user explicitly requests that message or action.
 `--allow-write` is mandatory because the native agent can contact its provider,
 run tools, and modify session or workspace state.
+
+`--message-stdin` reads the message from standard input instead of the
+positional argument, so the message does not appear in the `agent-sidecar`
+argv, shell history, or process listings. The two message sources are mutually
+exclusive: provide exactly one. Standard input is read as bytes with the same
+byte limit and then must decode as strict UTF-8; the message passes the same
+validation, injection pipeline, audit identity, receipts, and exit codes as a
+positional message. Standard input must be piped or redirected: an interactive
+terminal is refused with a usage error (exit `2`) instead of silently waiting
+for typed input, and interrupting the read exits `130` before any delivery is
+attempted. Input bytes are used exactly as provided, so a trailing newline
+(for example from `echo`) is preserved, counts toward the byte limit, and
+changes the audit fingerprint; the example above uses `printf '%s'` to avoid
+one.
 
 `--request-id` is optional. When omitted, Sidecar creates a cryptographically
 random opaque ID, but callers that may need retry safety should supply and
@@ -531,9 +547,12 @@ the native resume completed successfully and delivery is reported as
 `delivery: "unknown"`; exit `2` is a preflight or usage rejection before a
 valid resume result; interruption exits `130` and delivery is unknown.
 
-The positional message is present in the `agent-sidecar` command argv and may
-be stored in shell history or visible in process listings. For Cursor CLI it is
-also present in the native child argv. Do not use this command for secrets.
+A positional message is present in the `agent-sidecar` command argv and may be
+stored in shell history or visible in process listings; `--message-stdin`
+keeps the message out of the Sidecar command line. For Cursor CLI the prompt
+is still present in the native child argv whichever source is used, because
+that upstream resume contract requires argv transport. Do not use this command
+for secrets.
 
 The only recovery command for a corrupt, unsafe, or replaced send-audit
 namespace is:
@@ -649,10 +668,32 @@ and `daemon stop` signals a process only after the socket PID and PID file
 agree.
 
 The socket uses bounded newline-delimited JSON requests and responses. Its
-operations are `ping`, `status`, and `subscribe`: `status` returns the current
-session snapshot plus scan and tailer diagnostics, while `subscribe`
-acknowledges the request and then streams normalized event objects. User-facing
-daemon consumers report bounded, sanitized tailer diagnostics on stderr.
+operations are `ping`, `status`, `subscribe`, and `replay`: `status` returns
+the current session snapshot plus scan and tailer diagnostics, while
+`subscribe` acknowledges the request and then streams normalized event
+objects. A `subscribe` request may carry an optional nonempty `agents` array
+so the daemon streams only events from those agent names; omitting the field
+keeps the existing full stream, and filtered-out events never consume the
+subscriber's bounded queue.
+
+`replay` returns one bounded page of a session's historical events whose
+`seq` cursor is greater than `after_seq` (default 0, meaning from the start),
+reading at most `limit` records per page (1024 maximum) and reporting a
+`last_seq` cursor plus a `truncated` flag for paging. `truncated` is true
+whenever more retained events may remain after the returned cursor — the page
+reached `limit`, or the adapter's own bounded decode stopped the page early
+on its byte or time budget — so paging consumers keep fetching until a page
+reports `truncated: false` at the true end of the retained transcript. Its
+data source is the
+session adapter's own bounded local-transcript replay — currently only `dsh`
+sessions provide one — so it returns only events that are still retained in
+that transcript and carry a `seq` cursor. It cannot recover events the source
+never persisted or that exceed the bounded decode; sessions of other agents
+report `replay_unsupported`, and a session absent from the current snapshot
+reports `unknown_session`. Events dropped from a slow subscriber's bounded
+live queue can be backfilled through `replay` only while they remain in the
+retained transcript. User-facing daemon consumers report bounded, sanitized
+tailer diagnostics on stderr.
 
 The daemon also writes structured diagnostics to private `daemon.jsonl` in the
 mode-`0700` runtime directory. The current mode-`0600` file is bounded to 2 MiB
@@ -718,7 +759,7 @@ event streams.
 
 ## Agent skill integration
 
-The installed Cursor and Claude skill links expose the same
+The installed Cursor, Claude, and dsh skill links expose the same
 `skills/agent-sidecar` bundle. The skill instructs agents to query
 `agent-sidecar status --json` first for local observation, use remote monitoring
 only on request, never hide remote watch failures or gap warnings, never
@@ -733,6 +774,54 @@ or action; that request supplies the permission represented by `--allow-write`,
 so no second confirmation is required. It never infers send consent from
 monitoring, never retries an unknown delivery or pending request, and never
 invokes audit reset automatically.
+
+## DSH plugin
+
+The `plugin/` directory ships `@shendeguize/dsh-agent-sidecar`, a native DSH
+plugin that brings Agent Sidecar into the dsh web interface: a cross-agent
+monitoring board, session-detail timelines with dsh lineage and search, opt-in
+message injection into observed sessions, opt-in AI bypass analysis, and an
+embedded agent-sidecar skill provider. The plugin consumes the sidecar daemon
+over its Unix socket and manages the daemon lifecycle with a
+probe-adopt-else-host strategy; it never installs the sidecar CLI itself.
+
+Install it into a dsh profile; the command delegates package resolution to
+pnpm:
+
+```sh
+dsh plugin --profile web add @shendeguize/dsh-agent-sidecar
+```
+
+Every configuration key has a default, so a bare plugin row mounts with zero
+configuration. To override defaults, add a `config:` block to the plugin's row
+in the profile's `cordis.patch.yml`:
+
+```yaml
+- id: agent-sidecar
+  config:
+    daemon:
+      policy: adopt-only
+```
+
+Key configuration, summarized:
+
+- `daemon.policy` (default `adopt-or-host`) selects daemon lifecycle
+  management: probe and adopt an existing daemon, otherwise host one.
+  `adopt-only` never spawns, and `off` leaves the lifecycle alone.
+- `inject.enabled` (default **off**) is the master write gate. While off,
+  injection affordances are hidden and write actions are refused server-side.
+  Do not enable it on multi-user hosts; see the
+  [Security Policy](SECURITY.md).
+- `analysis.enabled` (default **off**) gates AI bypass analysis, which
+  consumes model tokens. `analysis.provider` and `analysis.model` optionally
+  route analysis sessions to an explicit model; when unset, the host's
+  default model selection is reused.
+- `skill.provide` (default on) embeds the agent-sidecar skill through the dsh
+  skill registry; a filesystem-installed skill of the same name automatically
+  takes precedence.
+
+The full configuration table, daemon supervision semantics, guard details,
+and development workflow live in the [plugin manual](plugin/README.md).
 
 ## Development
 

@@ -7,11 +7,22 @@ import socket
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+)
 
-from sidecar.daemon import SOCKET_NAME, default_runtime_dir
+from sidecar.daemon import REPLAY_MAX_LIMIT, SOCKET_NAME, default_runtime_dir
 
 DEFAULT_TIMEOUT = 1.0
+DEFAULT_REPLAY_TIMEOUT = 15.0
 CANCEL_POLL_SECONDS = 0.25
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 DEFAULT_RESPONSE_BYTES = MAX_RESPONSE_BYTES
@@ -157,9 +168,9 @@ class SidecarClient:
 
         return [dict(error) for error in self._tail_errors]
 
-    def _connect(self) -> socket.socket:
+    def _connect(self, timeout: Optional[float] = None) -> socket.socket:
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        connection.settimeout(self.timeout)
+        connection.settimeout(self.timeout if timeout is None else timeout)
         try:
             connection.connect(str(self.socket_path))
         except (OSError, socket.timeout) as error:
@@ -292,14 +303,22 @@ class SidecarClient:
                 code="invalid_response",
             )
 
-    def _request(self, operation: str) -> Dict[str, Any]:
-        connection = self._connect()
+    def _request(
+        self,
+        operation: str,
+        *,
+        timeout: Optional[float] = None,
+        **fields: Any
+    ) -> Dict[str, Any]:
+        connection = self._connect(timeout=timeout)
         try:
             with connection:
                 stream = connection.makefile("rwb")
                 try:
+                    payload: Dict[str, Any] = {"op": operation}
+                    payload.update(fields)
                     request = json.dumps(
-                        {"op": operation},
+                        payload,
                         separators=(",", ":"),
                     ).encode("utf-8")
                     stream.write(request + b"\n")
@@ -358,19 +377,102 @@ class SidecarClient:
         self._tail_errors = tuple(dict(error) for error in tail_errors)
         return sessions
 
+    def replay(
+        self,
+        session_id: str,
+        after_seq: int = 0,
+        *,
+        limit: Optional[int] = None,
+        timeout: Optional[float] = DEFAULT_REPLAY_TIMEOUT,
+    ) -> Dict[str, Any]:
+        """Return one bounded page of replayed events after ``after_seq``.
+
+        The response dictionary carries ``events``, ``last_seq``, and
+        ``truncated`` so callers can page with the returned cursor.
+        ``limit`` must be an integer from 1 through the daemon maximum of
+        1024. The default per-request ``timeout`` covers the daemon's
+        bounded transcript decode; pass ``None`` to use the client timeout
+        instead.
+        """
+
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("session_id must be a nonempty string")
+        if (
+            isinstance(after_seq, bool)
+            or not isinstance(after_seq, int)
+            or after_seq < 0
+        ):
+            raise ValueError("after_seq must be a nonnegative integer")
+        fields: Dict[str, Any] = {
+            "session_id": session_id,
+            "after_seq": after_seq,
+        }
+        if limit is not None:
+            if (
+                isinstance(limit, bool)
+                or not isinstance(limit, int)
+                or not 1 <= limit <= REPLAY_MAX_LIMIT
+            ):
+                raise ValueError(
+                    "limit must be an integer from 1 through {}".format(
+                        REPLAY_MAX_LIMIT
+                    )
+                )
+            fields["limit"] = limit
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be positive")
+        response = self._request("replay", timeout=timeout, **fields)
+        events = response.get("events")
+        if (
+            response.get("op") != "replay"
+            or not isinstance(events, list)
+            or not all(isinstance(event, dict) for event in events)
+        ):
+            raise SidecarClientError(
+                "daemon replay response has no valid events list",
+                code="invalid_response",
+            )
+        return response
+
+    @staticmethod
+    def _subscribe_request(agents: Optional[Iterable[str]]) -> bytes:
+        if agents is None:
+            return b'{"op":"subscribe"}\n'
+        names = list(agents)
+        if not names or any(
+            not isinstance(name, str) or not name for name in names
+        ):
+            raise ValueError(
+                "agents must be a nonempty collection of nonempty agent names"
+            )
+        return (
+            json.dumps(
+                {"op": "subscribe", "agents": names},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+
     def subscribe(
         self,
         cancel_event: Optional[threading.Event] = None,
         on_ready: Optional[Callable[[], None]] = None,
+        agents: Optional[Iterable[str]] = None,
     ) -> Iterator[Dict[str, Any]]:
-        """Yield normalized event dictionaries until disconnected or closed."""
+        """Yield normalized event dictionaries until disconnected or closed.
 
+        An optional ``agents`` allowlist asks the daemon to stream only
+        events from those agent names; omitting it keeps the full stream.
+        """
+
+        request = self._subscribe_request(agents)
         if cancel_event is not None:
             if cancel_event.is_set():
                 return
             yield from self._subscribe_cancelable(
                 cancel_event,
                 on_ready=on_ready,
+                request=request,
             )
             return
 
@@ -380,7 +482,7 @@ class SidecarClient:
                 stream = connection.makefile("rwb")
                 try:
                     try:
-                        stream.write(b'{"op":"subscribe"}\n')
+                        stream.write(request)
                         stream.flush()
                     except (OSError, socket.timeout) as error:
                         raise SidecarClientError(
@@ -414,6 +516,7 @@ class SidecarClient:
         cancel_event: threading.Event,
         *,
         on_ready: Optional[Callable[[], None]] = None,
+        request: bytes = b'{"op":"subscribe"}\n',
     ) -> Iterator[Dict[str, Any]]:
         connection = self._connect()
         pending = bytearray()
@@ -423,7 +526,7 @@ class SidecarClient:
                 if cancel_event.is_set():
                     return
                 try:
-                    connection.sendall(b'{"op":"subscribe"}\n')
+                    connection.sendall(request)
                 except (OSError, socket.timeout) as error:
                     raise SidecarClientError(
                         "subscribe request failed: {}".format(error),
@@ -462,20 +565,39 @@ def status(**kwargs: Any) -> List[Dict[str, Any]]:
     return SidecarClient(**kwargs).status()
 
 
+def replay(
+    session_id: str,
+    *,
+    after_seq: int = 0,
+    limit: Optional[int] = None,
+    timeout: Optional[float] = DEFAULT_REPLAY_TIMEOUT,
+    **kwargs: Any
+) -> Dict[str, Any]:
+    return SidecarClient(**kwargs).replay(
+        session_id,
+        after_seq,
+        limit=limit,
+        timeout=timeout,
+    )
+
+
 def subscribe(
     *,
     cancel_event: Optional[threading.Event] = None,
     on_ready: Optional[Callable[[], None]] = None,
+    agents: Optional[Iterable[str]] = None,
     **kwargs: Any
 ) -> Iterator[Dict[str, Any]]:
     return SidecarClient(**kwargs).subscribe(
         cancel_event=cancel_event,
         on_ready=on_ready,
+        agents=agents,
     )
 
 
 __all__ = [
     "CANCEL_POLL_SECONDS",
+    "DEFAULT_REPLAY_TIMEOUT",
     "DEFAULT_RESPONSE_BYTES",
     "HttpPingInfo",
     "MAX_RESPONSE_BYTES",
@@ -483,6 +605,7 @@ __all__ = [
     "SidecarClient",
     "SidecarClientError",
     "ping",
+    "replay",
     "status",
     "subscribe",
 ]
