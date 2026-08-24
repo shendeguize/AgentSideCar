@@ -439,11 +439,26 @@ agent-sidecar send <session-prefix> "Please review the latest test failure." --a
 agent-sidecar send <session-prefix> "Summarize your result." --allow-write --timeout 120 --json
 agent-sidecar send <session-prefix> "Retry-safe request." --allow-write --request-id <stable-unique-id> --json
 agent-sidecar send <session-prefix> --allow-write -- "-message beginning with a hyphen"
+printf '%s' "Keep this out of the agent-sidecar argv." | agent-sidecar send <session-prefix> --message-stdin --allow-write
 ```
 
 Use it only when the user explicitly requests that message or action.
 `--allow-write` is mandatory because the native agent can contact its provider,
 run tools, and modify session or workspace state.
+
+`--message-stdin` reads the message from standard input instead of the
+positional argument, so the message does not appear in the `agent-sidecar`
+argv, shell history, or process listings. The two message sources are mutually
+exclusive: provide exactly one. Standard input is read as bytes with the same
+byte limit and then must decode as strict UTF-8; the message passes the same
+validation, injection pipeline, audit identity, receipts, and exit codes as a
+positional message. Standard input must be piped or redirected: an interactive
+terminal is refused with a usage error (exit `2`) instead of silently waiting
+for typed input, and interrupting the read exits `130` before any delivery is
+attempted. Input bytes are used exactly as provided, so a trailing newline
+(for example from `echo`) is preserved, counts toward the byte limit, and
+changes the audit fingerprint; the example above uses `printf '%s'` to avoid
+one.
 
 `--request-id` is optional. When omitted, Sidecar creates a cryptographically
 random opaque ID, but callers that may need retry safety should supply and
@@ -531,9 +546,12 @@ the native resume completed successfully and delivery is reported as
 `delivery: "unknown"`; exit `2` is a preflight or usage rejection before a
 valid resume result; interruption exits `130` and delivery is unknown.
 
-The positional message is present in the `agent-sidecar` command argv and may
-be stored in shell history or visible in process listings. For Cursor CLI it is
-also present in the native child argv. Do not use this command for secrets.
+A positional message is present in the `agent-sidecar` command argv and may be
+stored in shell history or visible in process listings; `--message-stdin`
+keeps the message out of the Sidecar command line. For Cursor CLI the prompt
+is still present in the native child argv whichever source is used, because
+that upstream resume contract requires argv transport. Do not use this command
+for secrets.
 
 The only recovery command for a corrupt, unsafe, or replaced send-audit
 namespace is:

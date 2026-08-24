@@ -390,10 +390,21 @@ agent-sidecar send <session-prefix> "Please review the latest test failure." --a
 agent-sidecar send <session-prefix> "Summarize your result." --allow-write --timeout 120 --json
 agent-sidecar send <session-prefix> "Retry-safe request." --allow-write --request-id <stable-unique-id> --json
 agent-sidecar send <session-prefix> --allow-write -- "-message beginning with a hyphen"
+printf '%s' "Keep this out of the agent-sidecar argv." | agent-sidecar send <session-prefix> --message-stdin --allow-write
 ```
 
 只能在用户明确要求该消息或操作时使用。`--allow-write` 是强制参数，因为原生
 Agent 可以联系其服务提供方、运行工具并修改会话或工作区状态。
+
+`--message-stdin` 从标准输入读取消息以替代位置参数，因此消息不会出现在
+`agent-sidecar` 的 argv、Shell 历史或进程列表中。两种消息来源互斥：必须恰好
+提供一种。标准输入按字节读入并施加相同的字节上限，随后必须按严格 UTF-8
+解码；消息经过与位置参数完全相同的校验、注入管线、审计身份、回执和退出码。
+标准输入必须来自管道或重定向：交互式终端会被用法错误拒绝（退出码 `2`），
+而不会静默等待键盘输入；读取期间被中断时以退出码 `130` 退出，且不会发起
+任何投递。输入字节按原样使用，因此尾随换行（例如来自 `echo`）会被保留、
+计入字节上限并改变审计指纹；上面的示例使用 `printf '%s'` 以避免引入尾随
+换行。
 
 `--request-id` 是可选参数。省略时 Sidecar 会创建一个加密随机的不透明 ID；可能
 需要重试安全性的调用方应提供并保留自己稳定且唯一的 ID。对相同本地目标、项目和
@@ -459,8 +470,9 @@ Sidecar 发送，以及已经改变或消失的目标，并持锁直到原生进
 结果产生前的预检或用法拒绝；中断时退出码为 `130`，投递状态未知。
 
 位置参数消息会出现在 `agent-sidecar` 命令 argv 中，可能被 Shell 历史记录保存，
-也可能在进程列表中可见。对于 Cursor CLI，它还会出现在原生子进程 argv 中。不要
-使用此命令发送机密。
+也可能在进程列表中可见；`--message-stdin` 可以让消息不出现在 Sidecar 命令行
+中。无论使用哪种来源，对于 Cursor CLI，提示词仍会出现在原生子进程 argv 中，
+因为该上游恢复契约要求 argv 传输。不要使用此命令发送机密。
 
 针对损坏、不安全或被替换的发送审计命名空间，唯一的恢复命令是：
 

@@ -110,12 +110,15 @@ is separate from observation. It requires an explicit request and
 agent to contact its provider, run tools, modify its session, or change
 workspace files. It is not a sandbox or a policy-enforcement boundary.
 
-The message is present in the Sidecar command line and, for Cursor CLI, the
-native child command line, so it may appear in shell history or process
-listings. Never send secrets. Private audit records avoid storing message and
-response content, but their key and logs remain sensitive local state.
-Delivery reported as unknown must not be retried automatically because the
-agent may already have acted.
+A positional message is present in the Sidecar command line, so it may appear
+in shell history or process listings; `send --message-stdin` reads the message
+from standard input and keeps it out of the Sidecar command line. For Cursor
+CLI the prompt is still passed on the native child command line whichever
+source is used, because that upstream resume contract requires argv transport,
+so this residual exposure remains. Never send secrets. Private audit records
+avoid storing message and response content, but their key and logs remain
+sensitive local state. Delivery reported as unknown must not be retried
+automatically because the agent may already have acted.
 
 Agent Sidecar makes no general claim of sandboxing, process isolation, data-at-
 rest encryption, or end-to-end encryption. Platform permissions, SSH, and
