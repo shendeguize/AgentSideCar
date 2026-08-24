@@ -15,19 +15,24 @@
  * write (it recovers by reloading host state instead).
  */
 
-import { useState, useSyncExternalStore } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { Board } from './board/Board.tsx'
+import { ProjectView } from './board/project-view.tsx'
 import { SidecarWidget } from './widget.tsx'
 import { SettingsCard, type SettingsCardValues, type SidecarDaemonStatus } from './settings-card.tsx'
 import { countWorking, deriveWidgetConnection } from './board/logic.ts'
 import type { BoardFilterState } from './board/logic.ts'
 import type { SidecarController, SidecarViewState } from './controller.ts'
-import { InjectPanel } from './inject/InjectPanel.tsx'
 import type { InjectMode } from './inject/logic.ts'
-import { findInjectTarget, type InjectActions } from './inject-glue.ts'
-import overlay from './inject/overlay.module.css'
+import type { InjectActions } from './inject-glue.ts'
+import { SidecarDetailView, type SidecarUiIntegration } from './detail-view.tsx'
+import { findCardHint, type DetailHeaderHint } from './detail-glue.ts'
+import { findProjectSessionHint, type ProjectsStore } from './project-glue.ts'
+import { detailErrorText } from './detail/logic.ts'
+import { t } from './locales/index.ts'
+import css from './detail-view.module.css'
 import {
   DEFAULT_CONFIG_VIEW,
   cardValuesEqual,
@@ -36,7 +41,11 @@ import {
   type SidecarConfigView,
 } from './settings-glue.ts'
 
-/** What the board tab needs to host the inject panel (S5 wiring, T4.9). */
+/**
+ * What the board tab needs to host the inject panel (S5 wiring, T4.9).
+ * Since T5.10b the panel opens from the detail view's 注入 button; this
+ * shape rides {@link SidecarUiIntegration.inject} unchanged.
+ */
 export interface BoardInjectIntegration {
   /** onPrepare/onExecute over the action transport (inject-glue.ts). */
   actions: InjectActions
@@ -47,75 +56,142 @@ export interface BoardInjectIntegration {
   getDefaultMode: () => InjectMode
 }
 
+/** Board-tab main views (detail is an overlay route on top of either). */
+type MainView = 'board' | 'projects'
+
 /**
- * Cross-agent board bound to the controller (the "Sidecar" conversation
- * tab). Selecting a session card opens the inject panel as a modal overlay
- * (design §5.1 view 3: 从卡片唤起,模态); the panel gates itself on the
- * snapshot's inject capability — the entry stays visible when injection is
- * off so the user learns it can be enabled in Settings. Without an
- * integration (owner chose not to wire injection) the board stays inert.
+ * Project-correlation view bound to its store: refresh on entry, then
+ * throttled SSE-driven refreshes for as long as the view is on screen.
+ */
+function ProjectsContainer(props: {
+  controller: SidecarController
+  store: ProjectsStore
+  onSelectSession: (sessionId: string) => void
+}): ReactElement {
+  const { controller, store } = props
+  useEffect(() => {
+    void store.refresh()
+    return controller.subscribe(() => { store.notifySnapshot() })
+  }, [controller, store])
+  const state = useSyncExternalStore(store.subscribe, store.getState, store.getState)
+  return (
+    <ProjectView
+      groups={state.groups}
+      loading={state.loading}
+      error={state.error === null ? null : detailErrorText(state.error)}
+      onSelectSession={props.onSelectSession}
+    />
+  )
+}
+
+/**
+ * Cross-agent board tab (the "Sidecar" conversation tab), since T5.10b the
+ * shell of the whole M3 information architecture (design §5.1):
+ *
+ * - view 1: the session board, with a 「会话看板 / 项目视图」 switcher
+ *   (ProjectView over `GET projects`);
+ * - view 2: clicking a session card in EITHER view routes to the full-tab
+ *   session-detail view (timeline + 注入 + AI 分析 + dsh 谱系/检索);
+ *   detail-internal jumps (lineage nodes, search hits) re-route in place;
+ * - view 3: the M2 inject panel opens as a modal from the detail view.
+ *
+ * Without an integration the board renders read-only and inert (no detail
+ * routing) — the M1 degradation posture.
  */
 export function createBoardTab(
   controller: SidecarController,
-  inject?: BoardInjectIntegration,
+  integration?: SidecarUiIntegration,
 ): () => ReactElement {
   const subscribe = (cb: () => void): (() => void) => controller.subscribe(cb)
   const getState = (): SidecarViewState => controller.getState()
   const getFilters = (): BoardFilterState => controller.getFilters()
+
   return function SidecarBoardTab(): ReactElement {
     // Third argument (server snapshot) keeps the components renderable under
     // react-dom/server (DOM-level verification harness); same source.
     const state = useSyncExternalStore(subscribe, getState, getState)
     const filters = useSyncExternalStore(subscribe, getFilters, getFilters)
-    const [injectTargetId, setInjectTargetId] = useState<string | null>(null)
-    const closeInject = (): void => {
-      setInjectTargetId(null)
+    const [mainView, setMainView] = useState<MainView>('board')
+    const [detail, setDetail] = useState<{ id: string; hint: DetailHeaderHint | null } | null>(
+      null,
+    )
+    // One ProjectsStore per tab mount, created lazily with the integration
+    // seam; state survives board↔projects↔detail switches within the tab.
+    const [projectsStore] = useState<ProjectsStore | null>(
+      () => integration?.createProjectsStore() ?? null,
+    )
+    useEffect(() => () => { projectsStore?.dispose() }, [projectsStore])
+
+    const openDetail = (sessionId: string): void => {
+      if (integration === undefined) return
+      const hint =
+        findCardHint(state.sessions, sessionId) ??
+        (projectsStore !== null
+          ? findProjectSessionHint(projectsStore.getState().groups, sessionId)
+          : null)
+      setDetail({ id: sessionId, hint })
     }
+
+    if (integration !== undefined && detail !== null) {
+      return (
+        <SidecarDetailView
+          // key remounts per session: fresh stores, no state bleed on jumps.
+          key={detail.id}
+          sessionId={detail.id}
+          hint={detail.hint}
+          controller={controller}
+          integration={integration}
+          onClose={() => { setDetail(null) }}
+          onSelectSession={openDetail}
+        />
+      )
+    }
+
     return (
       <>
-        <Board
-          daemonState={state.daemonState}
-          {...state.daemonDetail !== undefined ? { daemonDetail: state.daemonDetail } : {}}
-          streamHealth={state.streamHealth}
-          lastReconcileAtMs={state.lastReconcileAtMs}
-          sessions={state.sessions}
-          filters={filters}
-          onFiltersChange={(next) => {
-            controller.setFilters(next)
-          }}
-          onRefresh={() => {
-            void controller.refresh()
-          }}
-          onSelectSession={(sessionId) => {
-            if (inject !== undefined) setInjectTargetId(sessionId)
-          }}
-        />
-        {inject !== undefined && injectTargetId !== null
+        <div className={css['switcherBar']} data-testid="agent-sidecar-view-switcher">
+          <button
+            type="button"
+            className={css['switcherButton']}
+            data-active={mainView === 'board' || undefined}
+            onClick={() => { setMainView('board') }}
+          >
+            {t('board.viewBoard')}
+          </button>
+          <button
+            type="button"
+            className={css['switcherButton']}
+            data-active={mainView === 'projects' || undefined}
+            onClick={() => { setMainView('projects') }}
+          >
+            {t('board.viewProjects')}
+          </button>
+        </div>
+        {mainView === 'projects' && projectsStore !== null
           ? (
-            <div className={overlay['backdrop']} role="presentation" onClick={closeInject}>
-              <div
-                className={overlay['dialog']}
-                role="dialog"
-                aria-modal="true"
-                onClick={(event) => {
-                  event.stopPropagation()
-                }}
-              >
-                {/* key remounts the panel per target: a fresh two-phase
-                    machine per session, no state bleed between targets. */}
-                <InjectPanel
-                  key={injectTargetId}
-                  capability={{ inject: state.injectCapability }}
-                  target={findInjectTarget(state.sessions, injectTargetId)}
-                  defaultMode={inject.getDefaultMode()}
-                  onPrepare={inject.actions.onPrepare}
-                  onExecute={inject.actions.onExecute}
-                  onClose={closeInject}
-                />
-              </div>
-            </div>
+            <ProjectsContainer
+              controller={controller}
+              store={projectsStore}
+              onSelectSession={openDetail}
+            />
           )
-          : null}
+          : (
+            <Board
+              daemonState={state.daemonState}
+              {...state.daemonDetail !== undefined ? { daemonDetail: state.daemonDetail } : {}}
+              streamHealth={state.streamHealth}
+              lastReconcileAtMs={state.lastReconcileAtMs}
+              sessions={state.sessions}
+              filters={filters}
+              onFiltersChange={(next) => {
+                controller.setFilters(next)
+              }}
+              onRefresh={() => {
+                void controller.refresh()
+              }}
+              onSelectSession={openDetail}
+            />
+          )}
       </>
     )
   }

@@ -3,6 +3,137 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { Readable, Writable } from "node:stream";
 import { Context } from "@deepseek-ai/cordis";
 
+//#region src/analysis.d.ts
+/**
+ * AI bypass-analysis engine — design §5 pillar 3 / §4.e.3 (M3, T5.6).
+ * Creates a DEDICATED dsh analysis session per request via `ctx.agents.create`,
+ * feeds it a bounded summary of the observed session/project, supports
+ * incremental follow-up questions, and can be cancelled from the UI at any
+ * time. Pure engine: routing/index wiring is the integration layer's job, and
+ * the analysis INPUT (summary text assembled from fusion timelines/overviews)
+ * arrives as a structured parameter — this module never touches fusion.
+ *
+ * API facts verified against the installed SDK
+ * (`@deepseek-ai/dsh-agent@0.1.1-rc.2` d.ts, authoritative over the design
+ * sketch):
+ *
+ * - `ctx.agents.create(options): Promise<AgentHandle>` (lib/types/index.d.ts:288)
+ *   with `CreateAgentOptions` requiring a CALLER-SUPPLIED `sessionId`
+ *   (index.d.ts:65-118) — the engine mints one per analysis — plus an optional
+ *   creation-only `signal` (index.d.ts:98). `AgentHandle = { agent; dispose():
+ *   Promise<void> }` (index.d.ts:155-158); `dispose()` stops the loop and
+ *   removes the session, which is exactly the UI "stop" semantics.
+ * - There is NO system-prompt field on `CreateAgentOptions` (`agentOptions` is
+ *   only provider/model/maxTokens, runtime-types.d.ts:21-28; `setup` composes
+ *   cordis scopes and would break pure DI), so the read-only-analyst guidance
+ *   rides the FIRST user message instead.
+ * - `Agent.followup(message: UserMessage): void` is a SYNCHRONOUS inbox splice
+ *   (runtime-types.d.ts:115) — same finding as T4.4. There is no per-message
+ *   response promise; the result must be read back from the session.
+ * - "Getting the analysis result": `Agent.whenIdle(): Promise<void>` resolves
+ *   after whole-agent quiescence (runtime-types.d.ts:87), and a waking
+ *   followup flips status to running synchronously (runtime-types.d.ts:161-172),
+ *   so `followup → whenIdle → read log` observes the completed turn. The text
+ *   is read from `agent.session.deriveMessages()` (dsh-session
+ *   index.d.ts:259, the cached surface projection); token accounting rides
+ *   `assistant/message` events as `data.usage?: TokenUsage`
+ *   (dsh-session types.d.ts:279-285, dsh-llm types.d.ts:123-129) — that feeds
+ *   `tokensHint`.
+ * - `Agent.cancel(cause: AgentCancelCause): void` aborts the active turn
+ *   (runtime-types.d.ts:80); `{ kind: 'user' }` is the honest cause for a
+ *   user-facing stop/timeout (dsh-session types.d.ts:118-127).
+ *
+ * Bounds (§7-B token-cost touchpoint, design risk 12): gated by live
+ * `analysis.enabled` (default false), input truncated to `maxInputChars`,
+ * first response and every follow-up bounded by `analysisTimeoutMs` (timeout
+ * cancels the in-flight turn), and at most `maxActiveSessions` concurrent
+ * analysis sessions. No periodic/automatic analysis exists here by design.
+ *
+ * Error vocabulary (contractual):
+ * `analysis_disabled | create_failed | timeout | too_many_active | cancelled`.
+ * `create_failed` covers the whole establishment phase of `request()`
+ * (create + priming followup + first-turn wait); `cancelled` covers follow-ups
+ * against a session that is unknown, already stopped, or died mid-turn.
+ *
+ * Honesty: results are AI-generated inference; every {@link AnalysisResult}
+ * carries {@link ANALYSIS_DISCLAIMER} for the UI to display.
+ *
+ * Log lines NEVER carry the analyzed content: no `summaryText`, no follow-up
+ * question, no model reply — only kind/title/analysisSessionId/outcome/token
+ * hints and sizes (S8).
+ *
+ * Pure DI: no cordis/dsh imports; `ctx.agents.create` is injected through the
+ * minimal structural face {@link AnalysisAgentFace} (method-syntax members
+ * keep parameter checks bivariant, so the SDK's branded `SessionId` / wider
+ * `UserMessage` / union `AgentCancelCause` signatures remain assignable).
+ *
+ * @module
+ */
+/** Widened user-message face (same shape family as dsh-inject's, F11). */
+interface AnalysisUserMessageFace {
+  readonly id: string;
+  readonly role: 'user';
+  readonly content: ReadonlyArray<{
+    readonly type: string;
+    readonly text?: string;
+  }>;
+  readonly source: {
+    readonly kind: string;
+    readonly plugin?: string;
+  };
+}
+/** Widened derived-message face over dsh-llm `Message` (message.d.ts:120-129). */
+interface AnalysisDerivedMessageFace {
+  readonly role: string;
+  readonly content: ReadonlyArray<{
+    readonly type: string;
+    readonly text?: string;
+  }>;
+}
+/** Widened session-event envelope face (dsh-session types.d.ts:425-443). */
+interface AnalysisSessionEventFace {
+  readonly type: string;
+  /** `assistant/message` events carry `{ usage?: TokenUsage }` here. */
+  readonly data?: unknown;
+}
+/** Read face over the live session log (dsh-session index.d.ts:106-267). */
+interface AnalysisSessionLogFace {
+  /** Cached surface projection of the derived LLM history (index.d.ts:259). */
+  deriveMessages(): ReadonlyArray<AnalysisDerivedMessageFace>;
+  /** Immutable append-only event snapshot (index.d.ts:174). */
+  readonly events: ReadonlyArray<AnalysisSessionEventFace>;
+}
+/** Cancellation cause face; `{kind:'user'}` ∈ `AgentCancelCause` (dsh-session types.d.ts:118-127). */
+interface AnalysisCancelCauseFace {
+  readonly kind: 'user';
+}
+/** Live-agent face: prompt in, quiescence + log read back (runtime-types.d.ts:60-133). */
+interface AnalysisAgentDriverFace {
+  readonly session: AnalysisSessionLogFace;
+  followup(message: AnalysisUserMessageFace): void;
+  cancel(cause: AnalysisCancelCauseFace): void;
+  whenIdle(): Promise<void>;
+}
+/**
+ * The dedicated analysis session handle — `AgentHandle` face
+ * (index.d.ts:155-158): send messages via `agent.followup`, read responses via
+ * `agent.whenIdle` + `agent.session`, stop via `dispose()`.
+ */
+interface AnalysisSession {
+  readonly agent: AnalysisAgentDriverFace;
+  dispose(): Promise<void>;
+}
+/** `CreateAgentOptions` face (index.d.ts:65-118): engine-minted id + creation abort. */
+interface AnalysisCreateOptions {
+  readonly sessionId: string;
+  readonly signal?: AbortSignal;
+}
+/** Minimal `ctx.agents` face: the one factory entry point this engine uses. */
+interface AnalysisAgentFace {
+  /** `AgentRegistry.create` (index.d.ts:288). */
+  create(options: AnalysisCreateOptions): Promise<AnalysisSession>;
+}
+//#endregion
 //#region src/supervisor.d.ts
 type SupervisorPolicy = 'adopt-or-host' | 'adopt-only' | 'off';
 //#endregion
@@ -61,6 +192,43 @@ interface Config {
   skill: SkillConfig;
 }
 declare const Config: z<Config>;
+//#endregion
+//#region src/dsh-inject.d.ts
+/**
+ * Widened message parameter face: the SDK's `UserMessage` is assignable to
+ * this shape, which keeps `Agent`'s method signatures structurally
+ * compatible with {@link DshAgentFace} without importing SDK types.
+ */
+interface DshUserMessageFace {
+  readonly id: string;
+  readonly role: 'user';
+  readonly content: ReadonlyArray<{
+    readonly type: string;
+  }>;
+  readonly source: {
+    readonly kind: string;
+  };
+}
+/** Live-agent face: the two injection entry points (runtime-types.d.ts:115/:123). */
+interface DshAgentFace {
+  followup(message: DshUserMessageFace): void;
+  steer(message: DshUserMessageFace): void;
+}
+/** `AgentHandle` face (index.d.ts:155-158). `dispose` is deliberately absent:
+ * the executor never tears down an agent it resumed — disposal would unload
+ * the session and cancel the just-queued work. */
+interface DshAgentHandleFace {
+  readonly agent: DshAgentFace;
+}
+/** Minimal `ctx.agents` (`AgentRegistry`) face: locate + resume. */
+interface AgentsServiceFace {
+  /** Live lookup (index.d.ts:349); undefined = session not loaded. */
+  get(sessionId: string): DshAgentFace | undefined;
+  /** Load a persisted session and start an agent on it (index.d.ts:296). */
+  resume(options: {
+    readonly resumeSessionId: string;
+  }): Promise<DshAgentHandleFace>;
+}
 //#endregion
 //#region src/index.d.ts
 declare const name = "agent-sidecar";
@@ -146,6 +314,13 @@ interface SettingsServiceFace {
     applies?: 'live' | 'restart';
   }): SettingsScopeFace<T>;
 }
+/**
+ * The lazily-bound `ctx.agents` registry surface: M2 injection consumes
+ * `get`/`resume` (dsh-inject's {@link AgentsServiceFace}), M3 analysis
+ * consumes `create` (analysis.ts's {@link AnalysisAgentFace}). One lazy
+ * binding serves both paths — and gates both degradations.
+ */
+type AgentsRegistryFace = AgentsServiceFace & Pick<AnalysisAgentFace, 'create'>;
 /** The plugin context with the two hard-injected services visible. */
 type HostContext = Context & {
   webServer: WebServerService;
@@ -166,4 +341,4 @@ type HostContext = Context & {
  */
 declare function apply(ctx: HostContext, config: Config): void;
 //#endregion
-export { Config, HostContext, SettingsScopeFace, SettingsServiceFace, SubprocessCollectSpec, SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessService, SubprocessSpawnSpec, WebServerService, apply, inject, name };
+export { AgentsRegistryFace, Config, HostContext, SettingsScopeFace, SettingsServiceFace, SubprocessCollectSpec, SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessService, SubprocessSpawnSpec, WebServerService, apply, inject, name };

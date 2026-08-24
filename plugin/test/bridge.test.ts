@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   Reconciler,
+  SidecarDaemonError,
   SidecarSocketClient,
   type DropReason,
   type ReconcilerClient,
@@ -69,10 +70,19 @@ interface MockDaemonOptions {
   pingBehavior?: 'reply' | 'silent'
   statusBehavior?: 'reply' | 'error'
   statusSessions?: unknown[]
+  /**
+   * Per-request `replay` behavior: an object is written as the response
+   * line, `'silent'` never answers (timeout path), `'close'` half-closes
+   * without a response. Unset → the connection is destroyed (like an old
+   * daemon that knows no replay op).
+   */
+  replayHandler?: (request: Record<string, unknown>) => unknown
 }
 
 interface MockDaemon {
   socketPath: string
+  subscribeRequests: Array<Record<string, unknown>>
+  replayRequests: Array<Record<string, unknown>>
   pushEvent(event: unknown): void
   pushRaw(raw: string): void
   killSubscribers(): void
@@ -85,6 +95,8 @@ async function startMockDaemon(opts: MockDaemonOptions = {}): Promise<MockDaemon
   const socketPath = join(dir, 'daemon.sock')
   const connections = new Set<Socket>()
   const subscribers = new Set<Socket>()
+  const subscribeRequests: Array<Record<string, unknown>> = []
+  const replayRequests: Array<Record<string, unknown>> = []
 
   const server: Server = createServer((socket) => {
     connections.add(socket)
@@ -141,8 +153,31 @@ async function startMockDaemon(opts: MockDaemonOptions = {}): Promise<MockDaemon
             )
           }
         } else if (op === 'subscribe') {
+          const envelope = request as Record<string, unknown>
+          subscribeRequests.push(envelope)
           subscribers.add(socket)
-          socket.write('{"ok":true,"op":"subscribe"}\n')
+          // Mirror the daemon ack: echo a sorted agents filter when given.
+          const agents = envelope['agents']
+          socket.write(
+            JSON.stringify({
+              ok: true,
+              op: 'subscribe',
+              ...(Array.isArray(agents) ? { agents: [...agents].sort() } : {}),
+            }) + '\n',
+          )
+        } else if (op === 'replay') {
+          const envelope = request as Record<string, unknown>
+          replayRequests.push(envelope)
+          const behavior = opts.replayHandler?.(envelope)
+          if (behavior === 'silent') {
+            // no response: the client's replay timeout owns this path
+          } else if (behavior === 'close') {
+            socket.end()
+          } else if (behavior === undefined) {
+            socket.destroy()
+          } else {
+            socket.write(JSON.stringify(behavior) + '\n')
+          }
         }
       }
     })
@@ -155,6 +190,8 @@ async function startMockDaemon(opts: MockDaemonOptions = {}): Promise<MockDaemon
 
   return {
     socketPath,
+    subscribeRequests,
+    replayRequests,
     pushEvent(event: unknown): void {
       for (const socket of subscribers) socket.write(JSON.stringify(event) + '\n')
     },
@@ -318,6 +355,171 @@ describe('SidecarSocketClient', () => {
     subscription.close()
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(closeCalls).toBe(1)
+  })
+
+  it('replay returns a parsed page and forwards session/cursor/limit on the wire', async () => {
+    daemon = await startMockDaemon({
+      replayHandler: (request) => ({
+        ok: true,
+        op: 'replay',
+        session_id: request['session_id'],
+        agent: 'dsh',
+        after_seq: request['after_seq'],
+        events: [
+          ev({ agent: 'dsh', kind: 'user', text: 'ask', extra: { seq: 3 } }),
+          ev({ agent: 'dsh', kind: 'assistant', text: 'answer', extra: { seq: 4 } }),
+        ],
+        count: 2,
+        last_seq: 4,
+        truncated: true,
+      }),
+    })
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    const page = await client.replay('s1', 2, 2)
+
+    expect(daemon.replayRequests).toEqual([
+      { op: 'replay', session_id: 's1', after_seq: 2, limit: 2 },
+    ])
+    expect(page.sessionId).toBe('s1')
+    expect(page.agent).toBe('dsh')
+    expect(page.afterSeq).toBe(2)
+    expect(page.events.map((e) => e.text)).toEqual(['ask', 'answer'])
+    expect(page.count).toBe(2)
+    expect(page.lastSeq).toBe(4)
+    expect(page.truncated).toBe(true)
+  })
+
+  it('replay omits the limit field when unset and defaults after_seq to 0', async () => {
+    daemon = await startMockDaemon({
+      replayHandler: (request) => ({
+        ok: true,
+        op: 'replay',
+        session_id: request['session_id'],
+        agent: 'claude',
+        after_seq: 0,
+        events: [],
+        count: 0,
+        last_seq: null,
+        truncated: false,
+      }),
+    })
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    const page = await client.replay('s1')
+
+    expect(daemon.replayRequests).toEqual([{ op: 'replay', session_id: 's1', after_seq: 0 }])
+    expect(page.events).toEqual([])
+    expect(page.lastSeq).toBeNull()
+    expect(page.truncated).toBe(false)
+  })
+
+  it('replay rejects with the daemon error code verbatim', async () => {
+    daemon = await startMockDaemon({
+      replayHandler: () => ({
+        ok: false,
+        error: { code: 'unknown_session', message: 'no session nope' },
+      }),
+    })
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    const failure = await client.replay('nope').then(
+      () => null,
+      (err: unknown) => err,
+    )
+    expect(failure).toBeInstanceOf(SidecarDaemonError)
+    expect((failure as SidecarDaemonError).code).toBe('unknown_session')
+    expect((failure as SidecarDaemonError).message).toContain('no session nope')
+  })
+
+  it('replay rejects with coded transport errors (refused / closed / timeout / bad payload)', async () => {
+    const codeOf = async (promise: Promise<unknown>): Promise<string> =>
+      promise.then(
+        () => 'resolved',
+        (err: unknown) => (err instanceof SidecarDaemonError ? err.code : 'other'),
+      )
+
+    const refused = new SidecarSocketClient({
+      socketPath: join(tmpdir(), `sidecar-absent-${process.pid}-${Date.now()}.sock`),
+      replayTimeoutMs: 200,
+    })
+    expect(await codeOf(refused.replay('s1'))).toBe('connection_failed')
+
+    daemon = await startMockDaemon({ replayHandler: () => 'close' })
+    const closed = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    expect(await codeOf(closed.replay('s1'))).toBe('connection_closed')
+    await daemon.close()
+
+    daemon = await startMockDaemon({ replayHandler: () => 'silent' })
+    const silent = new SidecarSocketClient({
+      socketPath: daemon.socketPath,
+      replayTimeoutMs: 200,
+    })
+    expect(await codeOf(silent.replay('s1'))).toBe('timeout')
+    await daemon.close()
+
+    daemon = await startMockDaemon({
+      replayHandler: () => ({ ok: true, op: 'replay', session_id: 's1', agent: 'dsh', events: 'nope' }),
+    })
+    const malformed = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    expect(await codeOf(malformed.replay('s1'))).toBe('invalid_response')
+  })
+
+  it('replay rejects programmer misuse locally without opening a socket', async () => {
+    daemon = await startMockDaemon()
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    await expect(client.replay('')).rejects.toThrow(RangeError)
+    await expect(client.replay('s1', -1)).rejects.toThrow(RangeError)
+    await expect(client.replay('s1', 1.5)).rejects.toThrow(RangeError)
+    await expect(client.replay('s1', 0, 0)).rejects.toThrow(RangeError)
+    expect(daemon.replayRequests).toEqual([])
+  })
+
+  it('subscribe forwards the agents allowlist on the wire and still streams', async () => {
+    daemon = await startMockDaemon()
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    const events: SidecarEvent[] = []
+    const ready = deferred()
+    const gotEvent = deferred()
+
+    const subscription = client.subscribe(
+      {
+        onReady: () => ready.resolve(),
+        onEvent: (event) => {
+          events.push(event)
+          gotEvent.resolve()
+        },
+      },
+      { agents: ['dsh', 'claude'] },
+    )
+
+    await ready.promise
+    expect(daemon.subscribeRequests).toEqual([
+      { op: 'subscribe', agents: ['dsh', 'claude'] },
+    ])
+    daemon.pushEvent(ev({ agent: 'dsh', text: 'filtered stream' }))
+    await gotEvent.promise
+    expect(events[0]?.text).toBe('filtered stream')
+    subscription.close()
+  })
+
+  it('subscribe without options keeps the bare wire request (back-compat)', async () => {
+    daemon = await startMockDaemon()
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    const ready = deferred()
+    const subscription = client.subscribe({
+      onReady: () => ready.resolve(),
+      onEvent: () => {},
+    })
+    await ready.promise
+    expect(daemon.subscribeRequests).toEqual([{ op: 'subscribe' }])
+    subscription.close()
+  })
+
+  it('subscribe throws synchronously on an invalid agents filter', async () => {
+    daemon = await startMockDaemon()
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    const handlers = { onEvent: () => {} }
+    expect(() => client.subscribe(handlers, { agents: [] })).toThrow(RangeError)
+    expect(() => client.subscribe(handlers, { agents: ['dsh', ''] })).toThrow(RangeError)
+    expect(daemon.subscribeRequests).toEqual([])
   })
 
   it('subscribe drops oversized or malformed lines without dying', async () => {

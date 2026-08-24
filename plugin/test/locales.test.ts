@@ -1,7 +1,9 @@
 /**
- * Locale table contract (T2.3): zh/en key-set parity, the t() fallback
- * chain (active locale → zh → the key itself), the `{name}` template
- * semantics, and the module-level active-locale switch.
+ * Locale table contract (T2.3, extended by T5.10b M3 unification): zh/en
+ * key-set parity, the t() fallback chain (active locale → zh → the key
+ * itself), the `{name}` template semantics, the module-level active-locale
+ * switch, and zero-drift parity between the main table and the
+ * component-local M3 string tables it references.
  */
 
 import { afterEach, describe, expect, it } from 'vitest'
@@ -17,8 +19,28 @@ import {
   zh,
 } from '../src/client/locales/index.ts'
 import type { SidecarLocaleKey } from '../src/client/locales/index.ts'
+import { commandEn, commandZh } from '../src/client/locales/command.ts'
+import { DETAIL_STRINGS } from '../src/client/detail/strings.ts'
+import { DSH_TOOLS_STRINGS } from '../src/client/dsh-tools/strings.ts'
+import { PROJECT_VIEW_STRINGS } from '../src/client/board/project-view-logic.ts'
 
 afterEach(() => { setLocale(BASE_LOCALE) })
+
+/** Flatten a nested string table into `prefix.path.leaf` entries. */
+function flatten(prefix: string, table: object): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(table)) {
+    if (typeof value === 'string') out[`${prefix}.${key}`] = value
+    else Object.assign(out, flatten(`${prefix}.${key}`, value as object))
+  }
+  return out
+}
+
+/** The `domain.*` slice of a flat dictionary. */
+function slice(dict: Record<string, string>, domain: string): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(dict).filter(([key]) => key.startsWith(`${domain}.`)))
+}
 
 describe('dictionary shape', () => {
   it('zh and en carry identical key sets', () => {
@@ -34,20 +56,57 @@ describe('dictionary shape', () => {
     }
   })
 
-  it('every key sits in a declared domain (settings live, board/inject reserved)', () => {
+  it('every key sits in a declared domain', () => {
     for (const key of Object.keys(zh)) {
-      expect(key).toMatch(/^(settings|board|inject)\.[^.].*$/)
+      expect(key).toMatch(
+        /^(settings|board|inject|detail|dshtools|project|analysis|command)\.[^.].*$/)
     }
   })
 
-  it('the settings card domain is populated', () => {
-    const settingsKeys = Object.keys(zh).filter(key => key.startsWith('settings.'))
-    expect(settingsKeys.length).toBeGreaterThan(0)
+  it('every declared domain is populated', () => {
+    for (const domain of
+      ['settings', 'board', 'inject', 'detail', 'dshtools', 'project', 'analysis', 'command']) {
+      expect(Object.keys(slice(zh, domain)).length, `empty domain ${domain}`).toBeGreaterThan(0)
+    }
   })
 
   it('exports the shipped dictionaries under their locale ids', () => {
     expect(dictionaries.zh).toBe(zh)
     expect(dictionaries.en).toBe(en)
+  })
+})
+
+describe('M3 unification: main table ↔ module tables (zero copy drift)', () => {
+  it('detail.* covers detail/strings.ts verbatim', () => {
+    const moduleTable = flatten('detail', DETAIL_STRINGS)
+    for (const [key, copy] of Object.entries(moduleTable)) {
+      expect(zh[key as SidecarLocaleKey], `drift at ${key}`).toBe(copy)
+    }
+  })
+
+  it('dshtools.* covers dsh-tools/strings.ts verbatim', () => {
+    const moduleTable = flatten('dshtools', DSH_TOOLS_STRINGS)
+    expect(slice(zh, 'dshtools')).toEqual(moduleTable)
+  })
+
+  it('project.* covers PROJECT_VIEW_STRINGS verbatim', () => {
+    const moduleTable = flatten('project', PROJECT_VIEW_STRINGS)
+    expect(slice(zh, 'project')).toEqual(moduleTable)
+  })
+
+  it('the command segment is exactly the command.* slice of the main table', () => {
+    expect({ ...commandZh }).toEqual(slice(zh, 'command'))
+    expect({ ...commandEn }).toEqual(slice(en, 'command'))
+  })
+
+  it('t() serves M3 domain keys in both locales', () => {
+    expect(t('dshtools.search.filterOnlyNotice'))
+      .toBe(DSH_TOOLS_STRINGS.search.filterOnlyNotice)
+    expect(t('project.title')).toBe(PROJECT_VIEW_STRINGS.title)
+    expect(t('analysis.disclaimerFallback')).toBe(zh['analysis.disclaimerFallback'])
+    setLocale('en')
+    expect(t('detail.header.close')).toBe(en['detail.header.close'])
+    expect(t('analysis.start')).toBe(en['analysis.start'])
   })
 })
 

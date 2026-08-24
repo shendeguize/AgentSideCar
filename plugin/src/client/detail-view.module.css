@@ -1,0 +1,79 @@
+/*
+ * Detail-view container + board-tab view-switcher chrome (T5.10b, design
+ * §5.1): every color rides a --dsw-alias-* design token with a neutral
+ * fallback. Same posture as board.module.css / dsh-tools.module.css.
+ */
+
+/* ------------------------------------------------ board-tab view switcher */
+
+.switcherBar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px 0;
+}
+
+.switcherButton {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #57606a);
+  cursor: pointer;
+}
+
+.switcherButton:hover {
+  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
+}
+
+.switcherButton[data-active='true'] {
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary, #1f2328);
+  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
+  border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+}
+
+/* --------------------------------------------------- detail-view chrome */
+
+.detailRoot {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.actionsRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.actionButton {
+  font-size: 12px;
+  padding: 3px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
+  color: var(--dsw-alias-label-primary, #1f2328);
+  cursor: pointer;
+}
+
+.actionButton:hover {
+  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
+}
+
+.actionButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* dsh deep-query tools section under the timeline. */
+.toolsSection {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  border-top: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
+  padding-top: 12px;
+}

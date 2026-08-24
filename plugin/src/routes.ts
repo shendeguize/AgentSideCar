@@ -16,6 +16,50 @@
  * is answered 200 as a terminal "do not retry" — this layer never re-fires
  * the gateway on it (S6).
  *
+ * M3 scope: when a {@link FusionApi} is wired into the deps, the read
+ * surface widens (design §4.e / §5, all GET, guard layers 1-4, no write
+ * gate):
+ * - `GET session/<id>` upgrades its `timeline: null` placeholder to the
+ *   newest fused timeline page plus a `nextCursor` pagination token, and
+ *   gains a `unified` row (dsh-live sessions the sidecar has not seen
+ *   yet resolve here instead of 404).
+ * - `GET session/<id>/timeline?cursor=&limit=` pages backward through
+ *   history (fusion pulls dsh live/cold logs, the daemon `replay` op and
+ *   the bounded event ring on demand).
+ * - `GET lineage/<id>` → fusion.getLineage; ALWAYS 200 with
+ *   `{available:false, reason}` when sessionQuery is absent or the trace
+ *   fails (degradation is data, not an error; design §4.e.4).
+ * - `GET search?q=&project=&limit=` → fusion.searchSessions (`mode`
+ *   reports 'full-text' vs the 'filter-only' degradation); a
+ *   project-only query filters the unified list without the engine.
+ * - `GET projects` → fusion.getProjectGroups.
+ * Without a fusion the four new paths answer 501 `fusion_not_wired` and
+ * `GET session/<id>` keeps the M1 placeholder contract. The SSE stream
+ * contract is untouched: live updates stay full-snapshot frames and the
+ * client pairs them with timeline pagination (no per-session filter —
+ * recorded as not needed for M3).
+ *
+ * M3 analysis scope (design §4.e.3 / §7-B): when an {@link AnalysisApi} is
+ * wired into the deps, `POST action` also dispatches
+ * `{ type: 'analysis.request' | 'analysis.followup' | 'analysis.cancel' }`.
+ * These pass guard layers 1-4 and then a WRITE GATE OF THEIR OWN —
+ * `deps.analysisEnabled` (live `analysis.enabled`, default false), parallel
+ * to and independent of the guard's inject gate — closed (or absent) means
+ * 403 `analysis_disabled`. Past the gate, a missing/unavailable analysis
+ * surface (agents-less composition) answers 501 `analysis_unavailable`
+ * (honest degradation, never a crash). `analysis.request` resolves its
+ * target through the wiring's fusion-backed input adapter (unknown target
+ * → 404 `target_not_found`) and drives the engine; result error codes map
+ * to `analysis_disabled` 403, `too_many_active` 429, `timeout` 504,
+ * `create_failed` 502 — while `cancelled` stays 200 (a terminal fact about
+ * the analysis session, carried in the outcome, not a transport failure).
+ * Analyzed content (summaries, questions, model replies) never reaches the
+ * route log (S8). Note the M1 no-gateway placeholder still wins: analysis
+ * dispatch lives inside the gateway-backed action handler.
+ *
+ * Timeline cursors are opaque `<seq|'-'>~<epoch-ms>` tokens minted by
+ * {@link encodeCursor}; clients must round-trip them verbatim.
+ *
  * Contract (verified against the dsh source, not docs): the webServer
  * prefix-route handler is plain `node:http` —
  * `(req: IncomingMessage, res: ServerResponse) => void | Promise<void>`,
@@ -41,6 +85,8 @@ import {
   type GuardOptions,
   type GuardVerdict,
 } from './guard.ts'
+import type { AnalysisEngine, AnalysisInput, AnalysisResult } from './analysis.ts'
+import type { FusionQuery, TimelineCursor, TimelinePage } from './fusion.ts'
 import type { InjectGateway } from './inject-gateway.ts'
 import type { BoardState, SessionStore } from './session-store.ts'
 import type { DaemonSupervisor, PingInfo, SupervisorState } from './supervisor.ts'
@@ -61,6 +107,54 @@ export const API_PREFIX = '/plugins/agent-sidecar/api'
  */
 export type InjectGatewayApi = Pick<InjectGateway, 'prepare' | 'execute'>
 
+/**
+ * The slice of {@link FusionQuery} the M3 read endpoints drive. Structural
+ * for the same reason as {@link InjectGatewayApi}: the entry wires the real
+ * fusion (possibly behind a holder facade) and tests wire plain objects.
+ */
+export type FusionApi = Pick<
+  FusionQuery,
+  | 'getUnifiedSessions'
+  | 'getSessionTimeline'
+  | 'getProjectGroups'
+  | 'getLineage'
+  | 'searchSessions'
+  | 'getCapabilities'
+>
+
+/** The slice of {@link AnalysisEngine} the analysis actions drive. */
+export type AnalysisEngineApi = Pick<AnalysisEngine, 'request' | 'followup' | 'cancel'>
+
+/** Target selector carried by one `analysis.request` action envelope. */
+export interface AnalysisTargetRequest {
+  targetKind: 'session' | 'project' | 'cross-agent'
+  /** Session id / project path; required for session and project kinds. */
+  targetId?: string
+  /** Optional user question folded into the analysis input by the adapter. */
+  question?: string
+}
+
+/**
+ * M3 analysis wiring handed in by the entry: the engine plus the adapter
+ * that assembles a bounded {@link AnalysisInput} from fusion data. The
+ * routes stay dumb — target resolution and summary assembly are the
+ * wiring's job, request/result vocabulary is the engine's.
+ */
+export interface AnalysisApi {
+  engine: AnalysisEngineApi
+  /**
+   * Assemble the bounded analysis input for a target. `null` means the
+   * target is unknown to fusion (the routes answer 404 `target_not_found`).
+   */
+  buildInput(req: AnalysisTargetRequest): Promise<AnalysisInput | null>
+  /**
+   * Whether the underlying `ctx.agents` service is bound. `false` answers
+   * 501 `analysis_unavailable` before touching the engine (agents-less
+   * composition — honest degradation).
+   */
+  available(): boolean
+}
+
 /** Everything the route layer consumes; all live objects, none owned here. */
 export interface RoutesDeps {
   store: SessionStore
@@ -72,6 +166,23 @@ export interface RoutesDeps {
    * `POST action` keeps the placeholder contract: write gate, then 501.
    */
   injectGateway?: InjectGatewayApi
+  /**
+   * M3 fusion query surface. When absent the timeline/lineage/search/
+   * projects endpoints answer 501 `fusion_not_wired` and `GET session/<id>`
+   * keeps the M1 placeholder contract.
+   */
+  fusion?: FusionApi
+  /**
+   * Live `analysis.enabled` reader — the analysis write gate, parallel to
+   * (and independent of) the guard's inject gate. Absent reads as CLOSED
+   * (fail-closed): every `analysis.*` action answers 403 `analysis_disabled`.
+   */
+  analysisEnabled?: () => boolean
+  /**
+   * M3 analysis surface. When absent (analysis not assembled), `analysis.*`
+   * actions that pass the gate answer 501 `analysis_unavailable`.
+   */
+  analysis?: AnalysisApi
   log(level: 'info' | 'warn' | 'error', msg: string, meta?: object): void
 }
 
@@ -137,6 +248,26 @@ const EXECUTE_ERROR_STATUS: Readonly<Record<string, number>> = {
   executor_error: 502,
 }
 
+/**
+ * Analysis-engine error code → HTTP status (task spec mapping). `cancelled`
+ * stays 200: it is a terminal fact about the analysis session carried in
+ * the result outcome, not a transport failure. Unknown codes fall back to
+ * 502 like the execute map does.
+ */
+const ANALYSIS_ERROR_STATUS: Readonly<Record<string, number>> = {
+  analysis_disabled: 403,
+  too_many_active: 429,
+  timeout: 504,
+  create_failed: 502,
+  cancelled: 200,
+}
+
+const ANALYSIS_ACTION_TYPES = new Set([
+  'analysis.request',
+  'analysis.followup',
+  'analysis.cancel',
+])
+
 interface SseClient {
   res: ServerResponse
   /** Frames queued while the socket is backpressured. */
@@ -179,6 +310,75 @@ function subpathOf(rawUrl: string | undefined): string | null {
   if (pathname === API_PREFIX) return ''
   if (pathname.startsWith(`${API_PREFIX}/`)) return pathname.slice(API_PREFIX.length + 1)
   return null
+}
+
+/** Query string of the request (empty params when the URL is unparsable). */
+function queryOf(rawUrl: string | undefined): URLSearchParams {
+  try {
+    return new URL(rawUrl ?? '/', 'http://dsh.internal').searchParams
+  } catch {
+    return new URLSearchParams()
+  }
+}
+
+/**
+ * Timeline pagination token: `<seq|'-'>~<epoch-ms>`. Deliberately not the
+ * raw JSON cursor object so the query-string round-trip stays trivial and
+ * the wire shape is decoupled from fusion's internal cursor type.
+ */
+function encodeCursor(cursor: TimelineCursor): string {
+  return `${cursor.seq === null ? '-' : cursor.seq}~${cursor.ts}`
+}
+
+function decodeCursor(raw: string): TimelineCursor | null {
+  const sep = raw.indexOf('~')
+  if (sep <= 0 || sep === raw.length - 1) return null
+  const seqPart = raw.slice(0, sep)
+  const tsPart = raw.slice(sep + 1)
+  const ts = Number(tsPart)
+  if (!Number.isInteger(ts) || ts < 0) return null
+  if (seqPart === '-') return { seq: null, ts }
+  const seq = Number(seqPart)
+  if (!Number.isInteger(seq) || seq < 0) return null
+  return { seq, ts }
+}
+
+/** Bound on caller-supplied page sizes (timeline entries / search hits). */
+const MAX_PAGE_LIMIT = 500
+
+/** Search result bound when the caller supplies no limit (fusion default). */
+const DEFAULT_SEARCH_ROUTE_LIMIT = 50
+
+/** Match fusion's project correlation key: strip trailing slashes (keep `/`). */
+function normalizeProjectKey(project: string): string {
+  if (project.length > 1 && project.endsWith('/')) {
+    const stripped = project.replace(/\/+$/, '')
+    return stripped === '' ? '/' : stripped
+  }
+  return project
+}
+
+/**
+ * Parse an optional positive-integer query param bounded by
+ * {@link MAX_PAGE_LIMIT}. `undefined` when absent, `null` when invalid.
+ */
+function parseLimit(params: URLSearchParams, name: string): number | undefined | null {
+  const raw = params.get(name)
+  if (raw === null || raw === '') return undefined
+  const value = Number(raw)
+  if (!Number.isInteger(value) || value < 1 || value > MAX_PAGE_LIMIT) return null
+  return value
+}
+
+/** JSON wire shape of one timeline page (adds the encoded `nextCursor`). */
+function timelineBody(page: TimelinePage): Record<string, unknown> {
+  return {
+    sessionId: page.sessionId,
+    entries: page.entries,
+    cursor: page.cursor,
+    nextCursor: page.cursor === null ? null : encodeCursor(page.cursor),
+    sources: page.sources,
+  }
 }
 
 /** `event: <name>` + single-line JSON data (JSON.stringify never emits raw newlines). */
@@ -324,29 +524,165 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
 
   // --------------------------------------------------------------- routes
 
-  const handleSession = (res: ServerResponse, rawId: string): void => {
-    let id: string
+  /** Decoded session id, or null (already answered 404) on a bad escape. */
+  const decodeId = (res: ServerResponse, rawId: string): string | null => {
     try {
-      id = decodeURIComponent(rawId)
+      const id = decodeURIComponent(rawId)
+      if (id !== '') return id
     } catch {
+      // fall through to the 404
+    }
+    writeJson(res, 404, { reason: 'session_not_found' })
+    return null
+  }
+
+  const handleSession = async (res: ServerResponse, rawId: string): Promise<void> => {
+    const id = decodeId(res, rawId)
+    if (id === null) return
+    const view = deps.store.getBoardState().sessions.find((s) => s.session_id === id)
+    const fusion = deps.fusion
+    if (fusion === undefined) {
+      // M1 contract preserved: detail == card data, timeline placeholder.
+      if (view === undefined) {
+        writeJson(res, 404, { reason: 'session_not_found' })
+        return
+      }
+      writeJson(res, 200, {
+        session: view,
+        timeline: null,
+        timelineNote: 'timeline_not_available_until_m3',
+      })
+      return
+    }
+    // M3: the unified view also resolves dsh-live sessions the sidecar has
+    // not observed on disk yet, so those answer 200 instead of 404.
+    const unified = fusion.getUnifiedSessions().find((s) => s.sessionId === id) ?? null
+    if (view === undefined && unified === null) {
       writeJson(res, 404, { reason: 'session_not_found' })
       return
     }
-    const view =
-      id === ''
-        ? undefined
-        : deps.store.getBoardState().sessions.find((s) => s.session_id === id)
-    if (view === undefined) {
-      writeJson(res, 404, { reason: 'session_not_found' })
-      return
-    }
-    // M1: detail == card data. The event timeline is M3; the placeholder
-    // shape is already contractual so the client half can render "pending".
+    const page = await fusion.getSessionTimeline(id)
     writeJson(res, 200, {
-      session: view,
-      timeline: null,
-      timelineNote: 'timeline_not_available_until_m3',
+      session: view ?? null,
+      unified,
+      timeline: timelineBody(page),
     })
+  }
+
+  const handleTimeline = async (
+    res: ServerResponse,
+    rawId: string,
+    params: URLSearchParams,
+  ): Promise<void> => {
+    const fusion = deps.fusion
+    if (fusion === undefined) {
+      writeJson(res, 501, { reason: 'fusion_not_wired' })
+      return
+    }
+    const id = decodeId(res, rawId)
+    if (id === null) return
+    const rawCursor = params.get('cursor')
+    let before: TimelineCursor | null = null
+    if (rawCursor !== null && rawCursor !== '') {
+      before = decodeCursor(rawCursor)
+      if (before === null) {
+        writeJson(res, 400, { reason: 'invalid_cursor' })
+        return
+      }
+    }
+    const limit = parseLimit(params, 'limit')
+    if (limit === null) {
+      writeJson(res, 400, { reason: 'invalid_limit' })
+      return
+    }
+    const page = await fusion.getSessionTimeline(id, { before, limit })
+    // Unknown id: no source contributed, nothing buffered, and the board
+    // does not list it either → an honest 404 instead of an empty page.
+    const anySource =
+      page.sources.dshLive ||
+      page.sources.dshCold ||
+      page.sources.sidecarReplay ||
+      page.sources.sidecarBuffer
+    if (!anySource && page.entries.length === 0) {
+      const known =
+        deps.store.getBoardState().sessions.some((s) => s.session_id === id) ||
+        fusion.getUnifiedSessions().some((s) => s.sessionId === id)
+      if (!known) {
+        writeJson(res, 404, { reason: 'session_not_found' })
+        return
+      }
+    }
+    writeJson(res, 200, timelineBody(page))
+  }
+
+  const handleLineage = async (res: ServerResponse, rawId: string): Promise<void> => {
+    const fusion = deps.fusion
+    if (fusion === undefined) {
+      writeJson(res, 501, { reason: 'fusion_not_wired' })
+      return
+    }
+    const id = decodeId(res, rawId)
+    if (id === null) return
+    // Degradation (sessionQuery absent / trace failed) is DATA, not an
+    // error: always 200 with {available, trace, reason} (design §4.e.4).
+    writeJson(res, 200, await fusion.getLineage(id))
+  }
+
+  const handleSearch = async (res: ServerResponse, params: URLSearchParams): Promise<void> => {
+    const fusion = deps.fusion
+    if (fusion === undefined) {
+      writeJson(res, 501, { reason: 'fusion_not_wired' })
+      return
+    }
+    const query = (params.get('q') ?? '').trim()
+    const project = (params.get('project') ?? '').trim()
+    if (query === '' && project === '') {
+      writeJson(res, 400, {
+        reason: 'invalid_request',
+        detail: 'search needs q= (text query) and/or project= (project filter)',
+      })
+      return
+    }
+    const limit = parseLimit(params, 'limit')
+    if (limit === null) {
+      writeJson(res, 400, { reason: 'invalid_limit' })
+      return
+    }
+    let mode: 'full-text' | 'filter-only'
+    let items: Array<{ session: { project: string }; matchedBy: string; snippet: string | null }>
+    if (query !== '') {
+      const result = await fusion.searchSessions(query, limit === undefined ? {} : { limit })
+      mode = result.mode
+      items = result.items
+    } else {
+      // Project-only search: a plain filter over the unified view.
+      mode = 'filter-only'
+      items = fusion
+        .getUnifiedSessions()
+        .map((session) => ({ session, matchedBy: 'project', snippet: null }))
+    }
+    if (project !== '') {
+      // Exact-path filter after trailing-slash normalization (`project` is
+      // the group key handed out by GET projects).
+      const wanted = normalizeProjectKey(project)
+      items = items.filter((item) => normalizeProjectKey(item.session.project) === wanted)
+    }
+    items = items.slice(0, limit ?? DEFAULT_SEARCH_ROUTE_LIMIT)
+    writeJson(res, 200, {
+      mode,
+      query,
+      project: project === '' ? null : project,
+      items,
+    })
+  }
+
+  const handleProjects = (res: ServerResponse): void => {
+    const fusion = deps.fusion
+    if (fusion === undefined) {
+      writeJson(res, 501, { reason: 'fusion_not_wired' })
+      return
+    }
+    writeJson(res, 200, { groups: fusion.getProjectGroups() })
   }
 
   // -------------------------------------------------------------- actions
@@ -438,6 +774,124 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
     writeJson(res, status, result)
   }
 
+  // ------------------------------------------------------ analysis actions
+
+  /**
+   * Answer one engine result: status per {@link ANALYSIS_ERROR_STATUS},
+   * body is the result verbatim (it already carries outcome /
+   * analysisSessionId / summary / truncated / disclaimer). The log line
+   * keeps only outcome/codes/ids — never summaries or questions (S8).
+   */
+  const respondAnalysisResult = (
+    type: string,
+    res: ServerResponse,
+    result: AnalysisResult,
+  ): void => {
+    const status =
+      result.errorCode !== undefined
+        ? (ANALYSIS_ERROR_STATUS[result.errorCode] ?? 502)
+        : 200
+    logAction(type, status, {
+      outcome: result.outcome,
+      ...(result.errorCode !== undefined ? { errorCode: result.errorCode } : {}),
+      ...(result.analysisSessionId !== undefined
+        ? { analysisSessionId: result.analysisSessionId }
+        : {}),
+      ...(result.truncated ? { truncated: true } : {}),
+    })
+    writeJson(res, status, result)
+  }
+
+  const rejectInvalidAnalysis = (type: string, res: ServerResponse, detail: string): void => {
+    logAction(type, 400, { reason: 'invalid_request' })
+    writeJson(res, 400, { reason: 'invalid_request', detail })
+  }
+
+  const handleAnalysisRequest = async (
+    analysis: AnalysisApi,
+    envelope: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> => {
+    const { targetKind, targetId, question } = envelope
+    if (
+      (targetKind !== 'session' && targetKind !== 'project' && targetKind !== 'cross-agent') ||
+      (targetId !== undefined && typeof targetId !== 'string') ||
+      (question !== undefined && typeof question !== 'string')
+    ) {
+      rejectInvalidAnalysis(
+        'analysis.request',
+        res,
+        'analysis.request needs targetKind session|project|cross-agent, optional string targetId and question',
+      )
+      return
+    }
+    if ((targetKind === 'session' || targetKind === 'project') && (targetId === undefined || targetId === '')) {
+      rejectInvalidAnalysis(
+        'analysis.request',
+        res,
+        `analysis.request with targetKind ${targetKind} needs a non-empty targetId`,
+      )
+      return
+    }
+    const input = await analysis.buildInput({
+      targetKind,
+      ...(targetId !== undefined ? { targetId } : {}),
+      ...(question !== undefined ? { question } : {}),
+    })
+    if (input === null) {
+      logAction('analysis.request', 404, { reason: 'target_not_found', targetKind })
+      writeJson(res, 404, { reason: 'target_not_found' })
+      return
+    }
+    respondAnalysisResult('analysis.request', res, await analysis.engine.request(input))
+  }
+
+  const handleAnalysisFollowup = async (
+    analysis: AnalysisApi,
+    envelope: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> => {
+    const { analysisSessionId, question } = envelope
+    if (
+      typeof analysisSessionId !== 'string' ||
+      analysisSessionId === '' ||
+      typeof question !== 'string' ||
+      question === ''
+    ) {
+      rejectInvalidAnalysis(
+        'analysis.followup',
+        res,
+        'analysis.followup needs non-empty string analysisSessionId and question',
+      )
+      return
+    }
+    respondAnalysisResult(
+      'analysis.followup',
+      res,
+      await analysis.engine.followup(analysisSessionId, question),
+    )
+  }
+
+  const handleAnalysisCancel = async (
+    analysis: AnalysisApi,
+    envelope: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> => {
+    const { analysisSessionId } = envelope
+    if (typeof analysisSessionId !== 'string' || analysisSessionId === '') {
+      rejectInvalidAnalysis(
+        'analysis.cancel',
+        res,
+        'analysis.cancel needs a non-empty string analysisSessionId',
+      )
+      return
+    }
+    // Idempotent by engine contract: an unknown id is a logged no-op.
+    await analysis.engine.cancel(analysisSessionId)
+    logAction('analysis.cancel', 200, { analysisSessionId })
+    writeJson(res, 200, { ok: true, analysisSessionId })
+  }
+
   /** M2 dispatcher over the action envelope (gateway present, guard 1-4 passed). */
   const handleAction = async (
     gateway: InjectGatewayApi,
@@ -495,6 +949,40 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
           await handlePrepare(gateway, envelope, res)
         } else {
           await handleExecute(gateway, envelope, res)
+        }
+        return
+      }
+
+      if (type !== null && ANALYSIS_ACTION_TYPES.has(type)) {
+        // The analysis write gate (guard layers 1-4 already passed via
+        // `verdict`): request/followup are gated by analysis.enabled —
+        // NOT the guard's inject.enabled gate — and fail-closed when the
+        // dep is absent. analysis.cancel deliberately BYPASSES the gate
+        // (F3): it is a cleanup/stop-loss action that spends no tokens,
+        // and flipping the kill switch off must not lock in-flight
+        // sessions out of cancellation until their timeout.
+        if (
+          type !== 'analysis.cancel' &&
+          (deps.analysisEnabled === undefined || !deps.analysisEnabled())
+        ) {
+          logAction(type, 403, { reason: 'analysis_disabled' })
+          writeJson(res, 403, { reason: 'analysis_disabled' })
+          return
+        }
+        // Past the gate: no engine wired, or the agents service is not
+        // bound in this composition → honest degradation, never a crash.
+        const analysis = deps.analysis
+        if (analysis === undefined || !analysis.available()) {
+          logAction(type, 501, { reason: 'analysis_unavailable' })
+          writeJson(res, 501, { reason: 'analysis_unavailable' })
+          return
+        }
+        if (type === 'analysis.request') {
+          await handleAnalysisRequest(analysis, envelope, res)
+        } else if (type === 'analysis.followup') {
+          await handleAnalysisFollowup(analysis, envelope, res)
+        } else {
+          await handleAnalysisCancel(analysis, envelope, res)
         }
         return
       }
@@ -567,9 +1055,34 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
       return
     }
 
+    if (subpath === 'projects') {
+      if (method !== 'GET') return writeMethodNotAllowed(res, 'GET')
+      handleProjects(res)
+      return
+    }
+
+    if (subpath === 'search') {
+      if (method !== 'GET') return writeMethodNotAllowed(res, 'GET')
+      await handleSearch(res, queryOf(req.url))
+      return
+    }
+
+    if (subpath.startsWith('lineage/')) {
+      if (method !== 'GET') return writeMethodNotAllowed(res, 'GET')
+      await handleLineage(res, subpath.slice('lineage/'.length))
+      return
+    }
+
     if (subpath.startsWith('session/')) {
       if (method !== 'GET') return writeMethodNotAllowed(res, 'GET')
-      handleSession(res, subpath.slice('session/'.length))
+      const rest = subpath.slice('session/'.length)
+      // `<id>/timeline` splits on the LAST path segment; percent-encoded
+      // ids can never contain a literal '/' so the split is unambiguous.
+      if (rest.endsWith('/timeline')) {
+        await handleTimeline(res, rest.slice(0, -'/timeline'.length), queryOf(req.url))
+        return
+      }
+      await handleSession(res, rest)
       return
     }
 

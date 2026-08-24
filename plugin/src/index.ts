@@ -1,10 +1,17 @@
 /**
- * Agent Sidecar — dsh host-half plugin entry (M1 + M2 assembly).
+ * Agent Sidecar — dsh host-half plugin entry (M1 + M2 + M3 assembly).
  *
  * Wires the pure modules onto the cordis context:
- *   SessionStore → SidecarSocketClient → Reconciler → DaemonSupervisor
- *   → InjectGateway (dsh + send-cli executors) → createRoutes
- *   → ctx.webServer prefix route.
+ *   SessionStore → SidecarSocketClient → FusionQuery (holder) → Reconciler
+ *   → DaemonSupervisor → InjectGateway (dsh + send-cli executors)
+ *   → AnalysisEngine (lazy agents.create + fusion input adapter)
+ *   → createRoutes → ctx.webServer prefix route.
+ *
+ * M3 fusion wiring in brief: FusionQuery lives behind a holder facade so
+ * the dsh event feed can bind lazily (`ctx.inject(['sessions'])`, swap-in/
+ * swap-out); sessionQuery resolves per call via reflect `get`; the daemon
+ * `replay` op arrives through a paging adapter over `client.replay`; and
+ * the reconciler's store face tees subscribe events into fusion's ring.
  *
  * Named exports only: postmortem 0001 documents that a default-exported
  * plugin object silently drops `inject`, so the loader must see the named
@@ -20,7 +27,8 @@
  * compositions the lazy callback fires at boot anyway; in agent-less
  * compositions the plugin still loads and the injection surface degrades
  * to the send-cli path only (a dsh-target execute fails with an honest
- * "agents service unavailable" detail).
+ * "agents service unavailable" detail) while the M3 analysis actions
+ * answer 501 `analysis_unavailable` (same binding gates both).
  *
  * Service contracts consumed here were verified against the installed dsh
  * 0.1.1-rc.2 type declarations, not docs:
@@ -49,16 +57,35 @@ import { createInterface } from 'node:readline'
 import type { Readable, Writable } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 
+import {
+  AnalysisEngine,
+  type AnalysisAgentFace,
+  type AnalysisInput,
+  type AnalysisSession,
+} from './analysis.ts'
 import { Config } from './config.ts'
 import { Reconciler, SidecarSocketClient } from './bridge.ts'
 import { createDshInjectExecutor, type AgentsServiceFace } from './dsh-inject.ts'
+import {
+  FusionQuery,
+  type DshEventFace,
+  type SessionQueryFace,
+  type SidecarEventFace,
+  type SidecarReplayFace,
+  type UnifiedSession,
+} from './fusion.ts'
 import type { GuardOptions } from './guard.ts'
 import {
   InjectGateway,
   type InjectTarget,
   type TargetStatus,
 } from './inject-gateway.ts'
-import { API_PREFIX, createRoutes } from './routes.ts'
+import {
+  API_PREFIX,
+  createRoutes,
+  type AnalysisTargetRequest,
+  type FusionApi,
+} from './routes.ts'
 import { createSendCliExecutor, type SpawnLike } from './send-cli.ts'
 import { SessionStore } from './session-store.ts'
 import { DaemonSupervisor, type DaemonProcess, type LogLevel } from './supervisor.ts'
@@ -156,6 +183,14 @@ export interface SettingsServiceFace {
   ): SettingsScopeFace<T>
 }
 
+/**
+ * The lazily-bound `ctx.agents` registry surface: M2 injection consumes
+ * `get`/`resume` (dsh-inject's {@link AgentsServiceFace}), M3 analysis
+ * consumes `create` (analysis.ts's {@link AnalysisAgentFace}). One lazy
+ * binding serves both paths — and gates both degradations.
+ */
+export type AgentsRegistryFace = AgentsServiceFace & Pick<AnalysisAgentFace, 'create'>
+
 /** The plugin context with the two hard-injected services visible. */
 export type HostContext = Context & {
   webServer: WebServerService
@@ -182,6 +217,26 @@ const SEND_CLI_GRACE_MS = 2000
 const DETECT_OUTPUT_BYTES = 4096
 /** Per-line clamp when forwarding daemon output into ctx.logger (S8). */
 const LOG_LINE_LIMIT = 400
+/** Per-page `replay` limit forwarded to the daemon (its own cap is 1024). */
+const REPLAY_PAGE_LIMIT = 512
+/** Page cap per fusion replay pull: bounds one timeline fan-out to ≤2048 events. */
+const REPLAY_MAX_PAGES = 4
+
+// Bounds of the fusion→AnalysisInput adapter (§7-B: the engine re-bounds
+// the whole text to maxInputChars anyway; these keep the assembly cheap
+// and the head of the text — which survives engine truncation — useful).
+/** Timeline entries pulled into one session-analysis summary. */
+const ANALYSIS_TIMELINE_LIMIT = 120
+/** Sessions listed per project-analysis overview. */
+const ANALYSIS_MAX_SESSIONS = 30
+/** Project groups listed in a cross-agent analysis overview. */
+const ANALYSIS_MAX_GROUPS = 12
+/** Sessions listed per group in a cross-agent analysis overview. */
+const ANALYSIS_CROSS_SESSIONS = 5
+/** Clamp on one line of untrusted text (titles, event text). */
+const ANALYSIS_LINE_CLAMP = 200
+/** Clamp on the user question (placed at the head, so it survives truncation). */
+const ANALYSIS_QUESTION_CLAMP = 2000
 
 /**
  * `service status` messages that mean "a LaunchAgent owns daemon liveness"
@@ -208,6 +263,33 @@ function resolveRuntimeDir(configured: string, env: NodeJS.ProcessEnv): string {
   const expanded =
     raw === '~' ? homedir() : raw.startsWith('~/') ? join(homedir(), raw.slice(2)) : raw
   return isAbsolute(expanded) ? expanded : resolve(expanded)
+}
+
+// ---------------------------------------------------------------------------
+// Fusion → AnalysisInput assembly helpers (pure; bounded per the constants).
+// ---------------------------------------------------------------------------
+
+/** Flatten and clamp one line of untrusted text for an analysis summary. */
+function clampAnalysisText(text: string, max = ANALYSIS_LINE_CLAMP): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length <= max ? flat : `${flat.slice(0, max)}…`
+}
+
+/** Same trailing-slash normalization fusion uses for project group keys. */
+function normalizeAnalysisProject(project: string): string {
+  if (project.length > 1 && project.endsWith('/')) {
+    const stripped = project.replace(/\/+$/, '')
+    return stripped === '' ? '/' : stripped
+  }
+  return project
+}
+
+/** One unified-session line in a project / cross-agent overview. */
+function describeUnifiedSession(session: UnifiedSession): string {
+  const title = session.title !== '' ? clampAnalysisText(session.title) : '(untitled)'
+  const live = session.live ? '|live' : ''
+  const updated = new Date(session.lastActivityAt).toISOString()
+  return `- [${session.agent}|${session.status}${live}] ${title} (updated ${updated})`
 }
 
 /**
@@ -302,12 +384,88 @@ export function apply(ctx: HostContext, config: Config): void {
 
   const store = new SessionStore()
   const client = new SidecarSocketClient({ socketPath })
+
+  // ------------------------------------------------------ M3 fusion assembly
+
+  // SidecarReplayFace → bridge.replay: one fusion pull pages the daemon op
+  // until the history is exhausted, bounded to REPLAY_MAX_PAGES so a huge
+  // transcript can never wedge one HTTP request. Coded daemon errors
+  // (unknown_session / replay_unsupported / ...) propagate as rejections;
+  // fusion degrades that source and reports it via `sources` (design §4.e).
+  const replayFace: SidecarReplayFace = {
+    replay: async ({ sessionId, afterSeq }) => {
+      const events: SidecarEventFace[] = []
+      let cursor = afterSeq ?? 0
+      for (let page = 0; page < REPLAY_MAX_PAGES; page += 1) {
+        const result = await client.replay(sessionId, cursor, REPLAY_PAGE_LIMIT)
+        events.push(...result.events)
+        if (!result.truncated || result.lastSeq === null || result.lastSeq <= cursor) break
+        cursor = result.lastSeq
+      }
+      return events
+    },
+  }
+
+  // SessionQueryFace → ctx.sessionQuery, re-resolved on EVERY use through
+  // the reflect `get` (never a hard inject): dsh-session-query may mount
+  // late or never, and fusion degrades per call instead of pending.
+  const getSessionQuery = (): SessionQueryFace | null => {
+    const getter = (ctx as { get?: (name: string) => unknown }).get
+    if (typeof getter !== 'function') return null
+    const engine = getter.call(ctx, 'sessionQuery')
+    return engine === undefined || engine === null ? null : (engine as SessionQueryFace)
+  }
+
+  const buildFusion = (dshEvents: DshEventFace | null): FusionQuery =>
+    new FusionQuery({
+      store,
+      dshEvents,
+      getSessionQuery,
+      replay: replayFace,
+    })
+
+  // DshEventFace is bound through the lazy `sessions` inject below, but
+  // fusion must exist NOW (routes capture it). Holder pattern: construct
+  // sidecar-only first, swap in a feed-backed instance when dsh-session
+  // binds, swap back on release — so `getCapabilities().dshEvents` always
+  // reports the truth instead of a permanently-optimistic facade. The swap
+  // drops the old instance's bounded event rings; replay and the live
+  // stream repopulate them, so no timeline data is lost, only hints.
+  const fusionHolder = { current: buildFusion(null) }
+  const fusion: FusionApi = {
+    getUnifiedSessions: () => fusionHolder.current.getUnifiedSessions(),
+    getSessionTimeline: (sessionId, opts) =>
+      fusionHolder.current.getSessionTimeline(sessionId, opts),
+    getProjectGroups: (opts) => fusionHolder.current.getProjectGroups(opts),
+    getLineage: (sessionId) => fusionHolder.current.getLineage(sessionId),
+    searchSessions: (query, opts) => fusionHolder.current.searchSessions(query, opts),
+    getCapabilities: () => fusionHolder.current.getCapabilities(),
+  }
+
   // policy=off still reconciles read-only against an externally managed
   // daemon: off means "lifecycle is not ours", not "do not read data".
-  const reconciler = new Reconciler(client, store, {
-    activeMs: config.stream.reconcileActiveMs,
-    idleMs: config.stream.reconcileIdleMs,
-  })
+  // The store face tees each subscribe-stream event into fusion's bounded
+  // ring (timeline hints) on its way into the session cache.
+  const reconciler = new Reconciler(
+    client,
+    {
+      applySnapshot: (rows) => {
+        store.applySnapshot(rows)
+      },
+      applyEvent: (ev) => {
+        store.applyEvent(ev)
+        fusionHolder.current.ingestSidecarEvent(ev)
+      },
+      setStreamHealth: (health) => {
+        store.setStreamHealth(health)
+      },
+      hasWorkingSessions: () => store.hasWorkingSessions(),
+    },
+    {
+      activeMs: config.stream.reconcileActiveMs,
+      idleMs: config.stream.reconcileIdleMs,
+    },
+  )
   const supervisor = new DaemonSupervisor(
     { ping: () => client.ping(), spawnDaemon, detectLaunchAgent, log },
     { policy: config.daemon.policy, backoffLimit: config.daemon.backoffLimit },
@@ -326,7 +484,8 @@ export function apply(ctx: HostContext, config: Config): void {
   // agents inject below; until then (and in compositions without dsh-agent)
   // the face reports the path unavailable: `get` misses, `resume` rejects,
   // and the executor surfaces an honest failure while send-cli keeps working.
-  let liveAgents: AgentsServiceFace | null = null
+  // The same binding carries `create` for the M3 analysis engine.
+  let liveAgents: AgentsRegistryFace | null = null
   const agentsFace: AgentsServiceFace = {
     get: (sessionId) => liveAgents?.get(sessionId),
     resume: (options) =>
@@ -415,7 +574,156 @@ export function apply(ctx: HostContext, config: Config): void {
     log: (entry) => log(entry.ok ? 'info' : 'warn', `inject ${entry.phase}`, entry),
   })
 
-  const routes = createRoutes({ store, supervisor, guardOptions, injectGateway, log })
+  // -------------------------------------------------- M3 analysis assembly
+
+  // In-flight analysis sessions created through this assembly, tracked at
+  // the wiring layer (the engine keeps its bookkeeping private): every
+  // engine cleanup path goes through `handle.dispose()`, which unregisters
+  // here, so whatever is left when the plugin unloads is exactly the set
+  // the effect disposer must cancel (design: 在途分析会话随 dispose 清理).
+  const liveAnalysisSessions = new Set<AnalysisSession>()
+
+  const createAnalysisAgent: AnalysisAgentFace['create'] = async (options) => {
+    const agents = liveAgents
+    if (agents === null) {
+      // Raced past the routes' availability probe: surfaces as an honest
+      // create_failed result, never a crash.
+      throw new Error('dsh agents service is not available in this composition')
+    }
+    const handle = await agents.create(options)
+    const tracked: AnalysisSession = {
+      agent: handle.agent,
+      dispose: async () => {
+        liveAnalysisSessions.delete(tracked)
+        await handle.dispose()
+      },
+    }
+    liveAnalysisSessions.add(tracked)
+    return tracked
+  }
+
+  // Engine log entries are body-free by the engine's own contract (S8):
+  // kind/title/ids/outcomes/sizes only — safe to forward whole.
+  const analysisEngine = new AnalysisEngine({
+    createAgent: createAnalysisAgent,
+    allowAnalysis: () => effective.analysis.enabled,
+    log: (entry) =>
+      log(entry.errorCode !== undefined ? 'warn' : 'info', `analysis ${entry.op}`, entry),
+  })
+
+  /**
+   * Assemble the bounded AnalysisInput for one target from fusion data
+   * (design §4.e.3: summaries come from the fused timelines/overviews).
+   * `null` = target unknown to fusion → the routes answer 404. The user
+   * question rides the HEAD of the text so it survives the engine's
+   * tail truncation, and the session timeline lists NEWEST events first
+   * for the same reason: when the engine's head-keep truncation bites,
+   * it should shed the oldest — least informative — events (F5).
+   */
+  const buildAnalysisInput = async (
+    req: AnalysisTargetRequest,
+  ): Promise<AnalysisInput | null> => {
+    const questionLines =
+      req.question !== undefined && req.question.trim() !== ''
+        ? [
+            '[用户问题 / question]',
+            clampAnalysisText(req.question, ANALYSIS_QUESTION_CLAMP),
+            '',
+          ]
+        : []
+
+    if (req.targetKind === 'session') {
+      const targetId = req.targetId ?? ''
+      const session =
+        fusion.getUnifiedSessions().find((s) => s.sessionId === targetId) ?? null
+      if (session === null) return null
+      const page = await fusion.getSessionTimeline(targetId, {
+        limit: ANALYSIS_TIMELINE_LIMIT,
+      })
+      const sources = page.sources
+      const summaryText = [
+        ...questionLines,
+        `[会话概览 / session] agent=${session.agent} status=${session.status} live=${session.live}`,
+        `title: ${session.title !== '' ? clampAnalysisText(session.title) : '(untitled)'}`,
+        `project: ${session.project}`,
+        `last activity: ${new Date(session.lastActivityAt).toISOString()}`,
+        '',
+        `[时间线 / timeline,最新在前 / newest first] ${page.entries.length} events (sources: dshLive=${sources.dshLive} dshCold=${sources.dshCold} replay=${sources.sidecarReplay} buffer=${sources.sidecarBuffer})`,
+        ...[...page.entries].reverse().map(
+          (entry) =>
+            `- [${new Date(entry.ts).toISOString()}] ${entry.kind}` +
+            `${entry.seq !== null ? ` seq=${entry.seq}` : ''}` +
+            `${entry.text !== '' ? ` ${clampAnalysisText(entry.text)}` : ''}`,
+        ),
+      ].join('\n')
+      return {
+        kind: 'session',
+        title:
+          session.title !== '' ? session.title : `${session.agent} ${session.sessionId}`,
+        summaryText,
+        meta: { targetId, agent: session.agent },
+      }
+    }
+
+    if (req.targetKind === 'project') {
+      const wanted = normalizeAnalysisProject(req.targetId ?? '')
+      const group =
+        fusion
+          .getProjectGroups()
+          .find((g) => normalizeAnalysisProject(g.project) === wanted) ?? null
+      if (group === null) return null
+      const omitted = group.sessions.length - ANALYSIS_MAX_SESSIONS
+      const summaryText = [
+        ...questionLines,
+        `[项目概览 / project] ${group.project}`,
+        `agents: ${group.agents.join(', ')} | sessions: ${group.sessions.length} | last activity: ${new Date(group.lastActivityAt).toISOString()}`,
+        '',
+        ...group.sessions.slice(0, ANALYSIS_MAX_SESSIONS).map(describeUnifiedSession),
+        ...(omitted > 0 ? [`… ${omitted} more sessions omitted`] : []),
+      ].join('\n')
+      return {
+        kind: 'project',
+        title: `project ${group.project}`,
+        summaryText,
+        meta: { targetId: group.project },
+      }
+    }
+
+    // cross-agent: whole-board overview, always resolvable (possibly empty).
+    const groups = fusion.getProjectGroups()
+    const sessionsTotal = groups.reduce((n, g) => n + g.sessions.length, 0)
+    const omittedGroups = groups.length - ANALYSIS_MAX_GROUPS
+    const summaryText = [
+      ...questionLines,
+      `[跨 agent 概览 / cross-agent overview] ${groups.length} projects, ${sessionsTotal} sessions in the correlation window`,
+      '',
+      ...groups.slice(0, ANALYSIS_MAX_GROUPS).flatMap((group) => [
+        `[${group.project}] agents: ${group.agents.join(', ')} | sessions: ${group.sessions.length}`,
+        ...group.sessions.slice(0, ANALYSIS_CROSS_SESSIONS).map(describeUnifiedSession),
+        '',
+      ]),
+      ...(omittedGroups > 0 ? [`… ${omittedGroups} more projects omitted`] : []),
+    ].join('\n')
+    return { kind: 'cross-agent', title: 'cross-agent overview', summaryText }
+  }
+
+  const routes = createRoutes({
+    store,
+    supervisor,
+    guardOptions,
+    injectGateway,
+    fusion,
+    // The analysis write gate reads the LIVE setting, same posture as the
+    // inject gate; the engine's allowAnalysis reads the same value (two
+    // independent gates, no duplication).
+    analysisEnabled: () => effective.analysis.enabled,
+    analysis: {
+      engine: analysisEngine,
+      buildInput: buildAnalysisInput,
+      available: () => liveAgents !== null,
+    },
+    log,
+  })
 
   ctx.effect(() => {
     const removeRoute = ctx.webServer.register({
@@ -430,33 +738,78 @@ export function apply(ctx: HostContext, config: Config): void {
     const offStateChange = supervisor.onStateChange((state) => {
       if (state === 'adopted' || state === 'hosted') void reconciler.reconcileNow()
     })
+    fusionHolder.current.start()
     reconciler.start()
     supervisor.start()
     return async () => {
       offStateChange()
       await supervisor.stop()
       reconciler.stop()
+      // In-flight analysis sessions die with the plugin: dispose() stops
+      // the agent loop and removes the session (the UI "stop" semantics),
+      // bounding token burn across plugin reloads (§7-B / design risk 12).
+      await Promise.all(
+        [...liveAnalysisSessions].map((handle) => handle.dispose().catch(() => {})),
+      )
       routes.dispose()
       removeRoute()
+      // Whichever instance the holder points at by now (idempotent stop;
+      // a feed-bound instance is also stopped by its own inject release).
+      fusionHolder.current.stop()
     }
-  }, 'agent-sidecar: host assembly (route + reconciler + supervisor)')
+  }, 'agent-sidecar: host assembly (route + reconciler + supervisor + fusion + analysis)')
 
-  // dsh injection path binding (M2). Lazy inject, same pattern as settings
-  // below: `agents` (dsh-agent AgentRegistry) is present in every dsh-base
-  // composition, but a top-level hard inject would pend the whole fiber in
-  // agent-less compositions (see module doc). The callback rides its own
-  // fiber: cordis unloads and re-runs it whenever the service changes, and
-  // the effect disposer unbinds so the executor degrades cleanly again.
-  // Binding the service reference here (not per call) keeps resume's owner
-  // context on this fiber, so a handle resumed for injection is drained by
-  // cordis if the plugin unloads.
+  // Fusion dsh event feed binding (M3). Lazy inject on `sessions`
+  // (dsh-session's service key; the feed itself is the cordis event bus —
+  // `ctx.on('session/event' | 'session/created' | 'session/disposed')` —
+  // but only meaningful while the service is mounted, and gating on it
+  // keeps `getCapabilities().dshEvents.available` honest). Compositions
+  // without dsh-session simply never run this: fusion stays sidecar-only
+  // and every route keeps working (degradation, not failure).
+  ctx.inject(['sessions'], (injected) => {
+    const sctx = injected as HostContext
+    // 'session/*' keys live in dsh-session's Events augmentation, which
+    // this package deliberately does not import (structural-faces rule);
+    // the cast keeps the listener registration honest at runtime.
+    const bus = sctx as unknown as {
+      on(event: string, handler: (...args: never[]) => void): () => void
+    }
+    const feed: DshEventFace = {
+      on: (event: string, handler: (...args: never[]) => void) => bus.on(event, handler),
+    }
+    const withFeed = buildFusion(feed)
+    withFeed.start()
+    const previous = fusionHolder.current
+    fusionHolder.current = withFeed
+    previous.stop()
+    sctx.effect(() => () => {
+      // Service departing: swap back to a sidecar-only fusion so queries
+      // keep answering (and capabilities report the feed as gone).
+      const downgraded = buildFusion(null)
+      downgraded.start()
+      fusionHolder.current = downgraded
+      withFeed.stop()
+    }, 'agent-sidecar: fusion dsh feed release')
+    log('debug', 'fusion dsh event feed online (sessions service bound)')
+  })
+
+  // dsh injection + analysis path binding (M2/M3). Lazy inject, same
+  // pattern as settings below: `agents` (dsh-agent AgentRegistry) is
+  // present in every dsh-base composition, but a top-level hard inject
+  // would pend the whole fiber in agent-less compositions (see module
+  // doc). The callback rides its own fiber: cordis unloads and re-runs it
+  // whenever the service changes, and the effect disposer unbinds so the
+  // executor AND the analysis engine degrade cleanly again. Binding the
+  // service reference here (not per call) keeps resume/create's owner
+  // context on this fiber, so handles created for injection or analysis
+  // are drained by cordis if the plugin unloads.
   ctx.inject(['agents'], (injected) => {
-    const actx = injected as HostContext & { agents: AgentsServiceFace }
+    const actx = injected as HostContext & { agents: AgentsRegistryFace }
     liveAgents = actx.agents
     actx.effect(() => () => {
       liveAgents = null
     }, 'agent-sidecar: agents binding release')
-    log('debug', 'dsh inject path online (agents service bound)')
+    log('debug', 'dsh inject + analysis paths online (agents service bound)')
   })
 
   // Settings namespace 'agent-sidecar' (T2.4): pairs the browser settings

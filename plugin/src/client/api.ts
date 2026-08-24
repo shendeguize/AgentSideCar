@@ -111,11 +111,43 @@ export interface DaemonRetryActionBody {
   type: 'daemon.retry'
 }
 
+/** Analysis target selector (host: routes.ts `AnalysisTargetRequest`). */
+export type AnalysisTargetKind = 'session' | 'project' | 'cross-agent'
+
+/** `POST action` body starting one analysis (host: routes.ts, M3). */
+export interface AnalysisRequestActionBody {
+  type: 'analysis.request'
+  targetKind: AnalysisTargetKind
+  /** Session id / project path; required for session and project kinds. */
+  targetId?: string
+  question?: string
+}
+
+/** `POST action` body asking a follow-up in a live analysis session. */
+export interface AnalysisFollowupActionBody {
+  type: 'analysis.followup'
+  analysisSessionId: string
+  question: string
+}
+
+/** `POST action` body releasing an analysis session (idempotent). */
+export interface AnalysisCancelActionBody {
+  type: 'analysis.cancel'
+  analysisSessionId: string
+}
+
 /**
- * The M2 action dispatcher envelope (host: routes.ts `handleAction`):
- * a `{type, ...}` union with the phase fields at the top level.
+ * The action dispatcher envelope (host: routes.ts `handleAction`):
+ * a `{type, ...}` union with the phase fields at the top level. M2 inject
+ * phases + daemon management + the M3 `analysis.*` trio.
  */
-export type ActionEnvelope = PrepareActionBody | ExecuteActionBody | DaemonRetryActionBody
+export type ActionEnvelope =
+  | PrepareActionBody
+  | ExecuteActionBody
+  | DaemonRetryActionBody
+  | AnalysisRequestActionBody
+  | AnalysisFollowupActionBody
+  | AnalysisCancelActionBody
 
 // ---------------------------------------------------------------------------
 // Injectable browser primitives (structural, so node tests can fake them).

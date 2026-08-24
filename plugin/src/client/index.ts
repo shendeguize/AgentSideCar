@@ -52,7 +52,7 @@ import { PLUGIN_ID, SidecarController } from './controller.ts'
 import { createInjectActions } from './inject-glue.ts'
 import type { InjectMode } from './inject/logic.ts'
 import { createBoardTab, createFooterWidget, createSettingsCardEntry } from './mount.tsx'
-import type { BoardInjectIntegration } from './mount.tsx'
+import { createDefaultIntegration, type SidecarUiIntegration } from './detail-view.tsx'
 import type { SidecarConfigView } from './settings-glue.ts'
 
 export const name = 'agent-sidecar'
@@ -141,20 +141,33 @@ function keepStylesAlive(): () => void {
 export function apply(ctx: ClientContext): void {
   const controller = new SidecarController()
 
-  // Inject integration (S5/T4.9): the board tab hosts the panel; a
+  // Inject integration (S5/T4.9): the detail view hosts the panel; a
   // delivered execute pulls one fresh snapshot so the board reflects the
   // injection promptly. The default mode is a mutable box because the
   // settings scope (seat 3) resolves after the board mounts — the reader
   // is late-bound and the box holds the schema default until then.
   const injectPrefs: { defaultMode: InjectMode } = { defaultMode: 'queue' }
-  const injectIntegration: BoardInjectIntegration = {
-    actions: createInjectActions({
-      onDelivered: () => {
-        void controller.refresh()
-      },
-    }),
-    getDefaultMode: () => injectPrefs.defaultMode,
-  }
+
+  // Analysis capability (T5.10b): the state snapshot carries no analysis
+  // bit, so the UI gate mirrors the live `analysis.enabled` setting the
+  // same late-bound way (schema default false = fail-closed until the
+  // scope resolves); the server 403 gate stays authoritative regardless.
+  const analysisPrefs: { enabled: boolean } = { enabled: false }
+
+  // M3 integration handed to the board tab (design §5.1): detail routing,
+  // project view, dsh deep-query tools, and the analysis panel, each over
+  // its glue store on the real transports.
+  const uiIntegration: SidecarUiIntegration = createDefaultIntegration({
+    inject: {
+      actions: createInjectActions({
+        onDelivered: () => {
+          void controller.refresh()
+        },
+      }),
+      getDefaultMode: () => injectPrefs.defaultMode,
+    },
+    getAnalysisEnabled: () => analysisPrefs.enabled,
+  })
 
   // Data feed + visibility resume (design §5.3: visibilitychange → pollNow).
   ctx.effect(() => {
@@ -182,10 +195,12 @@ export function apply(ctx: ClientContext): void {
 
   ctx.effect(keepStylesAlive, 'agent-sidecar: injected styles')
 
-  // Seat 1: cross-agent board as the "Sidecar" conversation tab (the
-  // inject panel rides it as a card-selection modal).
+  // Seat 1: cross-agent board as the "Sidecar" conversation tab — since
+  // T5.10b the shell of the M3 information architecture: board/project
+  // switcher, card-click detail routing (timeline + inject + analysis +
+  // dsh lineage/search), all riding the integration seams above.
   try {
-    const SidecarBoardTab = createBoardTab(controller, injectIntegration)
+    const SidecarBoardTab = createBoardTab(controller, uiIntegration)
     ctx.slots.inject('conversation.view', () => {
       if (hasOwnEntry(ctx, 'conversation.view')) return () => {}
       try {
@@ -237,11 +252,13 @@ export function apply(ctx: ClientContext): void {
 
         // ui.* settings defaults seed the board filters until the user
         // touches them (localStorage value or filter gesture wins);
-        // inject.default-mode feeds the panel's late-bound mode reader.
+        // inject.default-mode feeds the panel's late-bound mode reader;
+        // analysis.enabled feeds the analysis entry's late-bound gate.
         const adoptDefaults = (): void => {
           const value = scope.getSnapshot().value
           if (value?.ui !== undefined) controller.adoptConfigDefaults(value.ui)
           if (value?.inject !== undefined) injectPrefs.defaultMode = value.inject.defaultMode
+          if (value?.analysis !== undefined) analysisPrefs.enabled = value.analysis.enabled
         }
         sctx.effect(
           () => scope.subscribe(adoptDefaults),

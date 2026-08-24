@@ -6,15 +6,28 @@
  * plugin context.
  *
  * Protocol source of truth (verified against sidecar source, not docs):
- * - Requests are single-line JSON `{"op":"ping"|"status"|"subscribe"}`
- *   terminated by `\n` (`sidecar/daemon.py` `_handle_client`).
- * - `ping`/`status` answer with exactly one JSON line. The official client
- *   (`sidecar/client.py`) opens one fresh connection per op and closes it
- *   after the response; we mirror that semantic.
+ * - Requests are single-line JSON
+ *   `{"op":"ping"|"status"|"replay"|"subscribe"}` terminated by `\n`
+ *   (`sidecar/daemon.py` `_handle_client`).
+ * - `ping`/`status`/`replay` answer with exactly one JSON line. The official
+ *   client (`sidecar/client.py`) opens one fresh connection per op and
+ *   closes it after the response; we mirror that semantic.
+ * - `replay {session_id, after_seq, limit}` (T5.2) answers one bounded page
+ *   `{events, last_seq, truncated, count, agent, ...}` sourced from the
+ *   session adapter's own transcript replay (daemon `_replay_response`;
+ *   today only dsh sessions provide one). Unlike ping/status, {@link
+ *   SidecarSocketClient.replay} REJECTS with a coded
+ *   {@link SidecarDaemonError} instead of resolving null: the daemon error
+ *   vocabulary (`unknown_session` / `replay_unsupported` / `replay_failed`
+ *   / `invalid_request`) must reach the caller verbatim so the fusion
+ *   layer can degrade honestly (design §4.b.2).
  * - `subscribe` answers with an ack line `{"ok":true,"op":"subscribe"}`
  *   and then streams JSONL event objects until either side disconnects
- *   (`sidecar/daemon.py` `_serve_subscription`). The per-subscriber queue
- *   is bounded (256, drop-oldest) and drops are NOT signalled on the wire
+ *   (`sidecar/daemon.py` `_serve_subscription`). An optional
+ *   `{"agents":[...]}` allowlist asks the daemon to stream only those
+ *   agents' events (server-side filter, daemon `_parse_subscribe_agents`);
+ *   the ack then echoes the sorted list. The per-subscriber queue is
+ *   bounded (256, drop-oldest) and drops are NOT signalled on the wire
  *   (`sidecar/bus.py`), which is why the stream is a trigger signal only;
  *   `status` snapshots remain the source of truth (design §4.b / ADR-2).
  * - Daemon-declared errors arrive as `{"ok":false,"error":{code,message}}`.
@@ -76,6 +89,38 @@ export interface StatusSnapshot {
   diagnostics: Array<Record<string, unknown>>
 }
 
+/** One parsed page of the `replay` op (daemon `_replay_response`). */
+export interface ReplayPage {
+  sessionId: string
+  agent: string
+  /** The request cursor this page starts after. */
+  afterSeq: number
+  events: SidecarEvent[]
+  /** Daemon-reported event count of this page. */
+  count: number
+  /** Highest raw-record seq seen by the daemon; the next-page cursor. */
+  lastSeq: number | null
+  /** True when the daemon hit the page limit (more records may exist). */
+  truncated: boolean
+}
+
+/**
+ * Coded failure of a request/response op. `code` carries the daemon error
+ * vocabulary verbatim (`invalid_request`, `unknown_session`,
+ * `replay_unsupported`, `replay_failed`, ...) or one of the client-side
+ * transport codes: `timeout`, `connection_failed`, `connection_closed`,
+ * `invalid_response`.
+ */
+export class SidecarDaemonError extends Error {
+  readonly code: string
+
+  constructor(code: string, detail: string) {
+    super(`${code}: ${detail}`)
+    this.name = 'SidecarDaemonError'
+    this.code = code
+  }
+}
+
 /**
  * Client-side drop reasons. The daemon never signals its own queue drops
  * (`sidecar/bus.py` keeps `dropped` server-internal), so these only cover
@@ -98,17 +143,32 @@ export interface Subscription {
   close(): void
 }
 
+/** Per-stream options of {@link SidecarSocketClient.subscribe}. */
+export interface SubscribeOptions {
+  /**
+   * Optional agent allowlist forwarded on the wire
+   * (`{"op":"subscribe","agents":[...]}`); the daemon then streams only
+   * events from those agents. Omitting it keeps the full stream. An empty
+   * list or empty names throw a RangeError (mirrors sidecar/client.py).
+   */
+  agents?: readonly string[]
+}
+
 export interface SidecarSocketClientOptions {
   /** Absolute path to `daemon.sock` (default runtime dir is `~/.agent_sidecar`, redirectable via AGENT_SIDECAR_RUNTIME_DIR — resolved by the caller). */
   socketPath: string
   /** Connect/handshake/response bound; the stream idles unbounded after the subscribe ack, matching sidecar/client.py. */
   timeoutMs?: number
+  /** Response bound for the `replay` op (bounded transcript decode is slower than ping/status). */
+  replayTimeoutMs?: number
   /** Bound for a single JSONL line (sidecar caps responses at 32 MiB). */
   maxLineBytes?: number
 }
 
 /** Matches `DEFAULT_TIMEOUT = 1.0` in sidecar/client.py. */
 export const DEFAULT_TIMEOUT_MS = 1000
+/** Matches `DEFAULT_REPLAY_TIMEOUT = 15.0` in sidecar/client.py. */
+export const DEFAULT_REPLAY_TIMEOUT_MS = 15_000
 /** Matches `MAX_RESPONSE_BYTES` in sidecar/client.py. */
 export const DEFAULT_MAX_LINE_BYTES = 32 * 1024 * 1024
 
@@ -222,14 +282,60 @@ function parseEvent(value: Record<string, unknown>): SidecarEvent | null {
   }
 }
 
-function daemonError(value: Record<string, unknown>): Error {
+function daemonError(value: Record<string, unknown>): SidecarDaemonError {
   const error = value['error']
   if (isRecord(error)) {
     const code = String(error['code'] ?? 'daemon_error')
     const message = String(error['message'] ?? code)
-    return new Error(`${code}: ${message}`)
+    return new SidecarDaemonError(code, message)
   }
-  return new Error(String(error ?? 'daemon_error'))
+  return new SidecarDaemonError('daemon_error', String(error ?? 'daemon_error'))
+}
+
+/**
+ * Parse one `replay` response page. Mirrors sidecar/client.py strictness:
+ * a non-object entry in `events` invalidates the whole response, while an
+ * object entry missing normalized fields is skipped defensively (the
+ * daemon model guarantees them).
+ */
+function parseReplayPage(value: unknown): ReplayPage | null {
+  if (!isRecord(value) || value['ok'] !== true || value['op'] !== 'replay') return null
+  const sessionId = value['session_id']
+  const agent = value['agent']
+  const rawEvents = value['events']
+  if (typeof sessionId !== 'string' || typeof agent !== 'string') return null
+  if (!Array.isArray(rawEvents)) return null
+  const events: SidecarEvent[] = []
+  for (const raw of rawEvents) {
+    if (!isRecord(raw)) return null
+    const event = parseEvent(raw)
+    if (event !== null) events.push(event)
+  }
+  const afterSeq = value['after_seq']
+  const count = value['count']
+  const lastSeq = value['last_seq']
+  return {
+    sessionId,
+    agent,
+    afterSeq:
+      typeof afterSeq === 'number' && Number.isInteger(afterSeq) && afterSeq >= 0 ? afterSeq : 0,
+    events,
+    count: typeof count === 'number' && Number.isInteger(count) ? count : events.length,
+    lastSeq: typeof lastSeq === 'number' && Number.isInteger(lastSeq) ? lastSeq : null,
+    truncated: value['truncated'] === true,
+  }
+}
+
+/**
+ * Build the subscribe request line, validating an optional agents filter
+ * up front (before any socket exists) so misuse throws synchronously.
+ */
+function buildSubscribeRequest(agents: readonly string[] | undefined): string {
+  if (agents === undefined) return '{"op":"subscribe"}\n'
+  if (agents.length === 0 || agents.some((name) => typeof name !== 'string' || name === '')) {
+    throw new RangeError('agents must be a nonempty list of nonempty agent names')
+  }
+  return `${JSON.stringify({ op: 'subscribe', agents })}\n`
 }
 
 // ---------------------------------------------------------------------------
@@ -299,13 +405,15 @@ class LineBuffer {
 export class SidecarSocketClient {
   readonly socketPath: string
   readonly timeoutMs: number
+  readonly replayTimeoutMs: number
   readonly maxLineBytes: number
 
   constructor(opts: SidecarSocketClientOptions) {
     this.socketPath = opts.socketPath
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    this.replayTimeoutMs = opts.replayTimeoutMs ?? DEFAULT_REPLAY_TIMEOUT_MS
     this.maxLineBytes = opts.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES
-    if (this.timeoutMs <= 0 || this.maxLineBytes <= 0) {
+    if (this.timeoutMs <= 0 || this.replayTimeoutMs <= 0 || this.maxLineBytes <= 0) {
       throw new RangeError('client bounds are invalid')
     }
   }
@@ -321,12 +429,53 @@ export class SidecarSocketClient {
   }
 
   /**
+   * `replay` op (T5.2): one bounded page of normalized historical events
+   * after `afterSeq`. Unlike ping/status this REJECTS with a coded
+   * {@link SidecarDaemonError} — daemon codes pass through verbatim and
+   * transport failures get client codes — because the caller (FusionQuery
+   * seam) distinguishes degradation reasons instead of polling health.
+   * Local misuse throws a RangeError (mirrors sidecar/client.py's
+   * ValueError). `limit` is forwarded as-is; the daemon enforces its own
+   * 1..1024 bound and answers `invalid_request` beyond it.
+   */
+  async replay(sessionId: string, afterSeq = 0, limit?: number): Promise<ReplayPage> {
+    if (typeof sessionId !== 'string' || sessionId === '') {
+      throw new RangeError('sessionId must be a nonempty string')
+    }
+    if (!Number.isInteger(afterSeq) || afterSeq < 0) {
+      throw new RangeError('afterSeq must be a nonnegative integer')
+    }
+    if (limit !== undefined && (!Number.isInteger(limit) || limit <= 0)) {
+      throw new RangeError('limit must be a positive integer')
+    }
+    const payload: Record<string, unknown> = {
+      op: 'replay',
+      session_id: sessionId,
+      after_seq: afterSeq,
+    }
+    if (limit !== undefined) payload['limit'] = limit
+    const value = await this.requestObject(payload, this.replayTimeoutMs)
+    if (isRecord(value) && value['ok'] === false) throw daemonError(value)
+    const page = parseReplayPage(value)
+    if (page === null) {
+      throw new SidecarDaemonError(
+        'invalid_response',
+        'daemon replay response has no valid events list',
+      )
+    }
+    return page
+  }
+
+  /**
    * Open a subscribe stream: write the op, validate the ack, then deliver
    * each JSONL event through `handlers.onEvent`. After the ack the
    * connection may idle indefinitely (no timeout), matching
    * sidecar/client.py which disables its socket timeout post-handshake.
+   * An `opts.agents` allowlist becomes the daemon-side stream filter.
    */
-  subscribe(handlers: SubscribeHandlers): Subscription {
+  subscribe(handlers: SubscribeHandlers, opts: SubscribeOptions = {}): Subscription {
+    // Validate (and possibly throw) before any socket exists.
+    const request = buildSubscribeRequest(opts.agents)
     let closed = false
     let ready = false
     const socket: Socket = createConnection({ path: this.socketPath })
@@ -394,11 +543,59 @@ export class SidecarSocketClient {
     socket.once('error', (err: Error) => finish(err))
     socket.once('close', () => finish())
     socket.once('connect', () => {
-      socket.write('{"op":"subscribe"}\n')
+      socket.write(request)
     })
     socket.on('data', (chunk: Buffer) => lines.push(chunk))
 
     return { close: () => finish() }
+  }
+
+  /**
+   * Send one single-line JSON request and read one JSONL response line,
+   * REJECTING with a coded {@link SidecarDaemonError} on every transport
+   * failure (the replay path needs error provenance, not just null).
+   */
+  private requestObject(
+    payload: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    return new Promise<unknown>((resolve, reject) => {
+      let settled = false
+      const socket: Socket = createConnection({ path: this.socketPath })
+      const finish = (settle: () => void): void => {
+        if (settled) return
+        settled = true
+        socket.destroy()
+        settle()
+      }
+      const fail = (code: string, detail: string): void => {
+        finish(() => reject(new SidecarDaemonError(code, detail)))
+      }
+      const lines = new LineBuffer(
+        this.maxLineBytes,
+        (line) => {
+          let value: unknown
+          try {
+            value = JSON.parse(line.toString('utf8'))
+          } catch {
+            fail('invalid_response', 'daemon returned an unparsable response line')
+            return
+          }
+          finish(() => resolve(value))
+        },
+        () => fail('invalid_response', 'daemon response line exceeded the size bound'),
+      )
+      socket.setTimeout(timeoutMs)
+      socket.once('timeout', () => fail('timeout', 'daemon did not answer within the bound'))
+      socket.once('error', (err: Error) => fail('connection_failed', err.message))
+      socket.once('close', () =>
+        fail('connection_closed', 'connection closed before a response line'),
+      )
+      socket.once('connect', () => {
+        socket.write(`${JSON.stringify(payload)}\n`)
+      })
+      socket.on('data', (chunk: Buffer) => lines.push(chunk))
+    })
   }
 
   /** Send one single-line JSON request and read one JSONL response line. */

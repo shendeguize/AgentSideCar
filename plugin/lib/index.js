@@ -4,6 +4,425 @@ import { createInterface } from "node:readline";
 import z from "@deepseek-ai/schemastery";
 import { createConnection } from "node:net";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+/** Title chars kept in prompts and logs (titles are untrusted input too). */
+const MAX_TITLE_CHARS = 200;
+/** Appended to the input text when it was cut at `maxInputChars`. */
+const TRUNCATION_MARKER = "\n…[输入已截断 / input truncated]";
+/** Honesty banner attached to every result (design §7-B / risk 12). */
+const ANALYSIS_DISCLAIMER = "AI 分析仅供参考,由模型基于有界摘要推断生成,可能不完整或有误 / AI-generated analysis for reference only; inferred from a bounded summary and may be incomplete or wrong.";
+/**
+* Read-only-analyst guidance. `CreateAgentOptions` has no system-prompt field
+* (d.ts fact above), so this rides the first user message.
+*/
+const ANALYSIS_GUIDANCE = [
+	"你是只读分析助手:基于下面提供的 agent 会话摘要给出洞察(状态判断、异常与风险、可能的下一步建议)。",
+	"不执行任何操作、不调用任何工具、不修改任何东西;不要假设摘要之外的事实,摘要可能不完整或被截断,不确定处请如实说明。",
+	"You are a read-only analysis assistant: provide insights (state assessment, anomalies/risks, possible next steps) based solely on the agent-session summary below.",
+	"Take no actions, call no tools, change nothing; do not assume facts beyond the summary — it may be incomplete or truncated, so state uncertainty honestly."
+].join("\n");
+function describeError$4(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+function boundText(text, maxChars) {
+	if (text.length <= maxChars) return {
+		text,
+		truncated: false
+	};
+	return {
+		text: text.slice(0, maxChars) + TRUNCATION_MARKER,
+		truncated: true
+	};
+}
+function boundTitle(title) {
+	return title.length <= MAX_TITLE_CHARS ? title : title.slice(0, MAX_TITLE_CHARS) + "…";
+}
+/** Race a promise against a bounded timer; the timer is always cleared. */
+async function withTimeout(promise, ms) {
+	let timer;
+	try {
+		return await Promise.race([promise.then((value) => ({
+			timedOut: false,
+			value
+		})), new Promise((resolve) => {
+			timer = setTimeout(() => resolve({ timedOut: true }), Math.max(1, ms));
+		})]);
+	} finally {
+		if (timer !== void 0) clearTimeout(timer);
+	}
+}
+/** Join the text blocks of assistant messages appended after `baseline`. */
+function extractNewAssistantText(messages, baseline) {
+	const parts = [];
+	for (const message of messages.slice(baseline)) {
+		if (message.role !== "assistant") continue;
+		const text = message.content.filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text).join("\n");
+		if (text.length > 0) parts.push(text);
+	}
+	return parts.join("\n\n");
+}
+/** Sum reported input+output tokens on new `assistant/message` events. */
+function extractTokensHint(events, baseline) {
+	let total = 0;
+	let reported = false;
+	for (const event of events.slice(baseline)) {
+		if (event.type !== "assistant/message") continue;
+		const usage = event.data?.usage;
+		if (usage === void 0) continue;
+		reported = true;
+		if (typeof usage.inputTokens === "number") total += usage.inputTokens;
+		if (typeof usage.outputTokens === "number") total += usage.outputTokens;
+	}
+	return reported ? total : void 0;
+}
+var AnalysisEngine = class {
+	deps;
+	now;
+	maxInputChars;
+	analysisTimeoutMs;
+	maxActiveSessions;
+	pluginName;
+	active = /* @__PURE__ */ new Map();
+	mintCounter = 0;
+	constructor(deps) {
+		this.deps = deps;
+		this.now = deps.now ?? Date.now;
+		this.maxInputChars = deps.maxInputChars ?? 8e3;
+		this.analysisTimeoutMs = deps.analysisTimeoutMs ?? 6e4;
+		this.maxActiveSessions = deps.maxActiveSessions ?? 4;
+		this.pluginName = deps.pluginName ?? "agent-sidecar";
+	}
+	/** Number of live (or being-created) analysis sessions. */
+	get activeCount() {
+		return this.active.size;
+	}
+	/**
+	* Start a dedicated analysis session and return its first insight.
+	* Establishment (create + priming prompt + first response) shares one
+	* `analysisTimeoutMs` budget; on timeout the turn is cancelled and the
+	* session disposed, so a timed-out request leaves nothing running.
+	*/
+	async request(input) {
+		const startedAt = this.now();
+		const title = boundTitle(input.title);
+		if (!this.deps.allowAnalysis()) return this.failResult("request", {
+			kind: input.kind,
+			title
+		}, "analysis_disabled", {
+			truncated: false,
+			startedAt
+		});
+		if (this.active.size >= this.maxActiveSessions) return this.failResult("request", {
+			kind: input.kind,
+			title
+		}, "too_many_active", {
+			truncated: false,
+			startedAt,
+			detail: `active analyses at cap (${this.maxActiveSessions})`
+		});
+		const bounded = boundText(input.summaryText, this.maxInputChars);
+		const analysisSessionId = this.mintSessionId();
+		const entry = {
+			analysisSessionId,
+			kind: input.kind,
+			title,
+			busy: true,
+			messageBaseline: 0,
+			eventBaseline: 0,
+			messageSeq: 0
+		};
+		this.active.set(analysisSessionId, entry);
+		const deadline = startedAt + this.analysisTimeoutMs;
+		const controller = new AbortController();
+		let createTimedOut = false;
+		const createPromise = this.deps.createAgent({
+			sessionId: analysisSessionId,
+			signal: controller.signal
+		});
+		createPromise.then((late) => {
+			if (createTimedOut) late.dispose().catch(() => {});
+		}, () => {});
+		let handle;
+		try {
+			const created = await withTimeout(createPromise, deadline - this.now());
+			if (created.timedOut) {
+				createTimedOut = true;
+				this.active.delete(analysisSessionId);
+				controller.abort();
+				return this.timeoutResult("request", entry, bounded.truncated, startedAt, void 0);
+			}
+			handle = created.value;
+		} catch (error) {
+			this.active.delete(analysisSessionId);
+			return this.failResult("request", entry, "create_failed", {
+				truncated: bounded.truncated,
+				startedAt,
+				detail: describeError$4(error)
+			});
+		}
+		entry.handle = handle;
+		this.deps.log({
+			op: "create",
+			analysisSessionId,
+			kind: input.kind,
+			title,
+			truncated: bounded.truncated,
+			inputChars: bounded.text.length
+		});
+		const prompt = this.buildInitialPrompt(input.kind, title, bounded);
+		const turn = await this.runTurn(entry, prompt, deadline);
+		entry.busy = false;
+		if (turn.status === "threw") {
+			this.active.delete(analysisSessionId);
+			await this.disposeQuietly(entry);
+			return this.failResult("request", entry, "create_failed", {
+				truncated: bounded.truncated,
+				startedAt,
+				detail: turn.detail
+			});
+		}
+		if (turn.status === "timeout") {
+			this.cancelQuietly(entry);
+			this.active.delete(analysisSessionId);
+			await this.disposeQuietly(entry);
+			return this.timeoutResult("request", entry, bounded.truncated, startedAt, void 0);
+		}
+		const result = {
+			outcome: "completed",
+			analysisSessionId,
+			summary: turn.summary,
+			truncated: bounded.truncated,
+			...turn.tokensHint !== void 0 ? { tokensHint: turn.tokensHint } : {},
+			disclaimer: ANALYSIS_DISCLAIMER
+		};
+		this.logResult("request", entry, result, startedAt);
+		return result;
+	}
+	/**
+	* Ask an incremental follow-up question on an established analysis session.
+	* A timeout cancels the in-flight turn but KEEPS the session (its prior
+	* context stays valuable; the UI may retry or cancel).
+	*/
+	async followup(analysisSessionId, question) {
+		const startedAt = this.now();
+		const entry = this.active.get(analysisSessionId);
+		if (!this.deps.allowAnalysis()) return this.failResult("followup", entry ?? { analysisSessionId }, "analysis_disabled", {
+			truncated: false,
+			startedAt
+		});
+		if (entry === void 0 || entry.handle === void 0) return this.failResult("followup", { analysisSessionId }, "cancelled", {
+			truncated: false,
+			startedAt,
+			detail: "unknown or already-cancelled analysis session"
+		});
+		if (entry.busy) return this.failResult("followup", entry, "too_many_active", {
+			truncated: false,
+			startedAt,
+			detail: "a turn is already in flight on this analysis session"
+		});
+		const bounded = boundText(question, this.maxInputChars);
+		this.deps.log({
+			op: "followup",
+			analysisSessionId,
+			kind: entry.kind,
+			title: entry.title,
+			truncated: bounded.truncated,
+			inputChars: bounded.text.length
+		});
+		entry.busy = true;
+		try {
+			const turn = await this.runTurn(entry, bounded.text, startedAt + this.analysisTimeoutMs);
+			if (turn.status === "threw") {
+				this.active.delete(analysisSessionId);
+				await this.disposeQuietly(entry);
+				return this.failResult("followup", entry, "cancelled", {
+					truncated: bounded.truncated,
+					startedAt,
+					detail: turn.detail
+				});
+			}
+			if (turn.status === "timeout") {
+				this.cancelQuietly(entry);
+				return this.timeoutResult("followup", entry, bounded.truncated, startedAt, analysisSessionId);
+			}
+			const result = {
+				outcome: "completed",
+				analysisSessionId,
+				summary: turn.summary,
+				truncated: bounded.truncated,
+				...turn.tokensHint !== void 0 ? { tokensHint: turn.tokensHint } : {},
+				disclaimer: ANALYSIS_DISCLAIMER
+			};
+			this.logResult("followup", entry, result, startedAt);
+			return result;
+		} finally {
+			entry.busy = false;
+		}
+	}
+	/**
+	* Stop and dispose one analysis session (UI stop button). Idempotent: an
+	* unknown id resolves as a logged no-op.
+	*/
+	async cancel(analysisSessionId) {
+		const entry = this.active.get(analysisSessionId);
+		if (entry === void 0) {
+			this.deps.log({
+				op: "cancel",
+				analysisSessionId,
+				found: false
+			});
+			return;
+		}
+		this.active.delete(analysisSessionId);
+		this.cancelQuietly(entry);
+		await this.disposeQuietly(entry);
+		this.deps.log({
+			op: "cancel",
+			analysisSessionId,
+			kind: entry.kind,
+			title: entry.title,
+			found: true
+		});
+	}
+	async runTurn(entry, text, deadline) {
+		const handle = entry.handle;
+		const session = handle.agent.session;
+		entry.messageBaseline = session.deriveMessages().length;
+		entry.eventBaseline = session.events.length;
+		const message = {
+			id: `${entry.analysisSessionId}-msg-${++entry.messageSeq}`,
+			role: "user",
+			content: [{
+				type: "text",
+				text
+			}],
+			source: {
+				kind: "plugin",
+				plugin: this.pluginName
+			}
+		};
+		try {
+			handle.agent.followup(message);
+		} catch (error) {
+			return {
+				status: "threw",
+				detail: describeError$4(error)
+			};
+		}
+		let idle;
+		try {
+			idle = await withTimeout(handle.agent.whenIdle(), deadline - this.now());
+		} catch (error) {
+			return {
+				status: "threw",
+				detail: describeError$4(error)
+			};
+		}
+		if (idle.timedOut) return { status: "timeout" };
+		const summary = extractNewAssistantText(session.deriveMessages(), entry.messageBaseline);
+		const tokensHint = extractTokensHint(session.events, entry.eventBaseline);
+		entry.messageBaseline = session.deriveMessages().length;
+		entry.eventBaseline = session.events.length;
+		return {
+			status: "completed",
+			summary,
+			...tokensHint !== void 0 ? { tokensHint } : {}
+		};
+	}
+	buildInitialPrompt(kind, title, bounded) {
+		return [
+			ANALYSIS_GUIDANCE,
+			"",
+			`[分析对象 / subject] kind=${kind} title=${title}`,
+			"",
+			`--- 会话摘要开始 / summary begin (有界输入${bounded.truncated ? ",已截断 / truncated" : ""}) ---`,
+			bounded.text,
+			"--- 会话摘要结束 / summary end ---"
+		].join("\n");
+	}
+	cancelQuietly(entry) {
+		try {
+			entry.handle?.agent.cancel({ kind: "user" });
+		} catch (error) {
+			this.deps.log({
+				op: "cancel",
+				analysisSessionId: entry.analysisSessionId,
+				found: true,
+				detail: `cancel threw: ${describeError$4(error)}`
+			});
+		}
+	}
+	async disposeQuietly(entry) {
+		if (entry.handle === void 0) return;
+		try {
+			await entry.handle.dispose();
+		} catch (error) {
+			this.deps.log({
+				op: "cancel",
+				analysisSessionId: entry.analysisSessionId,
+				found: true,
+				detail: `dispose threw: ${describeError$4(error)}`
+			});
+		}
+	}
+	mintSessionId() {
+		return `${this.pluginName}-analysis-${this.now().toString(36)}-${++this.mintCounter}`;
+	}
+	failResult(phase, ident, errorCode, opts) {
+		const result = {
+			outcome: "failed",
+			truncated: opts.truncated,
+			errorCode,
+			...opts.detail !== void 0 ? { detail: opts.detail } : {},
+			disclaimer: ANALYSIS_DISCLAIMER
+		};
+		this.deps.log({
+			op: "result",
+			phase,
+			...ident.analysisSessionId !== void 0 ? { analysisSessionId: ident.analysisSessionId } : {},
+			...ident.kind !== void 0 ? { kind: ident.kind } : {},
+			...ident.title !== void 0 ? { title: ident.title } : {},
+			outcome: "failed",
+			errorCode,
+			...opts.detail !== void 0 ? { detail: opts.detail } : {},
+			elapsedMs: this.now() - opts.startedAt
+		});
+		return result;
+	}
+	timeoutResult(phase, entry, truncated, startedAt, analysisSessionId) {
+		const result = {
+			outcome: "timeout",
+			...analysisSessionId !== void 0 ? { analysisSessionId } : {},
+			truncated,
+			errorCode: "timeout",
+			disclaimer: ANALYSIS_DISCLAIMER
+		};
+		this.deps.log({
+			op: "result",
+			phase,
+			analysisSessionId: entry.analysisSessionId,
+			kind: entry.kind,
+			title: entry.title,
+			outcome: "timeout",
+			errorCode: "timeout",
+			elapsedMs: this.now() - startedAt
+		});
+		return result;
+	}
+	logResult(phase, entry, result, startedAt) {
+		this.deps.log({
+			op: "result",
+			phase,
+			analysisSessionId: entry.analysisSessionId,
+			kind: entry.kind,
+			title: entry.title,
+			outcome: result.outcome,
+			...result.tokensHint !== void 0 ? { tokensHint: result.tokensHint } : {},
+			truncated: result.truncated,
+			elapsedMs: this.now() - startedAt
+		});
+	}
+};
+//#endregion
 //#region src/config.ts
 /**
 * Composition config for the dsh-agent-sidecar host half (design §6, scoped
@@ -50,6 +469,59 @@ const Config = z.object({
 	}).description("看板界面"),
 	skill: z.object({ provide: z.boolean().default(false).description("是否经 registerProvider 内嵌提供 agent-sidecar skill(M4 启用)") }).description("skill 模式")
 });
+//#endregion
+//#region src/bridge.ts
+/**
+* Sidecar Unix-socket bridge (host half, transport layer only).
+*
+* Pure `node:net`; deliberately free of any cordis/dsh import so the
+* protocol client stays testable in isolation and reusable outside the
+* plugin context.
+*
+* Protocol source of truth (verified against sidecar source, not docs):
+* - Requests are single-line JSON
+*   `{"op":"ping"|"status"|"replay"|"subscribe"}` terminated by `\n`
+*   (`sidecar/daemon.py` `_handle_client`).
+* - `ping`/`status`/`replay` answer with exactly one JSON line. The official
+*   client (`sidecar/client.py`) opens one fresh connection per op and
+*   closes it after the response; we mirror that semantic.
+* - `replay {session_id, after_seq, limit}` (T5.2) answers one bounded page
+*   `{events, last_seq, truncated, count, agent, ...}` sourced from the
+*   session adapter's own transcript replay (daemon `_replay_response`;
+*   today only dsh sessions provide one). Unlike ping/status, {@link
+*   SidecarSocketClient.replay} REJECTS with a coded
+*   {@link SidecarDaemonError} instead of resolving null: the daemon error
+*   vocabulary (`unknown_session` / `replay_unsupported` / `replay_failed`
+*   / `invalid_request`) must reach the caller verbatim so the fusion
+*   layer can degrade honestly (design §4.b.2).
+* - `subscribe` answers with an ack line `{"ok":true,"op":"subscribe"}`
+*   and then streams JSONL event objects until either side disconnects
+*   (`sidecar/daemon.py` `_serve_subscription`). An optional
+*   `{"agents":[...]}` allowlist asks the daemon to stream only those
+*   agents' events (server-side filter, daemon `_parse_subscribe_agents`);
+*   the ack then echoes the sorted list. The per-subscriber queue is
+*   bounded (256, drop-oldest) and drops are NOT signalled on the wire
+*   (`sidecar/bus.py`), which is why the stream is a trigger signal only;
+*   `status` snapshots remain the source of truth (design §4.b / ADR-2).
+* - Daemon-declared errors arrive as `{"ok":false,"error":{code,message}}`.
+*
+* @module
+*/
+/**
+* Coded failure of a request/response op. `code` carries the daemon error
+* vocabulary verbatim (`invalid_request`, `unknown_session`,
+* `replay_unsupported`, `replay_failed`, ...) or one of the client-side
+* transport codes: `timeout`, `connection_failed`, `connection_closed`,
+* `invalid_response`.
+*/
+var SidecarDaemonError = class extends Error {
+	code;
+	constructor(code, detail) {
+		super(`${code}: ${detail}`);
+		this.name = "SidecarDaemonError";
+		this.code = code;
+	}
+};
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -156,10 +628,53 @@ function daemonError(value) {
 	const error = value["error"];
 	if (isRecord(error)) {
 		const code = String(error["code"] ?? "daemon_error");
-		const message = String(error["message"] ?? code);
-		return /* @__PURE__ */ new Error(`${code}: ${message}`);
+		return new SidecarDaemonError(code, String(error["message"] ?? code));
 	}
-	return new Error(String(error ?? "daemon_error"));
+	return new SidecarDaemonError("daemon_error", String(error ?? "daemon_error"));
+}
+/**
+* Parse one `replay` response page. Mirrors sidecar/client.py strictness:
+* a non-object entry in `events` invalidates the whole response, while an
+* object entry missing normalized fields is skipped defensively (the
+* daemon model guarantees them).
+*/
+function parseReplayPage(value) {
+	if (!isRecord(value) || value["ok"] !== true || value["op"] !== "replay") return null;
+	const sessionId = value["session_id"];
+	const agent = value["agent"];
+	const rawEvents = value["events"];
+	if (typeof sessionId !== "string" || typeof agent !== "string") return null;
+	if (!Array.isArray(rawEvents)) return null;
+	const events = [];
+	for (const raw of rawEvents) {
+		if (!isRecord(raw)) return null;
+		const event = parseEvent(raw);
+		if (event !== null) events.push(event);
+	}
+	const afterSeq = value["after_seq"];
+	const count = value["count"];
+	const lastSeq = value["last_seq"];
+	return {
+		sessionId,
+		agent,
+		afterSeq: typeof afterSeq === "number" && Number.isInteger(afterSeq) && afterSeq >= 0 ? afterSeq : 0,
+		events,
+		count: typeof count === "number" && Number.isInteger(count) ? count : events.length,
+		lastSeq: typeof lastSeq === "number" && Number.isInteger(lastSeq) ? lastSeq : null,
+		truncated: value["truncated"] === true
+	};
+}
+/**
+* Build the subscribe request line, validating an optional agents filter
+* up front (before any socket exists) so misuse throws synchronously.
+*/
+function buildSubscribeRequest(agents) {
+	if (agents === void 0) return "{\"op\":\"subscribe\"}\n";
+	if (agents.length === 0 || agents.some((name) => typeof name !== "string" || name === "")) throw new RangeError("agents must be a nonempty list of nonempty agent names");
+	return `${JSON.stringify({
+		op: "subscribe",
+		agents
+	})}\n`;
 }
 const NEWLINE = 10;
 const EMPTY = Buffer.alloc(0);
@@ -218,12 +733,14 @@ var LineBuffer = class {
 var SidecarSocketClient = class {
 	socketPath;
 	timeoutMs;
+	replayTimeoutMs;
 	maxLineBytes;
 	constructor(opts) {
 		this.socketPath = opts.socketPath;
 		this.timeoutMs = opts.timeoutMs ?? 1e3;
+		this.replayTimeoutMs = opts.replayTimeoutMs ?? 15e3;
 		this.maxLineBytes = opts.maxLineBytes ?? 33554432;
-		if (this.timeoutMs <= 0 || this.maxLineBytes <= 0) throw new RangeError("client bounds are invalid");
+		if (this.timeoutMs <= 0 || this.replayTimeoutMs <= 0 || this.maxLineBytes <= 0) throw new RangeError("client bounds are invalid");
 	}
 	/** `ping` op; `null` on refusal, timeout, or an invalid/error response. */
 	async ping() {
@@ -234,12 +751,40 @@ var SidecarSocketClient = class {
 		return parseStatusSnapshot(await this.requestLine("status"));
 	}
 	/**
+	* `replay` op (T5.2): one bounded page of normalized historical events
+	* after `afterSeq`. Unlike ping/status this REJECTS with a coded
+	* {@link SidecarDaemonError} — daemon codes pass through verbatim and
+	* transport failures get client codes — because the caller (FusionQuery
+	* seam) distinguishes degradation reasons instead of polling health.
+	* Local misuse throws a RangeError (mirrors sidecar/client.py's
+	* ValueError). `limit` is forwarded as-is; the daemon enforces its own
+	* 1..1024 bound and answers `invalid_request` beyond it.
+	*/
+	async replay(sessionId, afterSeq = 0, limit) {
+		if (typeof sessionId !== "string" || sessionId === "") throw new RangeError("sessionId must be a nonempty string");
+		if (!Number.isInteger(afterSeq) || afterSeq < 0) throw new RangeError("afterSeq must be a nonnegative integer");
+		if (limit !== void 0 && (!Number.isInteger(limit) || limit <= 0)) throw new RangeError("limit must be a positive integer");
+		const payload = {
+			op: "replay",
+			session_id: sessionId,
+			after_seq: afterSeq
+		};
+		if (limit !== void 0) payload["limit"] = limit;
+		const value = await this.requestObject(payload, this.replayTimeoutMs);
+		if (isRecord(value) && value["ok"] === false) throw daemonError(value);
+		const page = parseReplayPage(value);
+		if (page === null) throw new SidecarDaemonError("invalid_response", "daemon replay response has no valid events list");
+		return page;
+	}
+	/**
 	* Open a subscribe stream: write the op, validate the ack, then deliver
 	* each JSONL event through `handlers.onEvent`. After the ack the
 	* connection may idle indefinitely (no timeout), matching
 	* sidecar/client.py which disables its socket timeout post-handshake.
+	* An `opts.agents` allowlist becomes the daemon-side stream filter.
 	*/
-	subscribe(handlers) {
+	subscribe(handlers, opts = {}) {
+		const request = buildSubscribeRequest(opts.agents);
 		let closed = false;
 		let ready = false;
 		const socket = createConnection({ path: this.socketPath });
@@ -295,10 +840,48 @@ var SidecarSocketClient = class {
 		socket.once("error", (err) => finish(err));
 		socket.once("close", () => finish());
 		socket.once("connect", () => {
-			socket.write("{\"op\":\"subscribe\"}\n");
+			socket.write(request);
 		});
 		socket.on("data", (chunk) => lines.push(chunk));
 		return { close: () => finish() };
+	}
+	/**
+	* Send one single-line JSON request and read one JSONL response line,
+	* REJECTING with a coded {@link SidecarDaemonError} on every transport
+	* failure (the replay path needs error provenance, not just null).
+	*/
+	requestObject(payload, timeoutMs) {
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const socket = createConnection({ path: this.socketPath });
+			const finish = (settle) => {
+				if (settled) return;
+				settled = true;
+				socket.destroy();
+				settle();
+			};
+			const fail = (code, detail) => {
+				finish(() => reject(new SidecarDaemonError(code, detail)));
+			};
+			const lines = new LineBuffer(this.maxLineBytes, (line) => {
+				let value;
+				try {
+					value = JSON.parse(line.toString("utf8"));
+				} catch {
+					fail("invalid_response", "daemon returned an unparsable response line");
+					return;
+				}
+				finish(() => resolve(value));
+			}, () => fail("invalid_response", "daemon response line exceeded the size bound"));
+			socket.setTimeout(timeoutMs);
+			socket.once("timeout", () => fail("timeout", "daemon did not answer within the bound"));
+			socket.once("error", (err) => fail("connection_failed", err.message));
+			socket.once("close", () => fail("connection_closed", "connection closed before a response line"));
+			socket.once("connect", () => {
+				socket.write(`${JSON.stringify(payload)}\n`);
+			});
+			socket.on("data", (chunk) => lines.push(chunk));
+		});
 	}
 	/** Send one single-line JSON request and read one JSONL response line. */
 	requestLine(op) {
@@ -482,7 +1065,7 @@ var Reconciler = class {
 };
 /** Sha256 hex prefix length recorded in logs (matches inject-gateway). */
 const SHA_LOG_CHARS$1 = 12;
-function describeError$2(error) {
+function describeError$3(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 /** Race a resume against the bounded wait; null = timed out (still pending). */
@@ -521,7 +1104,7 @@ function createDshInjectExecutor(deps) {
 				try {
 					handle = await resumeWithin(deps.agents.resume({ resumeSessionId: sessionId }), resumeTimeoutMs);
 				} catch (error) {
-					const detail = describeError$2(error);
+					const detail = describeError$3(error);
 					log("warn", "dsh resume failed", {
 						...baseMeta,
 						error: detail
@@ -561,7 +1144,7 @@ function createDshInjectExecutor(deps) {
 				if (req.mode === "steer") agent.steer(message);
 				else agent.followup(message);
 			} catch (error) {
-				const detail = describeError$2(error);
+				const detail = describeError$3(error);
 				log("warn", "dsh injection call threw", {
 					...baseMeta,
 					resumed,
@@ -579,6 +1162,555 @@ function createDshInjectExecutor(deps) {
 			});
 			return { outcome: "delivered" };
 		}
+	};
+}
+const DSH_AGENT = "dsh";
+const KEY_SEP = "\0";
+function integerOrNull(value) {
+	return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+function secondsToMs(seconds) {
+	return typeof seconds === "number" && Number.isFinite(seconds) ? Math.round(seconds * 1e3) : 0;
+}
+function parseTs(ts) {
+	const ms = Date.parse(ts);
+	return Number.isFinite(ms) ? ms : 0;
+}
+/** Latest-wins `session/title` payload fold (`{title: string}`). */
+function extractTitle(data) {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) return null;
+	const title = data["title"];
+	return typeof title === "string" && title !== "" ? title : null;
+}
+/** Correlation-key normalization: strip trailing slashes (keep root `/`). */
+function normalizeProject(project) {
+	if (project.length > 1 && project.endsWith("/")) {
+		const stripped = project.replace(/\/+$/, "");
+		return stripped === "" ? "/" : stripped;
+	}
+	return project;
+}
+function describeError$2(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/**
+* Dedup identity of one sidecar event within a single session's timeline.
+* The dsh adapter legally normalizes ONE dsh record into SEVERAL events
+* sharing the same `extra.seq` (reasoning+text blocks of an assistant
+* message, multi-block user messages, spliced inbox inserts —
+* sidecar/adapters/dsh.py content_block_events), and no per-block ordinal
+* exists on the wire — so seq alone would silently drop sibling events.
+* The identity is therefore `seq+kind+text`: the same underlying event
+* seen through both replay and the ring still collapses (identical
+* normalized kind/text), while same-seq siblings stay distinct. Must stay
+* in sync with the client mirror (client/detail/logic.ts `entryKey`).
+*/
+function sidecarEventKey(ev) {
+	const seq = integerOrNull(ev.extra?.["seq"]);
+	return seq !== null ? `s:${seq}${KEY_SEP}${ev.kind}${KEY_SEP}${ev.text}` : `t:${ev.ts}${KEY_SEP}${ev.kind}${KEY_SEP}${ev.text}`;
+}
+/** Strictly-older-than-cursor predicate over the merged ascending order. */
+function isBeforeCursor(entry, cursor) {
+	if (cursor.seq !== null && entry.seq !== null) return entry.seq < cursor.seq;
+	return entry.ts < cursor.ts;
+}
+/** One seq-carrying sidecar event as its own timeline entry. */
+function sidecarSeqEntry(seq, ev) {
+	return {
+		origin: "sidecar",
+		seq,
+		ts: parseTs(ev.ts),
+		kind: ev.kind,
+		text: ev.text,
+		data: void 0,
+		extra: ev.extra ?? null
+	};
+}
+/**
+* Merge dsh events (authoritative seq domain) with sidecar events.
+* One dsh record can normalize into several sidecar events sharing the
+* same `extra.seq` (multi-block messages), so twins are grouped per seq:
+* the FIRST twin folds into the matching dsh entry (normalized text +
+* extra supplement, dsh primary) and every further sibling stays its own
+* entry — dropping siblings would silently lose blocks (F1). Seq-carrying
+* entries keep exact seq order (same-seq groups keep dsh-then-block
+* arrival order via the stable sort); seq-less entries interleave by
+* timestamp.
+*/
+function mergeTimeline(dshEvents, sidecarEvents) {
+	const twinsBySeq = /* @__PURE__ */ new Map();
+	const unseqed = [];
+	for (const ev of sidecarEvents) {
+		const seq = integerOrNull(ev.extra?.["seq"]);
+		if (seq !== null) {
+			const group = twinsBySeq.get(seq);
+			if (group === void 0) twinsBySeq.set(seq, [ev]);
+			else group.push(ev);
+		} else unseqed.push({
+			origin: "sidecar",
+			seq: null,
+			ts: parseTs(ev.ts),
+			kind: ev.kind,
+			text: ev.text,
+			data: void 0,
+			extra: ev.extra ?? null
+		});
+	}
+	const seqDomain = [];
+	const dshSeqs = /* @__PURE__ */ new Set();
+	for (const ev of dshEvents) {
+		const twins = dshSeqs.has(ev.seq) ? void 0 : twinsBySeq.get(ev.seq);
+		dshSeqs.add(ev.seq);
+		const first = twins?.[0];
+		seqDomain.push({
+			origin: "dsh",
+			seq: ev.seq,
+			ts: ev.time,
+			kind: ev.type,
+			text: first?.text ?? "",
+			data: ev.data,
+			extra: first?.extra ?? null
+		});
+		if (twins !== void 0) for (let i = 1; i < twins.length; i += 1) {
+			const sibling = twins[i];
+			if (sibling !== void 0) seqDomain.push(sidecarSeqEntry(ev.seq, sibling));
+		}
+	}
+	for (const [seq, twins] of twinsBySeq) {
+		if (dshSeqs.has(seq)) continue;
+		for (const ev of twins) seqDomain.push(sidecarSeqEntry(seq, ev));
+	}
+	seqDomain.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+	unseqed.sort((a, b) => a.ts - b.ts);
+	const out = [];
+	let i = 0;
+	let j = 0;
+	for (;;) {
+		const a = seqDomain[i];
+		const b = unseqed[j];
+		if (a === void 0 && b === void 0) break;
+		if (b === void 0 || a !== void 0 && a.ts <= b.ts) {
+			if (a !== void 0) {
+				out.push(a);
+				i += 1;
+			}
+		} else {
+			out.push(b);
+			j += 1;
+		}
+	}
+	return out;
+}
+/**
+* The fused query surface. Lifecycle: `start()` subscribes to the dsh
+* feed, `stop()` disposes subscriptions and drops all cached state; the
+* wiring feeds the sidecar subscribe stream through
+* {@link ingestSidecarEvent}. All query methods are on-demand pulls.
+*/
+var FusionQuery = class {
+	store;
+	dshEvents;
+	getSessionQueryThunk;
+	replaySource;
+	now;
+	maxEventsPerSession;
+	maxSessions;
+	/** Live in-process dsh sessions keyed by session id. */
+	live = /* @__PURE__ */ new Map();
+	/** Bounded per-session sidecar event rings; insertion order = feed recency. */
+	buffers = /* @__PURE__ */ new Map();
+	disposers = [];
+	started = false;
+	constructor(opts) {
+		this.store = opts.store;
+		this.dshEvents = opts.dshEvents ?? null;
+		this.getSessionQueryThunk = opts.getSessionQuery ?? null;
+		this.replaySource = opts.replay ?? null;
+		this.now = opts.now ?? Date.now;
+		this.maxEventsPerSession = opts.maxBufferedEventsPerSession ?? 200;
+		this.maxSessions = opts.maxBufferedSessions ?? 256;
+		if (this.maxEventsPerSession <= 0 || this.maxSessions <= 0) throw new RangeError("fusion buffer bounds are invalid");
+	}
+	/** Subscribe to the in-process feed (idempotent). */
+	start() {
+		if (this.started) return;
+		this.started = true;
+		if (this.dshEvents === null) return;
+		this.disposers.push(this.dshEvents.on("session/created", (session) => {
+			this.ensureLive(session);
+		}), this.dshEvents.on("session/event", (session, ev) => {
+			this.handleDshEvent(session, ev);
+		}), this.dshEvents.on("session/disposed", (session) => {
+			this.live.delete(session.id);
+		}));
+	}
+	/** Dispose subscriptions and drop all cached state (idempotent). */
+	stop() {
+		if (!this.started) return;
+		this.started = false;
+		const disposers = this.disposers;
+		this.disposers = [];
+		for (const dispose of disposers) dispose();
+		this.live.clear();
+		this.buffers.clear();
+	}
+	/**
+	* Feed one sidecar subscribe-stream event into the bounded ring
+	* (timeline hints only; the stream stays a trigger signal, ADR-2).
+	*/
+	ingestSidecarEvent(ev) {
+		if (typeof ev.session_id !== "string" || ev.session_id === "") return;
+		let ring = this.buffers.get(ev.session_id);
+		if (ring === void 0) ring = [];
+		else this.buffers.delete(ev.session_id);
+		ring.push(ev);
+		if (ring.length > this.maxEventsPerSession) ring.splice(0, ring.length - this.maxEventsPerSession);
+		this.buffers.set(ev.session_id, ring);
+		while (this.buffers.size > this.maxSessions) {
+			const oldest = this.buffers.keys().next();
+			if (oldest.done === true) break;
+			this.buffers.delete(oldest.value);
+		}
+	}
+	/**
+	* Deduplicated cross-agent session list, most recently active first.
+	* dsh sessions live in this process win over their sidecar rows
+	* (which then only supplement); cold dsh sessions and non-dsh agents
+	* come from the sidecar alone.
+	*/
+	getUnifiedSessions() {
+		const board = this.store.getBoardState();
+		const out = /* @__PURE__ */ new Map();
+		const mergedIds = /* @__PURE__ */ new Set();
+		for (const row of board.sessions) {
+			const liveEntry = row.agent === DSH_AGENT ? this.live.get(row.session_id) : void 0;
+			if (liveEntry !== void 0) {
+				mergedIds.add(row.session_id);
+				out.set(`${row.agent}${KEY_SEP}${row.session_id}`, this.mergeRow(liveEntry, row));
+			} else out.set(`${row.agent}${KEY_SEP}${row.session_id}`, fromSidecarRow(row));
+		}
+		for (const [id, entry] of this.live) {
+			if (mergedIds.has(id)) continue;
+			out.set(`${DSH_AGENT}${KEY_SEP}${id}`, fromDshLive(entry));
+		}
+		const sessions = [...out.values()];
+		sessions.sort((a, b) => b.lastActivityAt - a.lastActivityAt || a.sessionId.localeCompare(b.sessionId));
+		return sessions;
+	}
+	/**
+	* Cross-agent project correlation groups within a time window
+	* (project path + window is the correlation key, design §4.e.2).
+	*/
+	getProjectGroups(opts = {}) {
+		const windowMs = opts.windowMs ?? 864e5;
+		const cutoff = (opts.now ?? this.now()) - windowMs;
+		const groups = /* @__PURE__ */ new Map();
+		for (const session of this.getUnifiedSessions()) {
+			if (session.lastActivityAt < cutoff) continue;
+			const project = normalizeProject(session.project);
+			let group = groups.get(project);
+			if (group === void 0) {
+				group = {
+					project,
+					agents: [],
+					sessions: [],
+					lastActivityAt: 0
+				};
+				groups.set(project, group);
+			}
+			group.sessions.push(session);
+			if (!group.agents.includes(session.agent)) group.agents.push(session.agent);
+			if (session.lastActivityAt > group.lastActivityAt) group.lastActivityAt = session.lastActivityAt;
+		}
+		const out = [...groups.values()];
+		for (const group of out) group.agents.sort();
+		out.sort((a, b) => b.lastActivityAt - a.lastActivityAt || a.project.localeCompare(b.project));
+		return out;
+	}
+	/**
+	* One merged timeline page for a session, ascending, deduplicated by
+	* event identity (seq+kind+text for seq-carrying events — same-seq
+	* sibling events from multi-block records all survive), newest window
+	* first with a backward cursor. Sources are pulled on demand; a
+	* missing/failing source silently narrows the page (provenance is
+	* reported in `sources`).
+	*/
+	async getSessionTimeline(sessionId, opts = {}) {
+		const limit = Math.max(1, Math.floor(opts.limit ?? 100));
+		const sources = {
+			dshLive: false,
+			dshCold: false,
+			sidecarReplay: false,
+			sidecarBuffer: false
+		};
+		let dshEvents = [];
+		const liveEntry = this.live.get(sessionId);
+		if (liveEntry !== void 0) {
+			dshEvents = liveEntry.session.events;
+			sources.dshLive = true;
+		} else {
+			const engine = this.resolveSessionQuery();
+			if (engine !== null) try {
+				dshEvents = (await engine.readSession(sessionId)).events;
+				sources.dshCold = true;
+			} catch {}
+		}
+		const sidecarEvents = [];
+		const seen = /* @__PURE__ */ new Set();
+		const addSidecar = (ev) => {
+			const key = sidecarEventKey(ev);
+			if (seen.has(key)) return false;
+			seen.add(key);
+			sidecarEvents.push(ev);
+			return true;
+		};
+		if (this.replaySource !== null) try {
+			const replayed = await this.replaySource.replay({ sessionId });
+			for (const ev of replayed) addSidecar(ev);
+			sources.sidecarReplay = true;
+		} catch {}
+		const ring = this.buffers.get(sessionId);
+		if (ring !== void 0 && ring.length > 0) {
+			sources.sidecarBuffer = true;
+			for (const ev of ring) addSidecar(ev);
+		}
+		const entries = mergeTimeline(dshEvents, sidecarEvents);
+		let endIdx = entries.length;
+		const before = opts.before ?? null;
+		if (before !== null) {
+			endIdx = 0;
+			while (endIdx < entries.length) {
+				const entry = entries[endIdx];
+				if (entry === void 0 || !isBeforeCursor(entry, before)) break;
+				endIdx += 1;
+			}
+		}
+		let startIdx = Math.max(0, endIdx - limit);
+		const boundary = entries[startIdx];
+		if (boundary !== void 0 && boundary.seq !== null) while (startIdx > 0 && entries[startIdx - 1]?.seq === boundary.seq) startIdx -= 1;
+		const window = entries.slice(startIdx, endIdx);
+		const first = window[0];
+		return {
+			sessionId,
+			entries: window,
+			cursor: startIdx > 0 && first !== void 0 ? {
+				seq: first.seq,
+				ts: first.ts
+			} : null,
+			sources
+		};
+	}
+	/**
+	* dsh lineage via `sessionQuery.traceSession`; degrades to
+	* `trace: null` + reason when the service is absent or the trace
+	* fails (never throws).
+	*/
+	async getLineage(sessionId) {
+		const engine = this.resolveSessionQuery();
+		if (engine === null) return {
+			available: false,
+			trace: null,
+			reason: "session_query_unavailable"
+		};
+		try {
+			return {
+				available: true,
+				trace: await engine.traceSession(sessionId),
+				reason: null
+			};
+		} catch (error) {
+			return {
+				available: false,
+				trace: null,
+				reason: "trace_failed",
+				detail: describeError$2(error)
+			};
+		}
+	}
+	/**
+	* Cross-agent search. With sessionQuery mounted, dsh sessions get
+	* full-text ranking (hits first, engine order); without it — or when
+	* the engine call fails — the deep query degrades to title/project
+	* substring filtering over the unified view (`filter-only`), without
+	* error. Non-dsh agents always use the filter path (the sidecar has
+	* no search API).
+	*/
+	async searchSessions(query, opts = {}) {
+		const limit = Math.max(1, Math.floor(opts.limit ?? 50));
+		const needle = query.trim().toLowerCase();
+		const engine = this.resolveSessionQuery();
+		let mode = engine !== null ? "full-text" : "filter-only";
+		if (needle === "") return {
+			mode,
+			items: []
+		};
+		const unified = this.getUnifiedSessions();
+		const items = [];
+		const seen = /* @__PURE__ */ new Set();
+		if (engine !== null) try {
+			const page = await engine.searchSessions({
+				query,
+				limit
+			});
+			const dshById = /* @__PURE__ */ new Map();
+			for (const session of unified) if (session.agent === DSH_AGENT) dshById.set(session.sessionId, session);
+			for (const hit of page.items) {
+				const session = dshById.get(hit.header.id);
+				if (session === void 0) continue;
+				const key = `${session.agent}${KEY_SEP}${session.sessionId}`;
+				if (seen.has(key)) continue;
+				seen.add(key);
+				items.push({
+					session,
+					matchedBy: "full-text",
+					snippet: hit.bestMatch.snippet
+				});
+			}
+		} catch {
+			mode = "filter-only";
+		}
+		for (const session of unified) {
+			const key = `${session.agent}${KEY_SEP}${session.sessionId}`;
+			if (seen.has(key)) continue;
+			if (session.title.toLowerCase().includes(needle)) {
+				seen.add(key);
+				items.push({
+					session,
+					matchedBy: "title",
+					snippet: null
+				});
+			} else if (session.project.toLowerCase().includes(needle)) {
+				seen.add(key);
+				items.push({
+					session,
+					matchedBy: "project",
+					snippet: null
+				});
+			}
+		}
+		return {
+			mode,
+			items: items.slice(0, limit)
+		};
+	}
+	/** Current capability face (sessionQuery re-resolved on every call). */
+	getCapabilities() {
+		const engineAvailable = this.resolveSessionQuery() !== null;
+		return {
+			dshEvents: {
+				available: this.dshEvents !== null,
+				liveSessions: this.live.size
+			},
+			sessionQuery: {
+				available: engineAvailable,
+				reason: engineAvailable ? null : "session_query_unavailable"
+			},
+			search: { mode: engineAvailable ? "full-text" : "filter-only" }
+		};
+	}
+	resolveSessionQuery() {
+		if (this.getSessionQueryThunk === null) return null;
+		try {
+			return this.getSessionQueryThunk() ?? null;
+		} catch {
+			return null;
+		}
+	}
+	/**
+	* Register a live session (first `session/created` or, when the feed
+	* attached late, first `session/event`), folding title/seq facts from
+	* the existing log tail without copying it.
+	*/
+	ensureLive(session) {
+		let entry = this.live.get(session.id);
+		if (entry !== void 0) return entry;
+		const events = session.events;
+		const tail = events.length > 0 ? events[events.length - 1] : void 0;
+		let title = null;
+		for (let i = events.length - 1; i >= 0; i -= 1) {
+			const ev = events[i];
+			if (ev !== void 0 && ev.type === "session/title") {
+				const candidate = extractTitle(ev.data);
+				if (candidate !== null) {
+					title = candidate;
+					break;
+				}
+			}
+		}
+		entry = {
+			session,
+			title,
+			lastSeq: tail !== void 0 ? tail.seq : null,
+			lastEventAt: tail !== void 0 ? tail.time : null
+		};
+		this.live.set(session.id, entry);
+		return entry;
+	}
+	handleDshEvent(session, ev) {
+		const entry = this.ensureLive(session);
+		if (entry.lastSeq === null || ev.seq > entry.lastSeq) entry.lastSeq = ev.seq;
+		if (entry.lastEventAt === null || ev.time > entry.lastEventAt) entry.lastEventAt = ev.time;
+		if (ev.type === "session/title") {
+			const title = extractTitle(ev.data);
+			if (title !== null) entry.title = title;
+		}
+	}
+	/** Merge one live dsh entry with its sidecar row (dsh primary). */
+	mergeRow(liveEntry, row) {
+		const header = liveEntry.session.header;
+		const dshActivityMs = liveEntry.lastEventAt ?? header.createdAt;
+		return {
+			agent: DSH_AGENT,
+			sessionId: liveEntry.session.id,
+			origin: "merged",
+			live: true,
+			status: row.status,
+			title: liveEntry.title ?? row.title,
+			project: header.cwd ?? row.project,
+			lastActivityAt: Math.max(dshActivityMs, secondsToMs(row.updated_at)),
+			lastEvent: row.last_event ?? null,
+			lastSeq: liveEntry.lastSeq ?? integerOrNull(row.extra?.["seq"]),
+			gap: row.gap === true,
+			parentId: header.parentSession ?? (typeof row.parent_id === "string" ? row.parent_id : null),
+			extra: row.extra ?? {}
+		};
+	}
+};
+/** Cold fallback / non-dsh row: sidecar is the only source. */
+function fromSidecarRow(row) {
+	return {
+		agent: row.agent,
+		sessionId: row.session_id,
+		origin: "sidecar",
+		live: false,
+		status: row.status,
+		title: row.title,
+		project: row.project,
+		lastActivityAt: secondsToMs(row.updated_at),
+		lastEvent: row.last_event ?? null,
+		lastSeq: integerOrNull(row.extra?.["seq"]),
+		gap: row.gap === true,
+		parentId: typeof row.parent_id === "string" ? row.parent_id : null,
+		extra: row.extra ?? {}
+	};
+}
+/** Live dsh session the sidecar has not (yet) observed on disk. */
+function fromDshLive(entry) {
+	const header = entry.session.header;
+	return {
+		agent: DSH_AGENT,
+		sessionId: entry.session.id,
+		origin: "dsh-live",
+		live: true,
+		status: "unknown",
+		title: entry.title ?? "",
+		project: header.cwd ?? "",
+		lastActivityAt: entry.lastEventAt ?? header.createdAt,
+		lastEvent: null,
+		lastSeq: entry.lastSeq,
+		gap: false,
+		parentId: header.parentSession ?? null,
+		extra: {}
 	};
 }
 //#endregion
@@ -1077,6 +2209,24 @@ const EXECUTE_ERROR_STATUS = {
 	unsupported_agent: 422,
 	executor_error: 502
 };
+/**
+* Analysis-engine error code → HTTP status (task spec mapping). `cancelled`
+* stays 200: it is a terminal fact about the analysis session carried in
+* the result outcome, not a transport failure. Unknown codes fall back to
+* 502 like the execute map does.
+*/
+const ANALYSIS_ERROR_STATUS = {
+	analysis_disabled: 403,
+	too_many_active: 429,
+	timeout: 504,
+	create_failed: 502,
+	cancelled: 200
+};
+const ANALYSIS_ACTION_TYPES = /* @__PURE__ */ new Set([
+	"analysis.request",
+	"analysis.followup",
+	"analysis.cancel"
+]);
 function writeJson(res, status, body) {
 	res.writeHead(status, {
 		"content-type": "application/json; charset=utf-8",
@@ -1107,6 +2257,73 @@ function subpathOf(rawUrl) {
 	if (pathname === "/plugins/agent-sidecar/api") return "";
 	if (pathname.startsWith(`/plugins/agent-sidecar/api/`)) return pathname.slice(27);
 	return null;
+}
+/** Query string of the request (empty params when the URL is unparsable). */
+function queryOf(rawUrl) {
+	try {
+		return new URL(rawUrl ?? "/", "http://dsh.internal").searchParams;
+	} catch {
+		return new URLSearchParams();
+	}
+}
+/**
+* Timeline pagination token: `<seq|'-'>~<epoch-ms>`. Deliberately not the
+* raw JSON cursor object so the query-string round-trip stays trivial and
+* the wire shape is decoupled from fusion's internal cursor type.
+*/
+function encodeCursor(cursor) {
+	return `${cursor.seq === null ? "-" : cursor.seq}~${cursor.ts}`;
+}
+function decodeCursor(raw) {
+	const sep = raw.indexOf("~");
+	if (sep <= 0 || sep === raw.length - 1) return null;
+	const seqPart = raw.slice(0, sep);
+	const tsPart = raw.slice(sep + 1);
+	const ts = Number(tsPart);
+	if (!Number.isInteger(ts) || ts < 0) return null;
+	if (seqPart === "-") return {
+		seq: null,
+		ts
+	};
+	const seq = Number(seqPart);
+	if (!Number.isInteger(seq) || seq < 0) return null;
+	return {
+		seq,
+		ts
+	};
+}
+/** Bound on caller-supplied page sizes (timeline entries / search hits). */
+const MAX_PAGE_LIMIT = 500;
+/** Search result bound when the caller supplies no limit (fusion default). */
+const DEFAULT_SEARCH_ROUTE_LIMIT = 50;
+/** Match fusion's project correlation key: strip trailing slashes (keep `/`). */
+function normalizeProjectKey(project) {
+	if (project.length > 1 && project.endsWith("/")) {
+		const stripped = project.replace(/\/+$/, "");
+		return stripped === "" ? "/" : stripped;
+	}
+	return project;
+}
+/**
+* Parse an optional positive-integer query param bounded by
+* {@link MAX_PAGE_LIMIT}. `undefined` when absent, `null` when invalid.
+*/
+function parseLimit(params, name) {
+	const raw = params.get(name);
+	if (raw === null || raw === "") return void 0;
+	const value = Number(raw);
+	if (!Number.isInteger(value) || value < 1 || value > MAX_PAGE_LIMIT) return null;
+	return value;
+}
+/** JSON wire shape of one timeline page (adds the encoded `nextCursor`). */
+function timelineBody(page) {
+	return {
+		sessionId: page.sessionId,
+		entries: page.entries,
+		cursor: page.cursor,
+		nextCursor: page.cursor === null ? null : encodeCursor(page.cursor),
+		sources: page.sources
+	};
 }
 /** `event: <name>` + single-line JSON data (JSON.stringify never emits raw newlines). */
 function sseFrame(event, data) {
@@ -1230,24 +2447,141 @@ function createRoutes(deps, opts = {}) {
 		for (const client of [...clients]) push(client, frame);
 	};
 	const unsubscribes = [deps.store.onChange(onMutation), deps.supervisor.onStateChange(onMutation)];
-	const handleSession = (res, rawId) => {
-		let id;
+	/** Decoded session id, or null (already answered 404) on a bad escape. */
+	const decodeId = (res, rawId) => {
 		try {
-			id = decodeURIComponent(rawId);
-		} catch {
+			const id = decodeURIComponent(rawId);
+			if (id !== "") return id;
+		} catch {}
+		writeJson(res, 404, { reason: "session_not_found" });
+		return null;
+	};
+	const handleSession = async (res, rawId) => {
+		const id = decodeId(res, rawId);
+		if (id === null) return;
+		const view = deps.store.getBoardState().sessions.find((s) => s.session_id === id);
+		const fusion = deps.fusion;
+		if (fusion === void 0) {
+			if (view === void 0) {
+				writeJson(res, 404, { reason: "session_not_found" });
+				return;
+			}
+			writeJson(res, 200, {
+				session: view,
+				timeline: null,
+				timelineNote: "timeline_not_available_until_m3"
+			});
+			return;
+		}
+		const unified = fusion.getUnifiedSessions().find((s) => s.sessionId === id) ?? null;
+		if (view === void 0 && unified === null) {
 			writeJson(res, 404, { reason: "session_not_found" });
 			return;
 		}
-		const view = id === "" ? void 0 : deps.store.getBoardState().sessions.find((s) => s.session_id === id);
-		if (view === void 0) {
-			writeJson(res, 404, { reason: "session_not_found" });
-			return;
-		}
+		const page = await fusion.getSessionTimeline(id);
 		writeJson(res, 200, {
-			session: view,
-			timeline: null,
-			timelineNote: "timeline_not_available_until_m3"
+			session: view ?? null,
+			unified,
+			timeline: timelineBody(page)
 		});
+	};
+	const handleTimeline = async (res, rawId, params) => {
+		const fusion = deps.fusion;
+		if (fusion === void 0) {
+			writeJson(res, 501, { reason: "fusion_not_wired" });
+			return;
+		}
+		const id = decodeId(res, rawId);
+		if (id === null) return;
+		const rawCursor = params.get("cursor");
+		let before = null;
+		if (rawCursor !== null && rawCursor !== "") {
+			before = decodeCursor(rawCursor);
+			if (before === null) {
+				writeJson(res, 400, { reason: "invalid_cursor" });
+				return;
+			}
+		}
+		const limit = parseLimit(params, "limit");
+		if (limit === null) {
+			writeJson(res, 400, { reason: "invalid_limit" });
+			return;
+		}
+		const page = await fusion.getSessionTimeline(id, {
+			before,
+			limit
+		});
+		if (!(page.sources.dshLive || page.sources.dshCold || page.sources.sidecarReplay || page.sources.sidecarBuffer) && page.entries.length === 0) {
+			if (!(deps.store.getBoardState().sessions.some((s) => s.session_id === id) || fusion.getUnifiedSessions().some((s) => s.sessionId === id))) {
+				writeJson(res, 404, { reason: "session_not_found" });
+				return;
+			}
+		}
+		writeJson(res, 200, timelineBody(page));
+	};
+	const handleLineage = async (res, rawId) => {
+		const fusion = deps.fusion;
+		if (fusion === void 0) {
+			writeJson(res, 501, { reason: "fusion_not_wired" });
+			return;
+		}
+		const id = decodeId(res, rawId);
+		if (id === null) return;
+		writeJson(res, 200, await fusion.getLineage(id));
+	};
+	const handleSearch = async (res, params) => {
+		const fusion = deps.fusion;
+		if (fusion === void 0) {
+			writeJson(res, 501, { reason: "fusion_not_wired" });
+			return;
+		}
+		const query = (params.get("q") ?? "").trim();
+		const project = (params.get("project") ?? "").trim();
+		if (query === "" && project === "") {
+			writeJson(res, 400, {
+				reason: "invalid_request",
+				detail: "search needs q= (text query) and/or project= (project filter)"
+			});
+			return;
+		}
+		const limit = parseLimit(params, "limit");
+		if (limit === null) {
+			writeJson(res, 400, { reason: "invalid_limit" });
+			return;
+		}
+		let mode;
+		let items;
+		if (query !== "") {
+			const result = await fusion.searchSessions(query, limit === void 0 ? {} : { limit });
+			mode = result.mode;
+			items = result.items;
+		} else {
+			mode = "filter-only";
+			items = fusion.getUnifiedSessions().map((session) => ({
+				session,
+				matchedBy: "project",
+				snippet: null
+			}));
+		}
+		if (project !== "") {
+			const wanted = normalizeProjectKey(project);
+			items = items.filter((item) => normalizeProjectKey(item.session.project) === wanted);
+		}
+		items = items.slice(0, limit ?? DEFAULT_SEARCH_ROUTE_LIMIT);
+		writeJson(res, 200, {
+			mode,
+			query,
+			project: project === "" ? null : project,
+			items
+		});
+	};
+	const handleProjects = (res) => {
+		const fusion = deps.fusion;
+		if (fusion === void 0) {
+			writeJson(res, 501, { reason: "fusion_not_wired" });
+			return;
+		}
+		writeJson(res, 200, { groups: fusion.getProjectGroups() });
 	};
 	/**
 	* Route-log discipline (S8): only the action type, status and vocabulary
@@ -1323,6 +2657,75 @@ function createRoutes(deps, opts = {}) {
 		});
 		writeJson(res, status, result);
 	};
+	/**
+	* Answer one engine result: status per {@link ANALYSIS_ERROR_STATUS},
+	* body is the result verbatim (it already carries outcome /
+	* analysisSessionId / summary / truncated / disclaimer). The log line
+	* keeps only outcome/codes/ids — never summaries or questions (S8).
+	*/
+	const respondAnalysisResult = (type, res, result) => {
+		const status = result.errorCode !== void 0 ? ANALYSIS_ERROR_STATUS[result.errorCode] ?? 502 : 200;
+		logAction(type, status, {
+			outcome: result.outcome,
+			...result.errorCode !== void 0 ? { errorCode: result.errorCode } : {},
+			...result.analysisSessionId !== void 0 ? { analysisSessionId: result.analysisSessionId } : {},
+			...result.truncated ? { truncated: true } : {}
+		});
+		writeJson(res, status, result);
+	};
+	const rejectInvalidAnalysis = (type, res, detail) => {
+		logAction(type, 400, { reason: "invalid_request" });
+		writeJson(res, 400, {
+			reason: "invalid_request",
+			detail
+		});
+	};
+	const handleAnalysisRequest = async (analysis, envelope, res) => {
+		const { targetKind, targetId, question } = envelope;
+		if (targetKind !== "session" && targetKind !== "project" && targetKind !== "cross-agent" || targetId !== void 0 && typeof targetId !== "string" || question !== void 0 && typeof question !== "string") {
+			rejectInvalidAnalysis("analysis.request", res, "analysis.request needs targetKind session|project|cross-agent, optional string targetId and question");
+			return;
+		}
+		if ((targetKind === "session" || targetKind === "project") && (targetId === void 0 || targetId === "")) {
+			rejectInvalidAnalysis("analysis.request", res, `analysis.request with targetKind ${targetKind} needs a non-empty targetId`);
+			return;
+		}
+		const input = await analysis.buildInput({
+			targetKind,
+			...targetId !== void 0 ? { targetId } : {},
+			...question !== void 0 ? { question } : {}
+		});
+		if (input === null) {
+			logAction("analysis.request", 404, {
+				reason: "target_not_found",
+				targetKind
+			});
+			writeJson(res, 404, { reason: "target_not_found" });
+			return;
+		}
+		respondAnalysisResult("analysis.request", res, await analysis.engine.request(input));
+	};
+	const handleAnalysisFollowup = async (analysis, envelope, res) => {
+		const { analysisSessionId, question } = envelope;
+		if (typeof analysisSessionId !== "string" || analysisSessionId === "" || typeof question !== "string" || question === "") {
+			rejectInvalidAnalysis("analysis.followup", res, "analysis.followup needs non-empty string analysisSessionId and question");
+			return;
+		}
+		respondAnalysisResult("analysis.followup", res, await analysis.engine.followup(analysisSessionId, question));
+	};
+	const handleAnalysisCancel = async (analysis, envelope, res) => {
+		const { analysisSessionId } = envelope;
+		if (typeof analysisSessionId !== "string" || analysisSessionId === "") {
+			rejectInvalidAnalysis("analysis.cancel", res, "analysis.cancel needs a non-empty string analysisSessionId");
+			return;
+		}
+		await analysis.engine.cancel(analysisSessionId);
+		logAction("analysis.cancel", 200, { analysisSessionId });
+		writeJson(res, 200, {
+			ok: true,
+			analysisSessionId
+		});
+	};
 	/** M2 dispatcher over the action envelope (gateway present, guard 1-4 passed). */
 	const handleAction = async (gateway, verdict, req, res) => {
 		const body = await readActionBody(req);
@@ -1366,6 +2769,23 @@ function createRoutes(deps, opts = {}) {
 				}
 				if (type === "inject.prepare") await handlePrepare(gateway, envelope, res);
 				else await handleExecute(gateway, envelope, res);
+				return;
+			}
+			if (type !== null && ANALYSIS_ACTION_TYPES.has(type)) {
+				if (type !== "analysis.cancel" && (deps.analysisEnabled === void 0 || !deps.analysisEnabled())) {
+					logAction(type, 403, { reason: "analysis_disabled" });
+					writeJson(res, 403, { reason: "analysis_disabled" });
+					return;
+				}
+				const analysis = deps.analysis;
+				if (analysis === void 0 || !analysis.available()) {
+					logAction(type, 501, { reason: "analysis_unavailable" });
+					writeJson(res, 501, { reason: "analysis_unavailable" });
+					return;
+				}
+				if (type === "analysis.request") await handleAnalysisRequest(analysis, envelope, res);
+				else if (type === "analysis.followup") await handleAnalysisFollowup(analysis, envelope, res);
+				else await handleAnalysisCancel(analysis, envelope, res);
 				return;
 			}
 		}
@@ -1414,9 +2834,29 @@ function createRoutes(deps, opts = {}) {
 			await handleAction(gateway, verdict, req, res);
 			return;
 		}
+		if (subpath === "projects") {
+			if (method !== "GET") return writeMethodNotAllowed(res, "GET");
+			handleProjects(res);
+			return;
+		}
+		if (subpath === "search") {
+			if (method !== "GET") return writeMethodNotAllowed(res, "GET");
+			await handleSearch(res, queryOf(req.url));
+			return;
+		}
+		if (subpath.startsWith("lineage/")) {
+			if (method !== "GET") return writeMethodNotAllowed(res, "GET");
+			await handleLineage(res, subpath.slice(8));
+			return;
+		}
 		if (subpath.startsWith("session/")) {
 			if (method !== "GET") return writeMethodNotAllowed(res, "GET");
-			handleSession(res, subpath.slice(8));
+			const rest = subpath.slice(8);
+			if (rest.endsWith("/timeline")) {
+				await handleTimeline(res, rest.slice(0, -9), queryOf(req.url));
+				return;
+			}
+			await handleSession(res, rest);
 			return;
 		}
 		writeJson(res, 404, { reason: "not_found" });
@@ -2074,6 +3514,22 @@ const SEND_CLI_GRACE_MS = 2e3;
 const DETECT_OUTPUT_BYTES = 4096;
 /** Per-line clamp when forwarding daemon output into ctx.logger (S8). */
 const LOG_LINE_LIMIT = 400;
+/** Per-page `replay` limit forwarded to the daemon (its own cap is 1024). */
+const REPLAY_PAGE_LIMIT = 512;
+/** Page cap per fusion replay pull: bounds one timeline fan-out to ≤2048 events. */
+const REPLAY_MAX_PAGES = 4;
+/** Timeline entries pulled into one session-analysis summary. */
+const ANALYSIS_TIMELINE_LIMIT = 120;
+/** Sessions listed per project-analysis overview. */
+const ANALYSIS_MAX_SESSIONS = 30;
+/** Project groups listed in a cross-agent analysis overview. */
+const ANALYSIS_MAX_GROUPS = 12;
+/** Sessions listed per group in a cross-agent analysis overview. */
+const ANALYSIS_CROSS_SESSIONS = 5;
+/** Clamp on one line of untrusted text (titles, event text). */
+const ANALYSIS_LINE_CLAMP = 200;
+/** Clamp on the user question (placed at the head, so it survives truncation). */
+const ANALYSIS_QUESTION_CLAMP = 2e3;
 /**
 * `service status` messages that mean "a LaunchAgent owns daemon liveness"
 * (sidecar/launchd.py `_status`): exit 0 is `service is running (pid N)`;
@@ -2094,6 +3550,26 @@ function resolveRuntimeDir(configured, env) {
 	if (raw === "") return join(homedir(), ".agent_sidecar");
 	const expanded = raw === "~" ? homedir() : raw.startsWith("~/") ? join(homedir(), raw.slice(2)) : raw;
 	return isAbsolute(expanded) ? expanded : resolve(expanded);
+}
+/** Flatten and clamp one line of untrusted text for an analysis summary. */
+function clampAnalysisText(text, max = ANALYSIS_LINE_CLAMP) {
+	const flat = text.replace(/\s+/g, " ").trim();
+	return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
+}
+/** Same trailing-slash normalization fusion uses for project group keys. */
+function normalizeAnalysisProject(project) {
+	if (project.length > 1 && project.endsWith("/")) {
+		const stripped = project.replace(/\/+$/, "");
+		return stripped === "" ? "/" : stripped;
+	}
+	return project;
+}
+/** One unified-session line in a project / cross-agent overview. */
+function describeUnifiedSession(session) {
+	const title = session.title !== "" ? clampAnalysisText(session.title) : "(untitled)";
+	const live = session.live ? "|live" : "";
+	const updated = new Date(session.lastActivityAt).toISOString();
+	return `- [${session.agent}|${session.status}${live}] ${title} (updated ${updated})`;
 }
 /**
 * Assemble the M1 host half.
@@ -2185,7 +3661,51 @@ function apply(ctx, config) {
 	};
 	const store = new SessionStore();
 	const client = new SidecarSocketClient({ socketPath });
-	const reconciler = new Reconciler(client, store, {
+	const replayFace = { replay: async ({ sessionId, afterSeq }) => {
+		const events = [];
+		let cursor = afterSeq ?? 0;
+		for (let page = 0; page < REPLAY_MAX_PAGES; page += 1) {
+			const result = await client.replay(sessionId, cursor, REPLAY_PAGE_LIMIT);
+			events.push(...result.events);
+			if (!result.truncated || result.lastSeq === null || result.lastSeq <= cursor) break;
+			cursor = result.lastSeq;
+		}
+		return events;
+	} };
+	const getSessionQuery = () => {
+		const getter = ctx.get;
+		if (typeof getter !== "function") return null;
+		const engine = getter.call(ctx, "sessionQuery");
+		return engine === void 0 || engine === null ? null : engine;
+	};
+	const buildFusion = (dshEvents) => new FusionQuery({
+		store,
+		dshEvents,
+		getSessionQuery,
+		replay: replayFace
+	});
+	const fusionHolder = { current: buildFusion(null) };
+	const fusion = {
+		getUnifiedSessions: () => fusionHolder.current.getUnifiedSessions(),
+		getSessionTimeline: (sessionId, opts) => fusionHolder.current.getSessionTimeline(sessionId, opts),
+		getProjectGroups: (opts) => fusionHolder.current.getProjectGroups(opts),
+		getLineage: (sessionId) => fusionHolder.current.getLineage(sessionId),
+		searchSessions: (query, opts) => fusionHolder.current.searchSessions(query, opts),
+		getCapabilities: () => fusionHolder.current.getCapabilities()
+	};
+	const reconciler = new Reconciler(client, {
+		applySnapshot: (rows) => {
+			store.applySnapshot(rows);
+		},
+		applyEvent: (ev) => {
+			store.applyEvent(ev);
+			fusionHolder.current.ingestSidecarEvent(ev);
+		},
+		setStreamHealth: (health) => {
+			store.setStreamHealth(health);
+		},
+		hasWorkingSessions: () => store.hasWorkingSessions()
+	}, {
 		activeMs: config.stream.reconcileActiveMs,
 		idleMs: config.stream.reconcileIdleMs
 	});
@@ -2260,19 +3780,127 @@ function apply(ctx, config) {
 			project: view.project
 		};
 	};
+	const injectGateway = new InjectGateway({
+		executors: {
+			dsh: dshExecutor,
+			sendCli: sendCliExecutor
+		},
+		verifyTarget,
+		allowWrite: () => effective.inject.enabled,
+		log: (entry) => log(entry.ok ? "info" : "warn", `inject ${entry.phase}`, entry)
+	});
+	const liveAnalysisSessions = /* @__PURE__ */ new Set();
+	const createAnalysisAgent = async (options) => {
+		const agents = liveAgents;
+		if (agents === null) throw new Error("dsh agents service is not available in this composition");
+		const handle = await agents.create(options);
+		const tracked = {
+			agent: handle.agent,
+			dispose: async () => {
+				liveAnalysisSessions.delete(tracked);
+				await handle.dispose();
+			}
+		};
+		liveAnalysisSessions.add(tracked);
+		return tracked;
+	};
+	const analysisEngine = new AnalysisEngine({
+		createAgent: createAnalysisAgent,
+		allowAnalysis: () => effective.analysis.enabled,
+		log: (entry) => log(entry.errorCode !== void 0 ? "warn" : "info", `analysis ${entry.op}`, entry)
+	});
+	/**
+	* Assemble the bounded AnalysisInput for one target from fusion data
+	* (design §4.e.3: summaries come from the fused timelines/overviews).
+	* `null` = target unknown to fusion → the routes answer 404. The user
+	* question rides the HEAD of the text so it survives the engine's
+	* tail truncation, and the session timeline lists NEWEST events first
+	* for the same reason: when the engine's head-keep truncation bites,
+	* it should shed the oldest — least informative — events (F5).
+	*/
+	const buildAnalysisInput = async (req) => {
+		const questionLines = req.question !== void 0 && req.question.trim() !== "" ? [
+			"[用户问题 / question]",
+			clampAnalysisText(req.question, ANALYSIS_QUESTION_CLAMP),
+			""
+		] : [];
+		if (req.targetKind === "session") {
+			const targetId = req.targetId ?? "";
+			const session = fusion.getUnifiedSessions().find((s) => s.sessionId === targetId) ?? null;
+			if (session === null) return null;
+			const page = await fusion.getSessionTimeline(targetId, { limit: ANALYSIS_TIMELINE_LIMIT });
+			const sources = page.sources;
+			const summaryText = [
+				...questionLines,
+				`[会话概览 / session] agent=${session.agent} status=${session.status} live=${session.live}`,
+				`title: ${session.title !== "" ? clampAnalysisText(session.title) : "(untitled)"}`,
+				`project: ${session.project}`,
+				`last activity: ${new Date(session.lastActivityAt).toISOString()}`,
+				"",
+				`[时间线 / timeline,最新在前 / newest first] ${page.entries.length} events (sources: dshLive=${sources.dshLive} dshCold=${sources.dshCold} replay=${sources.sidecarReplay} buffer=${sources.sidecarBuffer})`,
+				...[...page.entries].reverse().map((entry) => `- [${new Date(entry.ts).toISOString()}] ${entry.kind}${entry.seq !== null ? ` seq=${entry.seq}` : ""}${entry.text !== "" ? ` ${clampAnalysisText(entry.text)}` : ""}`)
+			].join("\n");
+			return {
+				kind: "session",
+				title: session.title !== "" ? session.title : `${session.agent} ${session.sessionId}`,
+				summaryText,
+				meta: {
+					targetId,
+					agent: session.agent
+				}
+			};
+		}
+		if (req.targetKind === "project") {
+			const wanted = normalizeAnalysisProject(req.targetId ?? "");
+			const group = fusion.getProjectGroups().find((g) => normalizeAnalysisProject(g.project) === wanted) ?? null;
+			if (group === null) return null;
+			const omitted = group.sessions.length - ANALYSIS_MAX_SESSIONS;
+			const summaryText = [
+				...questionLines,
+				`[项目概览 / project] ${group.project}`,
+				`agents: ${group.agents.join(", ")} | sessions: ${group.sessions.length} | last activity: ${new Date(group.lastActivityAt).toISOString()}`,
+				"",
+				...group.sessions.slice(0, ANALYSIS_MAX_SESSIONS).map(describeUnifiedSession),
+				...omitted > 0 ? [`… ${omitted} more sessions omitted`] : []
+			].join("\n");
+			return {
+				kind: "project",
+				title: `project ${group.project}`,
+				summaryText,
+				meta: { targetId: group.project }
+			};
+		}
+		const groups = fusion.getProjectGroups();
+		const sessionsTotal = groups.reduce((n, g) => n + g.sessions.length, 0);
+		const omittedGroups = groups.length - ANALYSIS_MAX_GROUPS;
+		return {
+			kind: "cross-agent",
+			title: "cross-agent overview",
+			summaryText: [
+				...questionLines,
+				`[跨 agent 概览 / cross-agent overview] ${groups.length} projects, ${sessionsTotal} sessions in the correlation window`,
+				"",
+				...groups.slice(0, ANALYSIS_MAX_GROUPS).flatMap((group) => [
+					`[${group.project}] agents: ${group.agents.join(", ")} | sessions: ${group.sessions.length}`,
+					...group.sessions.slice(0, ANALYSIS_CROSS_SESSIONS).map(describeUnifiedSession),
+					""
+				]),
+				...omittedGroups > 0 ? [`… ${omittedGroups} more projects omitted`] : []
+			].join("\n")
+		};
+	};
 	const routes = createRoutes({
 		store,
 		supervisor,
 		guardOptions,
-		injectGateway: new InjectGateway({
-			executors: {
-				dsh: dshExecutor,
-				sendCli: sendCliExecutor
-			},
-			verifyTarget,
-			allowWrite: () => effective.inject.enabled,
-			log: (entry) => log(entry.ok ? "info" : "warn", `inject ${entry.phase}`, entry)
-		}),
+		injectGateway,
+		fusion,
+		analysisEnabled: () => effective.analysis.enabled,
+		analysis: {
+			engine: analysisEngine,
+			buildInput: buildAnalysisInput,
+			available: () => liveAgents !== null
+		},
 		log
 	});
 	ctx.effect(() => {
@@ -2284,23 +3912,42 @@ function apply(ctx, config) {
 		const offStateChange = supervisor.onStateChange((state) => {
 			if (state === "adopted" || state === "hosted") reconciler.reconcileNow();
 		});
+		fusionHolder.current.start();
 		reconciler.start();
 		supervisor.start();
 		return async () => {
 			offStateChange();
 			await supervisor.stop();
 			reconciler.stop();
+			await Promise.all([...liveAnalysisSessions].map((handle) => handle.dispose().catch(() => {})));
 			routes.dispose();
 			removeRoute();
+			fusionHolder.current.stop();
 		};
-	}, "agent-sidecar: host assembly (route + reconciler + supervisor)");
+	}, "agent-sidecar: host assembly (route + reconciler + supervisor + fusion + analysis)");
+	ctx.inject(["sessions"], (injected) => {
+		const sctx = injected;
+		const bus = sctx;
+		const withFeed = buildFusion({ on: (event, handler) => bus.on(event, handler) });
+		withFeed.start();
+		const previous = fusionHolder.current;
+		fusionHolder.current = withFeed;
+		previous.stop();
+		sctx.effect(() => () => {
+			const downgraded = buildFusion(null);
+			downgraded.start();
+			fusionHolder.current = downgraded;
+			withFeed.stop();
+		}, "agent-sidecar: fusion dsh feed release");
+		log("debug", "fusion dsh event feed online (sessions service bound)");
+	});
 	ctx.inject(["agents"], (injected) => {
 		const actx = injected;
 		liveAgents = actx.agents;
 		actx.effect(() => () => {
 			liveAgents = null;
 		}, "agent-sidecar: agents binding release");
-		log("debug", "dsh inject path online (agents service bound)");
+		log("debug", "dsh inject + analysis paths online (agents service bound)");
 	});
 	ctx.inject(["settings"], (injected) => {
 		try {
