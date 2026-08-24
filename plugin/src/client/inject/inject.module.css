@@ -1,0 +1,446 @@
+/* Inject panel (design §5.1 view 3). Every color rides a dsh --dsw-alias-*
+ * design token, no literal colors — same discipline as the settings card.
+ * The confirm-injection button is the one danger affordance: eye-catching
+ * (error-toned border/text, filled on hover) but restrained (no permanent
+ * solid red block). */
+
+.panel {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2);
+  max-width: 560px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── header ────────────────────────────────────────────────────────────── */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ── body ──────────────────────────────────────────────────────────────── */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px 14px;
+}
+
+.capabilityOff {
+  margin: 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ── notices (editor banners after a failed/expired attempt) ───────────── */
+
+.noticeWarn,
+.noticeError {
+  margin: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.noticeError {
+  border: 1px solid var(--dsw-alias-label-error);
+  color: var(--dsw-alias-label-error);
+}
+
+.noticeDetail {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── target row ────────────────────────────────────────────────────────── */
+
+.targetRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.noTarget {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.agentTag {
+  flex: none;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 17px;
+  font-weight: 500;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.planTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ── editor field ──────────────────────────────────────────────────────── */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+
+.textarea {
+  appearance: none;
+  resize: vertical;
+  min-height: 96px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-3);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-primary);
+}
+
+.textarea:focus-visible {
+  outline: none;
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.textarea::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.textarea:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Byte counter: thin progress track + numeric readout. */
+.byteRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.byteBar {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--dsw-alias-bg-module-platform);
+  overflow: hidden;
+}
+
+.byteFill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--dsw-alias-brand-primary);
+  transition: width .12s;
+}
+
+/* Modifier applied ALONGSIDE .byteFill (no `composes`; see settings card). */
+.byteFillOver {
+  background: var(--dsw-alias-label-error);
+}
+
+.byteText,
+.byteTextOver {
+  flex: none;
+  font-size: 11px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.byteTextOver {
+  color: var(--dsw-alias-label-error);
+}
+
+.invalid {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-error);
+}
+
+/* ── mode radios ───────────────────────────────────────────────────────── */
+
+.modes {
+  margin: 0;
+  border: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.modeOption {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.modeOption input {
+  accent-color: var(--dsw-alias-brand-primary);
+  width: 14px;
+  height: 14px;
+  margin: 3px 0 0;
+  cursor: pointer;
+}
+
+.modeOption input:disabled {
+  cursor: default;
+}
+
+.modeText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.modeLabel {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+
+.modeHint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── warnings & audit note ─────────────────────────────────────────────── */
+
+.warnBar {
+  margin: 0;
+  border: 1px solid var(--dsw-alias-label-error);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-error);
+}
+
+.auditNote {
+  margin: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ── confirm plan ──────────────────────────────────────────────────────── */
+
+.planBox {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-3);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.planRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.planKey {
+  flex: none;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.planValue {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+
+.observedNote {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.planPreview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.preview {
+  margin: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  padding: 8px 10px;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.countdown {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ── results ───────────────────────────────────────────────────────────── */
+
+.resultOk,
+.resultFail,
+.resultUnknown {
+  margin: 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  background: var(--dsw-alias-bg-module-platform);
+  color: var(--dsw-alias-label-primary);
+}
+
+.resultOk {
+  border: 1px solid var(--dsw-alias-brand-primary);
+}
+
+.resultFail {
+  border: 1px solid var(--dsw-alias-label-error);
+  color: var(--dsw-alias-label-error);
+}
+
+.resultUnknown {
+  border: 1px solid var(--dsw-alias-label-dimmed);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.resultDetail {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── footer buttons ────────────────────────────────────────────────────── */
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.btn,
+.btnPrimary,
+.btnDanger {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 5px 14px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.btn {
+  border-color: var(--dsw-alias-border-l2);
+  background: none;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.btn:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-label-dimmed);
+}
+
+.btnPrimary {
+  background: var(--dsw-alias-label-primary);
+  color: var(--dsw-alias-bg-layer-3);
+}
+
+/* The danger action: outlined error tone at rest, fills on hover. */
+.btnDanger {
+  border-color: var(--dsw-alias-label-error);
+  background: none;
+  color: var(--dsw-alias-label-error);
+  font-weight: 600;
+}
+
+.btnDanger:hover:not(:disabled) {
+  background: var(--dsw-alias-label-error);
+  color: var(--dsw-alias-bg-layer-3);
+}
+
+.btn:disabled,
+.btnPrimary:disabled,
+.btnDanger:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.btn:focus-visible,
+.btnPrimary:focus-visible,
+.btnDanger:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}

@@ -39,7 +39,13 @@ interface FakeCtx {
   disposeAll(): Promise<void>
 }
 
-function createFakeCtx(): FakeCtx {
+/**
+ * @param services - lazily injectable services by name (mirroring cordis
+ * `ctx.inject`): a callback whose deps are ALL present runs immediately on
+ * an extended ctx; any missing dep means the callback never runs (the
+ * composition-without-that-service case, e.g. no dsh-settings/dsh-agent).
+ */
+function createFakeCtx(services: Record<string, unknown> = {}): FakeCtx {
   const disposers: Array<() => unknown> = []
   const routes: RecordedRoute[] = []
   const removedRoutes: string[] = []
@@ -58,10 +64,10 @@ function createFakeCtx(): FakeCtx {
       disposers.push(disposer)
       return disposer
     },
-    // Lazy service request (T2.4 settings namespace). The fake mirrors a
-    // composition WITHOUT dsh-settings: the dependency never resolves, so
-    // the callback never runs — the entry must work fully without it.
-    inject(_deps: string[], _callback: (ctx: unknown) => void) {
+    inject(deps: string[], callback: (ctx: unknown) => void) {
+      if (!deps.every((dep) => dep in services)) return undefined
+      const injected = Object.assign(Object.create(ctx as object), services)
+      callback(injected)
       return undefined
     },
     webServer: {
@@ -77,6 +83,7 @@ function createFakeCtx(): FakeCtx {
         spawns.push(spec)
         return {
           pid: 12345,
+          stdin: undefined,
           stdout: undefined,
           stderr: undefined,
           collected: {},
@@ -110,6 +117,48 @@ function fakeReq(url: string): unknown {
     socket: { remoteAddress: '127.0.0.1' },
     resume: () => {},
   }
+}
+
+/**
+ * Loopback JSON POST whose body is delivered on a microtask, after the
+ * action handler has attached its data/end listeners synchronously.
+ */
+function fakePostReq(url: string, body: unknown): unknown {
+  const listeners = new Map<string, Array<(arg?: unknown) => void>>()
+  let scheduled = false
+  const schedule = (): void => {
+    if (scheduled) return
+    scheduled = true
+    queueMicrotask(() => {
+      const payload = Buffer.from(JSON.stringify(body), 'utf8')
+      for (const cb of listeners.get('data') ?? []) cb(payload)
+      for (const cb of listeners.get('end') ?? []) cb()
+    })
+  }
+  return {
+    method: 'POST',
+    url,
+    headers: { host: '127.0.0.1:3178', 'content-type': 'application/json' },
+    socket: { remoteAddress: '127.0.0.1' },
+    resume: () => {},
+    on(event: string, cb: (arg?: unknown) => void) {
+      const arr = listeners.get(event) ?? []
+      arr.push(cb)
+      listeners.set(event, arr)
+      schedule()
+      return this
+    },
+  }
+}
+
+/** POST <prefix>/action through the recorded route handler. */
+async function postAction(
+  route: RecordedRoute,
+  body: unknown,
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const res = fakeRes()
+  await route.handler(fakePostReq(`${API_PREFIX}/action`, body), res)
+  return { status: res.statusCode, json: JSON.parse(res.body) as Record<string, unknown> }
 }
 
 interface FakeRes {
@@ -154,8 +203,10 @@ async function fetchState(route: RecordedRoute): Promise<{
 /**
  * Mini sidecar daemon on a real Unix socket: one op per connection
  * (mirroring sidecar/client.py semantics), subscribe ack held open.
+ *
+ * @param sessions - `status` snapshot rows (SessionRow wire shape).
  */
-function startMiniDaemon(socketPath: string): Promise<Server> {
+function startMiniDaemon(socketPath: string, sessions: unknown[] = []): Promise<Server> {
   const server = createServer((socket) => {
     let buffer = ''
     let answered = false
@@ -177,7 +228,7 @@ function startMiniDaemon(socketPath: string): Promise<Server> {
           `${JSON.stringify({ ok: true, op: 'ping', pid: 4242, version: 'test', http: null })}\n`,
         )
       } else if (op === 'status') {
-        socket.end(`${JSON.stringify({ ok: true, op: 'status', sessions: [] })}\n`)
+        socket.end(`${JSON.stringify({ ok: true, op: 'status', sessions })}\n`)
       } else if (op === 'subscribe') {
         socket.write(`${JSON.stringify({ ok: true, op: 'subscribe' })}\n`)
       } else {
@@ -326,7 +377,7 @@ describe('apply', () => {
     expect(fake.spawns).toHaveLength(0)
   })
 
-  it('leaves no timers behind once every disposer has run', async () => {
+  it('leaves no timers behind once every disposer has run (M2 gateway included)', async () => {
     vi.useFakeTimers({
       // Keep setImmediate/Date real so genuine socket I/O still settles.
       toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
@@ -344,5 +395,297 @@ describe('apply', () => {
 
     await fake.disposeAll()
     expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M2 injection wiring (T4.8): gateway assembled into the routes, live
+// inject.enabled gate, agents-less degradation, dsh path end-to-end.
+// ---------------------------------------------------------------------------
+
+/** One dsh session row in the sidecar `status` wire shape (bridge SessionRow). */
+const DSH_SESSION_ROW = {
+  agent: 'dsh',
+  session_id: 'sess-dsh-1',
+  project: '/tmp/proj',
+  transcript: '/tmp/proj/session.jsonl',
+  updated_at: 1_700_000_000,
+  title: 'demo session',
+  status: 'waiting',
+  extra: {},
+  parent_id: null,
+}
+
+describe('M2 injection wiring', () => {
+  it('dispatches inject.prepare through the wired gateway, not the M1 placeholder', async () => {
+    const fake = createFakeCtx()
+    const runtimeDir = await tempRuntimeDir()
+    apply(
+      fake.ctx,
+      Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir }, inject: { enabled: true } }),
+    )
+    cleanups.push(() => fake.disposeAll())
+
+    const { status, json } = await postAction(fake.routes[0]!, {
+      type: 'inject.prepare',
+      target: { agent: 'dsh', sessionId: 'missing' },
+      mode: 'queue',
+      message: 'ping',
+    })
+    // 404 target_not_found comes from the gateway's live store re-check; the
+    // M1 wiring (no gateway) would have answered 501 not_implemented_until_m2.
+    expect(status).toBe(404)
+    expect(json.reason).toBe('target_not_found')
+  })
+
+  it('refuses inject.prepare with 403 while inject.enabled is false (default)', async () => {
+    const fake = createFakeCtx()
+    const runtimeDir = await tempRuntimeDir()
+    apply(fake.ctx, Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir } }))
+    cleanups.push(() => fake.disposeAll())
+
+    const { status, json } = await postAction(fake.routes[0]!, {
+      type: 'inject.prepare',
+      target: { agent: 'dsh', sessionId: 'missing' },
+      mode: 'queue',
+      message: 'ping',
+    })
+    expect(status).toBe(403)
+    expect(json.reason).toBe('inject_disabled')
+  })
+
+  it('loads without the agents service and degrades the dsh path honestly', async () => {
+    // Default fake ctx = composition without dsh-agent: the lazy inject
+    // callback never runs. The fiber must not pend — M1 reads and the
+    // prepare surface stay fully available (send-cli path unaffected).
+    const fake = createFakeCtx()
+    const runtimeDir = await tempRuntimeDir()
+    const server = await startMiniDaemon(join(runtimeDir, 'daemon.sock'), [DSH_SESSION_ROW])
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve())
+        }),
+    )
+    apply(
+      fake.ctx,
+      Config({
+        daemon: { policy: 'adopt-only' },
+        sidecar: { runtimeDir },
+        inject: { enabled: true },
+      }),
+    )
+    cleanups.push(() => fake.disposeAll())
+
+    await vi.waitFor(
+      async () => {
+        const { status, json } = await fetchState(fake.routes[0]!)
+        expect(status).toBe(200)
+        expect(json.board.sessions).toHaveLength(1)
+      },
+      { timeout: 3000, interval: 25 },
+    )
+
+    // prepare is store-backed (agents-free) and still issues a confirmation…
+    const prepared = await postAction(fake.routes[0]!, {
+      type: 'inject.prepare',
+      target: { agent: 'dsh', sessionId: 'sess-dsh-1' },
+      mode: 'queue',
+      message: 'ping',
+    })
+    expect(prepared.status).toBe(200)
+    expect(typeof prepared.json.confirmToken).toBe('string')
+
+    // …and a dsh-target execute fails honestly (agents unavailable → resume
+    // rejects) instead of pending or crashing the route.
+    const executed = await postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: prepared.json.requestId,
+      confirmToken: prepared.json.confirmToken,
+      message: 'ping',
+    })
+    expect(executed.status).toBe(502)
+    expect(executed.json.outcome).toBe('failed')
+    expect(executed.json.errorCode).toBe('session_not_found')
+    expect(String(executed.json.detail)).toContain('not available')
+  })
+
+  it('delivers a dsh queue injection end-to-end once agents resolves', async () => {
+    const followup = vi.fn()
+    const steer = vi.fn()
+    const agents = {
+      get: (sessionId: string) =>
+        sessionId === 'sess-dsh-1' ? { followup, steer } : undefined,
+      resume: async (): Promise<never> => {
+        throw new Error('resume must not be called for a live session')
+      },
+    }
+    const fake = createFakeCtx({ agents })
+    const runtimeDir = await tempRuntimeDir()
+    const server = await startMiniDaemon(join(runtimeDir, 'daemon.sock'), [DSH_SESSION_ROW])
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve())
+        }),
+    )
+    apply(
+      fake.ctx,
+      Config({
+        daemon: { policy: 'adopt-only' },
+        sidecar: { runtimeDir },
+        inject: { enabled: true },
+      }),
+    )
+    cleanups.push(() => fake.disposeAll())
+
+    await vi.waitFor(
+      async () => {
+        const { json } = await fetchState(fake.routes[0]!)
+        expect(json.board.sessions).toHaveLength(1)
+      },
+      { timeout: 3000, interval: 25 },
+    )
+
+    const prepared = await postAction(fake.routes[0]!, {
+      type: 'inject.prepare',
+      target: { agent: 'dsh', sessionId: 'sess-dsh-1' },
+      mode: 'queue',
+      message: 'hello from the board',
+    })
+    expect(prepared.status).toBe(200)
+    const plan = prepared.json.plan as { targetStatus: { status: string } }
+    expect(plan.targetStatus.status).toBe('waiting')
+
+    const executed = await postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: prepared.json.requestId,
+      confirmToken: prepared.json.confirmToken,
+      message: 'hello from the board',
+    })
+    expect(executed.status).toBe(200)
+    expect(executed.json.outcome).toBe('delivered')
+
+    expect(followup).toHaveBeenCalledTimes(1)
+    const message = followup.mock.calls[0]![0] as {
+      content: unknown
+      source: unknown
+    }
+    expect(message.content).toEqual([{ type: 'text', text: 'hello from the board' }])
+    expect(message.source).toEqual({ kind: 'plugin', plugin: 'agent-sidecar' })
+    expect(steer).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Settings wiring (M2 review F-1): the inject.enabled gate must read the
+// LIVE settings value — a runtime commit through `scope.watch` flips both
+// write-gated endpoints immediately, no restart, no reassembly — and the
+// namespace must declare `applies: 'live'` (in the installed dsh-settings,
+// `applies` is UI-badge metadata only; watchers fire regardless).
+// ---------------------------------------------------------------------------
+
+interface FakeSettings {
+  service: {
+    register(
+      ns: string,
+      schema: unknown,
+      options?: { base?: unknown; applies?: 'live' | 'restart' },
+    ): {
+      get(): unknown
+      watch(cb: (next: unknown, prev: unknown) => void): () => void
+    }
+  }
+  registrations: Array<{ ns: string; applies?: 'live' | 'restart' }>
+  /** Commit a new resolved value: swap, then notify watchers (dsh-settings shape). */
+  commit(next: unknown): void
+}
+
+function makeFakeSettings(): FakeSettings {
+  const watchers = new Set<(next: unknown, prev: unknown) => void>()
+  const registrations: FakeSettings['registrations'] = []
+  let value: unknown
+  return {
+    registrations,
+    service: {
+      register(ns, _schema, options) {
+        registrations.push({
+          ns,
+          ...(options?.applies !== undefined ? { applies: options.applies } : {}),
+        })
+        value = options?.base
+        return {
+          get: () => value,
+          watch(cb) {
+            watchers.add(cb)
+            return () => watchers.delete(cb)
+          },
+        }
+      },
+    },
+    commit(next) {
+      const prev = value
+      value = next
+      for (const cb of [...watchers]) cb(next, prev)
+    },
+  }
+}
+
+describe('settings wiring (M2 review F-1)', () => {
+  it('declares applies=live and flips both write gates on a runtime watch commit', async () => {
+    const settings = makeFakeSettings()
+    const fake = createFakeCtx({ settings: settings.service })
+    const runtimeDir = await tempRuntimeDir()
+    const offConfig = Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir } })
+    apply(fake.ctx, offConfig)
+    cleanups.push(() => fake.disposeAll())
+
+    expect(settings.registrations).toEqual([{ ns: 'agent-sidecar', applies: 'live' }])
+
+    const prepareBody = {
+      type: 'inject.prepare',
+      target: { agent: 'dsh', sessionId: 'missing' },
+      mode: 'queue',
+      message: 'ping',
+    }
+    const executeBody = {
+      type: 'inject.execute',
+      requestId: 'req-x',
+      confirmToken: 'f'.repeat(32),
+      message: 'ping',
+    }
+    const route = fake.routes[0]!
+
+    // inject.enabled=false at entry: both endpoints refuse at the write gate.
+    const closedPrepare = await postAction(route, prepareBody)
+    expect(closedPrepare.status).toBe(403)
+    expect(closedPrepare.json.reason).toBe('inject_disabled')
+    const closedExecute = await postAction(route, executeBody)
+    expect(closedExecute.status).toBe(403)
+    expect(closedExecute.json.reason).toBe('inject_disabled')
+
+    // Runtime flip to true: both endpoints now pass the gate and reach the
+    // REAL gateway, failing on its own later checks — proof the 403 gate
+    // read the live value.
+    settings.commit(
+      Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir }, inject: { enabled: true } }),
+    )
+    const openPrepare = await postAction(route, prepareBody)
+    expect(openPrepare.status).toBe(404)
+    expect(openPrepare.json.reason).toBe('target_not_found')
+    const openExecute = await postAction(route, executeBody)
+    expect(openExecute.status).toBe(401)
+    expect(openExecute.json.errorCode).toBe('token_missing')
+
+    // …and back to false: the gate closes just as immediately.
+    const reclosedPrepare = await postAction(route, prepareBody)
+    settings.commit(offConfig)
+    const finalPrepare = await postAction(route, prepareBody)
+    expect(reclosedPrepare.status).toBe(404) // still open right before the commit
+    expect(finalPrepare.status).toBe(403)
+    expect(finalPrepare.json.reason).toBe('inject_disabled')
+    const finalExecute = await postAction(route, executeBody)
+    expect(finalExecute.status).toBe(403)
+    expect(finalExecute.json.reason).toBe('inject_disabled')
   })
 })

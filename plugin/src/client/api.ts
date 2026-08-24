@@ -90,12 +90,32 @@ export interface SessionDetail {
   timelineNote: string
 }
 
-/** Idempotent action envelope for `POST action` (design §4.f; M2 surface). */
-export interface ActionEnvelope {
-  requestId: string
-  method: string
-  args?: Record<string, unknown>
+/** `POST action` body for injection phase one (host: routes.ts `handlePrepare`). */
+export interface PrepareActionBody {
+  type: 'inject.prepare'
+  target: { agent: string; sessionId: string }
+  mode: 'queue' | 'steer'
+  message: string
 }
+
+/** `POST action` body for injection phase two (host: routes.ts `handleExecute`). */
+export interface ExecuteActionBody {
+  type: 'inject.execute'
+  requestId: string
+  confirmToken: string
+  message: string
+}
+
+/** `POST action` body for daemon management (host: routes.ts `handleAction`). */
+export interface DaemonRetryActionBody {
+  type: 'daemon.retry'
+}
+
+/**
+ * The M2 action dispatcher envelope (host: routes.ts `handleAction`):
+ * a `{type, ...}` union with the phase fields at the top level.
+ */
+export type ActionEnvelope = PrepareActionBody | ExecuteActionBody | DaemonRetryActionBody
 
 // ---------------------------------------------------------------------------
 // Injectable browser primitives (structural, so node tests can fake them).
@@ -253,14 +273,19 @@ async function request(
       throw new ApiError('network', 'network_error', null, err)
     }
     if (!res.ok) {
-      // routes.ts answers every failure with a `{reason}` envelope; keep a
-      // status-derived fallback for bodies that are not JSON at all.
+      // routes.ts answers most failures with a `{reason}` envelope; the M2
+      // inject.execute failure answers the result view itself ({outcome:
+      // 'failed', errorCode}) with no reason key, so the vocabulary code is
+      // read as the fallback. Status-derived reason covers non-JSON bodies.
       let reason = `http_${res.status}`
       try {
         const body = await res.json()
         if (typeof body === 'object' && body !== null) {
-          const value = (body as Record<string, unknown>)['reason']
+          const record = body as Record<string, unknown>
+          const value = record['reason']
+          const code = record['errorCode']
           if (typeof value === 'string' && value !== '') reason = value
+          else if (typeof code === 'string' && code !== '') reason = code
         }
       } catch {
         // Non-JSON error body: the fallback reason stands.
@@ -301,12 +326,10 @@ export async function fetchSession(
 }
 
 /**
- * `POST <prefix>/action` — transport layer only (M2 placeholder): the
- * envelope is passed through verbatim, failures are normalized, and there
- * is deliberately NO retry here — requestId idempotency and the
- * `delivery:unknown` no-retry rule (S6) are gateway/UI policy, not
- * transport policy. In M1 the server always answers 403 (write gate off)
- * or 501 (gateway not implemented).
+ * `POST <prefix>/action` — transport layer only: the envelope is passed
+ * through verbatim, failures are normalized, and there is deliberately NO
+ * retry here — requestId idempotency and the `delivery:unknown` no-retry
+ * rule (S6) are gateway/UI policy, not transport policy.
  */
 export async function postAction(
   body: ActionEnvelope,

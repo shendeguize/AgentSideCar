@@ -43,7 +43,7 @@ export type SidecarDict = Readonly<Record<string, string>>
 /** Complete shipped dictionaries keyed by locale id. */
 export const dictionaries: Readonly<Record<SidecarLocale, SidecarDict>> = { zh, en }
 
-/** Keys of one reserved domain (`board.` / `inject.` stay empty until T2.2 fills them). */
+/** Keys of one domain (`settings.` / `inject.` are live; `board.` stays reserved). */
 export type KeysOfDomain<D extends SidecarLocaleDomain> = Extract<
   SidecarLocaleKey,
   `${D}.${string}`

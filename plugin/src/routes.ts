@@ -2,9 +2,19 @@
  * HTTP route layer for the plugin's self-registered namespace (design §4.f).
  *
  * M1 scope: three read endpoints (`GET state`, `GET session/<id>`,
- * `GET stream` SSE) plus a `POST action` placeholder that already enforces
- * the write gate (403 when `inject.enabled` is off, 501 otherwise — the
- * real gateway is M2).
+ * `GET stream` SSE) plus a `POST action` placeholder behind the write gate.
+ *
+ * M2 scope: when an {@link InjectGatewayApi} is wired into the deps,
+ * `POST action` becomes a dispatcher over a bounded (≤64 KiB) JSON body
+ * `{ type: 'inject.prepare' | 'inject.execute' | 'daemon.retry', ... }`.
+ * The inject types pass the write-action gate and drive the gateway's
+ * two-phase confirm; `daemon.retry` is daemon management — independent of
+ * the injection capability (design §6: `inject.enabled` gates injection
+ * only) — so it passes guard layers 1-4 without the write gate. Without a
+ * gateway the M1 placeholder contract (write gate, then 501) is preserved.
+ * Message bodies never reach the route log (S8), and `outcome: 'unknown'`
+ * is answered 200 as a terminal "do not retry" — this layer never re-fires
+ * the gateway on it (S6).
  *
  * Contract (verified against the dsh source, not docs): the webServer
  * prefix-route handler is plain `node:http` —
@@ -25,7 +35,13 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { guardRequest, guardWriteAction, type GuardOptions } from './guard.ts'
+import {
+  guardRequest,
+  guardWriteAction,
+  type GuardOptions,
+  type GuardVerdict,
+} from './guard.ts'
+import type { InjectGateway } from './inject-gateway.ts'
 import type { BoardState, SessionStore } from './session-store.ts'
 import type { DaemonSupervisor, PingInfo, SupervisorState } from './supervisor.ts'
 
@@ -38,12 +54,24 @@ export type WebRouteHandler = (
 /** Route namespace, per the `/plugins/<package>/` convention (design §4.f). */
 export const API_PREFIX = '/plugins/agent-sidecar/api'
 
+/**
+ * The slice of {@link InjectGateway} the routes drive. A `Pick` keeps the
+ * dependency structural (the class has private state), so the real gateway
+ * and plain-object test fakes are equally assignable.
+ */
+export type InjectGatewayApi = Pick<InjectGateway, 'prepare' | 'execute'>
+
 /** Everything the route layer consumes; all live objects, none owned here. */
 export interface RoutesDeps {
   store: SessionStore
   supervisor: DaemonSupervisor
   /** Live `inject.enabled` reader shared with the guard's write gate. */
   guardOptions: GuardOptions
+  /**
+   * M2 injection gateway. When absent (M1 wiring, injection not assembled)
+   * `POST action` keeps the placeholder contract: write gate, then 501.
+   */
+  injectGateway?: InjectGatewayApi
   log(level: 'info' | 'warn' | 'error', msg: string, meta?: object): void
 }
 
@@ -80,6 +108,34 @@ const DEFAULT_SSE_HEARTBEAT_MS = 15_000
 const DEFAULT_SSE_BUFFER_LIMIT = 256
 
 const HEARTBEAT_FRAME = ': hb\n\n'
+
+/** Bound on the `POST action` JSON body (message cap is 16 KiB + envelope). */
+export const MAX_ACTION_BODY_BYTES = 64 * 1024
+
+/** `inject.prepare` rejection code → HTTP status (task spec mapping). */
+const PREPARE_ERROR_STATUS: Readonly<Record<string, number>> = {
+  inject_disabled: 403,
+  invalid_message: 422,
+  target_not_found: 404,
+  target_dead: 409,
+  too_many_pending: 429,
+  // Issued at prepare since M2 review F-6 (no injection path for this
+  // agent); same 422 the execute-side defense-in-depth check maps to.
+  unsupported_agent: 422,
+}
+
+/**
+ * `inject.execute` failed-outcome code → HTTP status. Unlisted codes
+ * (executor-native vocab) and codeless failures fall back to 502.
+ */
+const EXECUTE_ERROR_STATUS: Readonly<Record<string, number>> = {
+  token_missing: 401,
+  token_expired: 401,
+  token_reused: 409,
+  token_mismatch: 409,
+  unsupported_agent: 422,
+  executor_error: 502,
+}
 
 interface SseClient {
   res: ServerResponse
@@ -128,6 +184,39 @@ function subpathOf(rawUrl: string | undefined): string | null {
 /** `event: <name>` + single-line JSON data (JSON.stringify never emits raw newlines). */
 function sseFrame(event: string, data: string): string {
   return `event: ${event}\ndata: ${data}\n\n`
+}
+
+/** Outcome of the bounded body read for `POST action`. */
+type BodyRead = { kind: 'ok'; text: string } | { kind: 'too_large' } | { kind: 'error' }
+
+/**
+ * Read the request body up to {@link MAX_ACTION_BODY_BYTES}. On overflow the
+ * promise settles immediately ('too_large') while the rest of the stream
+ * keeps draining, so the keep-alive connection is left in a clean state.
+ */
+function readActionBody(req: IncomingMessage): Promise<BodyRead> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = []
+    let size = 0
+    let settled = false
+    const settle = (result: BodyRead): void => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
+    req.on('data', (chunk: Buffer | string) => {
+      if (settled) return // overflow already answered; keep draining
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk
+      size += buf.length
+      if (size > MAX_ACTION_BODY_BYTES) {
+        settle({ kind: 'too_large' })
+        return
+      }
+      chunks.push(buf)
+    })
+    req.on('end', () => settle({ kind: 'ok', text: Buffer.concat(chunks).toString('utf8') }))
+    req.on('error', () => settle({ kind: 'error' }))
+  })
 }
 
 /**
@@ -260,6 +349,161 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
     })
   }
 
+  // -------------------------------------------------------------- actions
+
+  /**
+   * Route-log discipline (S8): only the action type, status and vocabulary
+   * codes — never the message body, preview, or gateway detail text.
+   */
+  const logAction = (type: string, status: number, meta: object = {}): void => {
+    deps.log('info', 'action handled', { type, status, ...meta })
+  }
+
+  const handlePrepare = async (
+    gateway: InjectGatewayApi,
+    envelope: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> => {
+    const rawTarget = envelope.target
+    const targetObj =
+      typeof rawTarget === 'object' && rawTarget !== null
+        ? (rawTarget as Record<string, unknown>)
+        : undefined
+    const agent = targetObj?.agent
+    const sessionId = targetObj?.sessionId
+    const mode = envelope.mode
+    const message = envelope.message
+    if (
+      typeof agent !== 'string' ||
+      typeof sessionId !== 'string' ||
+      (mode !== 'queue' && mode !== 'steer') ||
+      typeof message !== 'string'
+    ) {
+      logAction('inject.prepare', 400, { reason: 'invalid_request' })
+      writeJson(res, 400, {
+        reason: 'invalid_request',
+        detail: 'inject.prepare needs target{agent,sessionId}, mode queue|steer, and a string message',
+      })
+      return
+    }
+    const result = await gateway.prepare({ target: { agent, sessionId }, mode, message })
+    if (result.ok) {
+      logAction('inject.prepare', 200, { requestId: result.requestId })
+      writeJson(res, 200, {
+        requestId: result.requestId,
+        confirmToken: result.confirmToken,
+        plan: result.plan,
+        expiresAt: result.expiresAt,
+      })
+      return
+    }
+    const status = PREPARE_ERROR_STATUS[result.errorCode] ?? 400
+    logAction('inject.prepare', status, { errorCode: result.errorCode })
+    writeJson(res, status, {
+      reason: result.errorCode,
+      ...(result.detail !== undefined ? { detail: result.detail } : {}),
+    })
+  }
+
+  const handleExecute = async (
+    gateway: InjectGatewayApi,
+    envelope: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> => {
+    const { requestId, confirmToken, message } = envelope
+    if (
+      typeof requestId !== 'string' ||
+      typeof confirmToken !== 'string' ||
+      typeof message !== 'string'
+    ) {
+      logAction('inject.execute', 400, { reason: 'invalid_request' })
+      writeJson(res, 400, {
+        reason: 'invalid_request',
+        detail: 'inject.execute needs string requestId, confirmToken and message',
+      })
+      return
+    }
+    // Exactly one gateway dispatch per HTTP request. `outcome: 'unknown'` is
+    // answered 200 as a terminal "do not retry" — never re-fired here (S6).
+    const result = await gateway.execute({ requestId, confirmToken, message })
+    const status =
+      result.outcome === 'failed'
+        ? (EXECUTE_ERROR_STATUS[result.errorCode ?? ''] ?? 502)
+        : 200
+    logAction('inject.execute', status, {
+      outcome: result.outcome,
+      ...(result.errorCode !== undefined ? { errorCode: result.errorCode } : {}),
+      ...(result.replayed !== undefined ? { replayed: result.replayed } : {}),
+    })
+    writeJson(res, status, result)
+  }
+
+  /** M2 dispatcher over the action envelope (gateway present, guard 1-4 passed). */
+  const handleAction = async (
+    gateway: InjectGatewayApi,
+    verdict: GuardVerdict,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> => {
+    const body = await readActionBody(req)
+    if (body.kind === 'too_large') {
+      deps.log('warn', 'action rejected', { reason: 'body_too_large', limit: MAX_ACTION_BODY_BYTES })
+      writeJson(res, 400, { reason: 'body_too_large' })
+      return
+    }
+    if (body.kind === 'error') {
+      deps.log('warn', 'action rejected', { reason: 'body_read_error' })
+      writeJson(res, 400, { reason: 'body_read_error' })
+      return
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(body.text)
+    } catch {
+      deps.log('warn', 'action rejected', { reason: 'invalid_json' })
+      writeJson(res, 400, { reason: 'invalid_json' })
+      return
+    }
+    const envelope =
+      typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null
+
+    if (envelope !== null) {
+      const type = typeof envelope.type === 'string' ? envelope.type : null
+
+      if (type === 'daemon.retry') {
+        // Daemon management is a capability of its own: `inject.enabled`
+        // gates injection only (design §6), so retry passes guard layers
+        // 1-4 without the write-action gate. retry() itself is a no-op
+        // outside FAILED.
+        deps.supervisor.retry()
+        const state = deps.supervisor.state
+        logAction('daemon.retry', 200, { state })
+        writeJson(res, 200, { state })
+        return
+      }
+
+      if (type === 'inject.prepare' || type === 'inject.execute') {
+        const writeVerdict = guardWriteAction(verdict, deps.guardOptions)
+        if (!writeVerdict.ok) {
+          logAction(type, writeVerdict.status, { reason: writeVerdict.reason })
+          writeJson(res, writeVerdict.status, { reason: writeVerdict.reason })
+          return
+        }
+        if (type === 'inject.prepare') {
+          await handlePrepare(gateway, envelope, res)
+        } else {
+          await handleExecute(gateway, envelope, res)
+        }
+        return
+      }
+    }
+
+    deps.log('warn', 'action rejected', { reason: 'unknown_action' })
+    writeJson(res, 400, { reason: 'unknown_action' })
+  }
+
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if (disposed) {
       writeJson(res, 503, { reason: 'shutting_down' })
@@ -267,16 +511,27 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
     }
 
     const verdict = guardRequest(req, deps.guardOptions)
-    // M1 never reads a body; drain body-bearing requests so the keep-alive
-    // connection is left in a clean state either way.
     const method = (req.method ?? '').toUpperCase()
-    if (method === 'POST' || method === 'PUT' || method === 'PATCH') req.resume()
+    const subpath = subpathOf(req.url)
+    // The gateway-backed action handler reads its own bounded body; every
+    // other body-bearing request is drained so the keep-alive connection is
+    // left in a clean state either way.
+    const actionReadsBody =
+      verdict.ok &&
+      subpath === 'action' &&
+      method === 'POST' &&
+      deps.injectGateway !== undefined
+    if (
+      !actionReadsBody &&
+      (method === 'POST' || method === 'PUT' || method === 'PATCH')
+    ) {
+      req.resume()
+    }
     if (!verdict.ok) {
       writeJson(res, verdict.status, { reason: verdict.reason })
       return
     }
 
-    const subpath = subpathOf(req.url)
     if (subpath === null || subpath === '') {
       writeJson(res, 404, { reason: 'not_found' })
       return
@@ -295,15 +550,20 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
     }
 
     if (subpath === 'action') {
-      // M2 placeholder: the write gate is already live (403 when inject is
-      // off), the gateway itself is not (501).
       if (method !== 'POST') return writeMethodNotAllowed(res, 'POST')
-      const writeVerdict = guardWriteAction(verdict, deps.guardOptions)
-      if (!writeVerdict.ok) {
-        writeJson(res, writeVerdict.status, { reason: writeVerdict.reason })
+      const gateway = deps.injectGateway
+      if (gateway === undefined) {
+        // M1 wiring (no gateway assembled): keep the placeholder contract —
+        // the write gate is live (403 when inject is off), then 501.
+        const writeVerdict = guardWriteAction(verdict, deps.guardOptions)
+        if (!writeVerdict.ok) {
+          writeJson(res, writeVerdict.status, { reason: writeVerdict.reason })
+          return
+        }
+        writeJson(res, 501, { reason: 'not_implemented_until_m2' })
         return
       }
-      writeJson(res, 501, { reason: 'not_implemented_until_m2' })
+      await handleAction(gateway, verdict, req, res)
       return
     }
 

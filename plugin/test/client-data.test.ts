@@ -364,35 +364,70 @@ describe('fetchSession', () => {
 })
 
 describe('postAction', () => {
+  // Real M2 dispatcher bodies (api.ts ActionEnvelope union members).
+  const PREPARE_BODY = {
+    type: 'inject.prepare',
+    target: { agent: 'claude', sessionId: 'sess-1' },
+    mode: 'queue',
+    message: 'hello',
+  } as const
+  const EXECUTE_BODY = {
+    type: 'inject.execute',
+    requestId: 'req-1',
+    confirmToken: 'tok-1',
+    message: 'hello',
+  } as const
+
   it('POSTs the envelope verbatim as JSON with the guard-mandated content-type', async () => {
     const { fetch, seen } = captureFetch([
-      jsonResponse(501, { reason: 'not_implemented_until_m2' }),
+      jsonResponse(404, { reason: 'target_not_found' }),
     ])
-    const envelope = {
-      requestId: 'req-1',
-      method: 'inject.prepare',
-      args: { target: 'sess-1' },
-    }
     await expect(
-      postAction(envelope, { fetch, createAbortController: () => new FakeAbortController() }),
-    ).rejects.toMatchObject({ kind: 'http', status: 501, reason: 'not_implemented_until_m2' })
+      postAction(PREPARE_BODY, { fetch, createAbortController: () => new FakeAbortController() }),
+    ).rejects.toMatchObject({ kind: 'http', status: 404, reason: 'target_not_found' })
     expect(seen).toHaveLength(1) // transport layer never retries
     expect(seen[0]!.url).toBe(`${API_PREFIX}/action`)
     expect(seen[0]!.init.method).toBe('POST')
     expect(seen[0]!.init.headers).toEqual({ 'content-type': 'application/json' })
-    expect(JSON.parse(seen[0]!.init.body!)).toEqual(envelope)
+    expect(JSON.parse(seen[0]!.init.body!)).toEqual(PREPARE_BODY)
     expect(vi.getTimerCount()).toBe(0)
   })
 
   it('maps the 403 write gate to a normal http error without retrying', async () => {
     const { fetch, seen } = captureFetch([jsonResponse(403, { reason: 'inject_disabled' })])
     await expect(
-      postAction(
-        { requestId: 'r', method: 'inject.prepare' },
-        { fetch, createAbortController: () => new FakeAbortController() },
-      ),
+      postAction(PREPARE_BODY, {
+        fetch,
+        createAbortController: () => new FakeAbortController(),
+      }),
     ).rejects.toMatchObject({ kind: 'http', status: 403, reason: 'inject_disabled' })
     expect(seen).toHaveLength(1)
+  })
+
+  it('falls back to the errorCode field when the failure body has no reason (M2 execute)', async () => {
+    // routes.ts answers a failed inject.execute with the result view itself
+    // ({outcome:'failed', errorCode}) — no `reason` envelope.
+    const { fetch } = captureFetch([
+      jsonResponse(401, { outcome: 'failed', errorCode: 'token_expired' }),
+    ])
+    await expect(
+      postAction(EXECUTE_BODY, {
+        fetch,
+        createAbortController: () => new FakeAbortController(),
+      }),
+    ).rejects.toMatchObject({ kind: 'http', status: 401, reason: 'token_expired' })
+  })
+
+  it('prefers reason over errorCode when a failure body carries both', async () => {
+    const { fetch } = captureFetch([
+      jsonResponse(403, { reason: 'inject_disabled', errorCode: 'shadowed' }),
+    ])
+    await expect(
+      postAction(EXECUTE_BODY, {
+        fetch,
+        createAbortController: () => new FakeAbortController(),
+      }),
+    ).rejects.toMatchObject({ kind: 'http', status: 403, reason: 'inject_disabled' })
   })
 })
 

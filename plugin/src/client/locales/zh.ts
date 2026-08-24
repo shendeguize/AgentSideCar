@@ -6,15 +6,15 @@
  * Key-space convention (compile-enforced by the `satisfies` clause): every
  * key is `<domain>.<leaf>` where the domain is one of
  * {@link SidecarLocaleDomain}. `settings.*` is owned by the settings card
- * (this module, T2.3); `board.*` and `inject.*` are RESERVED for the board
- * and inject-panel surfaces (T2.2 fills them in its own change) — reserving
- * the prefixes here keeps one flat namespace with no cross-task collisions.
+ * (T2.3); `inject.*` is owned by the inject panel (T4.5,
+ * src/client/inject/); `board.*` stays RESERVED for the board surface —
+ * keeping the prefixes in one flat namespace avoids cross-task collisions.
  *
  * Copy sources: the schemastery `.description()` strings in src/config.ts
  * (the authoritative zh copy for each field) and design doc §4.a/§5.3/§6/§8.
  */
 
-/** Locale key domains: settings (this card), board / inject (reserved for T2.2). */
+/** Locale key domains: settings (card), inject (panel), board (reserved). */
 export type SidecarLocaleDomain = 'settings' | 'board' | 'inject'
 
 export const zh = {
@@ -104,6 +104,70 @@ export const zh = {
   'settings.skillProvideLabel': '内嵌提供 skill',
   'settings.skillProvideHint':
     '经 registerProvider 向 dsh 提供 agent-sidecar skill(M4 启用;重启后生效)。',
+
+  // ── inject panel: chrome & editor (T4.5, design §5.1 view 3) ───────────
+  'inject.title': '注入消息',
+  'inject.confirmTitle': '确认注入',
+  'inject.close': '关闭',
+  'inject.done': '完成',
+  'inject.capabilityOff': '注入功能未开启;请在设置中开启注入。',
+  'inject.noTarget': '未选择注入目标;请从看板卡片或会话详情发起注入。',
+  'inject.targetLabel': '注入目标',
+  'inject.messageLabel': '消息内容',
+  'inject.messagePlaceholder': '输入要注入的消息(上限 16 KiB;请勿粘贴密钥等敏感内容)',
+  'inject.byteCount': '{bytes} / {limit} 字节',
+  'inject.msgEmpty': '消息不能为空。',
+  'inject.msgNul': '消息包含非法 NUL 字符。',
+  'inject.msgTooLarge': '消息 {bytes} 字节,超出 {limit} 字节上限。',
+  'inject.modeLabel': '注入模式',
+  'inject.modeQueue': 'queue(排队下一轮)',
+  'inject.modeQueueHint': '消息排队等待,目标会话下一轮开始时处理。',
+  'inject.modeSteer': 'steer(中途注入)',
+  'inject.modeSteerHint': '消息在目标会话当前轮次中途注入,立即介入其工作。',
+  'inject.argvWarning':
+    '目标为 cursor-cli:注入经其原生子进程执行,消息在该进程存续期间对本机进程列表可见;请勿包含密钥等敏感内容。',
+  'inject.auditNote':
+    '本次注入会被记入 sidecar 审计日志(含字节数与内容指纹,不含消息明文)。',
+  'inject.prepare': '准备注入',
+  'inject.preparing': '校验中…',
+
+  // ── inject panel: confirm phase ──────────────────────────────────────
+  'inject.planTargetLabel': '目标现状',
+  'inject.planStatus': '当前状态:{status}',
+  'inject.statusObservedNote': '状态为从持久化数据推断的观察值,可能滞后。',
+  'inject.planModeLabel': '模式',
+  'inject.planPreviewLabel': '消息摘要({bytes} 字节)',
+  'inject.countdown': '确认令牌 {seconds} 秒后过期',
+  'inject.confirmExecute': '确认注入',
+  'inject.executing': '注入中…',
+  'inject.cancel': '取消',
+  'inject.tokenExpired': '确认已超时,令牌失效;请重新准备注入。',
+
+  // ── inject panel: result phase ───────────────────────────────────────
+  'inject.resultDelivered': '已投递:消息已注入目标会话。',
+  'inject.resultFailed': '注入失败。',
+  'inject.resultUnknown':
+    '结果未知:消息可能已投递。请勿重试;请前往目标会话核对后再决定下一步。',
+  'inject.resultReplayed': '幂等重放:返回的是此前同一请求的结果,未发生二次注入。',
+  'inject.reprepare': '重新准备',
+
+  // ── inject panel: error vocabulary (gateway + transport) ─────────────
+  'inject.errInjectDisabled': '注入功能已在服务端关闭;请在设置中开启注入。',
+  'inject.errInvalidMessage': '消息未通过服务端校验。',
+  'inject.errTargetNotFound': '目标会话不存在或已离开观测范围。',
+  'inject.errTargetDead': '目标会话已结束(dead),无法注入。',
+  'inject.errTooManyPending': '待确认的注入请求过多,请稍后再试。',
+  'inject.errTokenMissing': '确认令牌缺失或未被签发;请重新准备。',
+  'inject.errTokenExpired': '确认令牌已过期;请重新准备。',
+  'inject.errTokenReused': '确认令牌已被消费;请重新准备。',
+  'inject.errTokenMismatch': '确认内容与准备时不一致;请重新准备。',
+  'inject.errUnsupportedAgent': '该 agent 没有可用的注入通道。',
+  'inject.errExecutorError': '注入通路执行出错。',
+  'inject.errTimeout': '请求超时,未收到服务端回执。',
+  'inject.errAborted': '请求已取消。',
+  'inject.errNetwork': '网络错误,请求未能送达。',
+  'inject.errParse': '服务端响应无法解析。',
+  'inject.errGeneric': '请求失败({code})。',
 } satisfies Record<`${SidecarLocaleDomain}.${string}`, string>
 
 /** Key union of the locale table (zh is the source of truth). */

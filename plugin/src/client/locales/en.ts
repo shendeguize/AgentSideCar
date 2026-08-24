@@ -95,4 +95,77 @@ export const en = {
   'settings.skillProvideLabel': 'Provide the skill in-process',
   'settings.skillProvideHint':
     'Provide the agent-sidecar skill to dsh via registerProvider (enabled in M4; applies after restart).',
+
+  // ── inject panel: chrome & editor (T4.5, design §5.1 view 3) ───────────
+  'inject.title': 'Inject message',
+  'inject.confirmTitle': 'Confirm injection',
+  'inject.close': 'Close',
+  'inject.done': 'Done',
+  'inject.capabilityOff': 'Injection is not enabled; turn it on in Settings first.',
+  'inject.noTarget':
+    'No injection target selected; start from a board card or a session detail page.',
+  'inject.targetLabel': 'Target',
+  'inject.messageLabel': 'Message',
+  'inject.messagePlaceholder': 'Message to inject (16 KiB max; never paste secrets)',
+  'inject.byteCount': '{bytes} / {limit} bytes',
+  'inject.msgEmpty': 'The message must not be empty.',
+  'inject.msgNul': 'The message contains an illegal NUL character.',
+  'inject.msgTooLarge': 'The message is {bytes} bytes, over the {limit}-byte limit.',
+  'inject.modeLabel': 'Injection mode',
+  'inject.modeQueue': 'queue (next turn)',
+  'inject.modeQueueHint':
+    'The message queues and is handled when the target session starts its next turn.',
+  'inject.modeSteer': 'steer (mid-turn)',
+  'inject.modeSteerHint':
+    'The message is injected mid-turn and steers the target session immediately.',
+  'inject.argvWarning':
+    "cursor-cli target: injection runs through its native subprocess, and the message is visible in this machine's process list while that process lives; never include secrets.",
+  'inject.auditNote':
+    'This injection is recorded in the sidecar audit log (byte size and content fingerprint; never the message plaintext).',
+  'inject.prepare': 'Prepare injection',
+  'inject.preparing': 'Validating…',
+
+  // ── inject panel: confirm phase ──────────────────────────────────────
+  'inject.planTargetLabel': 'Target snapshot',
+  'inject.planStatus': 'Current status: {status}',
+  'inject.statusObservedNote':
+    'Status is an observed value inferred from persisted data and may lag.',
+  'inject.planModeLabel': 'Mode',
+  'inject.planPreviewLabel': 'Message digest ({bytes} bytes)',
+  'inject.countdown': 'The confirm token expires in {seconds}s',
+  'inject.confirmExecute': 'Confirm injection',
+  'inject.executing': 'Injecting…',
+  'inject.cancel': 'Cancel',
+  'inject.tokenExpired':
+    'Confirmation timed out and the token is void; prepare the injection again.',
+
+  // ── inject panel: result phase ───────────────────────────────────────
+  'inject.resultDelivered': 'Delivered: the message was injected into the target session.',
+  'inject.resultFailed': 'Injection failed.',
+  'inject.resultUnknown':
+    'Outcome unknown: the message may have been delivered. Do NOT retry; check the target session before deciding anything.',
+  'inject.resultReplayed':
+    'Idempotent replay: this is the earlier result of the same request — no second injection happened.',
+  'inject.reprepare': 'Prepare again',
+
+  // ── inject panel: error vocabulary (gateway + transport) ─────────────
+  'inject.errInjectDisabled': 'Injection is disabled on the server; enable it in Settings.',
+  'inject.errInvalidMessage': 'The message failed server-side validation.',
+  'inject.errTargetNotFound':
+    'The target session does not exist or left the observation window.',
+  'inject.errTargetDead': 'The target session has ended (dead); it cannot be injected.',
+  'inject.errTooManyPending':
+    'Too many injections are pending confirmation; try again later.',
+  'inject.errTokenMissing': 'The confirm token is missing or was never issued; prepare again.',
+  'inject.errTokenExpired': 'The confirm token expired; prepare again.',
+  'inject.errTokenReused': 'The confirm token was already consumed; prepare again.',
+  'inject.errTokenMismatch':
+    'The confirmation no longer matches what was prepared; prepare again.',
+  'inject.errUnsupportedAgent': 'This agent has no injection path.',
+  'inject.errExecutorError': 'The injection path failed while executing.',
+  'inject.errTimeout': 'The request timed out without a server receipt.',
+  'inject.errAborted': 'The request was cancelled.',
+  'inject.errNetwork': 'Network error; the request could not be sent.',
+  'inject.errParse': 'The server response could not be parsed.',
+  'inject.errGeneric': 'Request failed ({code}).',
 } satisfies Record<SidecarLocaleKey, string>

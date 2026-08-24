@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import z from "@deepseek-ai/schemastery";
 import { createConnection } from "node:net";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 //#region src/config.ts
 /**
 * Composition config for the dsh-agent-sidecar host half (design §6, scoped
@@ -454,6 +455,409 @@ var Reconciler = class {
 		});
 	}
 };
+/** Sha256 hex prefix length recorded in logs (matches inject-gateway). */
+const SHA_LOG_CHARS$1 = 12;
+function describeError$2(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/** Race a resume against the bounded wait; null = timed out (still pending). */
+async function resumeWithin(resume, timeoutMs) {
+	let timer;
+	try {
+		return await Promise.race([resume, new Promise((resolve) => {
+			timer = setTimeout(() => resolve(null), timeoutMs);
+		})]);
+	} finally {
+		if (timer !== void 0) clearTimeout(timer);
+	}
+}
+function createDshInjectExecutor(deps) {
+	const pluginName = deps.pluginName ?? "agent-sidecar";
+	const log = deps.log ?? (() => {});
+	const resumeTimeoutMs = deps.resumeTimeoutMs ?? 3e4;
+	return {
+		kind: "dsh",
+		async execute(req) {
+			const sessionId = req.target.sessionId;
+			const messageBytes = Buffer.byteLength(req.message, "utf8");
+			const messageSha12 = createHash("sha256").update(req.message, "utf8").digest("hex").slice(0, SHA_LOG_CHARS$1);
+			const baseMeta = {
+				requestId: req.requestId,
+				sessionId,
+				mode: req.mode,
+				messageBytes,
+				messageSha12
+			};
+			let agent = deps.agents.get(sessionId);
+			const resumed = agent === void 0;
+			if (agent === void 0) {
+				log("debug", "dsh session not loaded; resuming", baseMeta);
+				let handle;
+				try {
+					handle = await resumeWithin(deps.agents.resume({ resumeSessionId: sessionId }), resumeTimeoutMs);
+				} catch (error) {
+					const detail = describeError$2(error);
+					log("warn", "dsh resume failed", {
+						...baseMeta,
+						error: detail
+					});
+					return {
+						outcome: "failed",
+						errorCode: "session_not_found",
+						detail
+					};
+				}
+				if (handle === null) {
+					log("warn", "dsh resume timed out", {
+						...baseMeta,
+						resumeTimeoutMs
+					});
+					return {
+						outcome: "failed",
+						errorCode: "timeout",
+						detail: `resume did not settle within ${resumeTimeoutMs}ms`
+					};
+				}
+				agent = handle.agent;
+			}
+			const message = {
+				id: `${pluginName}-${req.requestId}`,
+				role: "user",
+				content: [{
+					type: "text",
+					text: req.message
+				}],
+				source: {
+					kind: "plugin",
+					plugin: pluginName
+				}
+			};
+			try {
+				if (req.mode === "steer") agent.steer(message);
+				else agent.followup(message);
+			} catch (error) {
+				const detail = describeError$2(error);
+				log("warn", "dsh injection call threw", {
+					...baseMeta,
+					resumed,
+					error: detail
+				});
+				return {
+					outcome: "failed",
+					errorCode: "executor_error",
+					detail
+				};
+			}
+			log("info", "dsh injection delivered", {
+				...baseMeta,
+				resumed
+			});
+			return { outcome: "delivered" };
+		}
+	};
+}
+//#endregion
+//#region src/inject-gateway.ts
+/**
+* InjectGateway — the single entry point of the injection write path
+* (design §4.d dual-path injection, §4.f.5 / §5.3 two-phase confirm,
+* §8 threat model: server-issued one-time confirmToken).
+*
+* Unifies the three planes both injection paths must share (ADR-4):
+*
+* - **Confirmation**: two-phase `prepare` → `execute`. `prepare` re-verifies
+*   the target live and issues a crypto-random one-time confirmToken
+*   (≥128 bit, 60s TTL) bound to requestId + target + mode + message sha256.
+*   `execute` refuses missing / expired / reused tokens, and refuses a
+*   message whose hash differs from the prepare-time binding (anti-swap).
+*   Any execute attempt against a live token voids it, success or not
+*   (consume-on-attempt).
+* - **Idempotency**: the first execute result per requestId is cached
+*   (5 min TTL) and replayed on repeats. `outcome: 'unknown'` is terminal:
+*   a repeated execute returns the cached unknown and NEVER re-fires the
+*   executor (S6 — no retry through the gateway).
+* - **Logging**: exactly one entry per prepare/execute carrying ts /
+*   requestId / target / mode / phase / result / errorCode / message byte
+*   size and sha256 prefix — never the message body or head plaintext
+*   (the head preview only travels in the prepare response for the UI).
+*
+* The token gate defends against browser-mediated attackers only; it does
+* not claim to stop a local process that can drive both phases itself
+* (ADR-8 trust posture — same as guard.ts).
+*
+* Pure DI: no cordis/dsh imports. Path executors (dsh in-process,
+* sidecar send CLI) are injected; this module owns the contract, not the
+* transport.
+*
+* @module
+*/
+/** Message byte cap, aligned with the sidecar send 16 KiB limit (§4.d). */
+const MAX_MESSAGE_BYTES = 16 * 1024;
+/** confirmToken lifetime (§4.f.5). */
+const TOKEN_TTL_MS = 6e4;
+/** Idempotency window: how long a first execute result is replayable. */
+const RESULT_CACHE_TTL_MS = 5 * 6e4;
+/** 16 random bytes = 128 bits, the spec floor for the confirmToken. */
+const TOKEN_BYTES = 16;
+/** Head preview cap (chars) for the confirm dialog; UI-only, never logged. */
+const HEAD_PREVIEW_CHARS = 120;
+/** Bound of the internal audit ring served by {@link InjectGateway.getRecentLog}. */
+const LOG_RING_LIMIT = 256;
+const DEFAULT_LOG_QUERY_LIMIT = 50;
+/** Sha256 hex prefix length recorded in logs. */
+const SHA_LOG_CHARS = 12;
+/** External agents reachable through the sidecar `send` CLI path (§4.d). */
+const SEND_CLI_AGENTS = /* @__PURE__ */ new Set([
+	"claude",
+	"codex",
+	"cursor-cli"
+]);
+function digestMessage(message) {
+	const sha256 = createHash("sha256").update(message, "utf8").digest("hex");
+	return {
+		bytes: Buffer.byteLength(message, "utf8"),
+		sha256,
+		sha12: sha256.slice(0, SHA_LOG_CHARS)
+	};
+}
+/** Returns a rejection detail, or null when the message is acceptable. */
+function validateMessage(message, bytes) {
+	if (bytes === 0) return "message is empty";
+	if (message.includes("\0")) return "message contains a NUL byte";
+	if (bytes > 16384) return `message is ${bytes} bytes; limit is ${MAX_MESSAGE_BYTES}`;
+	return null;
+}
+/** Constant-time token comparison (length leak is inherent and harmless). */
+function tokenEquals(expected, provided) {
+	const a = Buffer.from(expected, "utf8");
+	const b = Buffer.from(provided, "utf8");
+	return a.length === b.length && timingSafeEqual(a, b);
+}
+/** The confirmation / idempotency / logging hub for both injection paths. */
+var InjectGateway = class {
+	deps;
+	now;
+	randomId;
+	pending = /* @__PURE__ */ new Map();
+	results = /* @__PURE__ */ new Map();
+	logRing = [];
+	constructor(deps) {
+		this.deps = deps;
+		this.now = deps.now ?? Date.now;
+		this.randomId = deps.randomId ?? randomUUID;
+	}
+	/**
+	* Phase one: gate, validate, re-verify, then issue a one-time
+	* confirmation bound to this exact target + mode + message.
+	*
+	* Pipeline (order per spec): allowWrite gate → message pre-validation
+	* (≤16 KiB by bytes, non-empty, no NUL) → live target re-check →
+	* injectable-agent whitelist → capacity check → token issuance.
+	*/
+	async prepare(req) {
+		this.prune(this.now());
+		const digest = digestMessage(req.message);
+		if (!this.deps.allowWrite()) return this.rejectPrepare(req, digest, "inject_disabled");
+		const invalid = validateMessage(req.message, digest.bytes);
+		if (invalid !== null) return this.rejectPrepare(req, digest, "invalid_message", invalid);
+		const target = {
+			agent: req.target.agent,
+			sessionId: req.target.sessionId
+		};
+		const status = await this.deps.verifyTarget(target);
+		if (status === null) return this.rejectPrepare(req, digest, "target_not_found");
+		if (status.status === "dead") return this.rejectPrepare(req, digest, "target_dead");
+		if (this.executorFor(target.agent) === null) return this.rejectPrepare(req, digest, "unsupported_agent");
+		const issuedAt = this.now();
+		if (this.inFlightCount(issuedAt) >= 32) return this.rejectPrepare(req, digest, "too_many_pending");
+		const requestId = this.randomId();
+		const confirmToken = randomBytes(TOKEN_BYTES).toString("hex");
+		const expiresAt = issuedAt + TOKEN_TTL_MS;
+		this.pending.set(requestId, {
+			token: confirmToken,
+			target,
+			mode: req.mode,
+			messageSha256: digest.sha256,
+			expiresAt,
+			consumed: false
+		});
+		this.record({
+			ts: issuedAt,
+			phase: "prepare",
+			requestId,
+			target: { ...target },
+			mode: req.mode,
+			ok: true,
+			messageBytes: digest.bytes,
+			messageSha12: digest.sha12
+		});
+		return {
+			ok: true,
+			requestId,
+			confirmToken,
+			plan: {
+				target: { ...target },
+				mode: req.mode,
+				targetStatus: { ...status },
+				messagePreview: {
+					bytes: digest.bytes,
+					head: req.message.slice(0, HEAD_PREVIEW_CHARS)
+				}
+			},
+			expiresAt
+		};
+	}
+	/**
+	* Phase two: validate the confirmation, dispatch to the path executor,
+	* and cache the first result per requestId.
+	*
+	* Rejection order: cached replay (idempotency wins) → token missing →
+	* token reused → token expired → token/message binding mismatch →
+	* unsupported agent. Every attempt against a live token consumes it,
+	* whatever happens afterwards.
+	*/
+	async execute(req) {
+		const now = this.now();
+		this.prune(now);
+		const digest = digestMessage(req.message);
+		const record = this.pending.get(req.requestId) ?? null;
+		const cached = this.results.get(req.requestId);
+		if (cached !== void 0) {
+			if (record === null) return this.rejectExecute(req.requestId, null, digest, "token_missing");
+			if (!tokenEquals(record.token, req.confirmToken) || record.messageSha256 !== digest.sha256) return this.rejectExecute(req.requestId, record, digest, "token_mismatch");
+			const replay = {
+				...cached.result,
+				replayed: true
+			};
+			this.logExecuteResult(req.requestId, record, digest, replay);
+			return replay;
+		}
+		if (!req.confirmToken) return this.rejectExecute(req.requestId, record, digest, "token_missing");
+		if (record === null) return this.rejectExecute(req.requestId, null, digest, "token_missing");
+		if (record.consumed) return this.rejectExecute(req.requestId, record, digest, "token_reused");
+		if (record.expiresAt <= now) {
+			this.pending.delete(req.requestId);
+			return this.rejectExecute(req.requestId, record, digest, "token_expired");
+		}
+		record.consumed = true;
+		if (!tokenEquals(record.token, req.confirmToken)) return this.rejectExecute(req.requestId, record, digest, "token_mismatch");
+		if (record.messageSha256 !== digest.sha256) return this.rejectExecute(req.requestId, record, digest, "token_mismatch");
+		const executor = this.executorFor(record.target.agent);
+		if (executor === null) return this.rejectExecute(req.requestId, record, digest, "unsupported_agent");
+		let result;
+		try {
+			result = await executor.execute({
+				target: { ...record.target },
+				mode: record.mode,
+				message: req.message,
+				requestId: req.requestId
+			});
+		} catch (err) {
+			result = {
+				outcome: "failed",
+				errorCode: "executor_error",
+				detail: err instanceof Error ? err.message : String(err)
+			};
+		}
+		this.results.set(req.requestId, {
+			result: { ...result },
+			expiresAt: this.now() + RESULT_CACHE_TTL_MS
+		});
+		this.logExecuteResult(req.requestId, record, digest, result);
+		return result;
+	}
+	/** Read-only audit view (newest first), for the M3 detail page. */
+	getRecentLog(limit = DEFAULT_LOG_QUERY_LIMIT) {
+		const bounded = Math.min(Math.max(Math.floor(limit), 0), this.logRing.length);
+		return this.logRing.slice(this.logRing.length - bounded).reverse();
+	}
+	executorFor(agent) {
+		if (agent === "dsh") return this.deps.executors.dsh;
+		if (SEND_CLI_AGENTS.has(agent)) return this.deps.executors.sendCli;
+		return null;
+	}
+	/** Issued-but-unconsumed-and-unexpired tokens count toward the cap. */
+	inFlightCount(now) {
+		let count = 0;
+		for (const record of this.pending.values()) if (!record.consumed && record.expiresAt > now) count += 1;
+		return count;
+	}
+	/**
+	* Housekeeping. Pending records outlive their token TTL by the result
+	* cache window so that late replays keep their binding check and late
+	* reuse attempts still answer `token_reused` (not `token_missing`).
+	*/
+	prune(now) {
+		for (const [id, record] of this.pending) if (record.expiresAt + 3e5 <= now) this.pending.delete(id);
+		for (const [id, cached] of this.results) if (cached.expiresAt <= now) this.results.delete(id);
+	}
+	rejectPrepare(req, digest, errorCode, detail) {
+		this.record({
+			ts: this.now(),
+			phase: "prepare",
+			requestId: null,
+			target: {
+				agent: req.target.agent,
+				sessionId: req.target.sessionId
+			},
+			mode: req.mode,
+			ok: false,
+			errorCode,
+			messageBytes: digest.bytes,
+			messageSha12: digest.sha12
+		});
+		return detail === void 0 ? {
+			ok: false,
+			errorCode
+		} : {
+			ok: false,
+			errorCode,
+			detail
+		};
+	}
+	rejectExecute(requestId, record, digest, errorCode) {
+		this.record({
+			ts: this.now(),
+			phase: "execute",
+			requestId,
+			target: record === null ? null : { ...record.target },
+			mode: record === null ? null : record.mode,
+			ok: false,
+			outcome: "failed",
+			errorCode,
+			messageBytes: digest.bytes,
+			messageSha12: digest.sha12
+		});
+		return {
+			outcome: "failed",
+			errorCode
+		};
+	}
+	logExecuteResult(requestId, record, digest, result) {
+		this.record({
+			ts: this.now(),
+			phase: "execute",
+			requestId,
+			target: record === null ? null : { ...record.target },
+			mode: record === null ? null : record.mode,
+			ok: result.outcome === "delivered",
+			outcome: result.outcome,
+			...result.errorCode !== void 0 ? { errorCode: result.errorCode } : {},
+			...result.replayed !== void 0 ? { replayed: result.replayed } : {},
+			messageBytes: digest.bytes,
+			messageSha12: digest.sha12
+		});
+	}
+	record(entry) {
+		const frozen = Object.freeze({
+			...entry,
+			target: entry.target === null ? null : Object.freeze({ ...entry.target })
+		});
+		this.logRing.push(frozen);
+		if (this.logRing.length > LOG_RING_LIMIT) this.logRing.splice(0, this.logRing.length - LOG_RING_LIMIT);
+		this.deps.log(frozen);
+	}
+};
 //#endregion
 //#region src/guard.ts
 const OK = { ok: true };
@@ -625,6 +1029,29 @@ const DEFAULT_MAX_SSE_CLIENTS = 8;
 const DEFAULT_SSE_HEARTBEAT_MS = 15e3;
 const DEFAULT_SSE_BUFFER_LIMIT = 256;
 const HEARTBEAT_FRAME = ": hb\n\n";
+/** Bound on the `POST action` JSON body (message cap is 16 KiB + envelope). */
+const MAX_ACTION_BODY_BYTES = 64 * 1024;
+/** `inject.prepare` rejection code → HTTP status (task spec mapping). */
+const PREPARE_ERROR_STATUS = {
+	inject_disabled: 403,
+	invalid_message: 422,
+	target_not_found: 404,
+	target_dead: 409,
+	too_many_pending: 429,
+	unsupported_agent: 422
+};
+/**
+* `inject.execute` failed-outcome code → HTTP status. Unlisted codes
+* (executor-native vocab) and codeless failures fall back to 502.
+*/
+const EXECUTE_ERROR_STATUS = {
+	token_missing: 401,
+	token_expired: 401,
+	token_reused: 409,
+	token_mismatch: 409,
+	unsupported_agent: 422,
+	executor_error: 502
+};
 function writeJson(res, status, body) {
 	res.writeHead(status, {
 		"content-type": "application/json; charset=utf-8",
@@ -659,6 +1086,38 @@ function subpathOf(rawUrl) {
 /** `event: <name>` + single-line JSON data (JSON.stringify never emits raw newlines). */
 function sseFrame(event, data) {
 	return `event: ${event}\ndata: ${data}\n\n`;
+}
+/**
+* Read the request body up to {@link MAX_ACTION_BODY_BYTES}. On overflow the
+* promise settles immediately ('too_large') while the rest of the stream
+* keeps draining, so the keep-alive connection is left in a clean state.
+*/
+function readActionBody(req) {
+	return new Promise((resolve) => {
+		const chunks = [];
+		let size = 0;
+		let settled = false;
+		const settle = (result) => {
+			if (settled) return;
+			settled = true;
+			resolve(result);
+		};
+		req.on("data", (chunk) => {
+			if (settled) return;
+			const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+			size += buf.length;
+			if (size > 65536) {
+				settle({ kind: "too_large" });
+				return;
+			}
+			chunks.push(buf);
+		});
+		req.on("end", () => settle({
+			kind: "ok",
+			text: Buffer.concat(chunks).toString("utf8")
+		}));
+		req.on("error", () => settle({ kind: "error" }));
+	});
 }
 /**
 * Build the M1 route surface. All state lives in the returned closure;
@@ -765,6 +1224,129 @@ function createRoutes(deps, opts = {}) {
 			timelineNote: "timeline_not_available_until_m3"
 		});
 	};
+	/**
+	* Route-log discipline (S8): only the action type, status and vocabulary
+	* codes — never the message body, preview, or gateway detail text.
+	*/
+	const logAction = (type, status, meta = {}) => {
+		deps.log("info", "action handled", {
+			type,
+			status,
+			...meta
+		});
+	};
+	const handlePrepare = async (gateway, envelope, res) => {
+		const rawTarget = envelope.target;
+		const targetObj = typeof rawTarget === "object" && rawTarget !== null ? rawTarget : void 0;
+		const agent = targetObj?.agent;
+		const sessionId = targetObj?.sessionId;
+		const mode = envelope.mode;
+		const message = envelope.message;
+		if (typeof agent !== "string" || typeof sessionId !== "string" || mode !== "queue" && mode !== "steer" || typeof message !== "string") {
+			logAction("inject.prepare", 400, { reason: "invalid_request" });
+			writeJson(res, 400, {
+				reason: "invalid_request",
+				detail: "inject.prepare needs target{agent,sessionId}, mode queue|steer, and a string message"
+			});
+			return;
+		}
+		const result = await gateway.prepare({
+			target: {
+				agent,
+				sessionId
+			},
+			mode,
+			message
+		});
+		if (result.ok) {
+			logAction("inject.prepare", 200, { requestId: result.requestId });
+			writeJson(res, 200, {
+				requestId: result.requestId,
+				confirmToken: result.confirmToken,
+				plan: result.plan,
+				expiresAt: result.expiresAt
+			});
+			return;
+		}
+		const status = PREPARE_ERROR_STATUS[result.errorCode] ?? 400;
+		logAction("inject.prepare", status, { errorCode: result.errorCode });
+		writeJson(res, status, {
+			reason: result.errorCode,
+			...result.detail !== void 0 ? { detail: result.detail } : {}
+		});
+	};
+	const handleExecute = async (gateway, envelope, res) => {
+		const { requestId, confirmToken, message } = envelope;
+		if (typeof requestId !== "string" || typeof confirmToken !== "string" || typeof message !== "string") {
+			logAction("inject.execute", 400, { reason: "invalid_request" });
+			writeJson(res, 400, {
+				reason: "invalid_request",
+				detail: "inject.execute needs string requestId, confirmToken and message"
+			});
+			return;
+		}
+		const result = await gateway.execute({
+			requestId,
+			confirmToken,
+			message
+		});
+		const status = result.outcome === "failed" ? EXECUTE_ERROR_STATUS[result.errorCode ?? ""] ?? 502 : 200;
+		logAction("inject.execute", status, {
+			outcome: result.outcome,
+			...result.errorCode !== void 0 ? { errorCode: result.errorCode } : {},
+			...result.replayed !== void 0 ? { replayed: result.replayed } : {}
+		});
+		writeJson(res, status, result);
+	};
+	/** M2 dispatcher over the action envelope (gateway present, guard 1-4 passed). */
+	const handleAction = async (gateway, verdict, req, res) => {
+		const body = await readActionBody(req);
+		if (body.kind === "too_large") {
+			deps.log("warn", "action rejected", {
+				reason: "body_too_large",
+				limit: MAX_ACTION_BODY_BYTES
+			});
+			writeJson(res, 400, { reason: "body_too_large" });
+			return;
+		}
+		if (body.kind === "error") {
+			deps.log("warn", "action rejected", { reason: "body_read_error" });
+			writeJson(res, 400, { reason: "body_read_error" });
+			return;
+		}
+		let parsed;
+		try {
+			parsed = JSON.parse(body.text);
+		} catch {
+			deps.log("warn", "action rejected", { reason: "invalid_json" });
+			writeJson(res, 400, { reason: "invalid_json" });
+			return;
+		}
+		const envelope = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed : null;
+		if (envelope !== null) {
+			const type = typeof envelope.type === "string" ? envelope.type : null;
+			if (type === "daemon.retry") {
+				deps.supervisor.retry();
+				const state = deps.supervisor.state;
+				logAction("daemon.retry", 200, { state });
+				writeJson(res, 200, { state });
+				return;
+			}
+			if (type === "inject.prepare" || type === "inject.execute") {
+				const writeVerdict = guardWriteAction(verdict, deps.guardOptions);
+				if (!writeVerdict.ok) {
+					logAction(type, writeVerdict.status, { reason: writeVerdict.reason });
+					writeJson(res, writeVerdict.status, { reason: writeVerdict.reason });
+					return;
+				}
+				if (type === "inject.prepare") await handlePrepare(gateway, envelope, res);
+				else await handleExecute(gateway, envelope, res);
+				return;
+			}
+		}
+		deps.log("warn", "action rejected", { reason: "unknown_action" });
+		writeJson(res, 400, { reason: "unknown_action" });
+	};
 	const handle = async (req, res) => {
 		if (disposed) {
 			writeJson(res, 503, { reason: "shutting_down" });
@@ -772,12 +1354,12 @@ function createRoutes(deps, opts = {}) {
 		}
 		const verdict = guardRequest(req, deps.guardOptions);
 		const method = (req.method ?? "").toUpperCase();
-		if (method === "POST" || method === "PUT" || method === "PATCH") req.resume();
+		const subpath = subpathOf(req.url);
+		if (!(verdict.ok && subpath === "action" && method === "POST" && deps.injectGateway !== void 0) && (method === "POST" || method === "PUT" || method === "PATCH")) req.resume();
 		if (!verdict.ok) {
 			writeJson(res, verdict.status, { reason: verdict.reason });
 			return;
 		}
-		const subpath = subpathOf(req.url);
 		if (subpath === null || subpath === "") {
 			writeJson(res, 404, { reason: "not_found" });
 			return;
@@ -794,12 +1376,17 @@ function createRoutes(deps, opts = {}) {
 		}
 		if (subpath === "action") {
 			if (method !== "POST") return writeMethodNotAllowed(res, "POST");
-			const writeVerdict = guardWriteAction(verdict, deps.guardOptions);
-			if (!writeVerdict.ok) {
-				writeJson(res, writeVerdict.status, { reason: writeVerdict.reason });
+			const gateway = deps.injectGateway;
+			if (gateway === void 0) {
+				const writeVerdict = guardWriteAction(verdict, deps.guardOptions);
+				if (!writeVerdict.ok) {
+					writeJson(res, writeVerdict.status, { reason: writeVerdict.reason });
+					return;
+				}
+				writeJson(res, 501, { reason: "not_implemented_until_m2" });
 				return;
 			}
-			writeJson(res, 501, { reason: "not_implemented_until_m2" });
+			await handleAction(gateway, verdict, req, res);
 			return;
 		}
 		if (subpath.startsWith("session/")) {
@@ -822,6 +1409,189 @@ function createRoutes(deps, opts = {}) {
 	return {
 		handle,
 		dispose
+	};
+}
+//#endregion
+//#region src/send-cli.ts
+const DEFAULT_SEND_CLI_COMMAND = Object.freeze(["agent-sidecar"]);
+/** Detail cap for collected stderr (2 KiB). */
+const STDERR_DETAIL_BYTES = 2 * 1024;
+/** send --json responses are ≤4 MiB; anything past this is garbage. */
+const MAX_STDOUT_BYTES = 8 * 1024 * 1024;
+/** sidecar/inject.py MAX_SEND_TIMEOUT_SECONDS. */
+const MAX_CLI_TIMEOUT_SECONDS = 900;
+/** Byte-bounded chunk accumulator; excess input is dropped, not buffered. */
+var BoundedCollector = class {
+	limit;
+	chunks = [];
+	size = 0;
+	constructor(limit) {
+		this.limit = limit;
+	}
+	append(chunk) {
+		if (this.size >= this.limit) return;
+		const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : Buffer.from(chunk);
+		const room = this.limit - this.size;
+		const kept = buf.byteLength > room ? buf.subarray(0, room) : buf;
+		this.chunks.push(Buffer.from(kept));
+		this.size += kept.byteLength;
+	}
+	get bytes() {
+		return this.size;
+	}
+	text() {
+		return Buffer.concat(this.chunks).toString("utf8");
+	}
+};
+/**
+* Parse stdout as one `send --json` receipt. Anything that is not a JSON
+* object carrying a valid `delivery` field yields null (exit-code fallback).
+*/
+function parseReceipt(stdoutText) {
+	const trimmed = stdoutText.trim();
+	if (!trimmed) return null;
+	let value;
+	try {
+		value = JSON.parse(trimmed);
+	} catch {
+		return null;
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+	const record = value;
+	const delivery = record["delivery"];
+	if (delivery !== "delivered" && delivery !== "unknown") return null;
+	const rawErrorCode = record["error_code"];
+	const errorCode = typeof rawErrorCode === "string" && rawErrorCode !== "" ? rawErrorCode : void 0;
+	return {
+		delivery,
+		...errorCode !== void 0 ? { errorCode } : {},
+		replayed: record["replayed"] === true
+	};
+}
+function describeError$1(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+function createSendCliExecutor(deps) {
+	const command = deps.opts?.command ?? DEFAULT_SEND_CLI_COMMAND;
+	const timeoutMs = deps.opts?.timeoutMs ?? 3e4;
+	const bufferMs = deps.opts?.hardTimeoutBufferMs ?? 5e3;
+	const log = deps.log ?? (() => {});
+	const cliTimeoutSecs = Math.min(MAX_CLI_TIMEOUT_SECONDS, Math.max(1, Math.floor(timeoutMs / 1e3)));
+	const hardTimeoutMs = timeoutMs + bufferMs;
+	return {
+		kind: "send-cli",
+		async execute(req) {
+			const argv = [
+				...command,
+				"send",
+				req.target.sessionId,
+				"--message-stdin",
+				"--allow-write",
+				"--json",
+				"--request-id",
+				req.requestId,
+				"--timeout",
+				String(cliTimeoutSecs)
+			];
+			log("debug", "spawning sidecar send CLI", {
+				requestId: req.requestId,
+				agent: req.target.agent,
+				sessionId: req.target.sessionId,
+				mode: req.mode,
+				timeoutSecs: cliTimeoutSecs
+			});
+			let proc;
+			try {
+				proc = deps.spawn(argv);
+			} catch (error) {
+				log("warn", "send CLI spawn failed", {
+					requestId: req.requestId,
+					error: describeError$1(error)
+				});
+				return {
+					outcome: "failed",
+					errorCode: "cli_not_found",
+					detail: describeError$1(error)
+				};
+			}
+			const stdout = new BoundedCollector(MAX_STDOUT_BYTES);
+			const stderr = new BoundedCollector(STDERR_DETAIL_BYTES);
+			proc.onStdout((chunk) => stdout.append(chunk));
+			proc.onStderr((chunk) => stderr.append(chunk));
+			try {
+				proc.stdin.write(Buffer.from(req.message, "utf8"));
+				proc.stdin.end();
+			} catch {}
+			let timer;
+			const settled = await Promise.race([proc.exited.then((code) => ({
+				kind: "exit",
+				code
+			}), (error) => ({
+				kind: "spawn-error",
+				error
+			})), new Promise((resolve) => {
+				timer = setTimeout(() => resolve({ kind: "timeout" }), hardTimeoutMs);
+			})]);
+			if (timer !== void 0) clearTimeout(timer);
+			const stderrText = stderr.text();
+			if (settled.kind === "timeout") {
+				try {
+					proc.kill();
+				} catch {}
+				log("warn", "send CLI hard timeout; process killed", {
+					requestId: req.requestId,
+					hardTimeoutMs
+				});
+				return {
+					outcome: "unknown",
+					errorCode: "timeout",
+					detail: stderrText ? `no exit within ${hardTimeoutMs}ms; killed; stderr: ${stderrText}` : `no exit within ${hardTimeoutMs}ms; killed`
+				};
+			}
+			if (settled.kind === "spawn-error") {
+				log("warn", "send CLI could not be started", {
+					requestId: req.requestId,
+					error: describeError$1(settled.error)
+				});
+				return {
+					outcome: "failed",
+					errorCode: "cli_not_found",
+					detail: describeError$1(settled.error)
+				};
+			}
+			const receipt = parseReceipt(stdout.text());
+			log("info", "send CLI exited", {
+				requestId: req.requestId,
+				agent: req.target.agent,
+				sessionId: req.target.sessionId,
+				exitCode: settled.code,
+				parsedReceipt: receipt !== null,
+				...receipt !== null ? {
+					delivery: receipt.delivery,
+					...receipt.errorCode !== void 0 ? { errorCode: receipt.errorCode } : {},
+					replayed: receipt.replayed
+				} : {},
+				stdoutBytes: stdout.bytes,
+				stderrBytes: stderr.bytes
+			});
+			if (receipt !== null) return {
+				outcome: receipt.delivery === "delivered" ? "delivered" : "unknown",
+				...receipt.errorCode !== void 0 ? { errorCode: receipt.errorCode } : {},
+				...receipt.replayed ? { replayed: true } : {},
+				...stderrText ? { detail: stderrText } : {}
+			};
+			const code = settled.code;
+			if (code === 0) return {
+				outcome: "delivered",
+				detail: stderrText ? `parse_warning: exit 0 but stdout was not a send --json receipt; stderr: ${stderrText}` : "parse_warning: exit 0 but stdout was not a send --json receipt"
+			};
+			const base = { outcome: "failed" };
+			if (code === 2) base.errorCode = "usage_error";
+			else if (code === 130) base.errorCode = "interrupted";
+			else if (code !== 1) base.errorCode = `exit_${code ?? "signal"}`;
+			if (stderrText) base.detail = stderrText;
+			return base;
+		}
 	};
 }
 //#endregion
@@ -1262,7 +2032,7 @@ var DaemonSupervisor = class {
 //#endregion
 //#region src/index.ts
 const name = "agent-sidecar";
-/** Required services; see the module doc for why `agents` is deferred to M2. */
+/** Required services; see the module doc for why `agents` is lazy instead. */
 const inject = ["webServer", "subprocess"];
 /** `SOCKET_NAME` in sidecar/daemon.py. */
 const SOCKET_NAME = "daemon.sock";
@@ -1273,6 +2043,8 @@ const LEGACY_RUNTIME_ENV = "AGENT_SIDECAR_HOME";
 const DAEMON_GRACE_MS = 5e3;
 /** Whole-run bound for one `service status` detection probe. */
 const DETECT_TIMEOUT_MS = 1e4;
+/** SIGTERM → grace → SIGKILL window when the send-cli hard timeout kills. */
+const SEND_CLI_GRACE_MS = 2e3;
 /** Output cap for the detection probe (one sanitized message line). */
 const DETECT_OUTPUT_BYTES = 4096;
 /** Per-line clamp when forwarding daemon output into ctx.logger (S8). */
@@ -1402,10 +2174,80 @@ function apply(ctx, config) {
 		backoffLimit: config.daemon.backoffLimit
 	});
 	let effective = config;
+	const guardOptions = { allowWriteActions: () => effective.inject.enabled };
+	let liveAgents = null;
+	const dshExecutor = createDshInjectExecutor({
+		agents: {
+			get: (sessionId) => liveAgents?.get(sessionId),
+			resume: (options) => liveAgents === null ? Promise.reject(/* @__PURE__ */ new Error("dsh agents service is not available in this composition")) : liveAgents.resume(options)
+		},
+		log,
+		pluginName: name
+	});
+	const spawnSendCli = (argv) => {
+		const handle = ctx.subprocess.spawn({
+			argv,
+			cwd: homedir(),
+			stdio: {
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe"
+			},
+			graceMs: SEND_CLI_GRACE_MS,
+			env: childEnv
+		});
+		handle.stdin?.on("error", () => {});
+		return {
+			stdin: {
+				write: (chunk) => {
+					handle.stdin?.write(chunk);
+				},
+				end: () => {
+					handle.stdin?.end();
+				}
+			},
+			onStdout: (listener) => {
+				handle.stdout?.on("data", listener);
+			},
+			onStderr: (listener) => {
+				handle.stderr?.on("data", listener);
+			},
+			exited: handle.done.then((outcome) => outcome.exitCode),
+			kill: () => {
+				handle.terminate();
+			}
+		};
+	};
+	const sendCliExecutor = createSendCliExecutor({
+		spawn: spawnSendCli,
+		log,
+		opts: { command }
+	});
+	/** Live target re-check against the reconciled store (§4.f.5 prepare). */
+	const verifyTarget = async (target) => {
+		const view = store.getBoardState().sessions.find((s) => s.agent === target.agent && s.session_id === target.sessionId);
+		if (view === void 0) return null;
+		return {
+			agent: view.agent,
+			sessionId: view.session_id,
+			status: view.status,
+			title: view.title,
+			project: view.project
+		};
+	};
 	const routes = createRoutes({
 		store,
 		supervisor,
-		guardOptions: { allowWriteActions: () => effective.inject.enabled },
+		guardOptions,
+		injectGateway: new InjectGateway({
+			executors: {
+				dsh: dshExecutor,
+				sendCli: sendCliExecutor
+			},
+			verifyTarget,
+			allowWrite: () => effective.inject.enabled,
+			log: (entry) => log(entry.ok ? "info" : "warn", `inject ${entry.phase}`, entry)
+		}),
 		log
 	});
 	ctx.effect(() => {
@@ -1423,12 +2265,20 @@ function apply(ctx, config) {
 			removeRoute();
 		};
 	}, "agent-sidecar: host assembly (route + reconciler + supervisor)");
+	ctx.inject(["agents"], (injected) => {
+		const actx = injected;
+		liveAgents = actx.agents;
+		actx.effect(() => () => {
+			liveAgents = null;
+		}, "agent-sidecar: agents binding release");
+		log("debug", "dsh inject path online (agents service bound)");
+	});
 	ctx.inject(["settings"], (injected) => {
 		try {
 			const sctx = injected;
 			const scope = sctx.settings.register(name, Config, {
 				base: config,
-				applies: "restart"
+				applies: "live"
 			});
 			effective = scope.get();
 			const unwatch = scope.watch((next) => {
@@ -1438,7 +2288,7 @@ function apply(ctx, config) {
 				unwatch();
 				effective = config;
 			}, "agent-sidecar: settings scope release");
-			log("debug", "settings namespace registered", { applies: "restart" });
+			log("debug", "settings namespace registered", { applies: "live" });
 		} catch (err) {
 			log("warn", `settings namespace registration failed: ${String(err)}`);
 		}

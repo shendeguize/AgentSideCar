@@ -24,6 +24,10 @@ import { SettingsCard, type SettingsCardValues, type SidecarDaemonStatus } from 
 import { countWorking, deriveWidgetConnection } from './board/logic.ts'
 import type { BoardFilterState } from './board/logic.ts'
 import type { SidecarController, SidecarViewState } from './controller.ts'
+import { InjectPanel } from './inject/InjectPanel.tsx'
+import type { InjectMode } from './inject/logic.ts'
+import { findInjectTarget, type InjectActions } from './inject-glue.ts'
+import overlay from './inject/overlay.module.css'
 import {
   DEFAULT_CONFIG_VIEW,
   cardValuesEqual,
@@ -32,8 +36,29 @@ import {
   type SidecarConfigView,
 } from './settings-glue.ts'
 
-/** Cross-agent board bound to the controller (the "Sidecar" conversation tab). */
-export function createBoardTab(controller: SidecarController): () => ReactElement {
+/** What the board tab needs to host the inject panel (S5 wiring, T4.9). */
+export interface BoardInjectIntegration {
+  /** onPrepare/onExecute over the action transport (inject-glue.ts). */
+  actions: InjectActions
+  /**
+   * Late-bound `inject.default-mode` reader: the settings scope resolves
+   * after the tab mounts, so the value is read at panel-open time.
+   */
+  getDefaultMode: () => InjectMode
+}
+
+/**
+ * Cross-agent board bound to the controller (the "Sidecar" conversation
+ * tab). Selecting a session card opens the inject panel as a modal overlay
+ * (design §5.1 view 3: 从卡片唤起,模态); the panel gates itself on the
+ * snapshot's inject capability — the entry stays visible when injection is
+ * off so the user learns it can be enabled in Settings. Without an
+ * integration (owner chose not to wire injection) the board stays inert.
+ */
+export function createBoardTab(
+  controller: SidecarController,
+  inject?: BoardInjectIntegration,
+): () => ReactElement {
   const subscribe = (cb: () => void): (() => void) => controller.subscribe(cb)
   const getState = (): SidecarViewState => controller.getState()
   const getFilters = (): BoardFilterState => controller.getFilters()
@@ -42,24 +67,56 @@ export function createBoardTab(controller: SidecarController): () => ReactElemen
     // react-dom/server (DOM-level verification harness); same source.
     const state = useSyncExternalStore(subscribe, getState, getState)
     const filters = useSyncExternalStore(subscribe, getFilters, getFilters)
+    const [injectTargetId, setInjectTargetId] = useState<string | null>(null)
+    const closeInject = (): void => {
+      setInjectTargetId(null)
+    }
     return (
-      <Board
-        daemonState={state.daemonState}
-        {...state.daemonDetail !== undefined ? { daemonDetail: state.daemonDetail } : {}}
-        streamHealth={state.streamHealth}
-        lastReconcileAtMs={state.lastReconcileAtMs}
-        sessions={state.sessions}
-        filters={filters}
-        onFiltersChange={(next) => {
-          controller.setFilters(next)
-        }}
-        onRefresh={() => {
-          void controller.refresh()
-        }}
-        onSelectSession={() => {
-          // M3 wires the session detail view; the board stays clickable but inert.
-        }}
-      />
+      <>
+        <Board
+          daemonState={state.daemonState}
+          {...state.daemonDetail !== undefined ? { daemonDetail: state.daemonDetail } : {}}
+          streamHealth={state.streamHealth}
+          lastReconcileAtMs={state.lastReconcileAtMs}
+          sessions={state.sessions}
+          filters={filters}
+          onFiltersChange={(next) => {
+            controller.setFilters(next)
+          }}
+          onRefresh={() => {
+            void controller.refresh()
+          }}
+          onSelectSession={(sessionId) => {
+            if (inject !== undefined) setInjectTargetId(sessionId)
+          }}
+        />
+        {inject !== undefined && injectTargetId !== null
+          ? (
+            <div className={overlay['backdrop']} role="presentation" onClick={closeInject}>
+              <div
+                className={overlay['dialog']}
+                role="dialog"
+                aria-modal="true"
+                onClick={(event) => {
+                  event.stopPropagation()
+                }}
+              >
+                {/* key remounts the panel per target: a fresh two-phase
+                    machine per session, no state bleed between targets. */}
+                <InjectPanel
+                  key={injectTargetId}
+                  capability={{ inject: state.injectCapability }}
+                  target={findInjectTarget(state.sessions, injectTargetId)}
+                  defaultMode={inject.getDefaultMode()}
+                  onPrepare={inject.actions.onPrepare}
+                  onExecute={inject.actions.onExecute}
+                  onClose={closeInject}
+                />
+              </div>
+            </div>
+          )
+          : null}
+      </>
     )
   }
 }

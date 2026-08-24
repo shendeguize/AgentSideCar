@@ -1,20 +1,26 @@
 /**
- * Agent Sidecar — dsh host-half plugin entry (M1 assembly).
+ * Agent Sidecar — dsh host-half plugin entry (M1 + M2 assembly).
  *
- * Wires the four pure modules onto the cordis context:
+ * Wires the pure modules onto the cordis context:
  *   SessionStore → SidecarSocketClient → Reconciler → DaemonSupervisor
- *   → createRoutes → ctx.webServer prefix route.
+ *   → InjectGateway (dsh + send-cli executors) → createRoutes
+ *   → ctx.webServer prefix route.
  *
  * Named exports only: postmortem 0001 documents that a default-exported
  * plugin object silently drops `inject`, so the loader must see the named
  * `name`/`inject`/`Config`/`apply` faces directly on the module namespace.
  *
- * `inject` declares only what M1 actually consumes (webServer, subprocess).
- * `agents` is deliberately NOT declared yet: cordis `inject` knows no
- * optional tier (`Inject = (keyof M)[] | map`, all required), M1 never
- * touches `ctx.agents`, and a hard dependency on an unused service would
- * make the fiber pend in any composition without dsh-agent. M2 (inject
- * gateway) adds it together with its first real consumer.
+ * `inject` declares only the two services every milestone needs (webServer,
+ * subprocess). `agents` — the M2 dsh in-process injection path — is
+ * consumed through a LAZY `ctx.inject(['agents'], …)` instead: cordis
+ * `inject` knows no optional tier (`Inject = (keyof M)[] | map`, all
+ * required), so a top-level declaration would pend the whole fiber in any
+ * composition without dsh-agent and take the M1 read surface down with it.
+ * dsh-base does bundle `@deepseek-ai/dsh-agent`, so in standard
+ * compositions the lazy callback fires at boot anyway; in agent-less
+ * compositions the plugin still loads and the injection surface degrades
+ * to the send-cli path only (a dsh-target execute fails with an honest
+ * "agents service unavailable" detail).
  *
  * Service contracts consumed here were verified against the installed dsh
  * 0.1.1-rc.2 type declarations, not docs:
@@ -23,8 +29,12 @@
  *   (@deepseek-ai/dsh-host-webserver lib/types/index.d.ts).
  * - `ctx.subprocess.spawn(spec)` is fully explicit (argv/cwd/stdio/graceMs/
  *   env, argv never shell-interpreted); the handle exposes `done`,
- *   tree-scoped `terminate()` (SIGTERM → graceMs → SIGKILL) and
- *   `waitForExit()` (@deepseek-ai/dsh-subprocess lib/types/types.d.ts).
+ *   `stdin` (iff spawned with `stdin: 'pipe'`), tree-scoped `terminate()`
+ *   (SIGTERM → graceMs → SIGKILL) and `waitForExit()`
+ *   (@deepseek-ai/dsh-subprocess lib/types/types.d.ts).
+ * - `ctx.agents` is dsh-agent's AgentRegistry (`get(id)` live lookup,
+ *   `resume({resumeSessionId})` → AgentHandle); the structural
+ *   {@link AgentsServiceFace} in dsh-inject.ts is satisfied directly.
  * The faces below are structural on purpose: the plugin's type surface
  * stays on the two devDependency SDKs (cordis, schemastery) while the
  * service packages resolve at runtime from the dsh profile tree.
@@ -36,13 +46,20 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
-import type { Readable } from 'node:stream'
+import type { Readable, Writable } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { Config } from './config.ts'
 import { Reconciler, SidecarSocketClient } from './bridge.ts'
+import { createDshInjectExecutor, type AgentsServiceFace } from './dsh-inject.ts'
 import type { GuardOptions } from './guard.ts'
+import {
+  InjectGateway,
+  type InjectTarget,
+  type TargetStatus,
+} from './inject-gateway.ts'
 import { API_PREFIX, createRoutes } from './routes.ts'
+import { createSendCliExecutor, type SpawnLike } from './send-cli.ts'
 import { SessionStore } from './session-store.ts'
 import { DaemonSupervisor, type DaemonProcess, type LogLevel } from './supervisor.ts'
 
@@ -50,7 +67,7 @@ export { Config } from './config.ts'
 
 export const name = 'agent-sidecar'
 
-/** Required services; see the module doc for why `agents` is deferred to M2. */
+/** Required services; see the module doc for why `agents` is lazy instead. */
 export const inject = ['webServer', 'subprocess']
 
 // ---------------------------------------------------------------------------
@@ -100,6 +117,8 @@ export interface SubprocessOutputReader {
 /** Live child-process handle rooted in its own process tree. */
 export interface SubprocessHandle {
   readonly pid: number
+  /** Present iff spawned with `stdin: 'pipe'` (dsh-subprocess types.d.ts:158). */
+  readonly stdin: Writable | undefined
   readonly stdout: Readable | undefined
   readonly stderr: Readable | undefined
   readonly collected: {
@@ -157,6 +176,8 @@ const LEGACY_RUNTIME_ENV = 'AGENT_SIDECAR_HOME'
 const DAEMON_GRACE_MS = 5000
 /** Whole-run bound for one `service status` detection probe. */
 const DETECT_TIMEOUT_MS = 10_000
+/** SIGTERM → grace → SIGKILL window when the send-cli hard timeout kills. */
+const SEND_CLI_GRACE_MS = 2000
 /** Output cap for the detection probe (one sanitized message line). */
 const DETECT_OUTPUT_BYTES = 4096
 /** Per-line clamp when forwarding daemon output into ctx.logger (S8). */
@@ -298,7 +319,103 @@ export function apply(ctx: HostContext, config: Config): void {
   const guardOptions: GuardOptions = {
     allowWriteActions: () => effective.inject.enabled,
   }
-  const routes = createRoutes({ store, supervisor, guardOptions, log })
+
+  // ------------------------------------------------- M2 injection assembly
+
+  // dsh in-process path (§4.d path one). `liveAgents` is bound by the lazy
+  // agents inject below; until then (and in compositions without dsh-agent)
+  // the face reports the path unavailable: `get` misses, `resume` rejects,
+  // and the executor surfaces an honest failure while send-cli keeps working.
+  let liveAgents: AgentsServiceFace | null = null
+  const agentsFace: AgentsServiceFace = {
+    get: (sessionId) => liveAgents?.get(sessionId),
+    resume: (options) =>
+      liveAgents === null
+        ? Promise.reject(
+            new Error('dsh agents service is not available in this composition'),
+          )
+        : liveAgents.resume(options),
+  }
+  const dshExecutor = createDshInjectExecutor({
+    agents: agentsFace,
+    log,
+    pluginName: name,
+  })
+
+  // send-cli path (§4.d path two): adapt `ctx.subprocess.spawn` onto the
+  // executor's SpawnLike seam. stdin is a real pipe (the message travels
+  // via `--message-stdin`, never argv); the runtimeDir redirect flows via
+  // the same childEnv the daemon paths use, so send talks to the same
+  // daemon. `done` rejects only on spawn-level failures — exactly the
+  // `exited` contract — and `kill()` maps to the tree-scoped terminate.
+  const spawnSendCli: SpawnLike = (argv) => {
+    const handle = ctx.subprocess.spawn({
+      argv,
+      cwd: homedir(),
+      stdio: { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' },
+      graceMs: SEND_CLI_GRACE_MS,
+      env: childEnv,
+    })
+    // Dead-pipe writes must not throw asynchronously (adapter obligation);
+    // the authoritative failure surfaces through `exited`.
+    handle.stdin?.on('error', () => {})
+    return {
+      stdin: {
+        write: (chunk) => {
+          handle.stdin?.write(chunk)
+        },
+        end: () => {
+          handle.stdin?.end()
+        },
+      },
+      onStdout: (listener) => {
+        handle.stdout?.on('data', listener)
+      },
+      onStderr: (listener) => {
+        handle.stderr?.on('data', listener)
+      },
+      exited: handle.done.then((outcome) => outcome.exitCode),
+      kill: () => {
+        handle.terminate()
+      },
+    }
+  }
+  const sendCliExecutor = createSendCliExecutor({
+    spawn: spawnSendCli,
+    log,
+    opts: { command },
+  })
+
+  /** Live target re-check against the reconciled store (§4.f.5 prepare). */
+  const verifyTarget = async (target: InjectTarget): Promise<TargetStatus | null> => {
+    const view = store
+      .getBoardState()
+      .sessions.find(
+        (s) => s.agent === target.agent && s.session_id === target.sessionId,
+      )
+    if (view === undefined) return null
+    return {
+      agent: view.agent,
+      sessionId: view.session_id,
+      status: view.status,
+      title: view.title,
+      project: view.project,
+    }
+  }
+
+  // Constructed even when inject.enabled=false: `allowWrite` reads the live
+  // `effective` value on every prepare, and the route layer's
+  // guardWriteAction blocks first anyway (two independent gates, no
+  // duplication). Gateway audit entries are body-free by construction
+  // (byte size + sha256 prefix only), so forwarding them whole is S8-safe.
+  const injectGateway = new InjectGateway({
+    executors: { dsh: dshExecutor, sendCli: sendCliExecutor },
+    verifyTarget,
+    allowWrite: () => effective.inject.enabled,
+    log: (entry) => log(entry.ok ? 'info' : 'warn', `inject ${entry.phase}`, entry),
+  })
+
+  const routes = createRoutes({ store, supervisor, guardOptions, injectGateway, log })
 
   ctx.effect(() => {
     const removeRoute = ctx.webServer.register({
@@ -316,20 +433,46 @@ export function apply(ctx: HostContext, config: Config): void {
     }
   }, 'agent-sidecar: host assembly (route + reconciler + supervisor)')
 
+  // dsh injection path binding (M2). Lazy inject, same pattern as settings
+  // below: `agents` (dsh-agent AgentRegistry) is present in every dsh-base
+  // composition, but a top-level hard inject would pend the whole fiber in
+  // agent-less compositions (see module doc). The callback rides its own
+  // fiber: cordis unloads and re-runs it whenever the service changes, and
+  // the effect disposer unbinds so the executor degrades cleanly again.
+  // Binding the service reference here (not per call) keeps resume's owner
+  // context on this fiber, so a handle resumed for injection is drained by
+  // cordis if the plugin unloads.
+  ctx.inject(['agents'], (injected) => {
+    const actx = injected as HostContext & { agents: AgentsServiceFace }
+    liveAgents = actx.agents
+    actx.effect(() => () => {
+      liveAgents = null
+    }, 'agent-sidecar: agents binding release')
+    log('debug', 'dsh inject path online (agents service bound)')
+  })
+
   // Settings namespace 'agent-sidecar' (T2.4): pairs the browser settings
   // card (keyed `settings.plugin.item` slot) and persists user edits into
   // dsh's settings document. Lazy inject: compositions without dsh-settings
   // simply never run this, and nothing else depends on it.
-  // `applies: 'restart'` is the honest signal for daemon/stream/sidecar —
-  // those values are baked into this assembly at apply time; only
-  // inject.enabled is consumed live (through `effective`), and the ui.*
-  // group is read live by the browser half via its settings scope.
+  // `applies` (installed dsh-settings 0.1.1-rc.2, verified at source) is
+  // namespace-level UI-badge metadata surfaced through `describe()` only —
+  // commit() swaps the resolved value and notifies watchers regardless, so
+  // the `scope.watch → effective` chain below always takes effect
+  // immediately. `applies: 'live'` ('live' | 'restart' are the only
+  // values) is the honest badge for the security-relevant `inject.enabled`
+  // gate, which IS read live on every prepare/execute (M2 review F-1): a
+  // 'restart' badge would tell the user a gate they just closed is still
+  // open. Trade-off, documented: daemon.*/stream.*/sidecar values are
+  // baked into this assembly at apply time, so their edits still need a
+  // plugin reload despite the badge — a UX understatement, versus a badge
+  // that misstates a kill switch.
   ctx.inject(['settings'], (injected) => {
     try {
       const sctx = injected as HostContext & { settings: SettingsServiceFace }
       const scope = sctx.settings.register<Config>(name, Config, {
         base: config,
-        applies: 'restart',
+        applies: 'live',
       })
       effective = scope.get()
       const unwatch = scope.watch((next) => {
@@ -339,7 +482,7 @@ export function apply(ctx: HostContext, config: Config): void {
         unwatch()
         effective = config
       }, 'agent-sidecar: settings scope release')
-      log('debug', 'settings namespace registered', { applies: 'restart' })
+      log('debug', 'settings namespace registered', { applies: 'live' })
     } catch (err) {
       log('warn', `settings namespace registration failed: ${String(err)}`)
     }

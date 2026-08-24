@@ -1,6 +1,6 @@
 import z from "@deepseek-ai/schemastery";
 import { IncomingMessage, ServerResponse } from "node:http";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { Context } from "@deepseek-ai/cordis";
 
 //#region src/supervisor.d.ts
@@ -64,7 +64,7 @@ declare const Config: z<Config>;
 //#endregion
 //#region src/index.d.ts
 declare const name = "agent-sidecar";
-/** Required services; see the module doc for why `agents` is deferred to M2. */
+/** Required services; see the module doc for why `agents` is lazy instead. */
 declare const inject: string[];
 /** `ctx.webServer` face (route registration only). */
 interface WebServerService {
@@ -112,6 +112,8 @@ interface SubprocessOutputReader {
 /** Live child-process handle rooted in its own process tree. */
 interface SubprocessHandle {
   readonly pid: number;
+  /** Present iff spawned with `stdin: 'pipe'` (dsh-subprocess types.d.ts:158). */
+  readonly stdin: Writable | undefined;
   readonly stdout: Readable | undefined;
   readonly stderr: Readable | undefined;
   readonly collected: {

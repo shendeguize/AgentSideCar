@@ -1,19 +1,29 @@
 /**
- * Agent Sidecar — browser client half (T2.4 full integration).
+ * Agent Sidecar — browser client half (T2.4 full integration + S5/T4.9
+ * injection & command wiring).
  *
- * Mounts the completed modules into dsh Web on three seats:
+ * Mounts the completed modules into dsh Web on three slot seats plus one
+ * service contribution:
  *
  * - `conversation.view` (list slot, session scope): the cross-agent board
  *   as a "Sidecar" tab, order 30 — the official "multiple views per
  *   session" seat (registration shape follows the S0 skeleton and the
- *   dsh-project-kanban precedent);
+ *   dsh-project-kanban precedent). Selecting a session card opens the
+ *   inject panel (T4.5) as a modal overlay: onPrepare/onExecute ride the
+ *   action transport via inject-glue.ts, the capability bit comes from the
+ *   state snapshot, and `inject.default-mode` is adopted late from the
+ *   settings scope (seat 3) — 'queue', the schema default, until then;
  * - `sidebar.footer.action` (list slot, root scope): the connection-dot
  *   footer widget (slot declared by dsh-client-ui-sidebar's footer rail;
  *   type merge imported from its installed d.ts);
  * - `settings.plugin.item` (keyed slot, root scope): the settings card,
  *   keyed by the host-side settings namespace 'agent-sidecar' (the
  *   configurable-plugins tab dispatches one card per HOST-SERVED
- *   namespace — the host half registers it via `ctx.settings`).
+ *   namespace — the host half registers it via `ctx.settings`);
+ * - `/sidecar` slash command (T4.6): registered lazily on the `commandUi`
+ *   service via registerSidecarCommand — a composition without the
+ *   slash-menu runtime simply never gains the command, and a duplicate
+ *   registration (double apply) degrades to a logged no-op.
  *
  * Lifecycle contract:
  * - every resource rides `ctx.effect`: the data stream + visibilitychange
@@ -37,8 +47,12 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
+import { registerSidecarCommand } from './commands.ts'
 import { PLUGIN_ID, SidecarController } from './controller.ts'
+import { createInjectActions } from './inject-glue.ts'
+import type { InjectMode } from './inject/logic.ts'
 import { createBoardTab, createFooterWidget, createSettingsCardEntry } from './mount.tsx'
+import type { BoardInjectIntegration } from './mount.tsx'
 import type { SidecarConfigView } from './settings-glue.ts'
 
 export const name = 'agent-sidecar'
@@ -127,6 +141,21 @@ function keepStylesAlive(): () => void {
 export function apply(ctx: ClientContext): void {
   const controller = new SidecarController()
 
+  // Inject integration (S5/T4.9): the board tab hosts the panel; a
+  // delivered execute pulls one fresh snapshot so the board reflects the
+  // injection promptly. The default mode is a mutable box because the
+  // settings scope (seat 3) resolves after the board mounts — the reader
+  // is late-bound and the box holds the schema default until then.
+  const injectPrefs: { defaultMode: InjectMode } = { defaultMode: 'queue' }
+  const injectIntegration: BoardInjectIntegration = {
+    actions: createInjectActions({
+      onDelivered: () => {
+        void controller.refresh()
+      },
+    }),
+    getDefaultMode: () => injectPrefs.defaultMode,
+  }
+
   // Data feed + visibility resume (design §5.3: visibilitychange → pollNow).
   ctx.effect(() => {
     try {
@@ -153,9 +182,10 @@ export function apply(ctx: ClientContext): void {
 
   ctx.effect(keepStylesAlive, 'agent-sidecar: injected styles')
 
-  // Seat 1: cross-agent board as the "Sidecar" conversation tab.
+  // Seat 1: cross-agent board as the "Sidecar" conversation tab (the
+  // inject panel rides it as a card-selection modal).
   try {
-    const SidecarBoardTab = createBoardTab(controller)
+    const SidecarBoardTab = createBoardTab(controller, injectIntegration)
     ctx.slots.inject('conversation.view', () => {
       if (hasOwnEntry(ctx, 'conversation.view')) return () => {}
       try {
@@ -206,10 +236,12 @@ export function apply(ctx: ClientContext): void {
         })
 
         // ui.* settings defaults seed the board filters until the user
-        // touches them (localStorage value or filter gesture wins).
+        // touches them (localStorage value or filter gesture wins);
+        // inject.default-mode feeds the panel's late-bound mode reader.
         const adoptDefaults = (): void => {
-          const ui = scope.getSnapshot().value?.ui
-          if (ui !== undefined) controller.adoptConfigDefaults(ui)
+          const value = scope.getSnapshot().value
+          if (value?.ui !== undefined) controller.adoptConfigDefaults(value.ui)
+          if (value?.inject !== undefined) injectPrefs.defaultMode = value.inject.defaultMode
         }
         sctx.effect(
           () => scope.subscribe(adoptDefaults),
@@ -236,5 +268,16 @@ export function apply(ctx: ClientContext): void {
     })
   } catch (err) {
     console.error('agent-sidecar: settings scope injection failed', err)
+  }
+
+  // Seat 4: the `/sidecar` slash command, lazy on the commandUi service
+  // (T4.6). registerSidecarCommand catches its own registration failures
+  // (duplicate name on a double apply logs and no-ops); this try/catch
+  // keeps the degradation posture uniform with the slot seats. Disposal
+  // rides the injected fiber — unloading the plugin unregisters it.
+  try {
+    registerSidecarCommand(ctx)
+  } catch (err) {
+    console.error('agent-sidecar: /sidecar command mount failed', err)
   }
 }
