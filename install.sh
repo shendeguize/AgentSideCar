@@ -305,52 +305,580 @@ fi
 prefix=$(normalize_path "$prefix") || die "invalid installation prefix"
 target=$prefix/bin/agent-sidecar
 operation_lock=$prefix/.agent-sidecar-operation.lock
-operation_lock_owner=$operation_lock/owner
-operation_lock_recovery=$operation_lock/recovery
+operation_lock_recovery=$operation_lock.recovery
+operation_lock_recovery_claim=$operation_lock.recovery-claim
+operation_lock_grace_seconds=2
 operation_lock_held=0
+operation_lock_token=$(python3 - <<'PY'
+import secrets
+
+print(secrets.token_hex(16))
+PY
+) || die "cannot create operation lock identity"
 temporary=
 
-read_operation_lock_owner() {
-    observed_lock_owner=
-    if [ -f "$operation_lock_owner" ] &&
-        [ ! -L "$operation_lock_owner" ]; then
-        IFS= read -r observed_lock_owner < "$operation_lock_owner" ||
-            observed_lock_owner=
-    fi
-    case $observed_lock_owner in
-        ''|0|*[!0-9]*)
-            observed_lock_owner=
-            ;;
-    esac
+operation_lock_python() {
+    python3 - "$@" <<'PY'
+import errno
+import fcntl
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+
+def same_file(left, right):
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def lstat_or_none(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def process_identity(pid):
+    if sys.platform.startswith("linux"):
+        try:
+            with open(
+                "/proc/sys/kernel/random/boot_id", encoding="ascii"
+            ) as stream:
+                boot_id = stream.read().strip()
+            with open("/proc/{}/stat".format(pid), encoding="ascii") as stream:
+                process_stat = stream.read()
+            fields = process_stat.rsplit(")", 1)[1].split()
+            return "linux:{}:{}".format(boot_id, fields[19])
+        except (IndexError, OSError, UnicodeError):
+            return ""
+    for executable in ("/bin/ps", "/usr/bin/ps"):
+        if not os.path.isfile(executable):
+            continue
+        try:
+            output = subprocess.check_output(
+                [executable, "-p", str(pid), "-o", "lstart="],
+                env={"LC_ALL": "C", "PATH": "/bin:/usr/bin"},
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+            return "ps:" + output.decode("ascii").strip()
+        except (
+            OSError,
+            subprocess.CalledProcessError,
+            subprocess.TimeoutExpired,
+            UnicodeError,
+        ):
+            return ""
+    return ""
+
+
+def owner_payload(pid, token):
+    return "{}\n{}\n{}\n".format(
+        pid,
+        process_identity(pid),
+        token,
+    ).encode("ascii")
+
+
+def read_regular_file(path):
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | nofollow)
+    except OSError:
+        return None
+    try:
+        details = os.fstat(descriptor)
+        if not stat.S_ISREG(details.st_mode) or details.st_size > 1024:
+            return None
+        chunks = []
+        remaining = 1025
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > 1024:
+            return None
+        return payload
+    finally:
+        os.close(descriptor)
+
+
+def parse_owner(path):
+    payload = read_regular_file(path)
+    if payload is None:
+        return None
+    try:
+        lines = payload.decode("ascii").splitlines()
+    except UnicodeError:
+        return None
+    if len(lines) == 1:
+        identity = ""
+        token = ""
+    elif len(lines) == 3:
+        identity = lines[1]
+        token = lines[2]
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            return None
+    else:
+        return None
+    if not re.fullmatch(r"[1-9][0-9]*", lines[0]):
+        return None
+    pid = int(lines[0])
+    return pid, identity, token
+
+
+def owner_is_live(owner):
+    pid, expected_identity, _ = owner
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    current_identity = process_identity(pid)
+    if expected_identity and current_identity:
+        return expected_identity == current_identity
+    return True
+
+
+def newest_lock_timestamp(path, details):
+    newest = details.st_mtime
+    for name in ("owner", "recovery"):
+        child = lstat_or_none(os.path.join(path, name))
+        if child is not None:
+            newest = max(newest, child.st_mtime)
+    return newest
+
+
+def lock_state(path, grace):
+    details = lstat_or_none(path)
+    if details is None:
+        return "missing", None
+    if not stat.S_ISDIR(details.st_mode):
+        return "unsafe", details
+    owner = parse_owner(os.path.join(path, "owner"))
+    if owner is not None:
+        if owner_is_live(owner):
+            return "live", details
+        return "stale", details
+    age = time.time() - newest_lock_timestamp(path, details)
+    if age >= grace:
+        return "stale", details
+    return "fresh", details
+
+
+def gate_state(path, grace):
+    details = lstat_or_none(path)
+    if details is None:
+        return "missing", None
+    if not stat.S_ISREG(details.st_mode):
+        return "unsafe", details
+    owner = parse_owner(path)
+    if owner is not None:
+        if owner_is_live(owner):
+            return "live", details
+        return "stale", details
+    if time.time() - details.st_mtime >= grace:
+        return "stale", details
+    return "fresh", details
+
+
+def unlink_if_same(path, expected):
+    current = lstat_or_none(path)
+    if current is not None and same_file(current, expected):
+        os.unlink(os.fspath(path))
+
+
+def cleanup_lock_directory(path):
+    details = lstat_or_none(path)
+    if details is None:
+        return True
+    if not stat.S_ISDIR(details.st_mode):
+        return False
+    try:
+        names = set(os.listdir(path))
+    except OSError:
+        return False
+    if not names.issubset({"owner", "recovery"}):
+        return False
+    owner = os.path.join(path, "owner")
+    if "owner" in names:
+        owner_details = lstat_or_none(owner)
+        if owner_details is None or not stat.S_ISREG(owner_details.st_mode):
+            return False
+        os.unlink(owner)
+    legacy_recovery = os.path.join(path, "recovery")
+    if "recovery" in names:
+        recovery_details = lstat_or_none(legacy_recovery)
+        if recovery_details is None or not stat.S_ISDIR(
+            recovery_details.st_mode
+        ):
+            return False
+        try:
+            os.rmdir(legacy_recovery)
+        except OSError:
+            return False
+    try:
+        os.rmdir(path)
+    except OSError:
+        return False
+    return True
+
+
+def cleanup_workspace(path):
+    details = lstat_or_none(path)
+    if details is None:
+        return True
+    if not stat.S_ISDIR(details.st_mode):
+        return False
+    try:
+        names = set(os.listdir(path))
+    except OSError:
+        return False
+    if not names.issubset({"lock"}):
+        return False
+    recovered_lock = os.path.join(path, "lock")
+    if "lock" in names and not cleanup_lock_directory(recovered_lock):
+        return False
+    try:
+        os.rmdir(path)
+    except OSError:
+        return False
+    return True
+
+
+def cleanup_artifacts(lock, grace):
+    parent = os.path.dirname(lock)
+    basename = os.path.basename(lock)
+    candidate_prefix = basename + ".recovery-candidate."
+    workspace_prefix = basename + ".recovery-work."
+    try:
+        entries = list(os.scandir(parent))
+    except OSError:
+        return
+    now = time.time()
+    for entry in entries:
+        if entry.name.startswith(candidate_prefix):
+            details = lstat_or_none(entry.path)
+            if (
+                details is not None
+                and stat.S_ISREG(details.st_mode)
+                and now - details.st_mtime >= grace
+            ):
+                unlink_if_same(entry.path, details)
+        elif entry.name.startswith(workspace_prefix):
+            details = lstat_or_none(entry.path)
+            if (
+                details is not None
+                and stat.S_ISDIR(details.st_mode)
+                and now - details.st_mtime >= grace
+            ):
+                cleanup_workspace(entry.path)
+
+
+def finish_gate_claim(gate, claim, grace):
+    claim_details = lstat_or_none(claim)
+    if claim_details is None:
+        return "missing"
+    if not stat.S_ISREG(claim_details.st_mode):
+        return "unsafe"
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(claim, os.O_RDWR | nofollow)
+    except OSError:
+        return "busy"
+    try:
+        try:
+            fcntl.lockf(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EAGAIN):
+                return "busy"
+            raise
+        locked_details = os.fstat(descriptor)
+        if not same_file(locked_details, claim_details):
+            return "busy"
+        state, gate_details = gate_state(gate, grace)
+        if gate_details is not None and same_file(gate_details, locked_details):
+            if state in ("live", "fresh"):
+                unlink_if_same(claim, locked_details)
+                return "busy"
+            if state == "unsafe":
+                return "unsafe"
+            unlink_if_same(gate, locked_details)
+        unlink_if_same(claim, locked_details)
+        return "cleaned"
+    finally:
+        os.close(descriptor)
+
+
+def check_gate(gate, claim, grace):
+    for _ in range(4):
+        claim_result = finish_gate_claim(gate, claim, grace)
+        if claim_result == "unsafe":
+            return 2
+        if claim_result == "busy":
+            return 1
+        state, details = gate_state(gate, grace)
+        if state == "missing":
+            return 0
+        if state == "unsafe":
+            return 2
+        if state in ("live", "fresh"):
+            return 1
+        try:
+            os.link(gate, claim, follow_symlinks=False)
+        except FileExistsError:
+            continue
+        except OSError:
+            return 1
+        if details is None:
+            continue
+    return 1
+
+
+def write_all(descriptor, payload):
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError("short operation lock owner write")
+        offset += written
+
+
+def create_lock(lock, pid, token):
+    try:
+        os.mkdir(lock, 0o700)
+    except FileExistsError:
+        return 1
+    except OSError as error:
+        print(error, file=sys.stderr)
+        return 2
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    directory = -1
+    owner_descriptor = -1
+    created_owner = False
+    lock_details = None
+    try:
+        directory = os.open(
+            lock,
+            os.O_RDONLY | directory_flag | nofollow,
+        )
+        lock_details = os.fstat(directory)
+        owner_descriptor = os.open(
+            "owner",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow,
+            0o600,
+            dir_fd=directory,
+        )
+        created_owner = True
+        write_all(owner_descriptor, owner_payload(pid, token))
+        os.fsync(owner_descriptor)
+        os.close(owner_descriptor)
+        owner_descriptor = -1
+        current = os.lstat(lock)
+        if not same_file(current, lock_details):
+            raise OSError("operation lock moved while recording owner")
+        return 0
+    except OSError as error:
+        print(error, file=sys.stderr)
+        if created_owner and directory >= 0:
+            try:
+                os.unlink("owner", dir_fd=directory)
+            except OSError:
+                pass
+        if lock_details is not None:
+            current = lstat_or_none(lock)
+            if current is not None and same_file(current, lock_details):
+                try:
+                    os.rmdir(lock)
+                except OSError:
+                    pass
+        return 2
+    finally:
+        if owner_descriptor >= 0:
+            os.close(owner_descriptor)
+        if directory >= 0:
+            os.close(directory)
+
+
+def release_lock(lock, pid, token):
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    try:
+        directory = os.open(
+            lock,
+            os.O_RDONLY | directory_flag | nofollow,
+        )
+    except OSError:
+        return
+    try:
+        details = os.fstat(directory)
+        owner = parse_owner(os.path.join(lock, "owner"))
+        if owner is None or owner[0] != pid or owner[2] != token:
+            return
+        current = lstat_or_none(lock)
+        if current is None or not same_file(current, details):
+            return
+        try:
+            os.unlink("owner", dir_fd=directory)
+        except OSError:
+            return
+    finally:
+        os.close(directory)
+    current = lstat_or_none(lock)
+    if current is not None and same_file(current, details):
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
+def acquire_gate(gate, pid, token):
+    parent = os.path.dirname(gate)
+    prefix = os.path.basename(gate) + "-candidate."
+    descriptor, candidate = tempfile.mkstemp(prefix=prefix, dir=parent)
+    try:
+        os.fchmod(descriptor, 0o600)
+        write_all(descriptor, owner_payload(pid, token))
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            os.link(candidate, gate, follow_symlinks=False)
+        except FileExistsError:
+            return 1
+        except OSError:
+            return 1
+        return 0
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(candidate)
+        except FileNotFoundError:
+            pass
+
+
+def release_gate(gate, pid, token):
+    details = lstat_or_none(gate)
+    if details is None or not stat.S_ISREG(details.st_mode):
+        return
+    owner = parse_owner(gate)
+    if owner is None or owner[0] != pid or owner[2] != token:
+        return
+    unlink_if_same(gate, details)
+
+
+def recover_lock(lock, grace):
+    state, details = lock_state(lock, grace)
+    if state == "unsafe":
+        return 2
+    if state != "stale" or details is None:
+        return 1
+    parent = os.path.dirname(lock)
+    prefix = os.path.basename(lock) + ".recovery-work."
+    workspace = tempfile.mkdtemp(prefix=prefix, dir=parent)
+    os.chmod(workspace, 0o700)
+    recovered = os.path.join(workspace, "lock")
+    try:
+        current_state, current_details = lock_state(lock, grace)
+        if (
+            current_state != "stale"
+            or current_details is None
+            or not same_file(current_details, details)
+        ):
+            return 1
+        os.rename(lock, recovered)
+        moved_state, _ = lock_state(recovered, grace)
+        if moved_state in ("live", "fresh"):
+            if lstat_or_none(lock) is None:
+                os.rename(recovered, lock)
+            return 1
+        print(workspace)
+        workspace = ""
+        return 0
+    except FileNotFoundError:
+        return 1
+    except OSError as error:
+        print(error, file=sys.stderr)
+        return 2
+    finally:
+        if workspace:
+            cleanup_workspace(workspace)
+
+
+action = sys.argv[1]
+if action == "check-gate":
+    lock, gate, claim, grace = sys.argv[2:]
+    cleanup_artifacts(lock, int(grace))
+    raise SystemExit(check_gate(gate, claim, int(grace)))
+if action == "create-lock":
+    lock, pid, token = sys.argv[2:]
+    raise SystemExit(create_lock(lock, int(pid), token))
+if action == "release-lock":
+    lock, pid, token = sys.argv[2:]
+    release_lock(lock, int(pid), token)
+    raise SystemExit(0)
+if action == "acquire-gate":
+    gate, pid, token = sys.argv[2:]
+    raise SystemExit(acquire_gate(gate, int(pid), token))
+if action == "release-gate":
+    gate, pid, token = sys.argv[2:]
+    release_gate(gate, int(pid), token)
+    raise SystemExit(0)
+if action == "recover-lock":
+    lock, grace = sys.argv[2:]
+    raise SystemExit(recover_lock(lock, int(grace)))
+if action == "cleanup-workspace":
+    raise SystemExit(0 if cleanup_workspace(sys.argv[2]) else 1)
+raise SystemExit("unknown operation lock helper action")
+PY
 }
 
 recover_stale_operation_lock() {
-    [ -d "$operation_lock" ] && [ ! -L "$operation_lock" ] || return 1
-    read_operation_lock_owner
-    stale_owner=$observed_lock_owner
-    [ -n "$stale_owner" ] || return 1
-    kill -0 "$stale_owner" 2>/dev/null && return 1
-
-    mkdir "$operation_lock_recovery" 2>/dev/null || return 1
-    read_operation_lock_owner
-    current_owner=$observed_lock_owner
-    if [ -n "$current_owner" ] && [ "$current_owner" != "$stale_owner" ]; then
-        rmdir "$operation_lock_recovery" 2>/dev/null || :
+    operation_lock_python \
+        acquire-gate \
+        "$operation_lock_recovery" \
+        "$$" \
+        "$operation_lock_token" ||
         return 1
-    fi
-    if [ -n "$current_owner" ] && kill -0 "$current_owner" 2>/dev/null; then
-        rmdir "$operation_lock_recovery" 2>/dev/null || :
-        return 1
-    fi
 
-    if [ -n "$current_owner" ]; then
-        rm -f "$operation_lock_owner" 2>/dev/null || {
-            rmdir "$operation_lock_recovery" 2>/dev/null || :
+    recovered_operation_lock=
+    recovery_status=0
+    recovered_operation_lock=$(operation_lock_python \
+        recover-lock \
+        "$operation_lock" \
+        "$operation_lock_grace_seconds") ||
+        recovery_status=$?
+    operation_lock_python \
+        release-gate \
+        "$operation_lock_recovery" \
+        "$$" \
+        "$operation_lock_token" ||
+        :
+
+    case $recovery_status in
+        0)
+            operation_lock_python \
+                cleanup-workspace \
+                "$recovered_operation_lock" ||
+                :
+            return 0
+            ;;
+        1)
             return 1
-        }
-    fi
-    rmdir "$operation_lock_recovery" 2>/dev/null || return 1
-    rmdir "$operation_lock" 2>/dev/null
+            ;;
+        *)
+            die "cannot safely recover operation lock: $operation_lock"
+            ;;
+    esac
 }
 
 acquire_operation_lock() {
@@ -368,19 +896,48 @@ acquire_operation_lock() {
     operation_lock_started=$(date +%s) ||
         die "cannot read clock for operation lock"
     while :; do
-        if mkdir -m 700 "$operation_lock" 2>/dev/null; then
-            if (umask 077; printf '%s\n' "$$" > "$operation_lock_owner"); then
-                operation_lock_held=1
-                return
-            fi
-            rmdir "$operation_lock" 2>/dev/null || :
-            die "cannot record operation lock owner"
+        gate_status=0
+        operation_lock_python \
+            check-gate \
+            "$operation_lock" \
+            "$operation_lock_recovery" \
+            "$operation_lock_recovery_claim" \
+            "$operation_lock_grace_seconds" ||
+            gate_status=$?
+        case $gate_status in
+            0)
+                create_status=0
+                operation_lock_python \
+                    create-lock \
+                    "$operation_lock" \
+                    "$$" \
+                    "$operation_lock_token" ||
+                    create_status=$?
+                case $create_status in
+                    0)
+                        operation_lock_held=1
+                        return
+                        ;;
+                    1)
+                        ;;
+                    *)
+                        die "cannot create operation lock: $operation_lock"
+                        ;;
+                esac
+                ;;
+            1)
+                ;;
+            *)
+                die "refusing unsafe operation lock recovery path: $operation_lock_recovery"
+                ;;
+        esac
+        if [ "$gate_status" -eq 0 ] && recover_stale_operation_lock; then
+            continue
         fi
         if [ -L "$operation_lock" ] || [ ! -d "$operation_lock" ]; then
-            die "refusing unsafe operation lock path: $operation_lock"
-        fi
-        if recover_stale_operation_lock; then
-            continue
+            if [ -e "$operation_lock" ] || [ -L "$operation_lock" ]; then
+                die "refusing unsafe operation lock path: $operation_lock"
+            fi
         fi
         operation_lock_now=$(date +%s) ||
             die "cannot read clock for operation lock"
@@ -394,11 +951,12 @@ acquire_operation_lock() {
 
 release_operation_lock() {
     [ "$operation_lock_held" -eq 1 ] || return 0
-    read_operation_lock_owner
-    if [ "$observed_lock_owner" = "$$" ]; then
-        rm -f "$operation_lock_owner" 2>/dev/null || :
-        rmdir "$operation_lock" 2>/dev/null || :
-    fi
+    operation_lock_python \
+        release-lock \
+        "$operation_lock" \
+        "$$" \
+        "$operation_lock_token" ||
+        :
     operation_lock_held=0
 }
 

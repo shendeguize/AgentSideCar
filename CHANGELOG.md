@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-24
+
+### Fixed
+
+- Made Codex immutable status fallback copy only an unchanged regular main
+  database into a private snapshot, so FIFO replacement and source races
+  return promptly without opening the live source through SQLite.
+- Recovered aged ownerless installer operation locks and safely cleaned
+  interrupted recovery artifacts without stealing fresh or live locks.
+
+### Security
+
+- Closed status-read FIFO blocking and pathname TOCTOU windows by binding
+  bounded copies to descriptor-verified regular-file identity and opening
+  SQLite only on private snapshots.
+- Bound installer stale-lock recovery to process identities and per-operation
+  tokens with serialized, inode-checked recovery gates while retaining
+  fail-closed handling for unsafe paths.
+
 ## [0.4.3] - 2026-08-24
 
 ### Fixed
@@ -135,7 +154,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI and terminal-dashboard workflows for session listing, status, watching,
   and process inspection.
 
-[Unreleased]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.0...v0.4.1

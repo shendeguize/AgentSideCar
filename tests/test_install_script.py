@@ -261,6 +261,35 @@ if os.read(int(os.environ["LOCK_WAIT_RELEASE_FD"]), 1) != b"1":
         )
         wrapper.chmod(0o755)
 
+    def write_create_lock_crash_wrapper(self, destination):
+        destination.mkdir()
+        wrapper = destination / "python3"
+        wrapper.write_text(
+            """#!{python}
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+payload = sys.stdin.buffer.read()
+if sys.argv[2:3] == ["create-lock"]:
+    Path(sys.argv[3]).mkdir(mode=0o700)
+    os.write(int(os.environ["LOCK_CREATED_FD"]), b"1")
+    os.kill(os.getppid(), signal.SIGKILL)
+    raise SystemExit(0)
+result = subprocess.run(
+    [os.environ["REAL_PYTHON"], *sys.argv[1:]],
+    input=payload,
+)
+raise SystemExit(result.returncode)
+""".format(
+                python=sys.executable
+            ),
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+
     def test_shell_syntax_and_help(self):
         for shell in ("bash", "/bin/sh"):
             with self.subTest(shell=shell):
@@ -532,6 +561,155 @@ if os.read(int(os.environ["LOCK_WAIT_RELEASE_FD"]), 1) != b"1":
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(self.fixture.artifact.read_bytes(), self.target().read_bytes())
         self.assertFalse(lock.exists())
+
+    def test_fresh_ownerless_operation_lock_is_not_stolen(self):
+        lock = self.operation_lock()
+        lock.mkdir(parents=True)
+        original_inode = lock.stat().st_ino
+
+        result = self.run_installer(
+            "--prefix",
+            self.prefix,
+            extra_env={"AGENT_SIDECAR_LOCK_TIMEOUT_SECONDS": "0"},
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("timed out waiting for operation lock", result.stderr)
+        self.assertEqual(original_inode, lock.stat().st_ino)
+        self.assertEqual([], list(lock.iterdir()))
+        self.assertFalse(self.target().exists())
+        self.assertFalse(self.fixture.log.exists())
+
+    def test_aged_ownerless_operation_lock_is_recovered(self):
+        lock = self.operation_lock()
+        lock.mkdir(parents=True)
+        os.utime(lock, (1, 1))
+
+        result = self.run_installer("--prefix", self.prefix)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(self.fixture.artifact.read_bytes(), self.target().read_bytes())
+        self.assertFalse(lock.exists())
+
+    def test_crash_between_lock_creation_and_owner_write_is_recovered(self):
+        python_bin = self.root / "crash-create-lock-bin"
+        self.write_create_lock_crash_wrapper(python_bin)
+        ready_read, ready_write = os.pipe()
+        process = None
+        descriptors = {ready_read, ready_write}
+        try:
+            environment = self.environment(
+                extra={
+                    "PATH": os.pathsep.join(
+                        (str(python_bin), self.environment()["PATH"])
+                    ),
+                    "REAL_PYTHON": sys.executable,
+                    "LOCK_CREATED_FD": str(ready_write),
+                }
+            )
+            process = subprocess.Popen(
+                ["/bin/sh", str(INSTALLER), "--prefix", str(self.prefix)],
+                cwd=str(REPO_ROOT),
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(ready_write,),
+            )
+            os.close(ready_write)
+            descriptors.remove(ready_write)
+            self.wait_for_pipe(
+                ready_read,
+                "installer did not reach the ownerless lock crash window",
+            )
+            process.communicate(timeout=5)
+            self.assertNotEqual(0, process.returncode)
+            lock = self.operation_lock()
+            self.assertTrue(lock.is_dir())
+            self.assertEqual([], list(lock.iterdir()))
+
+            os.utime(lock, (1, 1))
+            recovered = self.run_installer("--prefix", self.prefix)
+
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            self.assertTrue(self.target().is_file())
+            self.assertFalse(lock.exists())
+        finally:
+            for descriptor in descriptors:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=2)
+
+    def test_interrupted_recovery_artifacts_are_cleaned_safely(self):
+        self.prefix.mkdir()
+        lock = self.operation_lock()
+        gate = Path(str(lock) + ".recovery")
+        claim = Path(str(lock) + ".recovery-claim")
+        gate.write_text("999999999\n", encoding="ascii")
+        os.link(gate, claim)
+
+        workspace = Path(str(lock) + ".recovery-work.interrupted")
+        recovered_lock = workspace / "lock"
+        recovered_lock.mkdir(parents=True)
+        recovered_lock.joinpath("owner").write_text(
+            "999999998\n",
+            encoding="ascii",
+        )
+        recovered_lock.joinpath("recovery").mkdir()
+        for path in (
+            recovered_lock / "owner",
+            recovered_lock / "recovery",
+            recovered_lock,
+            workspace,
+        ):
+            os.utime(path, (1, 1))
+
+        result = self.run_installer("--prefix", self.prefix)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(self.target().is_file())
+        self.assertFalse(gate.exists())
+        self.assertFalse(claim.exists())
+        self.assertFalse(workspace.exists())
+
+    def test_concurrent_installers_recover_one_aged_ownerless_lock(self):
+        lock = self.operation_lock()
+        lock.mkdir(parents=True)
+        os.utime(lock, (1, 1))
+        processes = [
+            subprocess.Popen(
+                ["/bin/sh", str(INSTALLER), "--prefix", str(self.prefix)],
+                cwd=str(REPO_ROOT),
+                env=self.environment(),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for _ in range(2)
+        ]
+        results = []
+        try:
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=10)
+                results.append((process.returncode, stdout, stderr))
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=2)
+
+        for returncode, _, stderr in results:
+            self.assertEqual(0, returncode, stderr)
+        self.assertEqual(self.fixture.artifact.read_bytes(), self.target().read_bytes())
+        self.assertFalse(lock.exists())
+        self.assertEqual(
+            [],
+            list(self.prefix.glob(".agent-sidecar-operation.lock.recovery*")),
+        )
 
     def test_live_operation_lock_times_out_without_mutation(self):
         lock = self.operation_lock()

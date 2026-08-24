@@ -194,18 +194,10 @@ def _quoted_identifier(identifier: str) -> str:
 _FileSignature = Tuple[int, int, int, int, int]
 
 
-def _regular_signature(
-    path: Path,
+def _signature_from_stat(
+    details: os.stat_result,
     maximum: int,
-    *,
-    required: bool,
-) -> Optional[_FileSignature]:
-    try:
-        details = os.stat(str(path))
-    except FileNotFoundError:
-        if required:
-            raise
-        return None
+) -> _FileSignature:
     if not stat.S_ISREG(details.st_mode):
         raise OSError("Codex status source is not a regular file")
     size = int(details.st_size)
@@ -220,15 +212,58 @@ def _regular_signature(
     )
 
 
-def _copy_regular_file(source: Path, destination: Path, expected_size: int) -> int:
+def _regular_signature(
+    path: Path,
+    maximum: int,
+    *,
+    required: bool,
+) -> Optional[_FileSignature]:
+    try:
+        # Follow symlinks only when their current target is a regular file.
+        # The opened descriptor is checked against this signature before copy.
+        details = os.stat(str(path))
+    except FileNotFoundError:
+        if required:
+            raise
+        return None
+    return _signature_from_stat(details, maximum)
+
+
+def _copy_regular_file(
+    source: Path,
+    destination: Path,
+    expected_signature: _FileSignature,
+) -> int:
     copied = 0
-    with source.open("rb") as reader, destination.open("xb") as writer:
-        while copied < expected_size:
-            chunk = reader.read(min(_SNAPSHOT_COPY_BYTES, expected_size - copied))
-            if not chunk:
-                break
-            writer.write(chunk)
-            copied += len(chunk)
+    descriptor: Optional[int] = None
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(str(source), flags)
+        opened_signature = _signature_from_stat(
+            os.fstat(descriptor),
+            expected_signature[2],
+        )
+        if opened_signature != expected_signature:
+            raise OSError("Codex status source changed before snapshot copy")
+
+        with os.fdopen(descriptor, "rb") as reader:
+            descriptor = None
+            with destination.open("xb") as writer:
+                while copied < expected_signature[2]:
+                    chunk = reader.read(
+                        min(
+                            _SNAPSHOT_COPY_BYTES,
+                            expected_signature[2] - copied,
+                        )
+                    )
+                    if not chunk:
+                        break
+                    writer.write(chunk)
+                    copied += len(chunk)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     return copied
 
 
@@ -322,9 +357,9 @@ def _read_copied_status(path: Path, session_id: str) -> Optional[Status]:
             copied_db = Path(temporary) / "snapshot.sqlite"
             copied_wal = Path(str(copied_db) + "-wal")
             try:
-                db_bytes = _copy_regular_file(path, copied_db, before_db[2])
+                db_bytes = _copy_regular_file(path, copied_db, before_db)
                 wal_bytes = (
-                    _copy_regular_file(source_wal, copied_wal, before_wal[2])
+                    _copy_regular_file(source_wal, copied_wal, before_wal)
                     if before_wal is not None
                     else 0
                 )
@@ -376,21 +411,46 @@ def _read_copied_status(path: Path, session_id: str) -> Optional[Status]:
 
 
 def _read_immutable_status(path: Path, session_id: str) -> Optional[Status]:
-    connection: Optional[sqlite3.Connection] = None
     try:
-        # immutable=1 prevents SQLite from taking locks or consulting source
-        # sidecars. This fallback may omit WAL-only rows, but remains non-mutating.
-        connection = sqlite3.connect(
-            path.resolve().as_uri() + "?mode=ro&immutable=1",
-            uri=True,
-            timeout=0.1,
+        before = _regular_signature(
+            path,
+            _SNAPSHOT_DB_BYTES,
+            required=True,
         )
-        return _status_from_connection(connection, session_id)
-    except (OSError, sqlite3.DatabaseError):
+    except OSError:
         return None
-    finally:
-        if connection is not None:
-            connection.close()
+    if before is None:
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="agent-sidecar-codex-main-") as temporary:
+        copied_db = Path(temporary) / "snapshot.sqlite"
+        try:
+            copied_bytes = _copy_regular_file(path, copied_db, before)
+            after = _regular_signature(
+                path,
+                _SNAPSHOT_DB_BYTES,
+                required=False,
+            )
+        except OSError:
+            return None
+        if copied_bytes != before[2] or after != before:
+            return None
+
+        connection: Optional[sqlite3.Connection] = None
+        try:
+            # Open only the verified private snapshot. This main-DB fallback may
+            # omit WAL-only rows, but never asks SQLite to inspect the source.
+            connection = sqlite3.connect(
+                copied_db.as_uri() + "?mode=ro&immutable=1",
+                uri=True,
+                timeout=0.1,
+            )
+            return _status_from_connection(connection, session_id)
+        except sqlite3.DatabaseError:
+            return None
+        finally:
+            if connection is not None:
+                connection.close()
 
 
 def _latest_thread_status(path: Path, session_id: str) -> Optional[Status]:

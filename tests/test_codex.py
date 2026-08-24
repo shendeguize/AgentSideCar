@@ -1,7 +1,10 @@
 import hashlib
 import json
+import os
 import sqlite3
+import stat
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -85,6 +88,36 @@ class CodexAdapterStatusTests(unittest.TestCase):
                 ),
             }
         return state
+
+    def path_metadata(self, path):
+        details = os.lstat(path)
+        return (
+            details.st_dev,
+            details.st_ino,
+            details.st_mode,
+            details.st_size,
+            details.st_mtime_ns,
+            details.st_ctime_ns,
+        )
+
+    def infer_status_with_timeout(self, session, timeout=2.0):
+        results = []
+        errors = []
+
+        def scan():
+            try:
+                results.append(self.adapter.infer_status(session, now=self.now))
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=scan, daemon=True)
+        worker.start()
+        worker.join(timeout)
+        self.assertFalse(worker.is_alive(), "Codex status scan did not return promptly")
+        if errors:
+            raise errors[0]
+        self.assertEqual(1, len(results))
+        return results[0]
 
     def test_multi_day_tail_statuses_are_idle(self):
         for payload_type in ("task_started", "task_complete"):
@@ -262,13 +295,13 @@ class CodexAdapterStatusTests(unittest.TestCase):
         original_copy = codex._copy_regular_file
         rotated = []
 
-        def rotate_sidecars(source, destination, expected_size):
+        def rotate_sidecars(source, destination, expected_signature):
             if source == wal and not rotated:
                 rotated.append(True)
                 wal.unlink()
                 shm.unlink()
                 raise FileNotFoundError(str(wal))
-            return original_copy(source, destination, expected_size)
+            return original_copy(source, destination, expected_signature)
 
         with mock.patch.object(
             codex,
@@ -298,12 +331,12 @@ class CodexAdapterStatusTests(unittest.TestCase):
         original_copy = codex._copy_regular_file
         partial_copies = []
 
-        def copy_partially(source, destination, expected_size):
+        def copy_partially(source, destination, expected_signature):
             if source == status_db and not partial_copies:
                 partial_copies.append(True)
                 destination.write_bytes(source.read_bytes()[:-1])
-                return expected_size - 1
-            return original_copy(source, destination, expected_size)
+                return expected_signature[2] - 1
+            return original_copy(source, destination, expected_signature)
 
         with mock.patch.object(
             codex,
@@ -317,6 +350,74 @@ class CodexAdapterStatusTests(unittest.TestCase):
 
         self.assertEqual([True], partial_copies)
         self.assertEqual(before, self.source_state(status_db))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
+    def test_fifo_status_source_returns_promptly_without_sqlite_open(self):
+        status_db = self.root / "thread_history_1.sqlite"
+        os.mkfifo(status_db)
+        before = self.path_metadata(status_db)
+        transcript = self.write_rollout("fifo.jsonl", "task_complete")
+        session = self.session(
+            transcript,
+            "fifo-thread",
+            age_seconds=1,
+            status_db=status_db,
+        )
+
+        with mock.patch.object(
+            codex.sqlite3,
+            "connect",
+            wraps=sqlite3.connect,
+        ) as sqlite_open:
+            self.assertEqual(
+                Status.WAITING,
+                self.infer_status_with_timeout(session),
+            )
+
+        sqlite_open.assert_not_called()
+        self.assertTrue(stat.S_ISFIFO(os.lstat(status_db).st_mode))
+        self.assertEqual(before, self.path_metadata(status_db))
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
+    def test_status_source_racing_to_fifo_returns_promptly_untouched(self):
+        status_db = self.write_status_db()
+        transcript = self.write_rollout("fifo-race.jsonl", "task_complete")
+        session = self.session(
+            transcript,
+            "working-thread",
+            age_seconds=1,
+            status_db=status_db,
+        )
+        original_copy = codex._copy_regular_file
+        replaced = []
+        fifo_state = []
+
+        def replace_with_fifo(source, destination, expected_signature):
+            if source == status_db and not replaced:
+                source.unlink()
+                os.mkfifo(source)
+                replaced.append(True)
+                fifo_state.append(self.path_metadata(source))
+            return original_copy(source, destination, expected_signature)
+
+        with mock.patch.object(
+            codex,
+            "_copy_regular_file",
+            side_effect=replace_with_fifo,
+        ), mock.patch.object(
+            codex.sqlite3,
+            "connect",
+            wraps=sqlite3.connect,
+        ) as sqlite_open:
+            self.assertEqual(
+                Status.WAITING,
+                self.infer_status_with_timeout(session),
+            )
+
+        self.assertEqual([True], replaced)
+        sqlite_open.assert_not_called()
+        self.assertTrue(stat.S_ISFIFO(os.lstat(status_db).st_mode))
+        self.assertEqual(fifo_state[0], self.path_metadata(status_db))
 
 
 if __name__ == "__main__":
