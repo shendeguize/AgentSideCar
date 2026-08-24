@@ -356,8 +356,11 @@ class CLITests(unittest.TestCase):
                 main(["--version"])
 
         self.assertEqual(0, raised.exception.code)
-        self.assertEqual("0.4.2", sidecar.__version__)
-        self.assertEqual("agent-sidecar 0.4.2\n", stdout.getvalue())
+        self.assertRegex(sidecar.__version__, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(
+            "agent-sidecar {}\n".format(sidecar.__version__),
+            stdout.getvalue(),
+        )
 
     def test_help_documents_version_and_repeatable_agent_filter(self):
         parser = build_parser()

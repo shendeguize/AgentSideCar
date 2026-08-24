@@ -14,6 +14,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
+import sidecar
 from sidecar import remote, remote_inventory, remote_transport, remote_types
 from sidecar.json_limits import (
     JSONLimitError,
@@ -772,7 +773,10 @@ class ZipappTests(unittest.TestCase):
             )
 
             self.assertEqual(0, version.returncode, version.stderr)
-            self.assertIn("0.4.2", version.stdout)
+            self.assertEqual(
+                "agent-sidecar {}\n".format(sidecar.__version__),
+                version.stdout,
+            )
             self.assertEqual(0, listing.returncode, listing.stderr)
             self.assertIsInstance(json.loads(listing.stdout), list)
             self.assertEqual(

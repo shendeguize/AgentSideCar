@@ -13,6 +13,7 @@ from email.parser import Parser
 from pathlib import Path
 from unittest import mock
 
+from sidecar import __version__
 from sidecar.release import (
     MAX_RELEASE_BYTES,
     RELEASE_SHEBANG,
@@ -91,7 +92,10 @@ class ReleaseZipappTests(unittest.TestCase):
             )
 
             self.assertEqual(0, version.returncode, version.stderr)
-            self.assertEqual("agent-sidecar 0.4.2\n", version.stdout)
+            self.assertEqual(
+                "agent-sidecar {}\n".format(__version__),
+                version.stdout,
+            )
             self.assertEqual(0, list_help.returncode, list_help.stderr)
             self.assertIn("usage: agent-sidecar list", list_help.stdout)
 
@@ -107,7 +111,10 @@ class ReleaseZipappTests(unittest.TestCase):
                     timeout=10,
                 )
                 self.assertEqual(0, direct.returncode, direct.stderr)
-                self.assertEqual("agent-sidecar 0.4.2\n", direct.stdout)
+                self.assertEqual(
+                    "agent-sidecar {}\n".format(__version__),
+                    direct.stdout,
+                )
 
     def test_standalone_release_builds_identical_runnable_nested_release(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -149,7 +156,10 @@ class ReleaseZipappTests(unittest.TestCase):
             self.assertEqual(0, package.returncode, package.stderr)
             self.assertEqual(outer.read_bytes(), nested.read_bytes())
             self.assertEqual(0, version.returncode, version.stderr)
-            self.assertEqual("agent-sidecar 0.4.2\n", version.stdout)
+            self.assertEqual(
+                "agent-sidecar {}\n".format(__version__),
+                version.stdout,
+            )
 
     @unittest.skipUnless(
         sys.platform == "darwin",
@@ -508,7 +518,9 @@ class WheelSmokeTests(unittest.TestCase):
                 timeout=60,
             )
             self.assertEqual(0, built.returncode, built.stderr)
-            wheels = list(wheelhouse.glob("agent_sidecar-0.4.2-*.whl"))
+            wheels = list(
+                wheelhouse.glob("agent_sidecar-{}-*.whl".format(__version__))
+            )
             self.assertEqual(1, len(wheels), built.stdout)
             wheel_path = wheels[0]
 
@@ -524,7 +536,10 @@ class WheelSmokeTests(unittest.TestCase):
                     any(name.startswith("tests/") for name in archive.namelist())
                 )
             self.assertIn("\nName: agent-sidecar\n", "\n" + metadata)
-            self.assertIn("\nVersion: 0.4.2\n", "\n" + metadata)
+            self.assertIn(
+                "\nVersion: {}\n".format(__version__),
+                "\n" + metadata,
+            )
             self.assertIn("\nRequires-Python: >=3.9\n", "\n" + metadata)
             requirements = Parser().parsestr(metadata).get_all(
                 "Requires-Dist",
@@ -585,4 +600,7 @@ class WheelSmokeTests(unittest.TestCase):
                 timeout=10,
             )
             self.assertEqual(0, version.returncode, version.stderr)
-            self.assertEqual("agent-sidecar 0.4.2\n", version.stdout)
+            self.assertEqual(
+                "agent-sidecar {}\n".format(__version__),
+                version.stdout,
+            )

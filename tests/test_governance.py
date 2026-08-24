@@ -361,9 +361,26 @@ class GovernanceContractTests(unittest.TestCase):
             'quality_gate="${RUNNER_TEMP}/portable-quality-gate.py"',
             document,
         )
+        self.assertIn('trap \'rm -f "${quality_gate}"\' EXIT', document)
+        self.assertIn(
+            'repository_root = Path(os.environ["GITHUB_WORKSPACE"]).resolve()',
+            document,
+        )
+        self.assertIn('sys.path.insert(0, str(repository_root))', document)
+        self.assertIn(
+            'discover(\n                  str(repository_root / "tests")\n',
+            document,
+        )
+        self.assertIn(
+            'PYTHONPATH="${GITHUB_WORKSPACE}${PYTHONPATH:+:${PYTHONPATH}}"',
+            document,
+        )
         self.assertIn('if __name__ == "__main__":', document)
         self.assertIn('python "${quality_gate}"', document)
-        self.assertNotIn("python - <<'PY'\n          import unittest", document)
+        self.assertNotIn(
+            "python - <<'PY'\n          import unittest",
+            document,
+        )
 
     def test_documented_canonical_commands_are_backed_by_cli_help(self):
         for path in DOCUMENTATION:
