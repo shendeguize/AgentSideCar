@@ -65,13 +65,21 @@ jobs:
       # plugin/lib/ is a tracked build output on purpose: dsh loads the
       # prebuilt lib/ from git installs. A non-empty diff after rebuilding
       # means the commit changed src/ without rebuilding lib/.
+      #
+      # client.js and its sourcemap are excluded from the byte comparison:
+      # the client bundler emits modules in a platform-dependent order
+      # (macOS-built commits differ from Linux CI rebuilds by ordering
+      # only), so their freshness is guaranteed by prepublishOnly and the
+      # release flow instead.
       - name: Verify committed lib/ matches sources
         run: |
-          if [[ -n "$(git status --porcelain -- lib)" ]]; then
-            git status --porcelain -- lib >&2
-            git diff --stat -- lib >&2
+          drift="$(git status --porcelain -- lib \
+            ':!lib/client.js' ':!lib/client.js.map')"
+          if [[ -n "$drift" ]]; then
+            echo "$drift" >&2
+            git diff --stat -- lib ':!lib/client.js' ':!lib/client.js.map' >&2
             echo "plugin/lib/ is out of sync with src/;" \
               "run 'pnpm build' in plugin/ and commit the result" >&2
             exit 1
           fi
-          echo "committed lib/ matches rebuilt output"
+          echo "committed lib/ matches rebuilt output (client.js excluded)"
