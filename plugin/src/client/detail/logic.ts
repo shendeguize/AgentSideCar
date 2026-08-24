@@ -109,6 +109,30 @@ export function formatRelativeTime(thenMs: number, nowMs: number): string {
   return formatTemplate(DETAIL_STRINGS.time.daysAgo, { n: Math.floor(delta / DAY_MS) })
 }
 
+function pad2(n: number): string {
+  return n < 10 ? `0${n}` : String(n)
+}
+
+/**
+ * Absolute short timestamp for the time column (UX-13): the same local
+ * calendar day renders「HH:mm」, anything older (or a different day)
+ * renders「MM-DD HH:mm」— so a column of same-age rows stays tellable
+ * apart, unlike the coarse relative buckets. The format rule is
+ * copy-implemented to match the board column (no cross-surface import);
+ * the full ISO timestamp stays in the hover title.
+ */
+export function formatEventTime(thenMs: number, nowMs: number): string {
+  if (!Number.isFinite(thenMs) || !Number.isFinite(nowMs)) return ''
+  const then = new Date(thenMs)
+  const now = new Date(nowMs)
+  const hhmm = `${pad2(then.getHours())}:${pad2(then.getMinutes())}`
+  const sameDay =
+    then.getFullYear() === now.getFullYear() &&
+    then.getMonth() === now.getMonth() &&
+    then.getDate() === now.getDate()
+  return sameDay ? hhmm : `${pad2(then.getMonth() + 1)}-${pad2(then.getDate())} ${hhmm}`
+}
+
 // ---------------------------------------------------------------------------
 // Event-kind classification (icon + label).
 // ---------------------------------------------------------------------------
@@ -137,26 +161,43 @@ const KIND_GLYPHS: Record<TimelineKindToken, string> = {
   other: '•',
 }
 
+/** One path segment → family token, or null when it names no family. */
+function segmentToken(segment: string): TimelineKindToken | null {
+  if (segment === 'user') return 'user'
+  if (segment === 'assistant') return 'assistant'
+  if (segment === 'thinking' || segment === 'reasoning') return 'thinking'
+  if (segment === 'tool_call' || segment === 'tool-call' || segment === 'toolcall') {
+    return 'toolCall'
+  }
+  if (segment === 'tool_result' || segment === 'tool-result' || segment === 'toolresult') {
+    return 'toolResult'
+  }
+  if (segment.startsWith('turn_') || segment === 'turn') return 'turn'
+  if (segment.startsWith('step_') || segment === 'step') return 'step'
+  if (segment === 'error') return 'error'
+  return null
+}
+
 /**
- * Map a raw event kind onto the glyph/label vocabulary. Covers both the
- * sidecar normalized kinds — user/assistant/thinking/tool_call/tool_result
- * plus the turn_ and step_ prefixes (sidecar/model.py) — and dsh native
- * slash-path types (`message/user` style); everything else is honestly
- * 'other'.
+ * Map a raw event kind onto the glyph/label vocabulary. Covers the sidecar
+ * normalized kinds — user/assistant/thinking/tool_call/tool_result plus
+ * the turn_ and step_ prefixes (sidecar/model.py) — and dsh native
+ * slash-path types in BOTH orders: `message/user` style (family last) and
+ * the observed `user/message` / `assistant/chunk` / `turn/start` style
+ * (family first; live-data fact, UX-03 — without it the conversation
+ * filter would misfile real dsh user messages as protocol noise). The
+ * last segment stays authoritative; the first is only a fallback.
+ * Everything else is honestly 'other'.
  */
 export function classifyKind(kind: string): TimelineKindToken {
   const k = kind.trim().toLowerCase()
-  const last = k.includes('/') ? (k.split('/').pop() ?? k) : k
-  if (last === 'user') return 'user'
-  if (last === 'assistant') return 'assistant'
-  if (last === 'thinking' || last === 'reasoning') return 'thinking'
-  if (last === 'tool_call' || last === 'tool-call' || last === 'toolcall') return 'toolCall'
-  if (last === 'tool_result' || last === 'tool-result' || last === 'toolresult') {
-    return 'toolResult'
+  const segments = k.split('/')
+  const last = segmentToken(segments[segments.length - 1] ?? k)
+  if (last !== null) return last
+  if (segments.length > 1) {
+    const first = segmentToken(segments[0] ?? '')
+    if (first !== null) return first
   }
-  if (last.startsWith('turn_') || last === 'turn') return 'turn'
-  if (last.startsWith('step_') || last === 'step') return 'step'
-  if (last === 'error') return 'error'
   return 'other'
 }
 
@@ -500,24 +541,48 @@ export function applyListenPage(vm: TimelineVM, page: TimelinePageWire): Timelin
 // Gap detection + row derivation.
 // ---------------------------------------------------------------------------
 
-/** One rendered timeline row: a real event or an honesty gap marker. */
+/** One rendered event row (extracted so aggregation can carry members). */
+export interface TimelineEventRowVM {
+  type: 'event'
+  key: string
+  entry: TimelineEntryVM
+  /** Absolute short time label (see {@link formatEventTime}). */
+  timeLabel: string
+  /** Hover title: ISO timestamp + raw kind + origin (+ seq) + relative age. */
+  hoverTitle: string
+  /** True when this entry arrived in the latest listen merge. */
+  isNew: boolean
+}
+
+/**
+ * One rendered timeline row: a real event, an honesty gap marker, or an
+ * aggregated run of adjacent empty streaming chunks (UX-03 — the members
+ * are carried verbatim so the view can expand the run without data loss).
+ */
 export type TimelineRowVM =
-  | {
-      type: 'event'
-      key: string
-      entry: TimelineEntryVM
-      relativeTime: string
-      /** Hover title: ISO timestamp + raw kind + origin (+ seq). */
-      hoverTitle: string
-      /** True when this entry arrived in the latest listen merge. */
-      isNew: boolean
-    }
+  | TimelineEventRowVM
   | {
       type: 'gap'
       key: string
       /** Lower bound of dropped events implied by the seq break. */
       missingCount: number
       label: string
+    }
+  | {
+      type: 'chunks'
+      key: string
+      /** Raw wire kind shared by every member of the run. */
+      kindRaw: string
+      count: number
+      /** 「N 个流式分块」 */
+      label: string
+      /** Time label of the newest member. */
+      timeLabel: string
+      hoverTitle: string
+      /** True when any member arrived in the latest listen merge. */
+      isNew: boolean
+      /** The collapsed rows, verbatim, for lossless expansion. */
+      members: TimelineEventRowVM[]
     }
 
 function isoOrEmpty(ts: number): string {
@@ -529,11 +594,12 @@ function isoOrEmpty(ts: number): string {
   }
 }
 
-function eventHoverTitle(entry: TimelineEntryVM): string {
+function eventHoverTitle(entry: TimelineEntryVM, nowMs: number): string {
   const parts = [isoOrEmpty(entry.ts), entry.kindRaw, entry.origin]
   if (entry.seq !== null) {
     parts.push(formatTemplate(DETAIL_STRINGS.timeline.seq, { n: entry.seq }))
   }
+  parts.push(formatRelativeTime(entry.ts, nowMs))
   return parts.filter((p) => p !== '').join(' · ')
 }
 
@@ -572,12 +638,137 @@ export function buildTimelineRows(vm: TimelineVM, nowMs: number): TimelineRowVM[
       type: 'event',
       key: entry.key,
       entry,
-      relativeTime: formatRelativeTime(entry.ts, nowMs),
-      hoverTitle: eventHoverTitle(entry),
+      timeLabel: formatEventTime(entry.ts, nowMs),
+      hoverTitle: eventHoverTitle(entry, nowMs),
       isNew: newKeys.has(entry.key),
     })
   }
   return rows
+}
+
+// ---------------------------------------------------------------------------
+// Kind filter + chunk-run aggregation (UX-03: signal over protocol noise).
+// ---------------------------------------------------------------------------
+
+/** Kind-filter modes; pure UI state owned by the component. */
+export type TimelineFilterMode = 'conversation' | 'all'
+
+/** The kinds that count as conversation (review UX-03 vocabulary). */
+export const CONVERSATION_KINDS: ReadonlySet<TimelineKindToken> = new Set([
+  'user',
+  'assistant',
+  'error',
+])
+
+export interface FilteredRows {
+  rows: TimelineRowVM[]
+  /** Exactly how many event rows the filter removed (honest count). */
+  hiddenCount: number
+}
+
+/**
+ * Kind filter over derived rows: 'conversation' keeps user/assistant/error
+ * events only; 'all' passes everything through. Gap markers ALWAYS stay —
+ * honesty rows are not noise and hiding them could fake a clean timeline.
+ * Runs BEFORE {@link aggregateChunkRows} (gaps are detected on the full
+ * entry list upstream, so filtering can never fabricate a gap).
+ */
+export function filterTimelineRows(
+  rows: readonly TimelineRowVM[],
+  mode: TimelineFilterMode,
+): FilteredRows {
+  if (mode === 'all') return { rows: [...rows], hiddenCount: 0 }
+  const out: TimelineRowVM[] = []
+  let hiddenCount = 0
+  for (const row of rows) {
+    if (row.type === 'event' && !CONVERSATION_KINDS.has(row.entry.kind)) {
+      hiddenCount += 1
+      continue
+    }
+    out.push(row)
+  }
+  return { rows: out, hiddenCount }
+}
+
+/**
+ * True for a protocol streaming-chunk entry: an empty one-line summary and
+ * a chunk-flavored kind (`assistant/chunk` style, matched on the last
+ * slash segment). These are the rows that drowned real conversation in
+ * the walkthrough (18 of 38 rows, review UX-03).
+ */
+export function isStreamChunkEntry(entry: TimelineEntryVM): boolean {
+  if (entry.summary !== '') return false
+  const k = entry.kindRaw.trim().toLowerCase()
+  const last = k.includes('/') ? (k.split('/').pop() ?? k) : k
+  return last === 'chunk' || last.endsWith('_chunk') || last.endsWith('-chunk')
+}
+
+/**
+ * Collapse each maximal run of ≥2 adjacent same-kind streaming-chunk rows
+ * into one 'chunks' row carrying the members verbatim (lossless — the view
+ * offers 展开). Gap markers and any non-chunk row break a run, so the
+ * aggregation can never paper over a seq discontinuity. Single chunks stay
+ * as plain rows (a 1-run header would add noise, not remove it).
+ */
+export function aggregateChunkRows(rows: readonly TimelineRowVM[]): TimelineRowVM[] {
+  const out: TimelineRowVM[] = []
+  let run: TimelineEventRowVM[] = []
+
+  const flush = (): void => {
+    if (run.length >= 2) {
+      const first = run[0]!
+      const last = run[run.length - 1]!
+      out.push({
+        type: 'chunks',
+        key: `chunks:${first.key}`,
+        kindRaw: first.entry.kindRaw,
+        count: run.length,
+        label: formatTemplate(DETAIL_STRINGS.timeline.chunkRun, { n: run.length }),
+        timeLabel: last.timeLabel,
+        hoverTitle: `${first.entry.kindRaw} ×${run.length}`,
+        isNew: run.some((r) => r.isNew),
+        members: run,
+      })
+    } else {
+      out.push(...run)
+    }
+    run = []
+  }
+
+  for (const row of rows) {
+    const chunk = row.type === 'event' && isStreamChunkEntry(row.entry)
+    if (chunk) {
+      const sameKind = run.length === 0 || run[run.length - 1]!.entry.kindRaw === row.entry.kindRaw
+      if (!sameKind) flush()
+      run.push(row as TimelineEventRowVM)
+      continue
+    }
+    flush()
+    out.push(row)
+  }
+  flush()
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// Viewport landing rule (UX-04: open on the newest events).
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the view should pin its scroll position to the newest rows:
+ * on the first non-empty render (initial landing — understanding the
+ * current context needs the latest events, review UX-04), and on every
+ * append while listen mode is on. Loading older history must never yank
+ * the viewport (`positioned` stays true after the first landing).
+ */
+export function shouldStickToLatest(input: {
+  entryCount: number
+  /** True once the initial landing already happened. */
+  positioned: boolean
+  listening: boolean
+}): boolean {
+  if (input.entryCount === 0) return false
+  return !input.positioned || input.listening
 }
 
 // ---------------------------------------------------------------------------

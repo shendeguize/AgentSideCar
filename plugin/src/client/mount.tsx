@@ -186,9 +186,9 @@ export function createBoardTab(
               onFiltersChange={(next) => {
                 controller.setFilters(next)
               }}
-              onRefresh={() => {
-                void controller.refresh()
-              }}
+              // Hand the promise through so the board can render the
+              // in-flight state and a failure notice (UX-07).
+              onRefresh={() => controller.refresh()}
               onSelectSession={openDetail}
             />
           )}

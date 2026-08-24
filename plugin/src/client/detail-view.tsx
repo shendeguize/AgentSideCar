@@ -34,7 +34,7 @@ import { SearchStore } from './search-glue.ts'
 import { AnalysisStore } from './analysis-glue.ts'
 import { ProjectsStore } from './project-glue.ts'
 import type { SidecarController } from './controller.ts'
-import type { InjectMode } from './inject/logic.ts'
+import { isDeliveredResult, type InjectMode } from './inject/logic.ts'
 import type { InjectActions } from './inject-glue.ts'
 import { t } from './locales/index.ts'
 import css from './detail-view.module.css'
@@ -97,6 +97,7 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
   const [analysisStore] = useState(() => integration.createAnalysisStore())
   const [injectOpen, setInjectOpen] = useState(false)
   const [analysisOpen, setAnalysisOpen] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(false)
 
   useEffect(() => {
     void detailStore.open()
@@ -130,6 +131,30 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
   const closeInject = (): void => { setInjectOpen(false) }
   const title = detail.header.title.trim()
 
+  // UX-05 observation loop, part 1: a delivered execute refetches the
+  // newest timeline window at once, so closing the panel never lands on a
+  // stale pre-injection timeline. Wraps (not replaces) the integration
+  // callback — the two-phase flow and the owner's onDelivered hook (board
+  // snapshot refresh) stay untouched.
+  const injectActions: InjectActions | undefined =
+    injectIntegration === undefined
+      ? undefined
+      : {
+          onPrepare: injectIntegration.actions.onPrepare,
+          onExecute: async (req) => {
+            const result = await injectIntegration.actions.onExecute(req)
+            if (isDeliveredResult(result)) void detailStore.refreshNewest()
+            return result
+          },
+        }
+
+  // UX-05 part 2: the delivered result page offers「开启监听观察反应」—
+  // flip listen mode on (if off) and hand the view back to the timeline.
+  const observeReaction = (): void => {
+    if (!detailStore.getState().listening) detailStore.toggleListen()
+    closeInject()
+  }
+
   return (
     <div className={css['detailRoot']} data-testid="agent-sidecar-detail-view">
       <div className={css['actionsRow']}>
@@ -155,6 +180,50 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
         </button>
       </div>
 
+      {/* Collapsible dsh deep-query tools ABOVE the timeline (UX-09):
+          discoverable without scrolling past a long event list. */}
+      <div className={css['toolsSection']} data-testid="agent-sidecar-detail-tools">
+        <button
+          type="button"
+          className={css['toolsToggle']}
+          aria-expanded={toolsOpen}
+          onClick={() => { setToolsOpen((open) => !open) }}
+        >
+          <span className={css['toolsToggleGlyph']} aria-hidden>
+            {toolsOpen ? '▾' : '▸'}
+          </span>
+          {t('detail.tools.title')}
+          <span className={css['toolsToggleGlyph']}>
+            {toolsOpen ? t('detail.tools.hide') : t('detail.tools.show')}
+          </span>
+        </button>
+        {toolsOpen && (
+          <>
+            <LineageTree
+              trace={detail.lineage.trace}
+              available={detail.lineage.available}
+              reason={detail.lineage.reason}
+              detail={detail.lineage.detail}
+              currentSessionId={sessionId}
+              onSelectSession={props.onSelectSession}
+              loading={detail.lineage.loading}
+              error={detail.lineage.error}
+            />
+            <SearchPanel
+              query={search.query}
+              project={search.project}
+              mode={search.mode}
+              items={search.items}
+              loading={search.loading}
+              error={search.error}
+              onQueryChange={(query) => { searchStore.setQuery(query) }}
+              onSubmit={() => { void searchStore.submit() }}
+              onSelectSession={props.onSelectSession}
+            />
+          </>
+        )}
+      </div>
+
       <SessionDetail
         sessionId={sessionId}
         header={detail.header}
@@ -163,8 +232,10 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
         error={detail.error}
         hasMore={detail.hasMore}
         listening={detail.listening}
+        refreshing={detail.refreshing}
         onLoadMore={() => { void detailStore.loadMore() }}
         onToggleListen={() => { detailStore.toggleListen() }}
+        onRefresh={() => { void detailStore.refreshNewest() }}
         onClose={props.onClose}
       />
 
@@ -181,31 +252,7 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
         />
       )}
 
-      <div className={css['toolsSection']} data-testid="agent-sidecar-detail-tools">
-        <LineageTree
-          trace={detail.lineage.trace}
-          available={detail.lineage.available}
-          reason={detail.lineage.reason}
-          detail={detail.lineage.detail}
-          currentSessionId={sessionId}
-          onSelectSession={props.onSelectSession}
-          loading={detail.lineage.loading}
-          error={detail.lineage.error}
-        />
-        <SearchPanel
-          query={search.query}
-          project={search.project}
-          mode={search.mode}
-          items={search.items}
-          loading={search.loading}
-          error={search.error}
-          onQueryChange={(query) => { searchStore.setQuery(query) }}
-          onSubmit={() => { void searchStore.submit() }}
-          onSelectSession={props.onSelectSession}
-        />
-      </div>
-
-      {injectIntegration !== undefined && injectOpen && (
+      {injectIntegration !== undefined && injectActions !== undefined && injectOpen && (
         <div className={overlay['backdrop']} role="presentation" onClick={closeInject}>
           <div
             className={overlay['dialog']}
@@ -221,9 +268,10 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
                 ...(title !== '' ? { title } : {}),
               }}
               defaultMode={injectIntegration.getDefaultMode()}
-              onPrepare={injectIntegration.actions.onPrepare}
-              onExecute={injectIntegration.actions.onExecute}
+              onPrepare={injectActions.onPrepare}
+              onExecute={injectActions.onExecute}
               onClose={closeInject}
+              onObserve={observeReaction}
             />
           </div>
         </div>

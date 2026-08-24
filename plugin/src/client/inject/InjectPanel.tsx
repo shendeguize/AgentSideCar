@@ -30,9 +30,11 @@ import css from './inject.module.css'
 import {
   byteUsage,
   classifyExecuteResponse,
+  classifyPanelKey,
   classifyPrepareResponse,
   deriveEditorGate,
   errorCopy,
+  isDeliveredResult,
   initialPanelState,
   messageInvalidCopy,
   MODE_COPY,
@@ -82,6 +84,12 @@ export interface InjectPanelProps {
   onExecute(req: PanelExecuteRequest): Promise<InjectResultView | ApiErrorLike>
   /** Close/dismiss the panel (the hosting modal owns the lifecycle). */
   onClose?(): void
+  /**
+   * UX-05 observation loop: when given, the delivered result page offers a
+   * 「开启监听观察反应」 button (the host typically enables listen mode on
+   * the detail timeline and closes the panel).
+   */
+  onObserve?(): void
   /** Clock injection for the token countdown; defaults to Date.now. */
   nowMs?: () => number
   /** Locale seat override; defaults to the module-local table. */
@@ -240,6 +248,32 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
     dispatch(event)
   }
 
+  // Keyboard affordances (UX-10): Esc closes in every zone; Cmd/Ctrl+Enter
+  // triggers PREPARE only (classifyPanelKey refuses everything else, so no
+  // keyboard path can shortcut the explicit confirm click).
+  const handleKeyDown = (event: {
+    key: string
+    metaKey: boolean
+    ctrlKey: boolean
+    stopPropagation(): void
+    preventDefault(): void
+  }): void => {
+    const intent = classifyPanelKey({
+      key: event.key,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      phase: state.phase,
+      canPrepare: gate.canPrepare,
+    })
+    if (intent === 'close' && props.onClose !== undefined) {
+      event.stopPropagation()
+      props.onClose()
+    } else if (intent === 'prepare') {
+      event.preventDefault()
+      void handlePrepare()
+    }
+  }
+
   const closeButton = props.onClose !== undefined
     ? (
       <button type="button" className={css['btn']} onClick={props.onClose}>
@@ -251,7 +285,7 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
   // ── whole-panel gate: injection capability off ─────────────────────────
   if (!props.capability.inject) {
     return (
-      <section className={css['panel']} aria-label={t('inject.title')}>
+      <section className={css['panel']} aria-label={t('inject.title')} onKeyDown={handleKeyDown}>
         <header className={css['header']}>
           <h3 className={css['title']}>{t('inject.title')}</h3>
         </header>
@@ -275,7 +309,7 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
         ? css['resultFail']
         : css['resultUnknown']
     return (
-      <section className={css['panel']} aria-label={t('inject.title')}>
+      <section className={css['panel']} aria-label={t('inject.title')} onKeyDown={handleKeyDown}>
         <header className={css['header']}>
           <h3 className={css['title']}>{t('inject.title')}</h3>
         </header>
@@ -293,6 +327,18 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
             : null}
           <div className={css['footer']}>
             {closeButton}
+            {isDeliveredResult(result) && props.onObserve !== undefined
+              ? (
+                <button
+                  type="button"
+                  className={css['btnPrimary']}
+                  onClick={props.onObserve}
+                  data-testid="agent-sidecar-inject-observe"
+                >
+                  {t('inject.observeListen')}
+                </button>
+              )
+              : null}
             {actions.canReprepare
               ? (
                 <button
@@ -328,7 +374,11 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
       ? tokenCountdown(state.expiresAt, clock)
       : null
     return (
-      <section className={css['panel']} aria-label={t('inject.confirmTitle')}>
+      <section
+        className={css['panel']}
+        aria-label={t('inject.confirmTitle')}
+        onKeyDown={handleKeyDown}
+      >
         <header className={css['header']}>
           <h3 className={css['title']}>{t('inject.confirmTitle')}</h3>
         </header>
@@ -373,7 +423,7 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
   const showInvalid = !validation.ok && validation.code !== 'empty'
 
   return (
-    <section className={css['panel']} aria-label={t('inject.title')}>
+    <section className={css['panel']} aria-label={t('inject.title')} onKeyDown={handleKeyDown}>
       <header className={css['header']}>
         <h3 className={css['title']}>{t('inject.title')}</h3>
       </header>
@@ -419,6 +469,9 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
             placeholder={t('inject.messagePlaceholder')}
             disabled={!canEdit}
             rows={5}
+            // eslint-disable-next-line jsx-a11y/no-autofocus -- the panel is
+            // a modal whose single task starts in this field (UX-10).
+            autoFocus
             onChange={(event) => { setDraft(event.target.value) }}
           />
           <div className={css['byteRow']}>

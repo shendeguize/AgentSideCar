@@ -317,6 +317,81 @@ describe('DetailStore listen mode', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Manual newest-window refresh (UX-07 button + UX-05 delivered loop).
+// ---------------------------------------------------------------------------
+
+describe('DetailStore.refreshNewest', () => {
+  it('pulls the newest window with in-flight feedback and highlights appends', async () => {
+    const gate = deferred<TimelinePageWire>()
+    const store = new DetailStore('s1', {
+      hint: HINT,
+      listenLimit: 50,
+      fetchDetailFn: () => Promise.resolve(detailWire()),
+      fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
+      fetchPageFn: (_id, opts) => {
+        expect(opts?.cursor).toBeUndefined()
+        expect(opts?.limit).toBe(50)
+        return gate.promise
+      },
+    })
+    await store.open()
+    await settle()
+    const done = store.refreshNewest()
+    expect(store.getState().refreshing).toBe(true)
+    gate.resolve(page([{ seq: 4, ts: 4_000, kind: 'assistant' }], 'IGNORED'))
+    await done
+    const state = store.getState()
+    expect(state.refreshing).toBe(false)
+    expect(state.timeline.entries.map((e) => e.seq)).toEqual([2, 3, 4])
+    // The appended entry gets the listen-merge highlight…
+    expect(state.timeline.newKeys).toHaveLength(1)
+    // …and the history cursor never moves.
+    expect(state.timeline.nextCursor).toBe('CUR1')
+  })
+
+  it('surfaces the failure reason and keeps shown data', async () => {
+    const store = new DetailStore('s1', {
+      hint: HINT,
+      fetchDetailFn: () => Promise.resolve(detailWire()),
+      fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
+      fetchPageFn: () => Promise.reject(new ApiError('timeout', 'request_timeout')),
+    })
+    await store.open()
+    await settle()
+    await store.refreshNewest()
+    const state = store.getState()
+    expect(state.refreshing).toBe(false)
+    expect(state.error).toBe('request_timeout')
+    expect(state.timeline.entries).toHaveLength(2)
+  })
+
+  it('coalesces concurrent calls and no-ops before ready', async () => {
+    const gate = deferred<TimelinePageWire>()
+    let calls = 0
+    const store = new DetailStore('s1', {
+      hint: HINT,
+      fetchDetailFn: () => Promise.resolve(detailWire()),
+      fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
+      fetchPageFn: () => {
+        calls += 1
+        return gate.promise
+      },
+    })
+    await store.refreshNewest() // before open(): dropped
+    expect(calls).toBe(0)
+    await store.open()
+    await settle()
+    const first = store.refreshNewest()
+    void store.refreshNewest() // while in flight: dropped, not queued
+    expect(calls).toBe(1)
+    gate.resolve(page([], null))
+    await first
+    expect(calls).toBe(1)
+    expect(store.getState().refreshing).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // dispose() + pure helpers.
 // ---------------------------------------------------------------------------
 

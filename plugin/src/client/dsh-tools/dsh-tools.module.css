@@ -169,10 +169,12 @@
   outline-offset: 1px;
 }
 
-/* Current-session highlight (the row the user is inspecting). */
+/* Current-session highlight (the row the user is inspecting). Brand tint
+ * rides the real brand-primary token — brand-secondary/tertiary do not
+ * exist in the dsh token table (UX-15). */
 .node[data-current='true'] {
   border-color: var(--dsw-alias-brand-primary, #4d6bfe);
-  background: var(--dsw-alias-brand-tertiary, rgba(77, 107, 254, 0.08));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4d6bfe) 8%, transparent);
   cursor: default;
 }
 
@@ -333,7 +335,7 @@
 
 .matchTag[data-kind='full-text'] {
   color: var(--dsw-alias-brand-primary, #4d6bfe);
-  border-color: var(--dsw-alias-brand-secondary, rgba(77, 107, 254, 0.32));
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #4d6bfe) 32%, transparent);
   background: transparent;
 }
 
@@ -368,7 +370,7 @@
 
 .snippetMark {
   color: var(--dsw-alias-brand-primary, #4d6bfe);
-  background: var(--dsw-alias-brand-tertiary, rgba(77, 107, 254, 0.12));
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4d6bfe) 12%, transparent);
   border-radius: 2px;
   font-weight: 600;
 }

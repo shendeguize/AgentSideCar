@@ -243,6 +243,25 @@ describe('readStoredFilters', () => {
   it('answers null without a storage', () => {
     expect(readStoredFilters(null)).toBeNull()
   })
+
+  it('carries a legal statusFilter and drops an unrecognized one (UX-01)', () => {
+    const storage = new FakeStorage()
+    storage.setItem(
+      FILTERS_STORAGE_KEY,
+      JSON.stringify({ timeWindowHours: 6, showDead: false, statusFilter: 'waiting' }),
+    )
+    expect(readStoredFilters(storage)).toEqual({
+      timeWindowHours: 6,
+      showDead: false,
+      statusFilter: 'waiting',
+    })
+    storage.setItem(
+      FILTERS_STORAGE_KEY,
+      JSON.stringify({ timeWindowHours: 6, showDead: false, statusFilter: 'dead' }),
+    )
+    // The record survives; only the illegal statusFilter token is dropped.
+    expect(readStoredFilters(storage)).toEqual({ timeWindowHours: 6, showDead: false })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -323,7 +342,7 @@ describe('SidecarController', () => {
     expect(controller.getFilters()).toEqual({ timeWindowHours: 6, showDead: false })
   })
 
-  it('refresh() pulls one snapshot through the injected fetch', async () => {
+  it('refresh() pulls one snapshot through the injected fetch and resolves true', async () => {
     const stream = new FakeStream()
     const controller = new SidecarController({
       stream,
@@ -331,9 +350,32 @@ describe('SidecarController', () => {
       fetchStateFn: () => Promise.resolve(snapshotFixture()),
     })
     controller.start()
-    await controller.refresh()
+    await expect(controller.refresh()).resolves.toBe(true)
     expect(controller.getState().daemonState).toBe('adopted')
     expect(controller.getState().hasSnapshot).toBe(true)
+  })
+
+  it('refresh() resolves false (never rejects) when the pull fails (UX-07)', async () => {
+    const stream = new FakeStream()
+    const controller = new SidecarController({
+      stream,
+      storage: null,
+      fetchStateFn: () => Promise.reject(new Error('boom')),
+    })
+    controller.start()
+    await expect(controller.refresh()).resolves.toBe(false)
+  })
+
+  it('persists the statusFilter through setFilters (UX-01)', () => {
+    const storage = new FakeStorage()
+    const { controller } = build(storage)
+    controller.setFilters({ timeWindowHours: 12, showDead: false, statusFilter: 'working' })
+    expect(JSON.parse(storage.map.get(FILTERS_STORAGE_KEY) ?? '')).toEqual({
+      timeWindowHours: 12,
+      showDead: false,
+      statusFilter: 'working',
+    })
+    expect(controller.getFilters().statusFilter).toBe('working')
   })
 
   it('start() is idempotent and pollNow()/stop() forward to the stream', () => {

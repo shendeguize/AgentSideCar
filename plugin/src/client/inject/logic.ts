@@ -419,6 +419,33 @@ export function deriveEditorGate(input: {
 }
 
 // ---------------------------------------------------------------------------
+// Keyboard affordances (UX-10).
+// ---------------------------------------------------------------------------
+
+export type PanelKeyIntent = 'close' | 'prepare' | null
+
+/**
+ * Map a keydown to a panel intent: Escape closes in every phase;
+ * Cmd/Ctrl+Enter submits the PREPARE step only (editor phase with a valid
+ * message). The confirm phase deliberately binds nothing — executing the
+ * injection stays an explicit click (two-phase discipline, §5.3), so no
+ * keyboard path can shortcut the confirmation.
+ */
+export function classifyPanelKey(input: {
+  key: string
+  metaKey: boolean
+  ctrlKey: boolean
+  phase: InjectPhase
+  canPrepare: boolean
+}): PanelKeyIntent {
+  if (input.key === 'Escape') return 'close'
+  if (input.key === 'Enter' && (input.metaKey || input.ctrlKey)) {
+    return input.phase === 'idle' && input.canPrepare ? 'prepare' : null
+  }
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // Result actions (S6: unknown is terminal).
 // ---------------------------------------------------------------------------
 
@@ -435,6 +462,17 @@ export function resultActions(outcome: InjectOutcome): ResultActions {
     canReprepare: outcome === 'failed',
     showCheckSessionHint: outcome === 'unknown',
   }
+}
+
+/**
+ * True when an execute response reports the message actually reached the
+ * target (UX-05 observation loop): a delivered outcome — including an
+ * idempotent replay of one — never an error envelope. failed/unknown must
+ * NOT trigger observation aids: unknown is a locked terminal state (S6)
+ * and any follow-up activity could read as "retrying is fine".
+ */
+export function isDeliveredResult(value: InjectResultView | ApiErrorLike): boolean {
+  return !isApiErrorLike(value) && value.outcome === 'delivered'
 }
 
 // ---------------------------------------------------------------------------

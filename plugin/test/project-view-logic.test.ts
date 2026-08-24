@@ -19,7 +19,7 @@ import {
   type ProjectGroupVM,
   type ProjectSessionVM,
 } from '../src/client/board/project-view-logic.ts'
-import { agentGlyph, formatTemplate } from '../src/client/board/logic.ts'
+import { agentGlyph, formatAbsoluteShort, formatTemplate } from '../src/client/board/logic.ts'
 import { BOARD_STRINGS } from '../src/client/board/strings.ts'
 
 const NOW = 1_700_000_000_000
@@ -352,7 +352,7 @@ describe('buildProjectViewModel: relative time', () => {
     )
   })
 
-  it('switches units for hour- and day-old groups', () => {
+  it('switches units for hour-old groups and absolute dates past 24h (UX-13)', () => {
     const vm = buildProjectViewModel({
       groups: [
         group({ project: '/p/h', sessions: [session({ lastActivityAt: NOW - 3 * HOUR })] }),
@@ -362,7 +362,9 @@ describe('buildProjectViewModel: relative time', () => {
     })
     const byKey = new Map(vm.groups.map((g) => [g.key, g]))
     expect(byKey.get('/p/h')!.lastActiveLabel).toContain('3 小时前')
-    expect(byKey.get('/p/d')!.lastActiveLabel).toContain('2 天前')
+    expect(byKey.get('/p/d')!.lastActiveLabel).toContain(
+      formatAbsoluteShort(NOW - 49 * HOUR),
+    )
   })
 })
 

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The dsh plugin board and detail views got a UX overhaul (plugin 0.1.1):
+  board header status counts with one-click filtering, collapsible groups
+  with bounded card rendering, a conversation-first timeline filter that
+  aggregates streaming chunks, newest-first detail positioning, a
+  post-injection observe loop (auto-refresh plus a listen shortcut),
+  keyboard support (Esc, Cmd+Enter, autofocus), copyable session ids, and
+  absolute short timestamps.
+
 ### Added
 
 - A native dsh plugin M1 monitoring milestone in the `plugin/` npm

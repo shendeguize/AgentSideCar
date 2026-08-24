@@ -11,7 +11,7 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: var(--dsw-alias-bg-mask-1);
+  background: var(--dsw-alias-bg-mask-1, rgba(0, 0, 0, 0.45));
 }
 
 .dialog {

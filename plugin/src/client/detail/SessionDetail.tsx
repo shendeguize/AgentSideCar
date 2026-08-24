@@ -5,25 +5,37 @@
  * imports. The integration layer (S7) owns transport and accumulation —
  * it feeds the {@link TimelineVM} built via logic.ts (`applyTimelinePage`
  * for history pages, `applyListenPage` for listen-mode refetches) and
- * handles `onLoadMore` / `onToggleListen`.
+ * handles `onLoadMore` / `onToggleListen` / `onRefresh`.
+ *
+ * Row pipeline (all pure, logic.ts): buildTimelineRows (gaps on the FULL
+ * entry list) → filterTimelineRows (UX-03 kind filter, conversation-first
+ * by default with an honest hidden count) → aggregateChunkRows (UX-03
+ * adjacent empty streaming chunks collapse into one expandable run) →
+ * limitTimelineRows (render cap with a 全部显示 escape hatch).
  *
  * Long-list posture (task report): no full virtualization — history only
  * grows page-by-page on explicit 加载更多, and rendering is additionally
- * capped at {@link DEFAULT_MAX_RENDER_ROWS} newest rows behind a collapse
- * notice with a 全部显示 escape hatch. View-local concerns (expanded
- * bodies, the lift-cap flag, auto-scroll) are component state; everything
+ * capped at {@link DEFAULT_MAX_RENDER_ROWS} newest rows. View-local
+ * concerns (expanded bodies/runs, filter mode, the lift-cap flag, the
+ * UX-04 initial landing, copy feedback) are component state; everything
  * else comes through props.
  */
 
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { Fragment, useEffect, useRef, useState, type ReactElement } from 'react'
 import {
+  aggregateChunkRows,
   buildTimelineRows,
   deriveDetailBodyState,
   deriveDetailStatus,
   deriveSourceBadges,
   agentGlyph,
+  filterTimelineRows,
+  formatTemplate,
   limitTimelineRows,
+  shouldStickToLatest,
   DEFAULT_MAX_RENDER_ROWS,
+  type TimelineEventRowVM,
+  type TimelineFilterMode,
   type TimelineRowVM,
   type TimelineVM,
 } from './logic.ts'
@@ -51,8 +63,12 @@ export interface SessionDetailProps {
   hasMore: boolean
   /** Listen mode (SSE-triggered newest-page refetch) currently on. */
   listening: boolean
+  /** True while a manual newest-window refresh is in flight (UX-07). */
+  refreshing?: boolean
   onLoadMore: () => void
   onToggleListen: () => void
+  /** Manual newest-window refetch; the button renders only when given. */
+  onRefresh?: () => void
   onClose?: () => void
   /** Clock injection for deterministic rendering; defaults to Date.now(). */
   nowMs?: number
@@ -61,7 +77,7 @@ export interface SessionDetailProps {
 }
 
 function EventRow(props: {
-  row: Extract<TimelineRowVM, { type: 'event' }>
+  row: TimelineEventRowVM
   expanded: boolean
   onToggleExpand: (key: string) => void
 }): ReactElement {
@@ -86,7 +102,7 @@ function EventRow(props: {
         )}
         {row.isNew && <span className={styles['eventNew']}>{DETAIL_STRINGS.timeline.newBadge}</span>}
         <span className={styles['eventSpacer']} />
-        <span className={styles['eventTime']}>{row.relativeTime}</span>
+        <span className={styles['eventTime']}>{row.timeLabel}</span>
       </div>
       {entry.summary !== '' && <div className={styles['eventSummary']}>{entry.summary}</div>}
       {entry.expandable && (
@@ -105,12 +121,58 @@ function EventRow(props: {
   )
 }
 
+/** Collapsed run of adjacent streaming chunks (UX-03); expandable lossless. */
+function ChunkRunRow(props: {
+  row: Extract<TimelineRowVM, { type: 'chunks' }>
+  expanded: boolean
+  onToggleRun: (key: string) => void
+  expandedKeys: ReadonlySet<string>
+  onToggleExpand: (key: string) => void
+}): ReactElement {
+  const { row } = props
+  return (
+    <Fragment>
+      <li
+        className={styles['chunkRun']}
+        data-new={row.isNew || undefined}
+        title={row.hoverTitle}
+        data-testid="agent-sidecar-detail-chunks"
+      >
+        <span className={styles['chunkRunLabel']}>{row.label}</span>
+        <button
+          type="button"
+          className={styles['expandButton']}
+          onClick={() => props.onToggleRun(row.key)}
+        >
+          {props.expanded ? DETAIL_STRINGS.timeline.collapse : DETAIL_STRINGS.timeline.expand}
+        </button>
+        <span className={styles['eventSpacer']} />
+        <span className={styles['eventTime']}>{row.timeLabel}</span>
+      </li>
+      {props.expanded &&
+        row.members.map((member) => (
+          <EventRow
+            key={member.key}
+            row={member}
+            expanded={props.expandedKeys.has(member.key)}
+            onToggleExpand={props.onToggleExpand}
+          />
+        ))}
+    </Fragment>
+  )
+}
+
 /** The session-detail view. Pure render of the logic.ts pipelines over props. */
 export function SessionDetail(props: SessionDetailProps): ReactElement {
   const nowMs = props.nowMs ?? Date.now()
   const [expandedKeys, setExpandedKeys] = useState<ReadonlySet<string>>(new Set())
+  const [expandedRuns, setExpandedRuns] = useState<ReadonlySet<string>>(new Set())
+  const [filterMode, setFilterMode] = useState<TimelineFilterMode>('conversation')
   const [renderAll, setRenderAll] = useState(false)
+  const [copied, setCopied] = useState(false)
   const listRef = useRef<HTMLOListElement | null>(null)
+  const positionedRef = useRef(false)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const status = deriveDetailStatus(props.header.status)
   const sourceBadges = deriveSourceBadges(props.timeline.sources)
@@ -121,18 +183,38 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
   })
 
   const allRows = buildTimelineRows(props.timeline, nowMs)
+  const filtered = filterTimelineRows(allRows, filterMode)
+  const aggregated = aggregateChunkRows(filtered.rows)
   const limited = renderAll
-    ? { rows: allRows, hiddenCount: 0, notice: null }
-    : limitTimelineRows(allRows, props.maxRenderRows ?? DEFAULT_MAX_RENDER_ROWS)
+    ? { rows: aggregated, hiddenCount: 0, notice: null }
+    : limitTimelineRows(aggregated, props.maxRenderRows ?? DEFAULT_MAX_RENDER_ROWS)
 
   const entryCount = props.timeline.entries.length
   const listening = props.listening
   useEffect(() => {
-    // Listen mode appends at the tail: keep the newest events in view.
-    if (!listening) return
+    // UX-04 landing + listen-mode tail pinning (shouldStickToLatest):
+    // first non-empty render lands on the newest events; listen appends
+    // keep them in view; paging back never yanks the viewport.
     const list = listRef.current
-    if (list !== null) list.scrollTop = list.scrollHeight
+    if (list === null) return
+    if (
+      shouldStickToLatest({
+        entryCount,
+        positioned: positionedRef.current,
+        listening,
+      })
+    ) {
+      list.scrollTop = list.scrollHeight
+      positionedRef.current = true
+    }
   }, [listening, entryCount])
+
+  useEffect(
+    () => () => {
+      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
+    },
+    [],
+  )
 
   const toggleExpand = (key: string): void => {
     setExpandedKeys((prev) => {
@@ -141,6 +223,32 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
       else next.add(key)
       return next
     })
+  }
+
+  const toggleRun = (key: string): void => {
+    setExpandedRuns((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const copySessionId = (): void => {
+    const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard
+    if (clipboard === undefined) return
+    clipboard.writeText(props.sessionId).then(
+      () => {
+        setCopied(true)
+        if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
+        copyTimerRef.current = setTimeout(() => {
+          setCopied(false)
+        }, 2000)
+      },
+      () => {
+        // Clipboard permission denied: silently keep the plain id display.
+      },
+    )
   }
 
   return (
@@ -163,6 +271,20 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
             {status.label}
           </span>
           <span className={styles['spacer']} />
+          {props.onRefresh !== undefined && (
+            <button
+              type="button"
+              className={styles['refreshButton']}
+              disabled={props.refreshing === true}
+              title={DETAIL_STRINGS.header.refreshHint}
+              onClick={props.onRefresh}
+              data-testid="agent-sidecar-detail-refresh"
+            >
+              {props.refreshing === true
+                ? DETAIL_STRINGS.header.refreshing
+                : DETAIL_STRINGS.header.refresh}
+            </button>
+          )}
           <button
             type="button"
             className={styles['listenButton']}
@@ -183,9 +305,20 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
               ? DETAIL_STRINGS.header.unknownProject
               : props.header.project}
           </span>
-          <span className={styles['sessionId']} title={props.sessionId}>
+          <button
+            type="button"
+            className={styles['sessionId']}
+            title={`${props.sessionId} · ${DETAIL_STRINGS.header.copyIdTitle}`}
+            onClick={copySessionId}
+            data-testid="agent-sidecar-detail-copy-id"
+          >
             {props.sessionId}
-          </span>
+          </button>
+          {copied && (
+            <span className={styles['copiedBubble']} role="status">
+              {DETAIL_STRINGS.header.copied}
+            </span>
+          )}
         </div>
         <div className={styles['metaRow']}>
           <span className={styles['disclaimer']}>{DETAIL_STRINGS.header.observedDisclaimer}</span>
@@ -214,6 +347,27 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
         </div>
       ) : (
         <>
+          <div className={styles['filterRow']} data-testid="agent-sidecar-detail-filter">
+            {(['conversation', 'all'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={styles['filterChip']}
+                data-active={filterMode === mode || undefined}
+                aria-pressed={filterMode === mode}
+                onClick={() => {
+                  setFilterMode(mode)
+                }}
+              >
+                {DETAIL_STRINGS.filter[mode]}
+              </button>
+            ))}
+            {filtered.hiddenCount > 0 && (
+              <span className={styles['filterHiddenNote']}>
+                {formatTemplate(DETAIL_STRINGS.filter.hiddenNotice, { n: filtered.hiddenCount })}
+              </span>
+            )}
+          </div>
           <div className={styles['pager']}>
             {props.hasMore ? (
               <button
@@ -253,6 +407,15 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
                 >
                   {row.label}
                 </li>
+              ) : row.type === 'chunks' ? (
+                <ChunkRunRow
+                  key={row.key}
+                  row={row}
+                  expanded={expandedRuns.has(row.key)}
+                  onToggleRun={toggleRun}
+                  expandedKeys={expandedKeys}
+                  onToggleExpand={toggleExpand}
+                />
               ) : (
                 <EventRow
                   key={row.key}

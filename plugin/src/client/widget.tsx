@@ -35,7 +35,6 @@ const rootStyle: CSSProperties = {
   border: 'none',
   borderRadius: 6,
   background: 'transparent',
-  cursor: 'pointer',
   font: 'inherit',
   color: 'var(--dsw-alias-label-secondary, #57606a)',
 }
@@ -47,19 +46,18 @@ const countStyle: CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
-/** Connection dot + working-session counter (e.g. `▸2`) for the footer. */
+/**
+ * Connection dot + working-session counter (e.g. `▸2`) for the footer.
+ *
+ * Without a wired `onOpen` the widget renders as an inert status `<span>`
+ * (UX-06): button semantics + pointer cursor on a control that does
+ * nothing would be a lie. The button form returns as soon as the
+ * integration layer supplies the callback.
+ */
 export function SidecarWidget(props: SidecarWidgetProps): ReactElement {
   const title = widgetTitle(props.connection, props.workingCount)
-  return (
-    <button
-      type="button"
-      style={rootStyle}
-      title={title}
-      aria-label={title}
-      onClick={props.onOpen}
-      data-testid="agent-sidecar-widget"
-      data-connection={props.connection}
-    >
+  const body = (
+    <>
       <span
         aria-hidden
         style={{
@@ -75,6 +73,33 @@ export function SidecarWidget(props: SidecarWidgetProps): ReactElement {
           {`▸${props.workingCount}`}
         </span>
       )}
+    </>
+  )
+  if (props.onOpen === undefined) {
+    return (
+      <span
+        style={rootStyle}
+        title={title}
+        aria-label={title}
+        role="status"
+        data-testid="agent-sidecar-widget"
+        data-connection={props.connection}
+      >
+        {body}
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      style={{ ...rootStyle, cursor: 'pointer' }}
+      title={title}
+      aria-label={title}
+      onClick={props.onOpen}
+      data-testid="agent-sidecar-widget"
+      data-connection={props.connection}
+    >
+      {body}
     </button>
   )
 }

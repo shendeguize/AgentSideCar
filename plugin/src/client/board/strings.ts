@@ -22,10 +22,13 @@ export const BOARD_STRINGS = {
     dead: '已结束',
     unknown: '未知',
   },
-  /** Badge attention markers; gap outranks stale (per-session > global). */
+  /**
+   * Badge attention markers. Only the per-session gap marker renders at
+   * card level; the global stream-health notice lives in the top banner
+   * alone (UX-18: repeating it on every card was pure noise).
+   */
   attention: {
     gap: '事件缺口',
-    stale: '可能滞后',
   },
   /** Daemon supervisor state labels for the top-bar badge. */
   daemon: {
@@ -58,7 +61,7 @@ export const BOARD_STRINGS = {
     daemonDeferHint:
       '检测到 LaunchAgent 托管,插件不会自行启动 daemon;服务拉起后看板会自动出数。',
     filteredTitle: '当前过滤条件下没有会话',
-    filteredHint: '试试放宽时间窗,或打开「显示已结束」。',
+    filteredHint: '试试放宽时间窗、取消状态过滤,或打开「显示已结束」。',
     noSessionsTitle: '暂无被观测的会话',
     noSessionsHint:
       '本机 agent(claude / codex / cursor / dsh …)开始工作后会自动出现在这里。',
@@ -67,9 +70,25 @@ export const BOARD_STRINGS = {
   topbar: {
     title: 'Sidecar 多 agent 看板',
     refresh: '刷新',
+    refreshing: '刷新中…',
     refreshTitle: '手动拉取最新快照',
+    refreshFailed: '手动刷新失败,看板仍显示原有快照',
+    dismiss: '知道了',
     showDead: '显示已结束',
     timeWindow: '时间窗',
+    /** Count badges (UX-01); working/waiting are clickable status filters. */
+    countWorking: '{n} 工作中',
+    countWaiting: '{n} 等待中',
+    countTotal: '共 {n} 个会话',
+    filterByStatusTitle: '只看「{label}」的会话',
+    clearStatusFilterTitle: '取消状态过滤,显示全部会话',
+  },
+  /** Group collapse / truncation controls (UX-02). */
+  group: {
+    collapseTitle: '收起该分组',
+    expandTitle: '展开该分组',
+    showAll: '展开全部 {n} 个会话',
+    showLess: '只看前 {n} 个',
   },
   /** Session card texts. */
   card: {
@@ -80,13 +99,18 @@ export const BOARD_STRINGS = {
     observedValue: '观察值: {status}',
     lastReconcile: '最近对账: {time}',
     neverReconciled: '尚未对账',
+    copyId: '点击复制完整会话 id',
+    copied: '已复制',
   },
-  /** Relative time templates. */
+  /**
+   * Relative time templates. Ages ≥ 24h render as an absolute short date
+   * (`MM-DD HH:mm`, see formatRelativeTime) instead of a `{n} 天前` bucket
+   * (UX-13: whole columns of "3 天前" carried zero information).
+   */
   time: {
     justNow: '刚刚',
     minutesAgo: '{n} 分钟前',
     hoursAgo: '{n} 小时前',
-    daysAgo: '{n} 天前',
   },
   /** Time-window option templates. */
   timeWindow: {

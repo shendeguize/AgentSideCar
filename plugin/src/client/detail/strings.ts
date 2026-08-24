@@ -20,6 +20,11 @@ export const DETAIL_STRINGS = {
     listenOn: '监听中',
     listenOff: '监听',
     listenHint: '开启后新事件将实时追加并高亮',
+    refresh: '刷新',
+    refreshing: '刷新中…',
+    refreshHint: '手动拉取最新时间线窗口',
+    copyIdTitle: '点击复制会话 ID',
+    copied: '已复制',
     untitled: '(无标题)',
     unknownProject: '未知项目',
     /** Design §5.3 / SKILL.md wording: statuses are inferred observations. */
@@ -58,6 +63,12 @@ export const DETAIL_STRINGS = {
   gap: {
     label: '缺口:可能有 {n} 条事件未捕获(256 队列上限或未持久化)',
   },
+  /** Kind filter chips (UX-03): protocol noise hidden by default, honestly counted. */
+  filter: {
+    conversation: '只看对话',
+    all: '全部事件',
+    hiddenNotice: '已隐藏 {n} 条协议事件',
+  },
   /** Timeline list chrome. */
   timeline: {
     loadMore: '加载更多历史',
@@ -69,6 +80,8 @@ export const DETAIL_STRINGS = {
     seq: 'seq {n}',
     hiddenNotice: '为保持流畅,较早的 {n} 条已折叠',
     showAll: '全部显示',
+    /** Aggregated row for an adjacent run of empty streaming chunks (UX-03). */
+    chunkRun: '{n} 个流式分块',
   },
   /** Loading / empty / error body states. */
   states: {

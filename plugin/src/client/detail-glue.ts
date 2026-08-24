@@ -83,6 +83,8 @@ export interface DetailGlueState {
   error: string | null
   hasMore: boolean
   listening: boolean
+  /** True while a manual newest-window refresh is in flight (UX-07). */
+  refreshing: boolean
   /** True once the initial load succeeded (timeline usable). */
   ready: boolean
   lineage: LineageSliceState
@@ -137,6 +139,7 @@ export class DetailStore {
   private paging = false
   private listenInFlight = false
   private listenQueued = false
+  private refreshInFlight = false
   private lineageStarted = false
 
   constructor(sessionId: string, options: DetailStoreOptions = {}) {
@@ -152,6 +155,7 @@ export class DetailStore {
       error: null,
       hasMore: false,
       listening: false,
+      refreshing: false,
       ready: false,
       lineage: INITIAL_LINEAGE,
     }
@@ -239,6 +243,35 @@ export class DetailStore {
     const listening = !this.state.listening
     this.setState({ listening })
     if (listening) this.scheduleListenRefetch()
+  }
+
+  /**
+   * Manual newest-window refetch with visible feedback (UX-07), also fired
+   * once after a delivered injection (UX-05 observation loop). Unlike the
+   * silent best-effort listen refetch, it reports in-flight state and
+   * surfaces a failure reason (rendered as the inline banner). Appended
+   * entries get the listen-merge highlight. Coalesced: at most one manual
+   * refresh in flight, extra calls are dropped.
+   */
+  async refreshNewest(): Promise<void> {
+    if (this.disposed || !this.state.ready || this.refreshInFlight) return
+    this.refreshInFlight = true
+    this.setState({ refreshing: true, error: null })
+    try {
+      const page = await this.fetchPageFn(this.state.sessionId, {
+        ...(this.listenLimit !== undefined ? { limit: this.listenLimit } : {}),
+      })
+      if (this.disposed) return
+      this.setState({
+        timeline: applyListenPage(this.state.timeline, page),
+        refreshing: false,
+      })
+    } catch (err) {
+      if (this.disposed) return
+      this.setState({ refreshing: false, error: reasonOf(err) })
+    } finally {
+      this.refreshInFlight = false
+    }
   }
 
   /**

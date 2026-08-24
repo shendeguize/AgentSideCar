@@ -58,10 +58,20 @@ export interface SessionCardVM {
   gap: boolean
 }
 
+/** Statuses the top-bar count badges can filter down to (UX-01). */
+export type BoardStatusFilter = 'working' | 'waiting'
+
 /** Board filter controls (wired to ui.time-window-hours / ui.show-dead). */
 export interface BoardFilterState {
   timeWindowHours: number
   showDead: boolean
+  /**
+   * Status-only view toggled by the top-bar count badges (UX-01). While
+   * set, ONLY sessions of this status are visible — the time window and
+   * showDead do not apply (the user explicitly asked for the全板 answer
+   * to "who is working/waiting"). Absent = no status filter.
+   */
+  statusFilter?: BoardStatusFilter
 }
 
 /** Derived status badge: color token + label + attention marker. */
@@ -69,8 +79,11 @@ export interface StatusBadgeVM {
   status: SessionStatusToken
   tone: BadgeTone
   label: string
-  /** 'gap' (per-session data hole) outranks 'stale' (global stream health). */
-  attention: 'gap' | 'stale' | null
+  /**
+   * Per-session data-hole marker. The global stream-health notice is NOT
+   * mirrored here (UX-18): the top banner already carries it once.
+   */
+  attention: 'gap' | null
   attentionLabel: string | null
 }
 
@@ -138,7 +151,9 @@ export interface BoardViewModel {
   streamTone: BadgeTone
   visibleCount: number
   totalCount: number
+  /** Whole-board counts (window/filter independent — the honest answer). */
   workingCount: number
+  waitingCount: number
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +219,9 @@ const STATUS_TONE: Record<SessionStatusToken, BadgeTone> = {
 
 /**
  * Visibility rules (task spec):
+ * - an active `statusFilter` (UX-01) overrides everything: only sessions
+ *   of that status are visible, regardless of window or showDead — the
+ *   count badge and the filtered board therefore always agree;
  * - dead sessions are hidden unless `showDead`;
  * - working sessions are always visible (even outside the window);
  * - everything else hides once `updatedAtMs` falls strictly beyond the
@@ -216,6 +234,7 @@ export function isSessionVisible(
   nowMs: number,
 ): boolean {
   const status = normalizeStatus(session.status)
+  if (filters.statusFilter !== undefined) return status === filters.statusFilter
   if (status === 'dead' && !filters.showDead) return false
   if (status === 'working') return true
   const windowMs = filters.timeWindowHours * HOUR_MS
@@ -295,18 +314,15 @@ export function groupSessions<T extends SessionCardVM>(
 // ---------------------------------------------------------------------------
 
 /**
- * status + gap + streamHealth → badge tone/label/attention.
+ * status + gap → badge tone/label/attention.
  *
- * Priority: a per-session `gap` marker (a known data hole for THIS session)
- * outranks the global stale marker (stream reconnecting affects everyone
- * and is already surfaced by the top banner). Unknown raw statuses keep
+ * Card-level attention carries ONLY the per-session `gap` marker (a known
+ * data hole for THIS session). The global stream-health state is a
+ * board-wide fact and lives in the top banner alone — repeating it on
+ * every card was noise, not signal (UX-18). Unknown raw statuses keep
  * their raw text as the label — the board never invents a state.
  */
-export function deriveBadge(
-  rawStatus: string,
-  gap: boolean,
-  streamHealth: StreamHealthToken,
-): StatusBadgeVM {
+export function deriveBadge(rawStatus: string, gap: boolean): StatusBadgeVM {
   const status = normalizeStatus(rawStatus)
   const trimmed = rawStatus.trim()
   const label =
@@ -315,9 +331,7 @@ export function deriveBadge(
         ? BOARD_STRINGS.status.unknown
         : trimmed
       : BOARD_STRINGS.status[status]
-  let attention: StatusBadgeVM['attention'] = null
-  if (gap) attention = 'gap'
-  else if (streamHealth !== 'ok') attention = 'stale'
+  const attention: StatusBadgeVM['attention'] = gap ? 'gap' : null
   return {
     status,
     tone: STATUS_TONE[status],
@@ -355,8 +369,22 @@ export function badgeHoverTitle(
 // ---------------------------------------------------------------------------
 
 /**
- * Coarse relative time: <60s (including clock skew into the future) is
- * 刚刚, then whole minutes/hours/days. Non-finite input renders empty.
+ * Absolute short timestamp in local time: `MM-DD HH:mm`. Used for ages
+ * beyond 24h where relative buckets stop discriminating (UX-13).
+ */
+export function formatAbsoluteShort(thenMs: number): string {
+  const date = new Date(thenMs)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
+    date.getMinutes(),
+  )}`
+}
+
+/**
+ * Card time: <60s (including clock skew into the future) is 刚刚, then
+ * whole minutes/hours; from 24h on the absolute short date takes over —
+ * a column of "3 天前" carries no information, "08-22 14:03" does
+ * (UX-13). Non-finite input renders empty.
  */
 export function formatRelativeTime(thenMs: number, nowMs: number): string {
   if (!Number.isFinite(thenMs)) return ''
@@ -368,7 +396,7 @@ export function formatRelativeTime(thenMs: number, nowMs: number): string {
   if (delta < DAY_MS) {
     return formatTemplate(BOARD_STRINGS.time.hoursAgo, { n: Math.floor(delta / HOUR_MS) })
   }
-  return formatTemplate(BOARD_STRINGS.time.daysAgo, { n: Math.floor(delta / DAY_MS) })
+  return formatAbsoluteShort(thenMs)
 }
 
 /** Label for a time-window option: whole days as 天, otherwise 小时. */
@@ -491,6 +519,47 @@ export function abbreviateSessionId(id: string, max = 20): string {
 }
 
 // ---------------------------------------------------------------------------
+// Display truncation (UX-02 board groups / UX-20 project lanes).
+// ---------------------------------------------------------------------------
+
+/** Cards a board group renders before the 「展开全部」 fold (UX-02). */
+export const GROUP_CARD_LIMIT = 20
+
+/** A truncated card list plus how many items the fold is hiding. */
+export interface DisplaySlice<T> {
+  shown: T[]
+  hiddenCount: number
+}
+
+/**
+ * Slice a status-sorted card list down to `limit` for display, unless
+ * `expanded`. The cut never lands inside the leading working/waiting run:
+ * attention-worthy sessions are the reason the board exists, so the
+ * effective limit grows to cover all of them (an all-active group renders
+ * fully — honest, and rare). Non-positive limits disable truncation.
+ */
+export function sliceCardsForDisplay<T extends { status: string }>(
+  cards: readonly T[],
+  limit: number,
+  expanded: boolean,
+): DisplaySlice<T> {
+  if (expanded || limit <= 0 || cards.length <= limit) {
+    return { shown: [...cards], hiddenCount: 0 }
+  }
+  let activeRun = 0
+  while (activeRun < cards.length) {
+    const status = normalizeStatus(cards[activeRun]!.status)
+    if (status !== 'working' && status !== 'waiting') break
+    activeRun += 1
+  }
+  const effectiveLimit = Math.max(limit, activeRun)
+  return {
+    shown: cards.slice(0, effectiveLimit),
+    hiddenCount: cards.length - Math.min(cards.length, effectiveLimit),
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Footer widget derivation.
 // ---------------------------------------------------------------------------
 
@@ -510,13 +579,21 @@ export function deriveWidgetConnection(
   return 'degraded'
 }
 
-/** Count of sessions currently observed as working. */
-export function countWorking(sessions: ReadonlyArray<{ status: string }>): number {
+/** Count of sessions observed in one normalized status. */
+export function countByStatus(
+  sessions: ReadonlyArray<{ status: string }>,
+  status: SessionStatusToken,
+): number {
   let count = 0
   for (const session of sessions) {
-    if (normalizeStatus(session.status) === 'working') count += 1
+    if (normalizeStatus(session.status) === status) count += 1
   }
   return count
+}
+
+/** Count of sessions currently observed as working. */
+export function countWorking(sessions: ReadonlyArray<{ status: string }>): number {
+  return countByStatus(sessions, 'working')
 }
 
 /** Widget hover/aria text: connection state, plus the count when nonzero. */
@@ -536,7 +613,7 @@ export function buildBoardViewModel(input: BoardComputeInput): BoardViewModel {
   const visible = filterSessions(sessions, filters, nowMs)
   const derived: DerivedSessionCardVM[] = visible.map((session) => ({
     ...session,
-    badge: deriveBadge(session.status, session.gap, streamHealth),
+    badge: deriveBadge(session.status, session.gap),
     glyph: agentGlyph(session.agent),
     shortId: abbreviateSessionId(session.sessionId),
     relativeTime: formatRelativeTime(session.updatedAtMs, nowMs),
@@ -552,5 +629,6 @@ export function buildBoardViewModel(input: BoardComputeInput): BoardViewModel {
     visibleCount: visible.length,
     totalCount: sessions.length,
     workingCount: countWorking(sessions),
+    waitingCount: countByStatus(sessions, 'waiting'),
   }
 }

@@ -7,17 +7,27 @@
  * from the host wire types (epoch-seconds → epoch-ms conversion included).
  *
  * Interaction surface handed back to the owner:
- * - `onFiltersChange` — time-window select / show-dead checkbox (controlled);
- * - `onRefresh`      — manual snapshot pull button;
+ * - `onFiltersChange` — time-window select / show-dead checkbox / the
+ *   top-bar status-filter badges (controlled, UX-01);
+ * - `onRefresh`      — manual snapshot pull button; a Promise<boolean>
+ *   return drives the in-flight/failure feedback (UX-07);
  * - `onSelectSession` — card click, pass-through for the M3 detail view.
+ *
+ * Local UI state (deliberately NOT lifted into the controller stores):
+ * group collapse and per-group truncation (UX-02) are ephemeral view
+ * concerns — useState here, reset on tab remount.
  */
 
-import type { ReactElement } from 'react'
+import { useState } from 'react'
+import type { MouseEvent, ReactElement } from 'react'
 import {
   buildBoardViewModel,
-  timeWindowLabel,
   formatTemplate,
+  sliceCardsForDisplay,
+  timeWindowLabel,
+  GROUP_CARD_LIMIT,
   type BoardFilterState,
+  type BoardStatusFilter,
   type DaemonStateToken,
   type DerivedSessionCardVM,
   type ProjectGroupVM,
@@ -41,7 +51,12 @@ export interface BoardProps {
   /** Controlled filter state (owner persists it to the settings namespace). */
   filters: BoardFilterState
   onFiltersChange: (next: BoardFilterState) => void
-  onRefresh: () => void
+  /**
+   * Manual snapshot pull. A `Promise<boolean>` return (true = snapshot
+   * applied) lets the board render the in-flight state and a dismissible
+   * failure notice; a void return keeps the button fire-and-forget.
+   */
+  onRefresh: () => void | Promise<boolean>
   onSelectSession: (sessionId: string) => void
   /** Clock injection for deterministic rendering; defaults to Date.now(). */
   nowMs?: number
@@ -52,6 +67,26 @@ function SessionCard(props: {
   onSelect: (sessionId: string) => void
 }): ReactElement {
   const { card, onSelect } = props
+  const [copied, setCopied] = useState(false)
+
+  // UX-17: click the id row to copy the full session id. stopPropagation
+  // keeps the card's open-detail click intact; the row stays a non-focusable
+  // span because the card itself is already a <button> (no nested controls).
+  const onCopyId = (ev: MouseEvent): void => {
+    ev.stopPropagation()
+    const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard
+    if (clipboard === undefined) return
+    clipboard.writeText(card.sessionId).then(
+      () => {
+        setCopied(true)
+        setTimeout(() => { setCopied(false) }, 2000)
+      },
+      () => {
+        // Clipboard permission denied: the hover title still carries the id.
+      },
+    )
+  }
+
   return (
     <button
       type="button"
@@ -79,8 +114,14 @@ function SessionCard(props: {
       <div className={styles['cardTitle']} title={card.title}>
         {card.title.trim() === '' ? BOARD_STRINGS.card.untitled : card.title}
       </div>
-      <div className={styles['cardId']} title={card.sessionId}>
+      <div
+        className={styles['cardId']}
+        title={`${card.sessionId}\n${BOARD_STRINGS.card.copyId}`}
+        onClick={onCopyId}
+        data-testid="agent-sidecar-card-id"
+      >
         {card.shortId}
+        {copied && <span className={styles['copied']} role="status">{BOARD_STRINGS.card.copied}</span>}
       </div>
       <div className={styles['cardEvent']}>
         {card.lastEvent === null
@@ -97,9 +138,25 @@ function ProjectGroup(props: {
   onSelect: (sessionId: string) => void
 }): ReactElement {
   const { group, onSelect } = props
+  // UX-02: collapse + truncation are per-group ephemeral view state.
+  const [collapsed, setCollapsed] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const { shown, hiddenCount } = sliceCardsForDisplay(group.cards, GROUP_CARD_LIMIT, expanded)
+  // Honesty guard: a collapsed group must not silently hide waiting
+  // sessions, so the header keeps a waiting counter while folded.
+  const waitingInGroup = group.cards.filter((card) => card.badge.status === 'waiting').length
   return (
     <section className={styles['group']}>
-      <div className={styles['groupHead']}>
+      <button
+        type="button"
+        className={styles['groupHead']}
+        aria-expanded={!collapsed}
+        title={collapsed ? BOARD_STRINGS.group.expandTitle : BOARD_STRINGS.group.collapseTitle}
+        onClick={() => { setCollapsed(!collapsed) }}
+      >
+        <span className={styles['chevron']} aria-hidden>
+          {collapsed ? '▸' : '▾'}
+        </span>
         <span
           className={styles['groupName']}
           title={group.fullPath === '' ? undefined : group.fullPath}
@@ -109,12 +166,39 @@ function ProjectGroup(props: {
         <span className={styles['groupCount']}>
           {formatTemplate(BOARD_STRINGS.groupCount, { n: group.cards.length })}
         </span>
-      </div>
-      <div className={styles['grid']}>
-        {group.cards.map((card) => (
-          <SessionCard key={`${card.agent}:${card.sessionId}`} card={card} onSelect={onSelect} />
-        ))}
-      </div>
+        {collapsed && waitingInGroup > 0 && (
+          <span className={styles['groupAttention']}>
+            {formatTemplate(BOARD_STRINGS.topbar.countWaiting, { n: waitingInGroup })}
+          </span>
+        )}
+      </button>
+      {!collapsed && (
+        <>
+          <div className={styles['grid']}>
+            {shown.map((card) => (
+              <SessionCard key={`${card.agent}:${card.sessionId}`} card={card} onSelect={onSelect} />
+            ))}
+          </div>
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              className={styles['showMore']}
+              onClick={() => { setExpanded(true) }}
+            >
+              {formatTemplate(BOARD_STRINGS.group.showAll, { n: group.cards.length })}
+            </button>
+          )}
+          {expanded && group.cards.length > GROUP_CARD_LIMIT && (
+            <button
+              type="button"
+              className={styles['showMore']}
+              onClick={() => { setExpanded(false) }}
+            >
+              {formatTemplate(BOARD_STRINGS.group.showLess, { n: GROUP_CARD_LIMIT })}
+            </button>
+          )}
+        </>
+      )}
     </section>
   )
 }
@@ -136,6 +220,36 @@ export function Board(props: BoardProps): ReactElement {
     ? TIME_WINDOW_OPTIONS
     : [...TIME_WINDOW_OPTIONS, props.filters.timeWindowHours].sort((a, b) => a - b)
 
+  // UX-07: manual-refresh feedback (in-flight + dismissible failure line).
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshFailed, setRefreshFailed] = useState(false)
+  const onRefreshClick = (): void => {
+    if (refreshing) return
+    setRefreshFailed(false)
+    const result = props.onRefresh()
+    if (result instanceof Promise) {
+      setRefreshing(true)
+      result
+        .then((ok) => { setRefreshFailed(!ok) })
+        .catch(() => { setRefreshFailed(true) })
+        .finally(() => { setRefreshing(false) })
+    }
+  }
+
+  // UX-01: the working/waiting badges toggle the status-only view.
+  const toggleStatusFilter = (status: BoardStatusFilter): void => {
+    const next: BoardFilterState = { ...props.filters }
+    if (next.statusFilter === status) delete next.statusFilter
+    else next.statusFilter = status
+    props.onFiltersChange(next)
+  }
+  const statusBadgeTitle = (status: BoardStatusFilter): string =>
+    props.filters.statusFilter === status
+      ? BOARD_STRINGS.topbar.clearStatusFilterTitle
+      : formatTemplate(BOARD_STRINGS.topbar.filterByStatusTitle, {
+          label: BOARD_STRINGS.status[status],
+        })
+
   return (
     <div className={styles['root']} data-testid="agent-sidecar-board">
       <header className={styles['topbar']}>
@@ -147,6 +261,31 @@ export function Board(props: BoardProps): ReactElement {
         <span className={styles['badge']} data-tone={vm.streamTone}>
           <span className={styles['dot']} data-tone={vm.streamTone} />
           {vm.streamLabel}
+        </span>
+        <button
+          type="button"
+          className={styles['countBadge']}
+          aria-pressed={props.filters.statusFilter === 'working'}
+          title={statusBadgeTitle('working')}
+          onClick={() => { toggleStatusFilter('working') }}
+          data-testid="agent-sidecar-count-working"
+        >
+          <span className={styles['dot']} data-tone={vm.workingCount > 0 ? 'success' : 'neutral'} />
+          {formatTemplate(BOARD_STRINGS.topbar.countWorking, { n: vm.workingCount })}
+        </button>
+        <button
+          type="button"
+          className={styles['countBadge']}
+          aria-pressed={props.filters.statusFilter === 'waiting'}
+          title={statusBadgeTitle('waiting')}
+          onClick={() => { toggleStatusFilter('waiting') }}
+          data-testid="agent-sidecar-count-waiting"
+        >
+          <span className={styles['dot']} data-tone={vm.waitingCount > 0 ? 'warn' : 'neutral'} />
+          {formatTemplate(BOARD_STRINGS.topbar.countWaiting, { n: vm.waitingCount })}
+        </button>
+        <span className={styles['countTotal']} data-testid="agent-sidecar-count-total">
+          {formatTemplate(BOARD_STRINGS.topbar.countTotal, { n: vm.totalCount })}
         </span>
         <span className={styles['spacer']} />
         <label className={styles['control']}>
@@ -183,11 +322,25 @@ export function Board(props: BoardProps): ReactElement {
           type="button"
           className={styles['refresh']}
           title={BOARD_STRINGS.topbar.refreshTitle}
-          onClick={props.onRefresh}
+          disabled={refreshing}
+          onClick={onRefreshClick}
         >
-          {BOARD_STRINGS.topbar.refresh}
+          {refreshing ? BOARD_STRINGS.topbar.refreshing : BOARD_STRINGS.topbar.refresh}
         </button>
       </header>
+
+      {refreshFailed && (
+        <div className={styles['banner']} data-tone="warn" role="status">
+          {BOARD_STRINGS.topbar.refreshFailed}
+          <button
+            type="button"
+            className={styles['bannerDismiss']}
+            onClick={() => { setRefreshFailed(false) }}
+          >
+            {BOARD_STRINGS.topbar.dismiss}
+          </button>
+        </div>
+      )}
 
       {vm.banner !== null && (
         <div className={styles['banner']} data-tone={vm.banner.tone} role="status">

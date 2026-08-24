@@ -169,7 +169,11 @@ function defaultStorage(): StorageLike | null {
   }
 }
 
-/** Parse + validate persisted filters; anything malformed reads as absent. */
+/**
+ * Parse + validate persisted filters; anything malformed reads as absent.
+ * The optional statusFilter (UX-01) survives only as one of its two legal
+ * values — an unrecognized token is dropped, not the whole record.
+ */
 export function readStoredFilters(storage: StorageLike | null): BoardFilterState | null {
   if (storage === null) return null
   try {
@@ -177,7 +181,11 @@ export function readStoredFilters(storage: StorageLike | null): BoardFilterState
     if (raw === null) return null
     const parsed: unknown = JSON.parse(raw)
     if (typeof parsed !== 'object' || parsed === null) return null
-    const candidate = parsed as { timeWindowHours?: unknown; showDead?: unknown }
+    const candidate = parsed as {
+      timeWindowHours?: unknown
+      showDead?: unknown
+      statusFilter?: unknown
+    }
     if (
       typeof candidate.timeWindowHours !== 'number'
       || !Number.isFinite(candidate.timeWindowHours)
@@ -186,7 +194,14 @@ export function readStoredFilters(storage: StorageLike | null): BoardFilterState
     ) {
       return null
     }
-    return { timeWindowHours: candidate.timeWindowHours, showDead: candidate.showDead }
+    const filters: BoardFilterState = {
+      timeWindowHours: candidate.timeWindowHours,
+      showDead: candidate.showDead,
+    }
+    if (candidate.statusFilter === 'working' || candidate.statusFilter === 'waiting') {
+      filters.statusFilter = candidate.statusFilter
+    }
+    return filters
   } catch {
     return null
   }
@@ -326,15 +341,20 @@ export class SidecarController {
     this.notify()
   }
 
-  /** Manual refresh (board's refresh button): one out-of-band snapshot pull. */
-  async refresh(): Promise<void> {
+  /**
+   * Manual refresh (board's refresh button): one out-of-band snapshot
+   * pull. Resolves true when the snapshot applied, false on failure so
+   * the button can surface honest feedback (UX-07) — never rejects; the
+   * stream (and its status surface) remains the health authority.
+   */
+  async refresh(): Promise<boolean> {
     try {
       const snapshot = await this.fetchFn({})
       this.applySnapshot(snapshot)
+      return true
     } catch (err) {
-      // The stream (and its status surface) remains the health authority;
-      // a failed manual pull only logs.
       console.error('agent-sidecar: manual refresh failed', err)
+      return false
     }
   }
 

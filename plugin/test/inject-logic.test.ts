@@ -15,8 +15,10 @@ import { en, zh } from '../src/client/locales/index.ts'
 import {
   byteUsage,
   classifyExecuteResponse,
+  classifyPanelKey,
   classifyPrepareResponse,
   deriveEditorGate,
+  isDeliveredResult,
   ERROR_COPY,
   errorCopy,
   initialPanelState,
@@ -35,6 +37,7 @@ import {
   validateMessage,
 } from '../src/client/inject/logic.ts'
 import type {
+  InjectPhase,
   InjectPlanView,
   MessageValidation,
   PanelState,
@@ -336,6 +339,51 @@ describe('state machine: results and the unknown terminal (S6)', () => {
       .toEqual({ canReprepare: false, showCheckSessionHint: false })
     expect(resultActions('unknown'))
       .toEqual({ canReprepare: false, showCheckSessionHint: true })
+  })
+
+  it('isDeliveredResult gates the UX-05 observation loop on delivered only', () => {
+    expect(isDeliveredResult({ outcome: 'delivered' })).toBe(true)
+    expect(isDeliveredResult({ outcome: 'delivered', replayed: true })).toBe(true)
+    expect(isDeliveredResult({ outcome: 'failed' })).toBe(false)
+    expect(isDeliveredResult({ outcome: 'unknown' })).toBe(false)
+    expect(isDeliveredResult(new ApiError('http', 'target_dead', 409))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+
+describe('classifyPanelKey (UX-10 keyboard affordances)', () => {
+  const base = {
+    key: 'Enter',
+    metaKey: false,
+    ctrlKey: false,
+    phase: 'idle' as InjectPhase,
+    canPrepare: true,
+  }
+  const PHASES: readonly InjectPhase[] = ['idle', 'preparing', 'confirm', 'executing', 'result']
+
+  it('Escape closes in every phase', () => {
+    for (const phase of PHASES) {
+      expect(classifyPanelKey({ ...base, key: 'Escape', phase })).toBe('close')
+    }
+  })
+
+  it('Cmd/Ctrl+Enter prepares only from the editor with a valid message', () => {
+    expect(classifyPanelKey({ ...base, metaKey: true })).toBe('prepare')
+    expect(classifyPanelKey({ ...base, ctrlKey: true })).toBe('prepare')
+    expect(classifyPanelKey({ ...base, metaKey: true, canPrepare: false })).toBeNull()
+  })
+
+  it('binds NOTHING outside the editor: confirming stays an explicit click', () => {
+    for (const phase of PHASES) {
+      if (phase === 'idle') continue
+      expect(classifyPanelKey({ ...base, metaKey: true, phase })).toBeNull()
+      expect(classifyPanelKey({ ...base, ctrlKey: true, phase })).toBeNull()
+    }
+  })
+
+  it('plain Enter never submits', () => {
+    expect(classifyPanelKey(base)).toBeNull()
   })
 })
 

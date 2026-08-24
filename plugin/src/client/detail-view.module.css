@@ -41,6 +41,12 @@
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  /* Own the scroll like the board/project roots do (UX-12): without a
+   * bounded height the inner timeline's overflow-y can never engage, and
+   * the UX-04 landing / listen-mode tail pinning would silently no-op. */
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
   padding: 12px;
 }
 
@@ -69,11 +75,38 @@
   cursor: not-allowed;
 }
 
-/* dsh deep-query tools section under the timeline. */
+/* dsh deep-query tools: collapsible segment between the actions row and
+ * the timeline (UX-09 — previously buried below a possibly very long
+ * list, outside the viewport on long sessions). */
 .toolsSection {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  border-top: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.08));
-  padding-top: 12px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.toolsToggle {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--dsw-alias-label-secondary, #57606a);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.toolsToggle:hover {
+  color: var(--dsw-alias-label-primary, #1f2328);
+}
+
+.toolsToggleGlyph {
+  flex: none;
+  font-size: 10px;
+  color: var(--dsw-alias-label-tertiary, #6e7781);
 }

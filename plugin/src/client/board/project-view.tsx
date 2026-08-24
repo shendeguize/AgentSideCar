@@ -14,15 +14,18 @@
  * blanking data the user already has.
  */
 
+import { useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   buildProjectViewModel,
+  LANE_SESSION_LIMIT,
   PROJECT_VIEW_STRINGS,
   type AgentLaneVM,
   type DerivedProjectGroupVM,
   type DerivedProjectSessionVM,
   type ProjectGroupVM,
 } from './project-view-logic.ts'
+import { formatTemplate, sliceCardsForDisplay } from './logic.ts'
 import styles from './project-view.module.css'
 
 export interface ProjectViewProps {
@@ -74,6 +77,11 @@ function AgentLane(props: {
   onSelect: (sessionId: string) => void
 }): ReactElement {
   const { lane, onSelect } = props
+  // UX-20: lanes fold past the row limit — ephemeral view state, same
+  // pattern as the board's group truncation. Rows are status-sorted, so
+  // the fold never hides a leading working/waiting run (slice guard).
+  const [expanded, setExpanded] = useState(false)
+  const { shown, hiddenCount } = sliceCardsForDisplay(lane.sessions, LANE_SESSION_LIMIT, expanded)
   return (
     <div className={styles['lane']}>
       <div className={styles['laneHead']}>
@@ -83,7 +91,7 @@ function AgentLane(props: {
         {lane.agent}
       </div>
       <div className={styles['laneSessions']}>
-        {lane.sessions.map((session) => (
+        {shown.map((session) => (
           <SessionRow
             key={`${session.agent}:${session.sessionId}`}
             session={session}
@@ -91,6 +99,24 @@ function AgentLane(props: {
           />
         ))}
       </div>
+      {hiddenCount > 0 && (
+        <button
+          type="button"
+          className={styles['showMore']}
+          onClick={() => { setExpanded(true) }}
+        >
+          {formatTemplate(PROJECT_VIEW_STRINGS.showAllSessions, { n: lane.sessions.length })}
+        </button>
+      )}
+      {expanded && lane.sessions.length > LANE_SESSION_LIMIT && (
+        <button
+          type="button"
+          className={styles['showMore']}
+          onClick={() => { setExpanded(false) }}
+        >
+          {formatTemplate(PROJECT_VIEW_STRINGS.showLessSessions, { n: LANE_SESSION_LIMIT })}
+        </button>
+      )}
     </div>
   )
 }

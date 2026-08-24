@@ -13,6 +13,7 @@ import {
   BODY_MAX_CHARS,
   DEFAULT_MAX_RENDER_ROWS,
   SUMMARY_MAX_CHARS,
+  aggregateChunkRows,
   applyListenPage,
   applyTimelinePage,
   buildTimelineRows,
@@ -23,11 +24,15 @@ import {
   deriveSourceBadges,
   detailErrorText,
   entryKey,
+  filterTimelineRows,
+  formatEventTime,
   formatRelativeTime,
   formatTemplate,
   gapLabel,
+  isStreamChunkEntry,
   limitTimelineRows,
   normalizeTimelineEntry,
+  shouldStickToLatest,
   sortTimelineEntries,
   type TimelineEntryWire,
   type TimelinePageWire,
@@ -119,8 +124,20 @@ describe('classifyKind', () => {
     expect(classifyKind('agent/tool_call')).toBe('toolCall')
   })
 
+  it('falls back to the first segment for family-first dsh kinds (live data)', () => {
+    expect(classifyKind('user/message')).toBe('user')
+    expect(classifyKind('assistant/message')).toBe('assistant')
+    expect(classifyKind('assistant/chunk')).toBe('assistant')
+    expect(classifyKind('turn/start')).toBe('turn')
+    expect(classifyKind('step/end')).toBe('step')
+    // …but the last segment stays authoritative when both match.
+    expect(classifyKind('message/user')).toBe('user')
+  })
+
   it('is honest about unknown kinds', () => {
     expect(classifyKind('session/title')).toBe('other')
+    expect(classifyKind('agent/inbox/spliced')).toBe('other')
+    expect(classifyKind('request/header')).toBe('other')
     expect(classifyKind('')).toBe('other')
     expect(classifyKind('whatever_new_kind')).toBe('other')
   })
@@ -630,6 +647,219 @@ describe('formatRelativeTime', () => {
   it('renders empty for non-finite input', () => {
     expect(formatRelativeTime(Number.NaN, NOW)).toBe('')
     expect(formatRelativeTime(Number.POSITIVE_INFINITY, NOW)).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Absolute short time (UX-13) — local-calendar rule, so fixtures build
+// their instants from local Date components, never epoch literals.
+// ---------------------------------------------------------------------------
+
+describe('formatEventTime', () => {
+  const now = new Date(2026, 7, 25, 14, 30).getTime()
+
+  it('renders HH:mm within the same local day', () => {
+    expect(formatEventTime(new Date(2026, 7, 25, 9, 5).getTime(), now)).toBe('09:05')
+    expect(formatEventTime(new Date(2026, 7, 25, 0, 0).getTime(), now)).toBe('00:00')
+  })
+
+  it('prefixes MM-DD on any other day, even less than 24h away', () => {
+    expect(formatEventTime(new Date(2026, 7, 24, 23, 59).getTime(), now)).toBe('08-24 23:59')
+    // Same month/day one year earlier is still "another day".
+    expect(formatEventTime(new Date(2025, 7, 25, 14, 30).getTime(), now)).toBe('08-25 14:30')
+  })
+
+  it('renders empty for non-finite input', () => {
+    expect(formatEventTime(Number.NaN, now)).toBe('')
+    expect(formatEventTime(now, Number.NaN)).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Kind filter (UX-03): conversation-first with an honest hidden count.
+// ---------------------------------------------------------------------------
+
+describe('filterTimelineRows', () => {
+  const NOW = 2_000_000
+
+  it("passes everything through untouched in 'all' mode", () => {
+    const rows = buildTimelineRows(
+      vmWith([seqEntry(1), seqEntry(2, { kind: 'request/header' })]),
+      NOW,
+    )
+    const out = filterTimelineRows(rows, 'all')
+    expect(out.rows).toEqual(rows)
+    expect(out.hiddenCount).toBe(0)
+  })
+
+  it("keeps only user/assistant/error in 'conversation' mode and counts the rest", () => {
+    const rows = buildTimelineRows(
+      vmWith([
+        seqEntry(1, { kind: 'user' }),
+        seqEntry(2, { kind: 'assistant' }),
+        seqEntry(3, { kind: 'thinking' }),
+        seqEntry(4, { kind: 'tool_call' }),
+        seqEntry(5, { kind: 'request/header' }),
+        seqEntry(6, { kind: 'error' }),
+      ]),
+      NOW,
+    )
+    const out = filterTimelineRows(rows, 'conversation')
+    expect(eventRows(out.rows).map((r) => r.entry.kind)).toEqual(['user', 'assistant', 'error'])
+    expect(out.hiddenCount).toBe(3)
+  })
+
+  it('never drops a gap marker: honesty rows survive the filter', () => {
+    const rows = buildTimelineRows(
+      vmWith([seqEntry(1, { kind: 'thinking' }), seqEntry(4, { kind: 'thinking' })]),
+      NOW,
+    )
+    const out = filterTimelineRows(rows, 'conversation')
+    expect(out.rows.map((r) => r.type)).toEqual(['gap'])
+    expect(out.hiddenCount).toBe(2)
+  })
+
+  it('keeps assistant streaming chunks, which then collapse via aggregation (live dsh shape)', () => {
+    // Real dsh timeline shape: user/message + empty assistant/chunk noise +
+    // protocol rows. Conversation mode keeps the chunks (assistant family)
+    // and the pipeline's aggregation step folds them into one line.
+    const rows = buildTimelineRows(
+      vmWith([
+        seqEntry(1, { kind: 'user/message' }),
+        seqEntry(2, { kind: 'assistant/chunk', text: '' }),
+        seqEntry(3, { kind: 'request/header', text: '' }),
+        seqEntry(4, { kind: 'assistant/chunk', text: '' }),
+        seqEntry(5, { kind: 'assistant/message' }),
+      ]),
+      NOW,
+    )
+    const filtered = filterTimelineRows(rows, 'conversation')
+    expect(filtered.hiddenCount).toBe(1) // request/header only
+    const out = aggregateChunkRows(filtered.rows)
+    // The protocol row between the chunks was filtered out, so the two
+    // chunks became adjacent and collapsed into one run.
+    expect(out.map((r) => (r.type === 'chunks' ? `chunks×${r.count}` : r.type))).toEqual([
+      'event',
+      'chunks×2',
+      'event',
+    ])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Streaming-chunk aggregation (UX-03).
+// ---------------------------------------------------------------------------
+
+/** Shorthand: an empty-text streaming-chunk entry at the given seq. */
+function chunkEntry(seq: number, over: Partial<TimelineEntryWire> = {}): TimelineEntryWire {
+  return seqEntry(seq, { kind: 'assistant/chunk', text: '', ...over })
+}
+
+function chunkRuns(rows: TimelineRowVM[]): Array<Extract<TimelineRowVM, { type: 'chunks' }>> {
+  return rows.filter((r): r is Extract<TimelineRowVM, { type: 'chunks' }> => r.type === 'chunks')
+}
+
+describe('isStreamChunkEntry', () => {
+  it('matches empty-summary chunk-flavored kinds by the last slash segment', () => {
+    const { entries } = vmWith([
+      chunkEntry(1),
+      chunkEntry(2, { kind: 'chunk' }),
+      chunkEntry(3, { kind: 'stream_chunk' }),
+      chunkEntry(4, { kind: 'stream-chunk' }),
+    ])
+    expect(entries.map((e) => isStreamChunkEntry(e))).toEqual([true, true, true, true])
+  })
+
+  it('refuses chunks that carry text and non-chunk kinds', () => {
+    const { entries } = vmWith([
+      chunkEntry(1, { text: 'partial words' }),
+      seqEntry(2, { kind: 'assistant', text: '' }),
+    ])
+    expect(entries.map((e) => isStreamChunkEntry(e))).toEqual([false, false])
+  })
+})
+
+describe('aggregateChunkRows', () => {
+  const NOW = 2_000_000
+
+  it('collapses a run of ≥2 adjacent same-kind chunks into one lossless row', () => {
+    const rows = buildTimelineRows(
+      vmWith([
+        seqEntry(1, { kind: 'user' }),
+        chunkEntry(2),
+        chunkEntry(3),
+        chunkEntry(4),
+        seqEntry(5, { kind: 'assistant' }),
+      ]),
+      NOW,
+    )
+    const out = aggregateChunkRows(rows)
+    expect(out.map((r) => r.type)).toEqual(['event', 'chunks', 'event'])
+    const run = chunkRuns(out)[0]!
+    expect(run.count).toBe(3)
+    expect(run.label).toBe(formatTemplate(DETAIL_STRINGS.timeline.chunkRun, { n: 3 }))
+    // Lossless: members are the original event rows, verbatim.
+    expect(run.members).toEqual(eventRows(rows).slice(1, 4))
+    // Stable key (first member) + newest member's time label.
+    expect(run.key).toBe(`chunks:${run.members[0]!.key}`)
+    expect(run.timeLabel).toBe(run.members[2]!.timeLabel)
+  })
+
+  it('keeps a single chunk as a plain row (a 1-run header would add noise)', () => {
+    const rows = buildTimelineRows(vmWith([seqEntry(1, { kind: 'user' }), chunkEntry(2)]), NOW)
+    expect(aggregateChunkRows(rows).map((r) => r.type)).toEqual(['event', 'event'])
+  })
+
+  it('breaks the run on a gap marker: aggregation cannot paper over a seq break', () => {
+    const rows = buildTimelineRows(
+      vmWith([chunkEntry(1), chunkEntry(2), chunkEntry(5), chunkEntry(6)]),
+      NOW,
+    )
+    expect(aggregateChunkRows(rows).map((r) => r.type)).toEqual(['chunks', 'gap', 'chunks'])
+  })
+
+  it('splits adjacent runs of different chunk kinds', () => {
+    const rows = buildTimelineRows(
+      vmWith([
+        chunkEntry(1),
+        chunkEntry(2),
+        chunkEntry(3, { kind: 'thinking/chunk' }),
+        chunkEntry(4, { kind: 'thinking/chunk' }),
+      ]),
+      NOW,
+    )
+    expect(chunkRuns(aggregateChunkRows(rows)).map((r) => [r.kindRaw, r.count])).toEqual([
+      ['assistant/chunk', 2],
+      ['thinking/chunk', 2],
+    ])
+  })
+
+  it('marks the run new when any member arrived in the latest listen merge', () => {
+    const vm = applyListenPage(vmWith([chunkEntry(1), chunkEntry(2)]), page([chunkEntry(3)]))
+    const runs = chunkRuns(aggregateChunkRows(buildTimelineRows(vm, NOW)))
+    expect(runs).toHaveLength(1)
+    expect(runs[0]!.count).toBe(3)
+    expect(runs[0]!.isNew).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Viewport landing rule (UX-04).
+// ---------------------------------------------------------------------------
+
+describe('shouldStickToLatest', () => {
+  it('never scrolls an empty timeline', () => {
+    expect(shouldStickToLatest({ entryCount: 0, positioned: false, listening: false })).toBe(false)
+    expect(shouldStickToLatest({ entryCount: 0, positioned: false, listening: true })).toBe(false)
+  })
+
+  it('lands on the newest events exactly once when entries first arrive', () => {
+    expect(shouldStickToLatest({ entryCount: 5, positioned: false, listening: false })).toBe(true)
+    expect(shouldStickToLatest({ entryCount: 5, positioned: true, listening: false })).toBe(false)
+  })
+
+  it('keeps pinning the tail while listen mode is on', () => {
+    expect(shouldStickToLatest({ entryCount: 5, positioned: true, listening: true })).toBe(true)
   })
 })
 

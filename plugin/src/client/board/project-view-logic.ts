@@ -55,6 +55,9 @@ export const PROJECT_VIEW_STRINGS = {
   liveChip: '实时',
   /** Untitled-session fallback. */
   untitled: '(无标题)',
+  /** Lane truncation fold (UX-20; mirrors the board's group fold). */
+  showAllSessions: '展开全部 {n} 个会话',
+  showLessSessions: '只看前 {n} 个',
   /** Empty state (no groups at all). */
   empty: {
     title: '暂无项目关联',
@@ -67,6 +70,9 @@ export const PROJECT_VIEW_STRINGS = {
 } as const
 
 export type ProjectViewStrings = typeof PROJECT_VIEW_STRINGS
+
+/** Rows a lane renders before the 「展开全部」 fold (UX-20). */
+export const LANE_SESSION_LIMIT = 10
 
 // ---------------------------------------------------------------------------
 // Input view models (hand-written wire mirror, see module doc).
@@ -224,9 +230,9 @@ function deriveSession(session: ProjectSessionVM, nowMs: number): DerivedProject
     lastActivityAt: session.lastActivityAt,
     live,
     gap,
-    // 'ok' stream health: the project view has no global stream signal,
-    // so badge attention reflects only the per-session gap marker.
-    badge: deriveBadge(session.status, gap, 'ok'),
+    // Badge attention reflects only the per-session gap marker (the badge
+    // vocabulary has no global-stream mirror at card level, UX-18).
+    badge: deriveBadge(session.status, gap),
     glyph: agentGlyph(session.agent),
     shortId: abbreviateSessionId(session.sessionId),
     relativeTime: formatRelativeTime(session.lastActivityAt, nowMs),

@@ -128,7 +128,30 @@
 .listenButton[data-active] {
   color: var(--dsw-alias-brand-primary, #4d6bfe);
   border-color: var(--dsw-alias-brand-primary, #4d6bfe);
-  background: var(--dsw-alias-brand-tertiary, rgba(77, 107, 254, 0.08));
+  /* brand tint from the real token (brand-secondary/tertiary do not exist
+   * in the dsh token table — UX-15). */
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4d6bfe) 8%, transparent);
+}
+
+.refreshButton {
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--dsw-alias-label-secondary, #57606a);
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
+  border-radius: 999px;
+  padding: 2px 12px;
+  cursor: pointer;
+}
+
+.refreshButton:hover:enabled {
+  color: var(--dsw-alias-label-primary, #1f2328);
+  border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+}
+
+.refreshButton:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .title {
@@ -155,15 +178,35 @@
   white-space: nowrap;
 }
 
+/* Click-to-copy session id (UX-17): plain-text look, button semantics. */
 .sessionId {
   font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--dsw-alias-label-tertiary, #6e7781);
+  background: transparent;
+  border: none;
+  padding: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   flex: none;
   max-width: 40%;
+  cursor: pointer;
+}
+
+.sessionId:hover {
+  color: var(--dsw-alias-label-primary, #1f2328);
+  text-decoration: underline;
+}
+
+.copiedBubble {
+  flex: none;
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  color: var(--dsw-alias-state-success-primary, #1a7f37);
+  border: 1px solid var(--dsw-alias-state-success-secondary, rgba(26, 127, 55, 0.24));
 }
 
 .metaRow {
@@ -247,6 +290,43 @@
   color: var(--dsw-alias-label-secondary, #57606a);
 }
 
+/* --------------------------------------- kind filter chips (UX-03) */
+
+.filterRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filterChip {
+  font-size: 11px;
+  font-family: inherit;
+  line-height: 18px;
+  padding: 0 10px;
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary, #57606a);
+  background: transparent;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
+  cursor: pointer;
+}
+
+.filterChip:hover {
+  color: var(--dsw-alias-label-primary, #1f2328);
+  border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+}
+
+.filterChip[data-active] {
+  color: var(--dsw-alias-brand-primary, #4d6bfe);
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4d6bfe) 8%, transparent);
+}
+
+.filterHiddenNote {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+}
+
 /* --------------------------------------------------------------- pager */
 
 .pager {
@@ -325,7 +405,30 @@
 
 .event[data-new] {
   border-color: var(--dsw-alias-brand-primary, #4d6bfe);
-  background: var(--dsw-alias-brand-tertiary, rgba(77, 107, 254, 0.06));
+  /* brand tint from the real token (UX-15). */
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary, #4d6bfe) 6%, transparent);
+}
+
+/* Aggregated streaming-chunk run (UX-03): quiet one-line stand-in. */
+.chunkRun {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 16px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  color: var(--dsw-alias-label-tertiary, #6e7781);
+  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
+  border: 1px dashed var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+}
+
+.chunkRun[data-new] {
+  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
+}
+
+.chunkRunLabel {
+  flex: none;
 }
 
 .eventHead {

@@ -195,6 +195,24 @@
   gap: 4px;
 }
 
+/* UX-20: lane truncation fold (same look as the board's group fold). */
+.showMore {
+  align-self: flex-start;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--dsw-alias-label-secondary, #57606a);
+  background: transparent;
+  border: 1px dashed var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  border-radius: 6px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+
+.showMore:hover {
+  color: var(--dsw-alias-label-primary, #1f2328);
+  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04));
+}
+
 /* -------------------------------------------------------- session rows */
 
 .session {

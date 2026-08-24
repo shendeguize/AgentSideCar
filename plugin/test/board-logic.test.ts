@@ -11,6 +11,7 @@ import {
   badgeHoverTitle,
   buildBoardViewModel,
   compareCards,
+  countByStatus,
   countWorking,
   deriveBadge,
   deriveBanner,
@@ -18,16 +19,19 @@ import {
   deriveEmptyState,
   deriveWidgetConnection,
   filterSessions,
+  formatAbsoluteShort,
   formatRelativeTime,
   formatTemplate,
   groupSessions,
   isSessionVisible,
   normalizeStatus,
   projectDisplayName,
+  sliceCardsForDisplay,
   statusRank,
   streamHealthTone,
   timeWindowLabel,
   widgetTitle,
+  GROUP_CARD_LIMIT,
   type BoardFilterState,
   type SessionCardVM,
 } from '../src/client/board/logic.ts'
@@ -127,6 +131,92 @@ describe('time-window filtering', () => {
   })
 })
 
+describe('status-only filter (UX-01)', () => {
+  const board = [
+    card({ sessionId: 'w', status: 'working', updatedAtMs: NOW - 500 * HOUR }),
+    card({ sessionId: 'a', status: 'waiting' }),
+    card({ sessionId: 'b', status: 'Waiting ', updatedAtMs: NOW - 100 * HOUR }),
+    card({ sessionId: 'i', status: 'idle' }),
+    card({ sessionId: 'd', status: 'dead' }),
+  ]
+
+  it('shows exactly the matching status, ignoring window and showDead', () => {
+    const waitingOnly = filterSessions(
+      board,
+      { ...defaultFilters, statusFilter: 'waiting' },
+      NOW,
+    )
+    // 'b' is outside the 48h window yet visible: the badge count and the
+    // filtered board must agree on the whole-board answer.
+    expect(waitingOnly.map((s) => s.sessionId)).toEqual(['a', 'b'])
+    const workingOnly = filterSessions(
+      board,
+      { ...defaultFilters, statusFilter: 'working' },
+      NOW,
+    )
+    expect(workingOnly.map((s) => s.sessionId)).toEqual(['w'])
+  })
+
+  it('absent statusFilter keeps the normal window rules', () => {
+    expect(
+      isSessionVisible(card({ status: 'idle' }), { ...defaultFilters }, NOW),
+    ).toBe(true)
+  })
+
+  it('countByStatus normalizes raw statuses; the VM carries both counts', () => {
+    expect(countByStatus(board, 'waiting')).toBe(2)
+    expect(countByStatus(board, 'working')).toBe(1)
+    const vm = buildBoardViewModel({
+      sessions: board,
+      filters: defaultFilters,
+      daemonState: 'hosted',
+      streamHealth: 'ok',
+      lastReconcileAtMs: NOW,
+      nowMs: NOW,
+    })
+    // Counts answer for the WHOLE board, not just the visible window.
+    expect(vm.workingCount).toBe(1)
+    expect(vm.waitingCount).toBe(2)
+  })
+})
+
+describe('sliceCardsForDisplay (UX-02 / UX-20 truncation)', () => {
+  const cards = (statuses: string[]): Array<{ status: string; id: number }> =>
+    statuses.map((status, id) => ({ status, id }))
+
+  it('returns everything at or under the limit', () => {
+    const input = cards(['working', 'idle', 'idle'])
+    expect(sliceCardsForDisplay(input, 3, false)).toEqual({
+      shown: input,
+      hiddenCount: 0,
+    })
+  })
+
+  it('cuts to the limit and reports the hidden tail', () => {
+    const input = cards(['waiting', 'idle', 'idle', 'idle', 'idle'])
+    const { shown, hiddenCount } = sliceCardsForDisplay(input, 2, false)
+    expect(shown.map((c) => c.id)).toEqual([0, 1])
+    expect(hiddenCount).toBe(3)
+  })
+
+  it('never cuts inside the leading working/waiting run', () => {
+    const input = cards(['working', 'Waiting', 'waiting', 'idle', 'idle'])
+    const { shown, hiddenCount } = sliceCardsForDisplay(input, 2, false)
+    expect(shown.map((c) => c.id)).toEqual([0, 1, 2])
+    expect(hiddenCount).toBe(2)
+  })
+
+  it('expanded or non-positive limits disable truncation', () => {
+    const input = cards(['idle', 'idle', 'idle'])
+    expect(sliceCardsForDisplay(input, 1, true).hiddenCount).toBe(0)
+    expect(sliceCardsForDisplay(input, 0, false).hiddenCount).toBe(0)
+  })
+
+  it('the board group limit is a sane default', () => {
+    expect(GROUP_CARD_LIMIT).toBeGreaterThan(0)
+  })
+})
+
 describe('grouping and ordering', () => {
   it('buckets empty/whitespace projects under 未知项目 with key ""', () => {
     const groups = groupSessions([card({ project: '' }), card({ project: '  ', sessionId: 's2' })])
@@ -169,32 +259,31 @@ describe('grouping and ordering', () => {
 
 describe('badge derivation', () => {
   it('maps known statuses to tone + Chinese label', () => {
-    expect(deriveBadge('working', false, 'ok')).toMatchObject({
+    expect(deriveBadge('working', false)).toMatchObject({
       status: 'working',
       tone: 'success',
       label: BOARD_STRINGS.status.working,
       attention: null,
       attentionLabel: null,
     })
-    expect(deriveBadge('waiting', false, 'ok').tone).toBe('warn')
-    expect(deriveBadge('idle', false, 'ok').tone).toBe('neutral')
-    expect(deriveBadge('dead', false, 'ok').tone).toBe('muted')
+    expect(deriveBadge('waiting', false).tone).toBe('warn')
+    expect(deriveBadge('idle', false).tone).toBe('neutral')
+    expect(deriveBadge('dead', false).tone).toBe('muted')
   })
 
   it('keeps the raw text as label for unknown statuses (never invents a state)', () => {
-    const badge = deriveBadge('resuming', false, 'ok')
+    const badge = deriveBadge('resuming', false)
     expect(badge.status).toBe('unknown')
     expect(badge.label).toBe('resuming')
-    expect(deriveBadge('  ', false, 'ok').label).toBe(BOARD_STRINGS.status.unknown)
+    expect(deriveBadge('  ', false).label).toBe(BOARD_STRINGS.status.unknown)
   })
 
-  it('flags gap, flags stale on non-ok stream, and gap outranks stale', () => {
-    expect(deriveBadge('working', true, 'ok').attention).toBe('gap')
-    expect(deriveBadge('working', false, 'degraded').attention).toBe('stale')
-    expect(deriveBadge('working', false, 'unknown').attention).toBe('stale')
-    const both = deriveBadge('working', true, 'degraded')
-    expect(both.attention).toBe('gap')
-    expect(both.attentionLabel).toBe(BOARD_STRINGS.attention.gap)
+  it('flags only the per-session gap; no global stale marker at card level (UX-18)', () => {
+    const flagged = deriveBadge('working', true)
+    expect(flagged.attention).toBe('gap')
+    expect(flagged.attentionLabel).toBe(BOARD_STRINGS.attention.gap)
+    expect(deriveBadge('working', false).attention).toBeNull()
+    expect(deriveBadge('working', false).attentionLabel).toBeNull()
   })
 })
 
@@ -218,17 +307,32 @@ describe('formatRelativeTime boundaries', () => {
     expect(formatRelativeTime(NOW + 10 * MINUTE, NOW)).toBe(BOARD_STRINGS.time.justNow)
   })
 
-  it('switches units exactly at the minute/hour/day boundaries', () => {
+  it('stays relative below 24h, exact at the minute/hour boundaries', () => {
     expect(formatRelativeTime(NOW - MINUTE, NOW)).toBe('1 分钟前')
     expect(formatRelativeTime(NOW - HOUR + 1, NOW)).toBe('59 分钟前')
     expect(formatRelativeTime(NOW - HOUR, NOW)).toBe('1 小时前')
     expect(formatRelativeTime(NOW - 24 * HOUR + 1, NOW)).toBe('23 小时前')
-    expect(formatRelativeTime(NOW - 24 * HOUR, NOW)).toBe('1 天前')
-    expect(formatRelativeTime(NOW - 40 * 24 * HOUR, NOW)).toBe('40 天前')
+  })
+
+  it('switches to the absolute short date from 24h on (UX-13)', () => {
+    for (const age of [24 * HOUR, 40 * 24 * HOUR]) {
+      const thenMs = NOW - age
+      expect(formatRelativeTime(thenMs, NOW)).toBe(formatAbsoluteShort(thenMs))
+      expect(formatRelativeTime(thenMs, NOW)).not.toContain('天前')
+    }
   })
 
   it('renders empty for non-finite input', () => {
     expect(formatRelativeTime(Number.NaN, NOW)).toBe('')
+  })
+})
+
+describe('formatAbsoluteShort', () => {
+  it('renders zero-padded local MM-DD HH:mm', () => {
+    // 2024-02-03 04:05 local time, built from local components so the
+    // expectation holds in every timezone the suite runs in.
+    const thenMs = new Date(2024, 1, 3, 4, 5).getTime()
+    expect(formatAbsoluteShort(thenMs)).toBe('02-03 04:05')
   })
 })
 
@@ -385,7 +489,7 @@ describe('buildBoardViewModel (pipeline)', () => {
     expect(vm.emptyState?.kind).toBe('filtered')
   })
 
-  it('surfaces the degraded banner and stale badges together', () => {
+  it('keeps the degraded notice in the banner only — cards stay clean (UX-18)', () => {
     const vm = buildBoardViewModel({
       sessions: [card()],
       filters: defaultFilters,
@@ -395,7 +499,7 @@ describe('buildBoardViewModel (pipeline)', () => {
       nowMs: NOW,
     })
     expect(vm.banner?.tone).toBe('warn')
-    expect(vm.groups[0]!.cards[0]!.badge.attention).toBe('stale')
+    expect(vm.groups[0]!.cards[0]!.badge.attention).toBeNull()
     expect(vm.streamTone).toBe('warn')
   })
 })

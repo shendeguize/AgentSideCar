@@ -69,7 +69,7 @@ export const en = {
   'settings.sectionInject': 'Message injection',
   'settings.injectEnabledLabel': 'Enable injection',
   'settings.injectEnabledHint':
-    'When off, the board hides every inject affordance and the server rejects write actions.',
+    'When off, the inject panel renders read-only and disabled, and the server rejects write actions.',
   'settings.injectDefaultModeLabel': 'Default injection mode',
   'settings.injectDefaultModeHint': 'The mode preselected when the inject panel opens.',
   'settings.injectModeQueue': 'queue (next turn)',
@@ -147,6 +147,7 @@ export const en = {
   'inject.resultReplayed':
     'Idempotent replay: this is the earlier result of the same request — no second injection happened.',
   'inject.reprepare': 'Prepare again',
+  'inject.observeListen': 'Listen for the reaction',
 
   // ── inject panel: error vocabulary (gateway + transport) ─────────────
   'inject.errInjectDisabled': 'Injection is disabled on the server; enable it in Settings.',
@@ -178,6 +179,11 @@ export const en = {
   'detail.header.listenOn': 'Listening',
   'detail.header.listenOff': 'Listen',
   'detail.header.listenHint': 'New events append live and get highlighted while on',
+  'detail.header.refresh': 'Refresh',
+  'detail.header.refreshing': 'Refreshing…',
+  'detail.header.refreshHint': 'Pull the newest timeline window',
+  'detail.header.copyIdTitle': 'Click to copy the session ID',
+  'detail.header.copied': 'Copied',
   'detail.header.untitled': '(untitled)',
   'detail.header.unknownProject': 'Unknown project',
   'detail.header.observedDisclaimer':
@@ -204,6 +210,9 @@ export const en = {
   'detail.kind.other': 'Event',
   'detail.gap.label':
     'Gap: about {n} events may be uncaptured (256-slot queue cap or not persisted)',
+  'detail.filter.conversation': 'Conversation only',
+  'detail.filter.all': 'All events',
+  'detail.filter.hiddenNotice': '{n} protocol events hidden',
   'detail.timeline.loadMore': 'Load older history',
   'detail.timeline.loadingMore': 'Loading…',
   'detail.timeline.noMore': 'Start of the timeline',
@@ -213,6 +222,7 @@ export const en = {
   'detail.timeline.seq': 'seq {n}',
   'detail.timeline.hiddenNotice': '{n} earlier entries collapsed to stay smooth',
   'detail.timeline.showAll': 'Show all',
+  'detail.timeline.chunkRun': '{n} streaming chunks',
   'detail.states.loadingTitle': 'Loading the timeline…',
   'detail.states.emptyTitle': 'No events yet',
   'detail.states.emptyHint': 'This session has no normalized events to show yet.',
@@ -233,6 +243,9 @@ export const en = {
   'detail.actions.analyze': 'AI analysis',
   'detail.actions.analyzeDisabledHint':
     'Enable "AI bypass analysis" in Settings to use this',
+  'detail.tools.title': 'Lineage & search',
+  'detail.tools.show': 'Show',
+  'detail.tools.hide': 'Hide',
 
   // ── dsh deep-query tools ────────────────────────────────────────────────
   'dshtools.lineage.title': 'Session lineage',
@@ -287,6 +300,8 @@ export const en = {
   'project.lastActive': 'Last active {time}',
   'project.liveChip': 'Live',
   'project.untitled': '(untitled)',
+  'project.showAllSessions': 'Show all {n} sessions',
+  'project.showLessSessions': 'Show first {n} only',
   'project.empty.title': 'No project correlation yet',
   'project.empty.hint':
     'No cross-agent project activity within the time window; projects appear here once an agent works inside a project directory.',
@@ -357,7 +372,7 @@ export const en = {
   'command.noSessions': 'No observed sessions yet',
   'command.unknownProject': 'Unknown project',
   'command.untitled': '(untitled)',
-  'command.truncated': '{n} more active sessions not listed',
+  'command.truncated': '{n} more sessions not listed',
   'command.boardHint': 'Open the "Sidecar" tab in the conversation view for the full board',
   'command.unreachable': 'sidecar is not connected',
   'command.unreachableHint':
