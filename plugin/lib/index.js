@@ -471,7 +471,7 @@ const Config = z.object({
 		timeWindowHours: z.natural().min(1).default(24).description("看板会话时间窗(小时)"),
 		showDead: z.boolean().default(false).description("是否显示 dead 会话")
 	}).description("看板界面"),
-	skill: z.object({ provide: z.boolean().default(false).description("是否经 registerProvider 内嵌提供 agent-sidecar skill(M4 启用)") }).description("skill 模式")
+	skill: z.object({ provide: z.boolean().default(true).description("是否经 registerProvider 内嵌提供 agent-sidecar skill(设计 §6 默认开;文件系统已装的同名 skill 自动优先;改动需重载插件生效)") }).description("skill 模式")
 });
 //#endregion
 //#region src/bridge.ts
@@ -3179,6 +3179,141 @@ var SessionStore = class {
 	}
 };
 //#endregion
+//#region src/skills-provider.ts
+/** Registry name of this provider (distinct from the skill it serves). */
+const SKILL_PROVIDER_NAME = "agent-sidecar-plugin";
+/** The one skill this provider serves (same name as the filesystem copy). */
+const SIDECAR_SKILL_NAME = "agent-sidecar";
+/** Routing description; aligned with skills/agent-sidecar/SKILL.md frontmatter. */
+const SIDECAR_SKILL_DESCRIPTION = "Monitors readonly local AI agent sessions (claude/codex/cursor/dsh/kimi/copilot) and reports their state and progress via the agent-sidecar CLI and the Sidecar board in dsh web. Use when the user asks for agent status, session progress, to monitor agents, which agent is waiting or working, or explicitly asks to send a message or feedback to an agent.";
+/**
+* dsh-scene skill body: semantically consistent with the canonical
+* `skills/agent-sidecar/SKILL.md`, condensed for the plugin context —
+* observation goes CLI/board, injection goes the plugin panel (design §7
+* path two: "dsh 会话注入应引导走插件通路而非 send,因 unsupported_dsh").
+*/
+const SIDECAR_SKILL_CONTENT = `# Agent Sidecar (dsh plugin edition)
+
+This dsh composition runs the \`dsh-agent-sidecar\` plugin. Observation is
+the default; every mutation needs an explicit user request in the same turn.
+
+## Observe
+
+1. Check \`command -v agent-sidecar\`. If missing, do not install anything
+   unless the user explicitly asks; point them at the agent_sidecar repo
+   install options instead.
+2. Run \`agent-sidecar status --json\` first; summarize sessions by agent,
+   status, title, project, and age from \`updated_at\`.
+3. Other observation commands, only when they match the request:
+   \`list --json\` (48h window), \`list --all --json\`, \`ps --json\`,
+   \`watch <session-prefix> --json\`, \`watch --all --json\`, \`tui\`.
+4. The plugin also serves a live multi-agent board in dsh web (the
+   "Sidecar" conversation tab). Prefer pointing the user there for
+   continuous monitoring instead of polling the CLI yourself.
+5. Treat \`working\`/\`waiting\` as inferred observations from persisted
+   data, not control-plane guarantees; Cursor IDE can report \`waiting\`
+   several minutes late.
+
+## Inject (explicit request only)
+
+- For **dsh sessions**, \`agent-sidecar send\` is unsupported
+  (\`unsupported_dsh\`: DSH has neither session resume nor stdin prompt
+  transport). Route the user to the plugin's inject panel on the Sidecar
+  board, which injects in-process (queue/steer) behind the plugin's
+  \`inject.enabled\` gate and confirmation dialog.
+- For **claude / codex / cursor-cli** sessions in \`waiting\`/\`idle\`, use
+  the plugin panel, or run \`send\` only when the user explicitly requests
+  the exact message or action in the same turn. Never infer consent from a
+  request to observe, watch, report, or wait. That explicit same-turn
+  request is the permission required to use \`--allow-write\`; never add it
+  otherwise:
+
+  \`\`\`sh
+  agent-sidecar send <session-prefix> "<exact-message>" --allow-write --request-id "<stable-unique-id>" --json
+  \`\`\`
+
+- Preserve the returned \`request_id\` and \`replayed\` fields. Never send
+  to remote, \`working\`, \`dead\`, child, or unsupported-agent sessions
+  (\`cursor-ide\`, \`copilot\`, \`kimi\`, \`dsh\`).
+- Never retry \`failed\`, \`timed_out\`, \`request_pending\`,
+  \`audit_error\`, \`cleanup_incomplete\`, or any result with
+  \`delivery: "unknown"\` — the agent may already have received the
+  message. Report the unknown state plainly and ask the user what to do.
+- The audit store is fail-closed; never run \`agent-sidecar audit reset\`
+  automatically.
+
+## Reference
+
+Full schemas, exit codes, and boundaries: \`skills/agent-sidecar/SKILL.md\`
+and \`reference.md\` in the agent_sidecar repository (also installable as a
+filesystem skill via \`scripts/install-skill.sh\`; a filesystem copy under
+\`~/.dsh/skills/\` automatically shadows this plugin-provided one).`;
+const RESOURCE_BASE = {
+	kind: "opaque",
+	description: "Self-contained skill provided by the dsh-agent-sidecar plugin; the canonical long-form reference (SKILL.md + reference.md) lives in the agent_sidecar repository under skills/agent-sidecar/."
+};
+const INVOCATION = {
+	modelInvocable: true,
+	userInvocable: true
+};
+/** The single catalog candidate this provider lists (skill-badge template). */
+const SIDECAR_SKILL_CANDIDATE = {
+	name: SIDECAR_SKILL_NAME,
+	description: SIDECAR_SKILL_DESCRIPTION,
+	invocation: INVOCATION,
+	source: "bundled",
+	provider: SKILL_PROVIDER_NAME,
+	resourceBase: RESOURCE_BASE,
+	rank: 600,
+	locator: SIDECAR_SKILL_NAME
+};
+/** The provider instance: one static candidate, embedded body. */
+const provider = {
+	name: SKILL_PROVIDER_NAME,
+	list: () => Promise.resolve([SIDECAR_SKILL_CANDIDATE]),
+	get: (candidate) => Promise.resolve(candidate.name === "agent-sidecar" ? {
+		name: SIDECAR_SKILL_NAME,
+		description: SIDECAR_SKILL_DESCRIPTION,
+		invocation: INVOCATION,
+		source: "bundled",
+		provider: SKILL_PROVIDER_NAME,
+		resourceBase: RESOURCE_BASE,
+		content: SIDECAR_SKILL_CONTENT
+	} : void 0)
+};
+/**
+* Register the agent-sidecar skill provider on `ctx.skills`.
+*
+* Yield rule (per live test, env_facts.md): none needed beyond the rank —
+* dsh's registry dedupes same-name skills natively, and this provider's
+* BUNDLED rank (600) loses to every filesystem root, so a filesystem copy
+* always shadows the plugin copy and the catalog shows exactly one entry
+* either way. `provide=false` skips registration entirely.
+*
+* @param deps - registry face, config gate, and log sink.
+* @returns the registry's unregister disposer, or `null` when the gate is
+*   off or registration failed (duplicate provider name in this layer —
+*   only reachable if the plugin is mounted twice in one scope).
+*/
+function registerSidecarSkillProvider(deps) {
+	if (!deps.provide) {
+		deps.log("debug", "skill provider disabled (skill.provide=false)");
+		return null;
+	}
+	try {
+		const dispose = deps.skills.registerProvider(() => provider);
+		deps.log("debug", "skill provider registered", {
+			provider: SKILL_PROVIDER_NAME,
+			skill: SIDECAR_SKILL_NAME,
+			rank: 600
+		});
+		return dispose;
+	} catch (err) {
+		deps.log("warn", `skill provider registration failed: ${String(err)}`);
+		return null;
+	}
+}
+//#endregion
 //#region src/supervisor.ts
 const defaultSetTimeout = (fn, ms) => globalThis.setTimeout(fn, ms);
 const defaultClearTimeout = (handle) => {
@@ -3997,6 +4132,13 @@ function apply(ctx, config) {
 			liveAgents = null;
 		}, "agent-sidecar: agents binding release");
 		log("debug", "dsh inject + analysis paths online (agents service bound)");
+	});
+	ctx.inject(["skills"], (injected) => {
+		registerSidecarSkillProvider({
+			skills: injected.skills,
+			provide: config.skill.provide,
+			log
+		});
 	});
 	ctx.inject(["settings"], (injected) => {
 		try {

@@ -946,8 +946,10 @@ window.__ModuleLoader__.load({
 		* `board.*` by the board-tab chrome (view switcher); `detail.*` /
 		* `dshtools.*` / `project.*` mirror the M3 module tables (see below);
 		* `analysis.*` is owned by the analysis panel (T5.10b); `command.*` by the
-		* `/sidecar` slash command (T4.6, re-exported via ./command.ts) — keeping
-		* the prefixes in one flat namespace avoids cross-task collisions.
+		* `/sidecar` slash command (T4.6, re-exported via ./command.ts);
+		* `sidebar.*` by the optional better-sidebar mini tab (T6.3,
+		* src/client/sidebar-tab.tsx) — keeping the prefixes in one flat namespace
+		* avoids cross-task collisions.
 		*
 		* M3 unification (T5.10b): the component-local tables `detail/strings.ts`,
 		* `dsh-tools/strings.ts` and `PROJECT_VIEW_STRINGS` stay the rendering
@@ -1248,7 +1250,15 @@ window.__ModuleLoader__.load({
 			"command.time.justNow": "刚刚",
 			"command.time.minutesAgo": "{n} 分钟前",
 			"command.time.hoursAgo": "{n} 小时前",
-			"command.time.daysAgo": "{n} 天前"
+			"command.time.daysAgo": "{n} 天前",
+			"sidebar.tabTitle": "Sidecar",
+			"sidebar.countsRow": "{working} 工作中 · {waiting} 等待中",
+			"sidebar.recentTitle": "最近活跃",
+			"sidebar.connecting": "等待 sidecar 快照…",
+			"sidebar.noSessions": "暂无活跃会话",
+			"sidebar.noEvent": "暂无事件记录",
+			"sidebar.untitled": "(无标题)",
+			"sidebar.boardHint": "完整看板见会话视图的「Sidecar」Tab"
 		};
 		//#endregion
 		//#region src/client/locales/en.ts
@@ -1538,7 +1548,15 @@ window.__ModuleLoader__.load({
 			"command.time.justNow": "just now",
 			"command.time.minutesAgo": "{n} min ago",
 			"command.time.hoursAgo": "{n} h ago",
-			"command.time.daysAgo": "{n} d ago"
+			"command.time.daysAgo": "{n} d ago",
+			"sidebar.tabTitle": "Sidecar",
+			"sidebar.countsRow": "{working} working · {waiting} waiting",
+			"sidebar.recentTitle": "Recently active",
+			"sidebar.connecting": "Waiting for the sidecar snapshot…",
+			"sidebar.noSessions": "No active sessions",
+			"sidebar.noEvent": "No events recorded yet",
+			"sidebar.untitled": "(untitled)",
+			"sidebar.boardHint": "Full board: the \"Sidecar\" tab in the conversation view"
 		};
 		/** Complete shipped dictionaries keyed by locale id. */
 		const dictionaries = {
@@ -2777,7 +2795,7 @@ window.__ModuleLoader__.load({
 		};
 		//#endregion
 		//#region src/client/board/project-view.tsx
-		function SessionRow(props) {
+		function SessionRow$1(props) {
 			const { session, onSelect } = props;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 				type: "button",
@@ -2835,7 +2853,7 @@ window.__ModuleLoader__.load({
 					}), lane.agent]
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					className: project_view_module_css_default["laneSessions"],
-					children: lane.sessions.map((session) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionRow, {
+					children: lane.sessions.map((session) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionRow$1, {
 						session,
 						onSelect
 					}, `${session.agent}:${session.sessionId}`))
@@ -2967,12 +2985,12 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/client/widget.tsx
-		const DOT_COLORS = {
+		const DOT_COLORS$1 = {
 			ok: "var(--dsw-alias-state-success-primary, #1a7f37)",
 			degraded: "var(--dsw-alias-state-warn-primary, #9a6700)",
 			off: "var(--dsw-alias-label-dimmed, #8c959f)"
 		};
-		const rootStyle = {
+		const rootStyle$1 = {
 			display: "inline-flex",
 			alignItems: "center",
 			gap: 4,
@@ -2995,7 +3013,7 @@ window.__ModuleLoader__.load({
 			const title = widgetTitle(props.connection, props.workingCount);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 				type: "button",
-				style: rootStyle,
+				style: rootStyle$1,
 				title,
 				"aria-label": title,
 				onClick: props.onOpen,
@@ -3008,7 +3026,7 @@ window.__ModuleLoader__.load({
 						height: 8,
 						borderRadius: "50%",
 						flex: "none",
-						background: DOT_COLORS[props.connection]
+						background: DOT_COLORS$1[props.connection]
 					}
 				}), props.workingCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 					style: countStyle,
@@ -7237,7 +7255,7 @@ window.__ModuleLoader__.load({
 				timeWindowHours: 24,
 				showDead: false
 			},
-			skill: { provide: false }
+			skill: { provide: true }
 		};
 		/** Whitespace-join an argv for the card's single-line command field. */
 		function joinCommand(argv) {
@@ -7529,6 +7547,345 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
+		//#region src/client/sidebar-tab.tsx
+		/**
+		* Optional better-sidebar mini tab (T6.3, design §5.2 / ADR-5 option C).
+		*
+		* dsh-better-sidebar (npm, ≥0.4.0) turns the sidebar into a registry
+		* service: its client half runs `ctx.provide('betterSidebar', service)` and
+		* consumers call `service.registerTab(descriptor)` (source of record:
+		* better-sidebar docs/external-plugin-guide.md + src/client/service.ts).
+		* This module integrates as a SOFT dependency, dsh-sentinel style:
+		*
+		* - NO value import and NO type import of `dsh-better-sidebar` — the client
+		*   bundle purity gate stays react-only. The minimal service contract is
+		*   restated locally ({@link BetterSidebarServiceFace}) and the live service
+		*   is duck-typed at runtime ({@link probeBetterSidebar}).
+		* - Absent → silent skip: {@link mountSidebarTab} parks the registration in
+		*   `ctx.inject(['betterSidebar'], …)` — a cordis fiber that stays PENDING
+		*   until some plugin provides the service (zero timers, zero polling, zero
+		*   resources), plus one debug-level log line at mount time. If
+		*   better-sidebar is installed later (any load order), the fiber activates
+		*   and the tab registers; if never, nothing ever runs.
+		* - Present → one compact "Sidecar" tab (`agent-sidecar:monitor`): daemon
+		*   connection dot, working/waiting counts, and the most recently active
+		*   sessions, all read from the SHARED {@link SidecarController} stores —
+		*   no second poller, no second SSE.
+		* - `visible === false` releases resources: better-sidebar hands tab
+		*   components a `visible` prop (false while the panel is collapsed or
+		*   another tab is active). The shared controller has no pause/refcount
+		*   surface (its stream is plugin-lifetime, `stop()` is terminal), so the
+		*   gate lives in this view: {@link VisibleGatedStore} unsubscribes from the
+		*   controller while hidden (re-render churn stops; the view triggers no
+		*   fetches of its own) and resubscribes + catches up on show.
+		*/
+		/** Registered tab type id (design §5.2 names it verbatim). */
+		const SIDEBAR_TAB_ID = "agent-sidecar:monitor";
+		/**
+		* Duck-type a candidate service value: any object exposing a callable
+		* `registerTab` qualifies (the registry contract is stable since
+		* better-sidebar v0.4.0). Anything else — absent service, or a foreign
+		* object squatting on the service name — reads as "not installed".
+		*/
+		function probeBetterSidebar(candidate) {
+			if (typeof candidate !== "object" || candidate === null) return null;
+			return typeof candidate.registerTab === "function" ? candidate : null;
+		}
+		/**
+		* A pausable read-through store between the shared controller and one tab
+		* instance. While visible it mirrors the controller (subscribed, snapshots
+		* flow, listeners notified); while hidden it holds NO controller
+		* subscription — upstream notifications cost this view nothing — and serves
+		* the last seen snapshot. Turning visible again resubscribes and catches up
+		* once. Methods are bound fields so uSES sees stable identities.
+		*/
+		var VisibleGatedStore = class {
+			source;
+			listeners = /* @__PURE__ */ new Set();
+			unsubscribe = null;
+			snapshot;
+			disposed = false;
+			constructor(source) {
+				this.source = source;
+				this.snapshot = source.getState();
+			}
+			/** Whether the upstream controller subscription is currently held. */
+			get subscribed() {
+				return this.unsubscribe !== null;
+			}
+			subscribe = (listener) => {
+				this.listeners.add(listener);
+				return () => {
+					this.listeners.delete(listener);
+				};
+			};
+			getState = () => this.snapshot;
+			/** Idempotent visibility switch: subscribe + catch up, or unsubscribe. */
+			setVisible(visible) {
+				if (this.disposed || visible === this.subscribed) return;
+				if (visible) {
+					this.unsubscribe = this.source.subscribe(() => {
+						this.pull();
+					});
+					this.pull();
+				} else {
+					this.unsubscribe?.();
+					this.unsubscribe = null;
+				}
+			}
+			/** Terminal teardown (component unmount): drop upstream and listeners. */
+			dispose() {
+				this.disposed = true;
+				this.unsubscribe?.();
+				this.unsubscribe = null;
+				this.listeners.clear();
+			}
+			pull() {
+				const next = this.source.getState();
+				if (next === this.snapshot) return;
+				this.snapshot = next;
+				for (const fn of [...this.listeners]) fn();
+			}
+		};
+		/** Count of sessions currently observed as waiting. */
+		function countWaiting(sessions) {
+			let count = 0;
+			for (const session of sessions) if (normalizeStatus(session.status) === "waiting") count += 1;
+			return count;
+		}
+		/**
+		* The compact list: non-dead sessions, most recently updated first, capped
+		* at {@link MAX_RECENT_SESSIONS} (ties break by session id for stability).
+		*/
+		function recentActiveSessions(sessions, limit = 5) {
+			return sessions.filter((session) => normalizeStatus(session.status) !== "dead").sort((a, b) => b.updatedAtMs !== a.updatedAtMs ? b.updatedAtMs - a.updatedAtMs : a.sessionId.localeCompare(b.sessionId)).slice(0, limit);
+		}
+		/** Fold the shared view state into the mini tab's view model (pure). */
+		function deriveMiniVM(state) {
+			const connection = deriveWidgetConnection(state.daemonState, state.streamHealth);
+			const workingCount = countWorking(state.sessions);
+			return {
+				connection,
+				connectionTitle: widgetTitle(connection, workingCount),
+				workingCount,
+				waitingCount: countWaiting(state.sessions),
+				recent: recentActiveSessions(state.sessions),
+				hasSnapshot: state.hasSnapshot
+			};
+		}
+		const STATUS_LABEL_KEY = {
+			working: "detail.status.working",
+			waiting: "detail.status.waiting",
+			idle: "detail.status.idle",
+			dead: "detail.status.dead",
+			unknown: "detail.status.unknown"
+		};
+		const DOT_COLORS = {
+			ok: "var(--dsw-alias-state-success-primary, #1a7f37)",
+			degraded: "var(--dsw-alias-state-warn-primary, #9a6700)",
+			off: "var(--dsw-alias-label-dimmed, #8c959f)"
+		};
+		const rootStyle = {
+			display: "flex",
+			flexDirection: "column",
+			gap: 8,
+			padding: "10px 12px",
+			fontSize: 12,
+			color: "var(--dsw-alias-label-primary, #1f2328)"
+		};
+		const headerStyle = {
+			display: "flex",
+			alignItems: "center",
+			gap: 6
+		};
+		const dotStyle = (connection) => ({
+			width: 8,
+			height: 8,
+			borderRadius: "50%",
+			flex: "none",
+			background: DOT_COLORS[connection]
+		});
+		const countsStyle = {
+			fontVariantNumeric: "tabular-nums",
+			color: "var(--dsw-alias-label-secondary, #57606a)"
+		};
+		const sectionTitleStyle = {
+			fontSize: 11,
+			fontWeight: 600,
+			color: "var(--dsw-alias-label-secondary, #57606a)"
+		};
+		const rowStyle = {
+			display: "flex",
+			alignItems: "center",
+			gap: 6,
+			width: "100%",
+			padding: "4px 6px",
+			border: "none",
+			borderRadius: 6,
+			background: "transparent",
+			cursor: "pointer",
+			font: "inherit",
+			textAlign: "left",
+			color: "inherit"
+		};
+		const rowTitleStyle = {
+			flex: 1,
+			minWidth: 0,
+			overflow: "hidden",
+			textOverflow: "ellipsis",
+			whiteSpace: "nowrap"
+		};
+		const rowMetaStyle = {
+			flex: "none",
+			fontSize: 11,
+			color: "var(--dsw-alias-label-dimmed, #8c959f)",
+			whiteSpace: "nowrap"
+		};
+		const detailStyle = {
+			margin: "0 6px 4px 20px",
+			fontSize: 11,
+			lineHeight: "16px",
+			color: "var(--dsw-alias-label-secondary, #57606a)",
+			overflowWrap: "anywhere"
+		};
+		const mutedStyle = { color: "var(--dsw-alias-label-dimmed, #8c959f)" };
+		const hintStyle = {
+			fontSize: 11,
+			color: "var(--dsw-alias-label-dimmed, #8c959f)"
+		};
+		/** One session row + its inline expansion (last event, project, id). */
+		function SessionRow(props) {
+			const { session, nowMs, expanded } = props;
+			const status = normalizeStatus(session.status);
+			const title = session.title.trim() === "" ? t("sidebar.untitled") : session.title;
+			const rowChildren = [
+				(0, react.createElement)("span", {
+					key: "glyph",
+					"aria-hidden": true
+				}, agentGlyph$1(session.agent)),
+				(0, react.createElement)("span", {
+					key: "title",
+					style: rowTitleStyle,
+					title: session.sessionId
+				}, title),
+				(0, react.createElement)("span", {
+					key: "meta",
+					style: rowMetaStyle
+				}, `${t(STATUS_LABEL_KEY[status])} · ${formatRelativeTime$1(session.updatedAtMs, nowMs)}`)
+			];
+			const children = [(0, react.createElement)("button", {
+				key: "row",
+				type: "button",
+				style: rowStyle,
+				onClick: props.onToggle,
+				"data-testid": "agent-sidecar-sidebar-session",
+				"data-session-id": session.sessionId,
+				"data-status": status,
+				"aria-expanded": expanded
+			}, ...rowChildren)];
+			if (expanded) {
+				const lastEvent = session.lastEvent === null ? (0, react.createElement)("span", { style: mutedStyle }, t("sidebar.noEvent")) : `${session.lastEvent.kind}: ${session.lastEvent.text}`;
+				children.push((0, react.createElement)("div", {
+					key: "detail",
+					style: detailStyle,
+					"data-testid": "agent-sidecar-sidebar-detail"
+				}, (0, react.createElement)("div", { key: "project" }, projectDisplayName(session.project)), (0, react.createElement)("div", { key: "event" }, lastEvent)));
+			}
+			return (0, react.createElement)("li", { style: { listStyle: "none" } }, ...children);
+		}
+		/**
+		* Build the tab component bound to the shared controller. One
+		* {@link VisibleGatedStore} per mounted tab instance: the `visible` prop is
+		* synced into it by effect, unmount disposes it.
+		*/
+		function createSidebarTabComponent(controller) {
+			return function SidecarSidebarTab({ visible }) {
+				const [gate] = (0, react.useState)(() => new VisibleGatedStore(controller));
+				(0, react.useEffect)(() => () => {
+					gate.dispose();
+				}, [gate]);
+				(0, react.useEffect)(() => {
+					gate.setVisible(visible);
+				}, [gate, visible]);
+				const state = (0, react.useSyncExternalStore)(gate.subscribe, gate.getState, gate.getState);
+				const [expandedId, setExpandedId] = (0, react.useState)(null);
+				const vm = deriveMiniVM(state);
+				const nowMs = Date.now();
+				let body;
+				if (!vm.hasSnapshot) body = (0, react.createElement)("div", { style: mutedStyle }, t("sidebar.connecting"));
+				else if (vm.recent.length === 0) body = (0, react.createElement)("div", { style: mutedStyle }, t("sidebar.noSessions"));
+				else body = (0, react.createElement)("ul", { style: {
+					margin: 0,
+					padding: 0
+				} }, ...vm.recent.map((session) => (0, react.createElement)(SessionRow, {
+					key: session.sessionId,
+					session,
+					nowMs,
+					expanded: expandedId === session.sessionId,
+					onToggle: () => {
+						setExpandedId((prev) => prev === session.sessionId ? null : session.sessionId);
+					}
+				})));
+				return (0, react.createElement)("div", {
+					style: rootStyle,
+					"data-testid": "agent-sidecar-sidebar-tab",
+					"data-visible": visible
+				}, (0, react.createElement)("div", {
+					style: headerStyle,
+					title: vm.connectionTitle
+				}, (0, react.createElement)("span", {
+					"aria-hidden": true,
+					style: dotStyle(vm.connection)
+				}), (0, react.createElement)("span", {
+					style: countsStyle,
+					"data-testid": "agent-sidecar-sidebar-counts"
+				}, t("sidebar.countsRow", {
+					working: vm.workingCount,
+					waiting: vm.waitingCount
+				}))), (0, react.createElement)("div", { style: sectionTitleStyle }, t("sidebar.recentTitle")), body, (0, react.createElement)("div", { style: hintStyle }, t("sidebar.boardHint")));
+			};
+		}
+		/**
+		* Park the better-sidebar integration on the optional service. Not
+		* installed → the inject fiber never activates (silent skip, one debug
+		* line, zero resources). Installed (before or after this plugin, order
+		* does not matter) → duck-type the service and register the mini tab
+		* inside `ctx.effect`, so plugin unload / HMR unregisters it. A duplicate
+		* registration (double apply) or a service throw degrades to a logged
+		* no-op — never past this seat.
+		*/
+		function mountSidebarTab(ctx, controller) {
+			const mount = ctx;
+			if (probeBetterSidebar(mount.get("betterSidebar")) === null) console.debug("agent-sidecar: better-sidebar not detected; the optional sidebar tab stays idle");
+			mount.inject(["betterSidebar"], (injected) => {
+				const bctx = injected;
+				const service = probeBetterSidebar(bctx.get("betterSidebar"));
+				if (service === null) {
+					console.debug("agent-sidecar: betterSidebar service lacks registerTab; skipping tab");
+					return;
+				}
+				const component = createSidebarTabComponent(controller);
+				bctx.effect(() => {
+					try {
+						return service.registerTab({
+							id: SIDEBAR_TAB_ID,
+							title: () => t("sidebar.tabTitle"),
+							icon: (size) => (0, react.createElement)("span", {
+								"aria-hidden": true,
+								style: { fontSize: Math.round(size * .75) }
+							}, "◈"),
+							order: 60,
+							single: true,
+							component
+						});
+					} catch (err) {
+						console.error("agent-sidecar: better-sidebar tab registration failed", err);
+						return () => {};
+					}
+				}, "agent-sidecar: better-sidebar tab");
+			});
+		}
+		//#endregion
 		//#region src/client/index.ts
 		const name = "agent-sidecar";
 		/** The slot registry is the only hard dependency; settingsScope is lazy. */
@@ -7687,6 +8044,11 @@ window.__ModuleLoader__.load({
 				registerSidecarCommand(ctx);
 			} catch (err) {
 				console.error("agent-sidecar: /sidecar command mount failed", err);
+			}
+			try {
+				mountSidebarTab(ctx, controller);
+			} catch (err) {
+				console.error("agent-sidecar: better-sidebar tab mount failed", err);
 			}
 		}
 		//#endregion

@@ -59,13 +59,14 @@ describe('dictionary shape', () => {
   it('every key sits in a declared domain', () => {
     for (const key of Object.keys(zh)) {
       expect(key).toMatch(
-        /^(settings|board|inject|detail|dshtools|project|analysis|command)\.[^.].*$/)
+        /^(settings|board|inject|detail|dshtools|project|analysis|command|sidebar)\.[^.].*$/)
     }
   })
 
   it('every declared domain is populated', () => {
     for (const domain of
-      ['settings', 'board', 'inject', 'detail', 'dshtools', 'project', 'analysis', 'command']) {
+      ['settings', 'board', 'inject', 'detail', 'dshtools', 'project', 'analysis', 'command',
+        'sidebar']) {
       expect(Object.keys(slice(zh, domain)).length, `empty domain ${domain}`).toBeGreaterThan(0)
     }
   })

@@ -88,6 +88,10 @@ import {
 } from './routes.ts'
 import { createSendCliExecutor, type SpawnLike } from './send-cli.ts'
 import { SessionStore } from './session-store.ts'
+import {
+  registerSidecarSkillProvider,
+  type SkillsServiceFace,
+} from './skills-provider.ts'
 import { DaemonSupervisor, type DaemonProcess, type LogLevel } from './supervisor.ts'
 
 export { Config } from './config.ts'
@@ -878,6 +882,25 @@ export function apply(ctx: HostContext, config: Config): void {
       liveAgents = null
     }, 'agent-sidecar: agents binding release')
     log('debug', 'dsh inject + analysis paths online (agents service bound)')
+  })
+
+  // Skill path two (T6.2, design §7): register the embedded agent-sidecar
+  // skill provider. Lazy inject on `skills` (dsh-skill's service key):
+  // compositions without dsh-skill simply never run this — silent,
+  // capability-honest skip. Registration rides this callback's fiber, so
+  // cordis unregisters the provider on plugin unload / service departure
+  // (dsh-skill d.ts:243-244 "Fiber disposal unregisters the provider and
+  // invalidates catalog caches"); no manual effect wrapping, same posture
+  // as settings.register below. The gate reads the APPLY-TIME config value
+  // on purpose (restart semantics, documented in the schema description):
+  // a live settings flip cannot re-run this callback anyway.
+  ctx.inject(['skills'], (injected) => {
+    const sctx = injected as HostContext & { skills: SkillsServiceFace }
+    registerSidecarSkillProvider({
+      skills: sctx.skills,
+      provide: config.skill.provide,
+      log,
+    })
   })
 
   // Settings namespace 'agent-sidecar' (T2.4): pairs the browser settings

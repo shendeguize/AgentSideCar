@@ -73,8 +73,9 @@ export interface UiConfig {
   showDead: boolean
 }
 
-/** Skill provider switch (M4). */
+/** Skill provider switch (design §6/§7 path two; wired in M4/T6.2). */
 export interface SkillConfig {
+  /** Register the embedded agent-sidecar skill on ctx.skills (read at apply; restart semantics). */
   provide: boolean
 }
 
@@ -183,8 +184,10 @@ export const Config: z<Config> = z.object({
     .object({
       provide: z
         .boolean()
-        .default(false)
-        .description('是否经 registerProvider 内嵌提供 agent-sidecar skill(M4 启用)'),
+        .default(true)
+        .description(
+          '是否经 registerProvider 内嵌提供 agent-sidecar skill(设计 §6 默认开;文件系统已装的同名 skill 自动优先;改动需重载插件生效)',
+        ),
     })
     .description('skill 模式'),
 })

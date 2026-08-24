@@ -10,8 +10,10 @@
  * `board.*` by the board-tab chrome (view switcher); `detail.*` /
  * `dshtools.*` / `project.*` mirror the M3 module tables (see below);
  * `analysis.*` is owned by the analysis panel (T5.10b); `command.*` by the
- * `/sidecar` slash command (T4.6, re-exported via ./command.ts) — keeping
- * the prefixes in one flat namespace avoids cross-task collisions.
+ * `/sidecar` slash command (T4.6, re-exported via ./command.ts);
+ * `sidebar.*` by the optional better-sidebar mini tab (T6.3,
+ * src/client/sidebar-tab.tsx) — keeping the prefixes in one flat namespace
+ * avoids cross-task collisions.
  *
  * M3 unification (T5.10b): the component-local tables `detail/strings.ts`,
  * `dsh-tools/strings.ts` and `PROJECT_VIEW_STRINGS` stay the rendering
@@ -38,6 +40,7 @@ export type SidecarLocaleDomain =
   | 'project'
   | 'analysis'
   | 'command'
+  | 'sidebar'
 
 const D = DETAIL_STRINGS
 const Q = DSH_TOOLS_STRINGS
@@ -383,6 +386,16 @@ export const zh = {
   'command.time.minutesAgo': '{n} 分钟前',
   'command.time.hoursAgo': '{n} 小时前',
   'command.time.daysAgo': '{n} 天前',
+
+  // ── better-sidebar mini tab (T6.3, design §5.2 optional soft dep) ──────
+  'sidebar.tabTitle': 'Sidecar',
+  'sidebar.countsRow': '{working} 工作中 · {waiting} 等待中',
+  'sidebar.recentTitle': '最近活跃',
+  'sidebar.connecting': '等待 sidecar 快照…',
+  'sidebar.noSessions': '暂无活跃会话',
+  'sidebar.noEvent': '暂无事件记录',
+  'sidebar.untitled': '(无标题)',
+  'sidebar.boardHint': '完整看板见会话视图的「Sidecar」Tab',
 } satisfies Record<`${SidecarLocaleDomain}.${string}`, string>
 
 /** Key union of the locale table (zh is the source of truth). */

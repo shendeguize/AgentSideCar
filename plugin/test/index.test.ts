@@ -325,7 +325,7 @@ describe('Config schema', () => {
     expect(config.analysis.model).toBe('')
     expect(config.ui.timeWindowHours).toBe(24)
     expect(config.ui.showDead).toBe(false)
-    expect(config.skill.provide).toBe(false)
+    expect(config.skill.provide).toBe(true)
   })
 
   it('merges a partial override with sibling defaults', () => {

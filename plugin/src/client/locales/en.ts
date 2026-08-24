@@ -372,4 +372,14 @@ export const en = {
   'command.time.minutesAgo': '{n} min ago',
   'command.time.hoursAgo': '{n} h ago',
   'command.time.daysAgo': '{n} d ago',
+
+  // ── better-sidebar mini tab (T6.3) ─────────────────────────────────────
+  'sidebar.tabTitle': 'Sidecar',
+  'sidebar.countsRow': '{working} working · {waiting} waiting',
+  'sidebar.recentTitle': 'Recently active',
+  'sidebar.connecting': 'Waiting for the sidecar snapshot…',
+  'sidebar.noSessions': 'No active sessions',
+  'sidebar.noEvent': 'No events recorded yet',
+  'sidebar.untitled': '(untitled)',
+  'sidebar.boardHint': 'Full board: the "Sidecar" tab in the conversation view',
 } satisfies Record<SidecarLocaleKey, string>

@@ -41,7 +41,7 @@ export const DEFAULT_CONFIG_VIEW: SidecarConfigView = {
   inject: { enabled: false, defaultMode: 'queue' },
   analysis: { enabled: false, provider: '', model: '' },
   ui: { timeWindowHours: 24, showDead: false },
-  skill: { provide: false },
+  skill: { provide: true },
 }
 
 /** Whitespace-join an argv for the card's single-line command field. */

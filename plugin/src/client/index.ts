@@ -23,7 +23,10 @@
  * - `/sidecar` slash command (T4.6): registered lazily on the `commandUi`
  *   service via registerSidecarCommand — a composition without the
  *   slash-menu runtime simply never gains the command, and a duplicate
- *   registration (double apply) degrades to a logged no-op.
+ *   registration (double apply) degrades to a logged no-op;
+ * - optional better-sidebar mini tab (T6.3): parked on the lazily-injected
+ *   `betterSidebar` service via mountSidebarTab (optional peer, runtime
+ *   duck-typed probe — never imported); not installed = silent skip.
  *
  * Lifecycle contract:
  * - every resource rides `ctx.effect`: the data stream + visibilitychange
@@ -52,6 +55,7 @@ import { PLUGIN_ID, SidecarController } from './controller.ts'
 import { createInjectActions } from './inject-glue.ts'
 import type { InjectMode } from './inject/logic.ts'
 import { createBoardTab, createFooterWidget, createSettingsCardEntry } from './mount.tsx'
+import { mountSidebarTab } from './sidebar-tab.tsx'
 import { createDefaultIntegration, type SidecarUiIntegration } from './detail-view.tsx'
 import type { SidecarConfigView } from './settings-glue.ts'
 
@@ -296,5 +300,16 @@ export function apply(ctx: ClientContext): void {
     registerSidecarCommand(ctx)
   } catch (err) {
     console.error('agent-sidecar: /sidecar command mount failed', err)
+  }
+
+  // Seat 5 (optional, T6.3): the better-sidebar mini tab, parked on the
+  // lazily-injected `betterSidebar` service (optional peer; runtime
+  // duck-typed probe, never imported). Not installed → the fiber stays
+  // pending forever: silent skip, zero resources. A probe/registration
+  // failure degrades to a log and never touches the other seats.
+  try {
+    mountSidebarTab(ctx, controller)
+  } catch (err) {
+    console.error('agent-sidecar: better-sidebar tab mount failed', err)
   }
 }

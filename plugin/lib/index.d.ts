@@ -213,8 +213,9 @@ interface UiConfig {
   /** Whether dead sessions are listed. */
   showDead: boolean;
 }
-/** Skill provider switch (M4). */
+/** Skill provider switch (design §6/§7 path two; wired in M4/T6.2). */
 interface SkillConfig {
+  /** Register the embedded agent-sidecar skill on ctx.skills (read at apply; restart semantics). */
   provide: boolean;
 }
 /** Validated composition config (all defaults filled by the schema). */
