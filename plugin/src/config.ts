@@ -51,9 +51,18 @@ export interface InjectConfig {
   defaultMode: 'queue' | 'steer'
 }
 
-/** AI bypass-analysis switch (M3). */
+/** AI bypass-analysis switch and model routing (M3). */
 export interface AnalysisConfig {
   enabled: boolean
+  /**
+   * Explicit provider route for the dedicated analysis agents. Empty (the
+   * default) reuses the host's default model selection (`agentDefaultModel`
+   * service, the same source dsh's own entry points read). Takes effect
+   * only together with a non-empty `model`.
+   */
+  provider: string
+  /** Explicit model id for the analysis agents; see {@link provider}. */
+  model: string
 }
 
 /** Board rendering knobs (client half). */
@@ -146,6 +155,18 @@ export const Config: z<Config> = z.object({
         .boolean()
         .default(false)
         .description('AI 旁路分析开关(M3;消耗模型 token,默认关闭)'),
+      provider: z
+        .string()
+        .default('')
+        .description(
+          '分析代理的 provider 路由:留空(默认)复用宿主默认模型(agentDefaultModel 服务);与 model 同时非空才生效',
+        ),
+      model: z
+        .string()
+        .default('')
+        .description(
+          '分析代理的模型 id:留空(默认)复用宿主默认模型;与 provider 同时非空才生效',
+        ),
     })
     .description('旁路分析'),
   ui: z

@@ -123,10 +123,37 @@ interface AnalysisSession {
   readonly agent: AnalysisAgentDriverFace;
   dispose(): Promise<void>;
 }
+/** Per-agent options face over SDK `AgentOptions` (runtime-types.d.ts:21-28). */
+interface AnalysisAgentOptionsFace {
+  /** Provider route (must have a registered adapter at call time). */
+  readonly provider?: string;
+  /** Model id interpreted by the selected provider adapter. */
+  readonly model?: string;
+  /** Maximum output tokens for each conversation-model request. */
+  readonly maxTokens?: number;
+}
 /** `CreateAgentOptions` face (index.d.ts:65-118): engine-minted id + creation abort. */
 interface AnalysisCreateOptions {
   readonly sessionId: string;
   readonly signal?: AbortSignal;
+  /**
+   * Provider/model routing for the analysis agent (`CreateAgentOptions.
+   * agentOptions`). The engine never sets this — the integration layer's
+   * create adapter resolves and attaches it (A-1: an agent created without
+   * provider/model fails prompt assembly on the `{{model}}` variable and
+   * `buildRequest`, completing with an empty summary and zero tokens).
+   */
+  readonly agentOptions?: AnalysisAgentOptionsFace;
+  /**
+   * Session creation metadata (`CreateAgentOptions.meta` subset). Also
+   * attached by the create adapter, never the engine: the deployment
+   * persona's `{{cwd}}` prompt variable reads `session.header.cwd`, which
+   * only `meta.cwd` populates (same reason dsh-headless passes
+   * `meta: { cwd: process.cwd() }` on its own create call).
+   */
+  readonly meta?: {
+    readonly cwd?: string;
+  };
 }
 /** Minimal `ctx.agents` face: the one factory entry point this engine uses. */
 interface AnalysisAgentFace {
@@ -166,9 +193,18 @@ interface InjectConfig {
   /** Default injection mode offered by the inject panel. */
   defaultMode: 'queue' | 'steer';
 }
-/** AI bypass-analysis switch (M3). */
+/** AI bypass-analysis switch and model routing (M3). */
 interface AnalysisConfig {
   enabled: boolean;
+  /**
+   * Explicit provider route for the dedicated analysis agents. Empty (the
+   * default) reuses the host's default model selection (`agentDefaultModel`
+   * service, the same source dsh's own entry points read). Takes effect
+   * only together with a non-empty `model`.
+   */
+  provider: string;
+  /** Explicit model id for the analysis agents; see {@link provider}. */
+  model: string;
 }
 /** Board rendering knobs (client half). */
 interface UiConfig {
@@ -321,6 +357,21 @@ interface SettingsServiceFace {
  * binding serves both paths — and gates both degradations.
  */
 type AgentsRegistryFace = AgentsServiceFace & Pick<AnalysisAgentFace, 'create'>;
+/**
+ * `ctx.agentDefaultModel` face (dsh-agent-default-model index.d.ts:40-56):
+ * the host's default model selection — the SAME source dsh's own entry
+ * points read when creating agents (dsh-headless `run()` passes
+ * `agentOptions: {provider, model}` from `currentSelection()`;
+ * dsh-host-apiproxy exposes it as `defaultModelSelection`). Resolved per
+ * call via reflect `get` (never a hard inject): the service is core in
+ * dsh-base compositions but the plugin must degrade honestly without it.
+ */
+interface AgentDefaultModelFace {
+  currentSelection(): {
+    provider: string;
+    model: string;
+  };
+}
 /** The plugin context with the two hard-injected services visible. */
 type HostContext = Context & {
   webServer: WebServerService;
@@ -341,4 +392,4 @@ type HostContext = Context & {
  */
 declare function apply(ctx: HostContext, config: Config): void;
 //#endregion
-export { AgentsRegistryFace, Config, HostContext, SettingsScopeFace, SettingsServiceFace, SubprocessCollectSpec, SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessService, SubprocessSpawnSpec, WebServerService, apply, inject, name };
+export { AgentDefaultModelFace, AgentsRegistryFace, Config, HostContext, SettingsScopeFace, SettingsServiceFace, SubprocessCollectSpec, SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessService, SubprocessSpawnSpec, WebServerService, apply, inject, name };

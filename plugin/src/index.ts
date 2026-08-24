@@ -191,6 +191,19 @@ export interface SettingsServiceFace {
  */
 export type AgentsRegistryFace = AgentsServiceFace & Pick<AnalysisAgentFace, 'create'>
 
+/**
+ * `ctx.agentDefaultModel` face (dsh-agent-default-model index.d.ts:40-56):
+ * the host's default model selection — the SAME source dsh's own entry
+ * points read when creating agents (dsh-headless `run()` passes
+ * `agentOptions: {provider, model}` from `currentSelection()`;
+ * dsh-host-apiproxy exposes it as `defaultModelSelection`). Resolved per
+ * call via reflect `get` (never a hard inject): the service is core in
+ * dsh-base compositions but the plugin must degrade honestly without it.
+ */
+export interface AgentDefaultModelFace {
+  currentSelection(): { provider: string; model: string }
+}
+
 /** The plugin context with the two hard-injected services visible. */
 export type HostContext = Context & {
   webServer: WebServerService
@@ -583,6 +596,44 @@ export function apply(ctx: HostContext, config: Config): void {
   // the effect disposer must cancel (design: 在途分析会话随 dispose 清理).
   const liveAnalysisSessions = new Set<AnalysisSession>()
 
+  /**
+   * Resolve the provider/model the analysis agent runs on (A-1 fix: an
+   * agent created without agentOptions has no model — `{{model}}` prompt
+   * assembly and `buildRequest` both fail, yielding an empty summary).
+   * Explicit `analysis.provider`+`analysis.model` config wins (both
+   * non-empty, read live); otherwise the host's default model selection is
+   * reused via `ctx.agentDefaultModel` — the same source dsh's own entry
+   * points (headless/apiproxy) read. `null` = no model anywhere: routes
+   * pre-reject `analysis.request` as `analysis_model_unconfigured`.
+   */
+  const resolveAnalysisModel = (): { provider: string; model: string } | null => {
+    const provider = effective.analysis.provider.trim()
+    const model = effective.analysis.model.trim()
+    if (provider !== '' && model !== '') return { provider, model }
+    const getter = (ctx as { get?: (name: string) => unknown }).get
+    if (typeof getter !== 'function') return null
+    const service = getter.call(ctx, 'agentDefaultModel') as
+      | AgentDefaultModelFace
+      | undefined
+      | null
+    if (service === undefined || service === null) return null
+    try {
+      const selection = service.currentSelection()
+      if (
+        typeof selection?.provider === 'string' &&
+        selection.provider !== '' &&
+        typeof selection.model === 'string' &&
+        selection.model !== ''
+      ) {
+        return { provider: selection.provider, model: selection.model }
+      }
+    } catch {
+      // A throwing selection reads as "no default available" — the routes'
+      // pre-check turns that into an honest analysis_model_unconfigured.
+    }
+    return null
+  }
+
   const createAnalysisAgent: AnalysisAgentFace['create'] = async (options) => {
     const agents = liveAgents
     if (agents === null) {
@@ -590,7 +641,23 @@ export function apply(ctx: HostContext, config: Config): void {
       // create_failed result, never a crash.
       throw new Error('dsh agents service is not available in this composition')
     }
-    const handle = await agents.create(options)
+    const selection = resolveAnalysisModel()
+    if (selection === null) {
+      // Raced past the routes' model pre-check (config/settings flipped
+      // mid-flight): surfaces as an honest create_failed, never an agent
+      // that assembles `{{model}}`-less prompts into empty summaries (A-1).
+      throw new Error(
+        'no analysis model available: set analysis.provider/analysis.model or mount agentDefaultModel',
+      )
+    }
+    const handle = await agents.create({
+      ...options,
+      agentOptions: { provider: selection.provider, model: selection.model },
+      // The deployment persona's `{{cwd}}` variable reads session.header.cwd,
+      // which only meta.cwd populates — same as dsh-headless's own create
+      // call (A-1: without it prompt assembly errors and the summary is '').
+      meta: { cwd: process.cwd() },
+    })
     const tracked: AnalysisSession = {
       agent: handle.agent,
       dispose: async () => {
@@ -721,6 +788,7 @@ export function apply(ctx: HostContext, config: Config): void {
       engine: analysisEngine,
       buildInput: buildAnalysisInput,
       available: () => liveAgents !== null,
+      modelConfigured: () => resolveAnalysisModel() !== null,
     },
     log,
   })

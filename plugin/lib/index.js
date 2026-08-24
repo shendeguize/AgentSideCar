@@ -462,7 +462,11 @@ const Config = z.object({
 		enabled: z.boolean().default(false).description("注入总开关:关闭时看板隐藏全部注入入口,写接口在服务端同步拒绝(默认关闭;多用户主机不建议开启)"),
 		defaultMode: z.union([z.const("queue"), z.const("steer")]).default("queue").description("注入面板默认模式:queue=排队下一轮,steer=中途注入")
 	}).description("消息注入"),
-	analysis: z.object({ enabled: z.boolean().default(false).description("AI 旁路分析开关(M3;消耗模型 token,默认关闭)") }).description("旁路分析"),
+	analysis: z.object({
+		enabled: z.boolean().default(false).description("AI 旁路分析开关(M3;消耗模型 token,默认关闭)"),
+		provider: z.string().default("").description("分析代理的 provider 路由:留空(默认)复用宿主默认模型(agentDefaultModel 服务);与 model 同时非空才生效"),
+		model: z.string().default("").description("分析代理的模型 id:留空(默认)复用宿主默认模型;与 provider 同时非空才生效")
+	}).description("旁路分析"),
 	ui: z.object({
 		timeWindowHours: z.natural().min(1).default(24).description("看板会话时间窗(小时)"),
 		showDead: z.boolean().default(false).description("是否显示 dead 会话")
@@ -2783,6 +2787,11 @@ function createRoutes(deps, opts = {}) {
 					writeJson(res, 501, { reason: "analysis_unavailable" });
 					return;
 				}
+				if (type === "analysis.request" && analysis.modelConfigured !== void 0 && !analysis.modelConfigured()) {
+					logAction(type, 403, { reason: "analysis_model_unconfigured" });
+					writeJson(res, 403, { reason: "analysis_model_unconfigured" });
+					return;
+				}
 				if (type === "analysis.request") await handleAnalysisRequest(analysis, envelope, res);
 				else if (type === "analysis.followup") await handleAnalysisFollowup(analysis, envelope, res);
 				else await handleAnalysisCancel(analysis, envelope, res);
@@ -3790,10 +3799,49 @@ function apply(ctx, config) {
 		log: (entry) => log(entry.ok ? "info" : "warn", `inject ${entry.phase}`, entry)
 	});
 	const liveAnalysisSessions = /* @__PURE__ */ new Set();
+	/**
+	* Resolve the provider/model the analysis agent runs on (A-1 fix: an
+	* agent created without agentOptions has no model — `{{model}}` prompt
+	* assembly and `buildRequest` both fail, yielding an empty summary).
+	* Explicit `analysis.provider`+`analysis.model` config wins (both
+	* non-empty, read live); otherwise the host's default model selection is
+	* reused via `ctx.agentDefaultModel` — the same source dsh's own entry
+	* points (headless/apiproxy) read. `null` = no model anywhere: routes
+	* pre-reject `analysis.request` as `analysis_model_unconfigured`.
+	*/
+	const resolveAnalysisModel = () => {
+		const provider = effective.analysis.provider.trim();
+		const model = effective.analysis.model.trim();
+		if (provider !== "" && model !== "") return {
+			provider,
+			model
+		};
+		const getter = ctx.get;
+		if (typeof getter !== "function") return null;
+		const service = getter.call(ctx, "agentDefaultModel");
+		if (service === void 0 || service === null) return null;
+		try {
+			const selection = service.currentSelection();
+			if (typeof selection?.provider === "string" && selection.provider !== "" && typeof selection.model === "string" && selection.model !== "") return {
+				provider: selection.provider,
+				model: selection.model
+			};
+		} catch {}
+		return null;
+	};
 	const createAnalysisAgent = async (options) => {
 		const agents = liveAgents;
 		if (agents === null) throw new Error("dsh agents service is not available in this composition");
-		const handle = await agents.create(options);
+		const selection = resolveAnalysisModel();
+		if (selection === null) throw new Error("no analysis model available: set analysis.provider/analysis.model or mount agentDefaultModel");
+		const handle = await agents.create({
+			...options,
+			agentOptions: {
+				provider: selection.provider,
+				model: selection.model
+			},
+			meta: { cwd: process.cwd() }
+		});
 		const tracked = {
 			agent: handle.agent,
 			dispose: async () => {
@@ -3899,7 +3947,8 @@ function apply(ctx, config) {
 		analysis: {
 			engine: analysisEngine,
 			buildInput: buildAnalysisInput,
-			available: () => liveAgents !== null
+			available: () => liveAgents !== null,
+			modelConfigured: () => resolveAnalysisModel() !== null
 		},
 		log
 	});

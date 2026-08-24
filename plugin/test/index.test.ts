@@ -321,6 +321,8 @@ describe('Config schema', () => {
     expect(config.inject.enabled).toBe(false)
     expect(config.inject.defaultMode).toBe('queue')
     expect(config.analysis.enabled).toBe(false)
+    expect(config.analysis.provider).toBe('')
+    expect(config.analysis.model).toBe('')
     expect(config.ui.timeWindowHours).toBe(24)
     expect(config.ui.showDead).toBe(false)
     expect(config.skill.provide).toBe(false)
@@ -853,28 +855,39 @@ describe('M3 fusion wiring', () => {
 // compositions degrade to 501, and dispose cancels in-flight sessions.
 // ---------------------------------------------------------------------------
 
+/** One `agents.create` call as observed by the analysis-path fake. */
+interface RecordedCreate {
+  sessionId: string
+  agentOptions?: { provider?: string; model?: string; maxTokens?: number }
+  meta?: { cwd?: string }
+}
+
 /**
  * Agents-registry fake for the analysis path: `create` returns a live
  * agent whose synchronous `followup` splice appends the user message plus
  * one canned assistant reply, so the engine's followup → whenIdle →
- * deriveMessages read-back observes a completed turn.
+ * deriveMessages read-back observes a completed turn. Every create's
+ * options are recorded so the A-1 agentOptions assembly is pinnable.
  */
 function makeAnalysisAgents(): {
   agents: unknown
   followups: Array<{ content: Array<{ type: string; text?: string }>; source: unknown }>
   created: string[]
+  createOptions: RecordedCreate[]
   disposed: string[]
 } {
   const followups: Array<{ content: Array<{ type: string; text?: string }>; source: unknown }> = []
   const created: string[] = []
+  const createOptions: RecordedCreate[] = []
   const disposed: string[] = []
   const agents = {
     get: () => undefined,
     resume: async (): Promise<never> => {
       throw new Error('resume must not be called by the analysis path')
     },
-    create: async (options: { sessionId: string }) => {
+    create: async (options: RecordedCreate) => {
       created.push(options.sessionId)
+      createOptions.push(options)
       const messages: Array<{ role: string; content: Array<{ type: string; text?: string }> }> = []
       return {
         agent: {
@@ -899,13 +912,21 @@ function makeAnalysisAgents(): {
       }
     },
   }
-  return { agents, followups, created, disposed }
+  return { agents, followups, created, createOptions, disposed }
 }
+
+/**
+ * `ctx.agentDefaultModel` fake — the host default model selection the
+ * analysis wiring falls back to when no explicit analysis.provider/model
+ * is configured (same source dsh's headless/apiproxy entries read).
+ */
+const HOST_DEFAULT_MODEL = { provider: 'host-default-provider', model: 'host-default-model' }
+const fakeDefaultModel = { currentSelection: () => ({ ...HOST_DEFAULT_MODEL }) }
 
 describe('M3 analysis wiring (T5.10a)', () => {
   it('drives the engine with a fusion-assembled input for session and cross-agent targets', async () => {
     const { agents, followups, created } = makeAnalysisAgents()
-    const fake = createFakeCtx({ agents })
+    const fake = createFakeCtx({ agents, agentDefaultModel: fakeDefaultModel })
     const runtimeDir = await tempRuntimeDir()
     const freshRow = { ...DSH_SESSION_ROW, updated_at: Math.floor(Date.now() / 1000) }
     const server = await startMiniDaemon(join(runtimeDir, 'daemon.sock'), [freshRow])
@@ -977,7 +998,7 @@ describe('M3 analysis wiring (T5.10a)', () => {
 
   it('lists the session timeline newest-first in the analysis input (F5)', async () => {
     const { agents, followups } = makeAnalysisAgents()
-    const fake = createFakeCtx({ sessions: {}, agents })
+    const fake = createFakeCtx({ sessions: {}, agents, agentDefaultModel: fakeDefaultModel })
     const runtimeDir = await tempRuntimeDir()
     apply(
       fake.ctx,
@@ -1016,6 +1037,99 @@ describe('M3 analysis wiring (T5.10a)', () => {
     expect(olderAt).toBeGreaterThanOrEqual(0)
     expect(questionAt).toBeLessThan(newerAt)
     expect(newerAt).toBeLessThan(olderAt)
+  })
+
+  it('assembles agentOptions from the host default model selection (A-1 fallback)', async () => {
+    const { agents, createOptions } = makeAnalysisAgents()
+    const fake = createFakeCtx({ agents, agentDefaultModel: fakeDefaultModel })
+    const runtimeDir = await tempRuntimeDir()
+    // analysis.provider/model left at their '' defaults → fallback branch.
+    apply(
+      fake.ctx,
+      Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir }, analysis: { enabled: true } }),
+    )
+    cleanups.push(() => fake.disposeAll())
+
+    const requested = await postAction(fake.routes[0]!, {
+      type: 'analysis.request',
+      targetKind: 'cross-agent',
+    })
+    expect(requested.status).toBe(200)
+    expect(requested.json.outcome).toBe('completed')
+    expect(createOptions).toHaveLength(1)
+    expect(createOptions[0]!.agentOptions).toEqual(HOST_DEFAULT_MODEL)
+    // The persona's {{cwd}} variable reads session.header.cwd, populated
+    // only through meta.cwd (headless-precedent create shape).
+    expect(createOptions[0]!.meta?.cwd).toBe(process.cwd())
+  })
+
+  it('lets explicit analysis.provider/model config win over the host default (A-1)', async () => {
+    const { agents, createOptions } = makeAnalysisAgents()
+    const fake = createFakeCtx({ agents, agentDefaultModel: fakeDefaultModel })
+    const runtimeDir = await tempRuntimeDir()
+    apply(
+      fake.ctx,
+      Config({
+        daemon: { policy: 'off' },
+        sidecar: { runtimeDir },
+        analysis: { enabled: true, provider: 'explicit-provider', model: 'explicit-model' },
+      }),
+    )
+    cleanups.push(() => fake.disposeAll())
+
+    const requested = await postAction(fake.routes[0]!, {
+      type: 'analysis.request',
+      targetKind: 'cross-agent',
+    })
+    expect(requested.status).toBe(200)
+    expect(createOptions).toHaveLength(1)
+    expect(createOptions[0]!.agentOptions).toEqual({
+      provider: 'explicit-provider',
+      model: 'explicit-model',
+    })
+  })
+
+  it('pre-rejects analysis.request with 403 when no model source exists (A-1)', async () => {
+    // agents bound but NO agentDefaultModel service and no explicit
+    // analysis.provider/model: an agent created here would have no model
+    // ({{model}} assembly error, empty summary) — the routes now refuse
+    // honestly before any session is created.
+    const { agents, created } = makeAnalysisAgents()
+    const fake = createFakeCtx({ agents })
+    const runtimeDir = await tempRuntimeDir()
+    apply(
+      fake.ctx,
+      Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir }, analysis: { enabled: true } }),
+    )
+    cleanups.push(() => fake.disposeAll())
+
+    const { status, json } = await postAction(fake.routes[0]!, {
+      type: 'analysis.request',
+      targetKind: 'cross-agent',
+    })
+    expect(status).toBe(403)
+    expect(json.reason).toBe('analysis_model_unconfigured')
+    expect(created).toHaveLength(0)
+
+    // A partial explicit override (model without provider) is not a model
+    // source either: the pair falls back, and with no host default the
+    // request stays pre-rejected.
+    const partial = createFakeCtx({ agents })
+    apply(
+      partial.ctx,
+      Config({
+        daemon: { policy: 'off' },
+        sidecar: { runtimeDir },
+        analysis: { enabled: true, model: 'model-without-provider' },
+      }),
+    )
+    cleanups.push(() => partial.disposeAll())
+    const partialReply = await postAction(partial.routes[0]!, {
+      type: 'analysis.request',
+      targetKind: 'cross-agent',
+    })
+    expect(partialReply.status).toBe(403)
+    expect(partialReply.json.reason).toBe('analysis_model_unconfigured')
   })
 
   it('refuses analysis actions with 403 while analysis.enabled is false (default)', async () => {
@@ -1061,7 +1175,11 @@ describe('M3 analysis wiring (T5.10a)', () => {
   it('reads the analysis gate live through a settings commit', async () => {
     const settings = makeFakeSettings()
     const { agents } = makeAnalysisAgents()
-    const fake = createFakeCtx({ settings: settings.service, agents })
+    const fake = createFakeCtx({
+      settings: settings.service,
+      agents,
+      agentDefaultModel: fakeDefaultModel,
+    })
     const runtimeDir = await tempRuntimeDir()
     const offConfig = Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir } })
     apply(fake.ctx, offConfig)
@@ -1091,7 +1209,7 @@ describe('M3 analysis wiring (T5.10a)', () => {
 
   it('cancels in-flight analysis sessions when the plugin disposes', async () => {
     const { agents, created, disposed } = makeAnalysisAgents()
-    const fake = createFakeCtx({ agents })
+    const fake = createFakeCtx({ agents, agentDefaultModel: fakeDefaultModel })
     const runtimeDir = await tempRuntimeDir()
     apply(
       fake.ctx,

@@ -7228,7 +7228,11 @@ window.__ModuleLoader__.load({
 				enabled: false,
 				defaultMode: "queue"
 			},
-			analysis: { enabled: false },
+			analysis: {
+				enabled: false,
+				provider: "",
+				model: ""
+			},
 			ui: {
 				timeWindowHours: 24,
 				showDead: false
@@ -7255,6 +7259,8 @@ window.__ModuleLoader__.load({
 				injectEnabled: config.inject.enabled,
 				injectDefaultMode: config.inject.defaultMode,
 				analysisEnabled: config.analysis.enabled,
+				analysisProvider: config.analysis.provider,
+				analysisModel: config.analysis.model,
 				uiTimeWindowHours: config.ui.timeWindowHours,
 				uiShowDead: config.ui.showDead,
 				skillProvide: config.skill.provide
@@ -7279,7 +7285,11 @@ window.__ModuleLoader__.load({
 					enabled: values.injectEnabled,
 					defaultMode: values.injectDefaultMode
 				},
-				analysis: { enabled: values.analysisEnabled },
+				analysis: {
+					enabled: values.analysisEnabled,
+					provider: values.analysisProvider,
+					model: values.analysisModel
+				},
 				ui: {
 					timeWindowHours: values.uiTimeWindowHours,
 					showDead: values.uiShowDead

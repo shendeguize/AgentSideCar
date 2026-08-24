@@ -47,8 +47,11 @@
  * to and independent of the guard's inject gate — closed (or absent) means
  * 403 `analysis_disabled`. Past the gate, a missing/unavailable analysis
  * surface (agents-less composition) answers 501 `analysis_unavailable`
- * (honest degradation, never a crash). `analysis.request` resolves its
- * target through the wiring's fusion-backed input adapter (unknown target
+ * (honest degradation, never a crash). `analysis.request` additionally
+ * pre-checks that an analysis model is resolvable — no model anywhere
+ * answers 403 `analysis_model_unconfigured` before any session is created
+ * (A-1) — then resolves its target through the wiring's fusion-backed
+ * input adapter (unknown target
  * → 404 `target_not_found`) and drives the engine; result error codes map
  * to `analysis_disabled` 403, `too_many_active` 429, `timeout` 504,
  * `create_failed` 502 — while `cancelled` stays 200 (a terminal fact about
@@ -153,6 +156,17 @@ export interface AnalysisApi {
    * composition — honest degradation).
    */
   available(): boolean
+  /**
+   * Whether an analysis model is resolvable (explicit analysis.provider/
+   * model config, or the host's default model selection). `false` answers
+   * 403 `analysis_model_unconfigured` on `analysis.request` BEFORE the
+   * engine creates a session — honest pre-rejection instead of a modelless
+   * agent completing with an empty summary (A-1). Followup/cancel are not
+   * gated: an established analysis session carries its model already.
+   * Optional: an absent probe skips the pre-check (the create adapter
+   * still fails honestly as `create_failed`).
+   */
+  modelConfigured?(): boolean
 }
 
 /** Everything the route layer consumes; all live objects, none owned here. */
@@ -975,6 +989,19 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
         if (analysis === undefined || !analysis.available()) {
           logAction(type, 501, { reason: 'analysis_unavailable' })
           writeJson(res, 501, { reason: 'analysis_unavailable' })
+          return
+        }
+        // Model pre-check (A-1), request only: no explicit analysis
+        // provider/model and no host default → 403 before any session is
+        // created. Same status family as analysis_disabled: the action is
+        // well-formed but the deployment configuration forbids running it.
+        if (
+          type === 'analysis.request' &&
+          analysis.modelConfigured !== undefined &&
+          !analysis.modelConfigured()
+        ) {
+          logAction(type, 403, { reason: 'analysis_model_unconfigured' })
+          writeJson(res, 403, { reason: 'analysis_model_unconfigured' })
           return
         }
         if (type === 'analysis.request') {

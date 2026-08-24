@@ -156,7 +156,12 @@ afterEach(async () => {
 })
 
 async function startHarness(
-  init: { withAnalysis?: boolean; withAnalysisGate?: boolean } = {},
+  init: {
+    withAnalysis?: boolean
+    withAnalysisGate?: boolean
+    /** When set, wired as the AnalysisApi.modelConfigured probe (A-1). */
+    modelConfigured?: () => boolean
+  } = {},
 ): Promise<Harness> {
   const store = new SessionStore()
   const supervisor = makeSupervisor()
@@ -171,7 +176,16 @@ async function startHarness(
     ...(init.withAnalysisGate === false
       ? {}
       : { analysisEnabled: () => gates.analysis }),
-    ...(init.withAnalysis === false ? {} : { analysis: analysis.api }),
+    ...(init.withAnalysis === false
+      ? {}
+      : {
+          analysis: {
+            ...analysis.api,
+            ...(init.modelConfigured !== undefined
+              ? { modelConfigured: init.modelConfigured }
+              : {}),
+          },
+        }),
     log: (level, msg, meta) => {
       logs.push({ level, msg, ...(meta !== undefined ? { meta } : {}) })
     },
@@ -369,6 +383,64 @@ describe('analysis availability degradation', () => {
     expect(reply.status).toBe(501)
     expect(JSON.parse(reply.body)).toEqual({ reason: 'analysis_unavailable' })
     expect(harness.analysis.buildCalls).toHaveLength(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Model pre-check (A-1): no resolvable analysis model → honest 403 before
+// any session is created. Followup/cancel are not gated (an established
+// session carries its model); an absent probe skips the pre-check.
+// ---------------------------------------------------------------------------
+
+describe('analysis model pre-check (A-1)', () => {
+  it('pre-rejects analysis.request with 403 analysis_model_unconfigured', async () => {
+    const harness = await startHarness({ modelConfigured: () => false })
+    harness.gates.analysis = true
+
+    const reply = await postAction(harness.base, REQUEST_ENVELOPE)
+    expect(reply.status).toBe(403)
+    expect(JSON.parse(reply.body)).toEqual({ reason: 'analysis_model_unconfigured' })
+    // Nothing downstream ran: no input assembled, no session created.
+    expect(harness.analysis.buildCalls).toHaveLength(0)
+    expect(harness.analysis.requestCalls).toHaveLength(0)
+  })
+
+  it('does not gate followup or cancel (established sessions keep their model)', async () => {
+    const harness = await startHarness({ modelConfigured: () => false })
+    harness.gates.analysis = true
+
+    const followup = await postAction(harness.base, FOLLOWUP_ENVELOPE)
+    expect(followup.status).toBe(200)
+    expect(harness.analysis.followupCalls).toHaveLength(1)
+
+    const cancel = await postAction(harness.base, CANCEL_ENVELOPE)
+    expect(cancel.status).toBe(200)
+    expect(harness.analysis.cancelCalls).toEqual(['ana-1'])
+  })
+
+  it('passes requests through when the probe reports a model', async () => {
+    const harness = await startHarness({ modelConfigured: () => true })
+    harness.gates.analysis = true
+
+    const reply = await postAction(harness.base, REQUEST_ENVELOPE)
+    expect(reply.status).toBe(200)
+    expect(harness.analysis.requestCalls).toHaveLength(1)
+  })
+
+  it('ranks below the gate and the availability probe', async () => {
+    // Gate closed wins over the model pre-check…
+    const gated = await startHarness({ modelConfigured: () => false })
+    const closed = await postAction(gated.base, REQUEST_ENVELOPE)
+    expect(closed.status).toBe(403)
+    expect(JSON.parse(closed.body).reason).toBe('analysis_disabled')
+
+    // …and agents-less unavailability wins too (model config is moot).
+    const unavailable = await startHarness({ modelConfigured: () => false })
+    unavailable.gates.analysis = true
+    unavailable.analysis.available = false
+    const reply = await postAction(unavailable.base, REQUEST_ENVELOPE)
+    expect(reply.status).toBe(501)
+    expect(JSON.parse(reply.body).reason).toBe('analysis_unavailable')
   })
 })
 

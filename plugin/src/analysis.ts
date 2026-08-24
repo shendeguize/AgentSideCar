@@ -120,10 +120,36 @@ export interface AnalysisSession {
   dispose(): Promise<void>
 }
 
+/** Per-agent options face over SDK `AgentOptions` (runtime-types.d.ts:21-28). */
+export interface AnalysisAgentOptionsFace {
+  /** Provider route (must have a registered adapter at call time). */
+  readonly provider?: string
+  /** Model id interpreted by the selected provider adapter. */
+  readonly model?: string
+  /** Maximum output tokens for each conversation-model request. */
+  readonly maxTokens?: number
+}
+
 /** `CreateAgentOptions` face (index.d.ts:65-118): engine-minted id + creation abort. */
 export interface AnalysisCreateOptions {
   readonly sessionId: string
   readonly signal?: AbortSignal
+  /**
+   * Provider/model routing for the analysis agent (`CreateAgentOptions.
+   * agentOptions`). The engine never sets this — the integration layer's
+   * create adapter resolves and attaches it (A-1: an agent created without
+   * provider/model fails prompt assembly on the `{{model}}` variable and
+   * `buildRequest`, completing with an empty summary and zero tokens).
+   */
+  readonly agentOptions?: AnalysisAgentOptionsFace
+  /**
+   * Session creation metadata (`CreateAgentOptions.meta` subset). Also
+   * attached by the create adapter, never the engine: the deployment
+   * persona's `{{cwd}}` prompt variable reads `session.header.cwd`, which
+   * only `meta.cwd` populates (same reason dsh-headless passes
+   * `meta: { cwd: process.cwd() }` on its own create call).
+   */
+  readonly meta?: { readonly cwd?: string }
 }
 
 /** Minimal `ctx.agents` face: the one factory entry point this engine uses. */

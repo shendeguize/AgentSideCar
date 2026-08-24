@@ -88,6 +88,14 @@ export interface SettingsCardValues {
   injectDefaultMode: 'queue' | 'steer'
   /** analysis.enabled */
   analysisEnabled: boolean
+  /**
+   * analysis.provider / analysis.model ('' = reuse the host default model).
+   * Carried through the staged values for save round-trip fidelity (a group
+   * write is a COMPLETE analysis object — dropping them here would wipe an
+   * explicit configuration); not yet rendered as form fields.
+   */
+  analysisProvider: string
+  analysisModel: string
   /** ui.timeWindowHours (integer ≥ 1) */
   uiTimeWindowHours: number
   /** ui.showDead */

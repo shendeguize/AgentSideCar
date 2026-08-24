@@ -28,7 +28,7 @@ export interface SidecarConfigView {
   sidecar: { command: string[]; runtimeDir: string }
   stream: { reconcileActiveMs: number; reconcileIdleMs: number }
   inject: { enabled: boolean; defaultMode: 'queue' | 'steer' }
-  analysis: { enabled: boolean }
+  analysis: { enabled: boolean; provider: string; model: string }
   ui: { timeWindowHours: number; showDead: boolean }
   skill: { provide: boolean }
 }
@@ -39,7 +39,7 @@ export const DEFAULT_CONFIG_VIEW: SidecarConfigView = {
   sidecar: { command: ['agent-sidecar'], runtimeDir: '' },
   stream: { reconcileActiveMs: 2000, reconcileIdleMs: 10000 },
   inject: { enabled: false, defaultMode: 'queue' },
-  analysis: { enabled: false },
+  analysis: { enabled: false, provider: '', model: '' },
   ui: { timeWindowHours: 24, showDead: false },
   skill: { provide: false },
 }
@@ -66,6 +66,8 @@ export function configToValues(config: SidecarConfigView): SettingsCardValues {
     injectEnabled: config.inject.enabled,
     injectDefaultMode: config.inject.defaultMode,
     analysisEnabled: config.analysis.enabled,
+    analysisProvider: config.analysis.provider,
+    analysisModel: config.analysis.model,
     uiTimeWindowHours: config.ui.timeWindowHours,
     uiShowDead: config.ui.showDead,
     skillProvide: config.skill.provide,
@@ -85,7 +87,11 @@ export function valuesToConfigView(values: SettingsCardValues): SidecarConfigVie
       reconcileIdleMs: values.streamReconcileIdleMs,
     },
     inject: { enabled: values.injectEnabled, defaultMode: values.injectDefaultMode },
-    analysis: { enabled: values.analysisEnabled },
+    analysis: {
+      enabled: values.analysisEnabled,
+      provider: values.analysisProvider,
+      model: values.analysisModel,
+    },
     ui: { timeWindowHours: values.uiTimeWindowHours, showDead: values.uiShowDead },
     skill: { provide: values.skillProvide },
   }
