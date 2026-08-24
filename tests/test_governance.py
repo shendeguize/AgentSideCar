@@ -354,6 +354,17 @@ class GovernanceContractTests(unittest.TestCase):
             release_job.index("- name: Attest build provenance"),
         )
 
+    def test_release_ubuntu_gate_uses_spawn_importable_script(self):
+        document = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'quality_gate="${RUNNER_TEMP}/portable-quality-gate.py"',
+            document,
+        )
+        self.assertIn('if __name__ == "__main__":', document)
+        self.assertIn('python "${quality_gate}"', document)
+        self.assertNotIn("python - <<'PY'\n          import unittest", document)
+
     def test_documented_canonical_commands_are_backed_by_cli_help(self):
         for path in DOCUMENTATION:
             document = path.read_text(encoding="utf-8")

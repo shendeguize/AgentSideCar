@@ -114,7 +114,8 @@ jobs:
       - name: Run portable Ubuntu quality gate
         run: |
           ruff check .
-          python - <<'PY'
+          quality_gate="${RUNNER_TEMP}/portable-quality-gate.py"
+          cat > "${quality_gate}" <<'PY'
           import unittest
 
           macos_gate_only = (
@@ -136,17 +137,22 @@ jobs:
                   else:
                       yield item
 
-          suite = unittest.defaultTestLoader.discover("tests")
-          for case in cases(suite):
-              if case.id().endswith(macos_gate_only):
-                  method = getattr(case.__class__, case._testMethodName)
-                  method.__unittest_skip__ = True
-                  method.__unittest_skip_why__ = (
-                      "covered by the required full macOS gate"
-                  )
-          result = unittest.TextTestRunner(verbosity=2).run(suite)
-          raise SystemExit(not result.wasSuccessful())
+          def main():
+              suite = unittest.defaultTestLoader.discover("tests")
+              for case in cases(suite):
+                  if case.id().endswith(macos_gate_only):
+                      method = getattr(case.__class__, case._testMethodName)
+                      method.__unittest_skip__ = True
+                      method.__unittest_skip_why__ = (
+                          "covered by the required full macOS gate"
+                      )
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+              return not result.wasSuccessful()
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
           PY
+          python "${quality_gate}"
           python scripts/check.py \
             --only pack \
             --only cli \
