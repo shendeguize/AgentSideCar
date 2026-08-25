@@ -17,7 +17,8 @@
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { basename, dirname, resolve as resolvePath, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { dirname, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path'
 import { transform } from 'lightningcss'
 import { defineConfig, type UserConfig } from 'tsdown'
 
@@ -46,6 +47,11 @@ const GENERATED_REMOTE = /^@deepseek-ai\/dsh-[a-z0-9]+(?:-[a-z0-9]+)*\/remote$/
 /** Virtual-id wrapper keeping module CSS away from tsdown's own css pipeline. */
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
+const STYLE_MANIFEST_KEY = '@shendeguize/dsh-agent-sidecar/style-manifest'
+const STYLE_OWNER_KEY = '@shendeguize/dsh-agent-sidecar/style-owner'
+const STYLE_GENERATION_KEY = '@shendeguize/dsh-agent-sidecar/style-generation'
+const PROJECT_ROOT = fileURLToPath(new URL('.', import.meta.url))
+const CSS_REAL_PATHS = new Map<string, string>()
 
 /**
  * Module id this bundle registers under via `__ModuleLoader__.load`. The host
@@ -102,16 +108,22 @@ const config: UserConfig = {
     name: 'dsh-css-modules-inline',
     resolveId(source: string, importer: string | undefined) {
       if (!source.endsWith('.module.css')) return null
-      const abs = importer !== undefined ? sourceAssetPath(source, importer) : source
-      return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX
+      const fileId = importer !== undefined ? sourceAssetPath(source, importer) : source
+      const absolutePath = isAbsolute(fileId) ? fileId : resolvePath(PROJECT_ROOT, fileId)
+      const projectPath = relative(PROJECT_ROOT, absolutePath).split(sep).join('/')
+      const virtualId = CSS_VIRTUAL_PREFIX + projectPath + CSS_VIRTUAL_SUFFIX
+      CSS_REAL_PATHS.set(virtualId, absolutePath)
+      return virtualId
     },
     async load(virtualId: string) {
       if (!virtualId.startsWith(CSS_VIRTUAL_PREFIX)) return null
-      const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
+      const fileId = CSS_REAL_PATHS.get(virtualId)
+      if (fileId === undefined) throw new Error(`missing CSS path for virtual module "${virtualId}"`)
+      const projectPath = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length)
       this.addWatchFile(fileId)
       const source = readFileSync(fileId)
       const { code, exports: cssExports } = transform({
-        filename: fileId,
+        filename: projectPath,
         code: source,
         cssModules: { pattern: '[hash]_[local]' },
         minify: true,
@@ -122,13 +134,21 @@ const config: UserConfig = {
       for (const [local, exp] of sorted) classMap[local] = exp.name
       return [
         `const css = ${JSON.stringify(code.toString())};`,
-        `const tagId = ${JSON.stringify(`${PLUGIN_ID}/${basename(fileId)}`)};`,
-        'if (typeof document !== \'undefined\' && document.querySelector(\'style[data-plugin-css=\' + JSON.stringify(tagId) + \']\') === null) {',
-        '  const tag = document.createElement(\'style\');',
-        `  tag.dataset.plugin = ${JSON.stringify(PLUGIN_ID)};`,
-        '  tag.dataset.pluginCss = tagId;',
+        `const tagId = ${JSON.stringify(`${PLUGIN_ID}/${projectPath}`)};`,
+        `globalThis[Symbol.for(${JSON.stringify(STYLE_MANIFEST_KEY)})].set(tagId, css);`,
+        'if (typeof document !== \'undefined\') {',
+        `  const selector = 'style[data-plugin=' + ${JSON.stringify(JSON.stringify(PLUGIN_ID))} + '][data-plugin-css=' + JSON.stringify(tagId) + ']';`,
+        '  let tag = document.querySelector(selector);',
+        '  let created = false;',
+        '  if (tag === null) {',
+        '    tag = document.createElement(\'style\');',
+        `    tag.dataset.plugin = ${JSON.stringify(PLUGIN_ID)};`,
+        '    tag.dataset.pluginCss = tagId;',
+        '    created = true;',
+        '  }',
         '  tag.textContent = css;',
-        '  document.head.appendChild(tag);',
+        `  tag[Symbol.for(${JSON.stringify(STYLE_OWNER_KEY)})] = globalThis[Symbol.for(${JSON.stringify(STYLE_GENERATION_KEY)})];`,
+        '  if (created) document.head.appendChild(tag);',
         '}',
         `export default ${JSON.stringify(classMap)};`,
       ].join('\n')
@@ -138,7 +158,11 @@ const config: UserConfig = {
     entryFileNames: 'client.js',
     banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (require) => {`,
     footer: 'return module.exports; } });',
-    intro: 'var module = { exports: {} }; var exports = module.exports;',
+    intro: [
+      'var module = { exports: {} }; var exports = module.exports;',
+      `globalThis[Symbol.for(${JSON.stringify(STYLE_GENERATION_KEY)})] = {};`,
+      `globalThis[Symbol.for(${JSON.stringify(STYLE_MANIFEST_KEY)})] = new Map();`,
+    ].join(' '),
   },
 }
 

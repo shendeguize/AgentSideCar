@@ -2,9 +2,13 @@
  * `/sidecar` slash command (T4.6): the pure snapshot→overview derivation
  * (`buildOverview`), its popupSelect rendering (`overviewToOptions`), the
  * command-segment locale table, and the contribution/registration seam
- * against a fake `commandUi` registry (duplicate-name idempotency).
+ * against a fake `commandUi` registry, plus the shared Center navigation
+ * store and overlay surface.
  */
 
+import { createElement } from 'react'
+import type { ReactNode } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../src/client/api.ts'
 import type { SessionView, StateSnapshot } from '../src/client/api.ts'
@@ -23,9 +27,38 @@ import type {
 } from '../src/client/commands.ts'
 import { commandEn, commandZh } from '../src/client/locales/command.ts'
 import { BASE_LOCALE, setLocale } from '../src/client/locales/index.ts'
+import { CenterOverlay } from '../src/client/navigation/CenterOverlay.tsx'
+import { createCenterNavigation } from '../src/client/navigation/center.ts'
+
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', async () => {
+  const React = await import('react')
+  return {
+    Modal: (props: {
+      open: boolean
+      title: string
+      closeLabel?: string
+      className?: string
+      contentClassName?: string
+      children?: ReactNode
+    }) => props.open
+      ? React.createElement(
+          'section',
+          {
+            className: props.className,
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-label': props.title,
+            'data-close-label': props.closeLabel,
+          },
+          React.createElement('div', { className: props.contentClassName }, props.children),
+        )
+      : null,
+  }
+})
 
 afterEach(() => {
   setLocale(BASE_LOCALE)
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -389,6 +422,72 @@ describe('command locale segment', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Agent Center navigation store and surface.
+// ---------------------------------------------------------------------------
+
+describe('createCenterNavigation', () => {
+  it('opens and closes idempotently, notifying only on state changes', () => {
+    const navigation = createCenterNavigation()
+    const listener = vi.fn()
+    navigation.subscribe(listener)
+
+    expect(navigation.getSnapshot()).toBe(false)
+    expect(navigation.open()).toBe(true)
+    expect(navigation.getSnapshot()).toBe(true)
+    expect(listener).toHaveBeenCalledOnce()
+
+    expect(navigation.open()).toBe(true)
+    expect(listener).toHaveBeenCalledOnce()
+
+    navigation.close()
+    expect(navigation.getSnapshot()).toBe(false)
+    expect(listener).toHaveBeenCalledTimes(2)
+
+    navigation.close()
+    expect(listener).toHaveBeenCalledTimes(2)
+  })
+
+  it('retains an early open and stops notifying unsubscribed listeners', () => {
+    const navigation = createCenterNavigation()
+    expect(navigation.open()).toBe(true)
+    expect(navigation.getSnapshot()).toBe(true)
+
+    const listener = vi.fn()
+    const unsubscribe = navigation.subscribe(listener)
+    navigation.close()
+    expect(listener).toHaveBeenCalledOnce()
+
+    unsubscribe()
+    navigation.open()
+    expect(listener).toHaveBeenCalledOnce()
+    expect(navigation.getSnapshot()).toBe(true)
+  })
+})
+
+describe('CenterOverlay', () => {
+  it('renders the official modal seam without claiming effect attributes in SSR', () => {
+    const html = renderToStaticMarkup(createElement(
+      CenterOverlay,
+      {
+        open: true,
+        onClose: () => {},
+        title: 'Agent Center',
+        closeLabel: 'Close',
+      },
+      createElement('span', null, 'board'),
+    ))
+
+    expect(html).toContain('role="dialog"')
+    expect(html).toContain('aria-modal="true"')
+    expect(html).toContain('aria-label="Agent Center"')
+    expect(html).toContain('data-close-label="Close"')
+    expect(html).not.toContain('data-dsh-plugin')
+    expect(html).not.toContain('data-dsh-part')
+    expect(html).toContain('board')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Contribution: shape and the options() data path.
 // ---------------------------------------------------------------------------
 
@@ -470,11 +569,21 @@ describe('createSidecarCommandContribution', () => {
     ).rejects.toMatchObject({ kind: 'aborted' })
   })
 
-  it('onSelect is a no-op (read-only glance)', () => {
-    const contribution = createSidecarCommandContribution()
+  it('opens Agent Center only when the board option is selected', () => {
+    const openAgentCenter = vi.fn(() => true)
+    const contribution = createSidecarCommandContribution({ openCenter: openAgentCenter })
     expect(
-      contribution.ui.onSelect({ id: 'daemon', label: 'x' }, undefined),
+      contribution.ui.onSelect({ id: 'board', label: 'open board' }, undefined),
     ).toBeUndefined()
+    expect(openAgentCenter).toHaveBeenCalledOnce()
+  })
+
+  it('leaves informational option selections inert', () => {
+    const openAgentCenter = vi.fn(() => true)
+    const contribution = createSidecarCommandContribution({ openCenter: openAgentCenter })
+    contribution.ui.onSelect({ id: 'daemon', label: 'status' }, undefined)
+    contribution.ui.onSelect({ id: 'session:s1', label: 'session' }, undefined)
+    expect(openAgentCenter).not.toHaveBeenCalled()
   })
 })
 
@@ -502,14 +611,16 @@ function makeFakeRegistry() {
 /** Fake mount context: resolves `commandUi` synchronously, records deps. */
 function makeFakeCtx(registry: ReturnType<typeof makeFakeRegistry>) {
   const injected: string[][] = []
+  const disposers: Array<() => void> = []
   const ctx: CommandMountContext = {
     inject(deps, callback) {
       injected.push([...deps])
-      callback({ commandUi: registry })
+      const dispose = callback({ commandUi: registry })
+      if (typeof dispose === 'function') disposers.push(dispose)
       return undefined
     },
   }
-  return { ctx, injected }
+  return { ctx, injected, disposers }
 }
 
 describe('registerSidecarCommand', () => {
@@ -522,14 +633,30 @@ describe('registerSidecarCommand', () => {
     expect(registry.contributions.get(SIDECAR_COMMAND_NAME)!.ui.kind).toBe('popupSelect')
   })
 
-  it('a duplicate registration degrades to a logged no-op (idempotent)', () => {
+  it('hands a double mount to the new command closure after old cleanup', () => {
+    vi.useFakeTimers()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const registry = makeFakeRegistry()
-    const { ctx } = makeFakeCtx(registry)
-    registerSidecarCommand(ctx)
-    expect(() => registerSidecarCommand(ctx)).not.toThrow()
+    const { ctx, disposers } = makeFakeCtx(registry)
+    const oldOpen = vi.fn(() => true)
+    const newOpen = vi.fn(() => true)
+    registerSidecarCommand(ctx, { openCenter: oldOpen })
+    registerSidecarCommand(ctx, { openCenter: newOpen })
+
     expect(registry.contributions.size).toBe(1)
-    expect(errorSpy).toHaveBeenCalledOnce()
+    expect(disposers).toHaveLength(2)
+    disposers[0]!()
+    vi.advanceTimersByTime(8)
+    registry.contributions.get(SIDECAR_COMMAND_NAME)!.ui.onSelect(
+      { id: 'board', label: 'board' },
+      undefined,
+    )
+    expect(oldOpen).not.toHaveBeenCalled()
+    expect(newOpen).toHaveBeenCalledOnce()
+    expect(errorSpy).not.toHaveBeenCalled()
+
+    disposers[1]!()
+    expect(registry.contributions.size).toBe(0)
   })
 
   it('an inject failure is contained (never takes the client half down)', () => {

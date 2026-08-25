@@ -1,42 +1,32 @@
 /**
- * Agent Sidecar — browser client half (T2.4 full integration + S5/T4.9
- * injection & command wiring).
+ * Agent Sidecar browser composition root.
  *
- * Mounts the completed modules into dsh Web on three slot seats plus one
- * service contribution:
+ * Builds the controller and narrow UI ports, then mounts:
  *
- * - `conversation.view` (list slot, session scope): the cross-agent board
- *   as a "Sidecar" tab, order 30 — the official "multiple views per
- *   session" seat (registration shape follows the S0 skeleton and the
- *   dsh-project-kanban precedent). Selecting a session card opens the
- *   inject panel (T4.5) as a modal overlay: onPrepare/onExecute ride the
- *   action transport via inject-glue.ts, the capability bit comes from the
- *   state snapshot, and `inject.default-mode` is adopted late from the
- *   settings scope (seat 3) — 'queue', the schema default, until then;
+ * - `shell.overlay` (list slot, root scope): the first-class Agent Center,
+ *   reachable with or without an active conversation;
+ * - `conversation.view` (list slot, session scope): a second entry to the
+ *   same cross-agent board and its project/detail routes;
+ * - a self-healing Agent Center row in the host sidebar;
  * - `sidebar.footer.action` (list slot, root scope): the connection-dot
- *   footer widget (slot declared by dsh-client-ui-sidebar's footer rail;
- *   type merge imported from its installed d.ts);
+ *   footer widget;
  * - `settings.plugin.item` (keyed slot, root scope): the settings card,
- *   keyed by the host-side settings namespace 'agent-sidecar' (the
- *   configurable-plugins tab dispatches one card per HOST-SERVED
- *   namespace — the host half registers it via `ctx.settings`);
- * - `/sidecar` slash command (T4.6): registered lazily on the `commandUi`
- *   service via registerSidecarCommand — a composition without the
- *   slash-menu runtime simply never gains the command, and a duplicate
- *   registration (double apply) degrades to a logged no-op;
- * - optional better-sidebar mini tab (T6.3): parked on the lazily-injected
- *   `betterSidebar` service via mountSidebarTab (optional peer, runtime
- *   duck-typed probe — never imported); not installed = silent skip.
+ *   keyed by the host-side namespace `agent-sidecar`;
+ * - the lazily registered `/sidecar` command and optional better-sidebar
+ *   mini tab.
  *
  * Lifecycle contract:
  * - every resource rides `ctx.effect`: the data stream + visibilitychange
  *   listener, the injected `<style data-plugin>` tags (tsdown's CSS-module
- *   loader injects them at factory execution — once per materialization —
- *   so a keeper effect caches their text and restores them when a
- *   re-apply of the same materialized module follows an unload);
- * - apply-guard idempotency: each mount checks the slot ledger for an
- *   entry with this plugin's id/key before registering, so a duplicate
- *   apply never double-registers (same cell + same priority would throw);
+ *   loader resets a current-bundle manifest and injects them at factory
+ *   execution — once per materialization — so a keeper effect prunes stale
+ *   tags and restores authoritative manifest text when a re-apply of the
+ *   same materialized module follows an unload);
+ * - the optional Host locale bridge rides a `locale`-injected child fiber;
+ *   without that service the local table stays on zh, while every independent
+ *   React root subscribes once and refreshes its complete descendant tree;
+ * - HMR handoff: each slot waits briefly while an overlapping old fiber owns
+ *   this plugin's id/key, then registers the new component closure;
  * - graceful degradation: every mount is individually try/catch-ed —
  *   a failing seat logs and is skipped, never taking the GUI down;
  * - the settings card waits on the optional `settingsScope` service via
@@ -47,6 +37,7 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 // Type-only slot-contract merges into SlotMap (erased at runtime):
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
@@ -54,18 +45,37 @@ import { registerSidecarCommand } from './commands.ts'
 import { PLUGIN_ID, SidecarController } from './controller.ts'
 import { createInjectActions } from './inject-glue.ts'
 import type { InjectMode } from './inject/logic.ts'
-import { createBoardTab, createFooterWidget, createSettingsCardEntry } from './mount.tsx'
+import {
+  acquireWithHandoff,
+  isRegistrationCollision,
+} from './lifecycle/handoff.ts'
+import type { HostLocalePort } from './locales/host.ts'
+import { attachHostLocale, subscribeLocale, t } from './locales/index.ts'
+import {
+  createBoardTab,
+  createCenterOverlay,
+  createFooterWidget,
+  createSettingsCardEntry,
+} from './mount.tsx'
+import { createCenterNavigation } from './navigation/center.ts'
+import {
+  mountSidebarEntry,
+  type SidebarEntryCopyPort,
+} from './navigation/sidebar-entry.ts'
 import { mountSidebarTab } from './sidebar-tab.tsx'
-import { createDefaultIntegration, type SidecarUiIntegration } from './detail-view.tsx'
+import { createDefaultIntegration, type BoardUiPort } from './ui-integration.ts'
 import type { SidecarConfigView } from './settings-glue.ts'
 
 export const name = 'agent-sidecar'
 
-/** The slot registry is the only hard dependency; settingsScope is lazy. */
+/** The slot registry is the only hard dependency; settingsScope and locale are lazy. */
 export const inject = ['slots']
 
 /** Entry id (list slots) and cell key (settings keyed slot) in one. */
 const ENTRY_ID = 'agent-sidecar'
+
+/** Distinct list-seat id for the frame-wide Agent Center surface. */
+const CENTER_ENTRY_ID = 'agent-sidecar-center'
 
 /** Host-side settings namespace (host half registers it via ctx.settings). */
 const SETTINGS_NAMESPACE = 'agent-sidecar'
@@ -80,56 +90,146 @@ interface SettingsScopeBinderFace {
   bind<T>(spec: SettingsScopeSpec<T>): SettingsScope<T>
 }
 
-/** The three slot seats this plugin occupies (all merged into SlotMap). */
-type SidecarSlot = 'conversation.view' | 'sidebar.footer.action' | 'settings.plugin.item'
+/** Structural Cordis face keeps the unpublished locale package out of runtime imports. */
+interface LocaleInjectContextFace {
+  inject(deps: string[], callback: (ctx: unknown) => void): unknown
+}
+
+/** The four slot seats this plugin occupies (all merged into SlotMap). */
+type SidecarSlot =
+  | 'shell.overlay'
+  | 'conversation.view'
+  | 'sidebar.footer.action'
+  | 'settings.plugin.item'
 
 /**
  * Apply-guard: whether the slot ledger already holds this plugin's entry
- * (list slots match by `id`, the keyed settings slot by `key`; both use
- * the same 'agent-sidecar' token). `entries()` answers [] for undeclared
- * slots, and the check runs inside the deferred `slots.inject` callback —
- * i.e. at actual registration time, when the ledger is authoritative.
+ * (list slots match their seat-specific `id`, the keyed settings slot by
+ * namespace `key`). `entries()` answers [] for undeclared slots, and the
+ * check runs inside the deferred `slots.inject` callback — i.e. at actual
+ * registration time, when the ledger is authoritative.
  */
 function hasOwnEntry(ctx: ClientContext, slot: SidecarSlot): boolean {
+  const entryId = slot === 'shell.overlay' ? CENTER_ENTRY_ID : ENTRY_ID
   return ctx.slots
     .entries(slot)
-    .some((entry) => entry.options.id === ENTRY_ID || entry.options.key === SETTINGS_NAMESPACE)
+    .some((entry) =>
+      entry.options.id === entryId ||
+      (slot === 'settings.plugin.item' && entry.options.key === SETTINGS_NAMESPACE))
+}
+
+/**
+ * Lease the optional Host locale service for this injected child fiber.
+ * The locale core arbitrates overlapping fibers that share one service.
+ */
+function mountHostLocale(ctx: ClientContext): void {
+  const mount = ctx as unknown as LocaleInjectContextFace
+  mount.inject(['locale'], (injected) => {
+    const lctx = injected as ClientContext & HostLocalePort
+    lctx.effect(
+      () => attachHostLocale(lctx),
+      'agent-sidecar: host locale bridge',
+    )
+  })
 }
 
 // ---------------------------------------------------------------------------
 // Style lifecycle.
 // ---------------------------------------------------------------------------
 
-/**
- * Style text per data-plugin-css tag id, cached at module scope so it
- * survives unload → re-apply cycles of one materialized module (the CSS
- * factory body only runs once per materialization).
- */
-const styleTextCache = new Map<string, string>()
+const STYLE_OWNER = Symbol.for('@shendeguize/dsh-agent-sidecar/style-owner')
+const STYLE_MANIFEST = Symbol.for('@shendeguize/dsh-agent-sidecar/style-manifest')
+const STYLE_GENERATION = Symbol.for('@shendeguize/dsh-agent-sidecar/style-generation')
+
+type StyleGlobals = Record<PropertyKey, unknown>
 
 /**
- * Keeper effect for the tsdown-injected `<style data-plugin>` tags: cache
- * their text, restore any tag a previous unload removed, and remove all of
- * this plugin's tags on dispose.
+ * A fallback only for a sequential re-apply of this exact materialization.
+ * A new intro installs a new generation object, so it can never inherit an
+ * earlier materialization's cached CSS.
  */
-function keepStylesAlive(): () => void {
-  if (typeof document === 'undefined') return () => {}
-  const ownTags = `style[data-plugin=${JSON.stringify(PLUGIN_ID)}]`
-  for (const el of Array.from(document.querySelectorAll(ownTags))) {
-    const key = (el as HTMLStyleElement).dataset['pluginCss']
-    if (key !== undefined) styleTextCache.set(key, el.textContent ?? '')
+let cachedStyleManifest:
+  | { generation: object; styles: ReadonlyMap<string, string> }
+  | undefined
+
+function setStyleOwner(tag: HTMLStyleElement, owner: object): void {
+  const sharedTag = tag as unknown as Record<PropertyKey, unknown>
+  sharedTag[STYLE_OWNER] = owner
+}
+
+function isStyleOwner(tag: Element, owner: object): boolean {
+  return (tag as unknown as Record<PropertyKey, unknown>)[STYLE_OWNER] === owner
+}
+
+/**
+ * Freeze the current materialization's CSS before another bundle can reset
+ * it. A present Map is authoritative, including when it is empty.
+ */
+function snapshotStyleManifest(globals: StyleGlobals): ReadonlyMap<string, string> {
+  const generation = globals[STYLE_GENERATION]
+  const manifest = globals[STYLE_MANIFEST]
+  if (manifest instanceof Map) {
+    const styles = new Map<string, string>()
+    for (const [tagId, cssText] of manifest) {
+      if (typeof tagId === 'string' && typeof cssText === 'string') {
+        styles.set(tagId, cssText)
+      }
+    }
+    if (typeof generation === 'object' && generation !== null) {
+      cachedStyleManifest = { generation, styles }
+    }
+    return styles
   }
-  for (const [key, cssText] of styleTextCache) {
-    if (document.querySelector(`style[data-plugin-css=${JSON.stringify(key)}]`) === null) {
-      const tag = document.createElement('style')
+  if (
+    typeof generation === 'object' &&
+    generation !== null &&
+    cachedStyleManifest?.generation === generation
+  ) {
+    return new Map(cachedStyleManifest.styles)
+  }
+  return new Map()
+}
+
+/**
+ * Keeper effect for the tsdown-injected `<style data-plugin>` tags. Ownership
+ * lives on the DOM node through Symbol.for so the latest HMR fiber wins. The
+ * current bundle manifest is authoritative: plugin tags for CSS modules
+ * absent from it are stale and removed.
+ */
+function keepStylesAlive(
+  documentRef: Document | undefined = typeof document === 'undefined' ? undefined : document,
+  globals: StyleGlobals = globalThis as unknown as StyleGlobals,
+): () => void {
+  if (documentRef === undefined) return () => {}
+  const manifest = snapshotStyleManifest(globals)
+  const owner = {}
+  const ownTags = `style[data-plugin=${JSON.stringify(PLUGIN_ID)}]`
+  for (const el of Array.from(documentRef.querySelectorAll(ownTags))) {
+    const tag = el as HTMLStyleElement
+    const key = tag.dataset['pluginCss']
+    const cssText = key === undefined ? undefined : manifest.get(key)
+    if (cssText === undefined) {
+      tag.remove()
+      continue
+    }
+    tag.textContent = cssText
+    setStyleOwner(tag, owner)
+  }
+  for (const [key, cssText] of manifest) {
+    const selector = `${ownTags}[data-plugin-css=${JSON.stringify(key)}]`
+    if (documentRef.querySelector(selector) === null) {
+      const tag = documentRef.createElement('style')
       tag.dataset['plugin'] = PLUGIN_ID
       tag.dataset['pluginCss'] = key
       tag.textContent = cssText
-      document.head.appendChild(tag)
+      setStyleOwner(tag, owner)
+      documentRef.head.appendChild(tag)
     }
   }
   return () => {
-    for (const el of Array.from(document.querySelectorAll(ownTags))) el.remove()
+    for (const el of Array.from(documentRef.querySelectorAll(ownTags))) {
+      if (isStyleOwner(el, owner)) el.remove()
+    }
   }
 }
 
@@ -144,24 +244,35 @@ function keepStylesAlive(): () => void {
  */
 export function apply(ctx: ClientContext): void {
   const controller = new SidecarController()
+  const navigation = createCenterNavigation()
+  const openAgentCenter = navigation.open
+  const sidebarEntryCopy: SidebarEntryCopyPort = {
+    get label() { return t('sidebar.centerEntryLabel') },
+    get accessibilityLabel() { return t('sidebar.centerEntryAria') },
+    subscribe: subscribeLocale,
+  }
 
-  // Inject integration (S5/T4.9): the detail view hosts the panel; a
-  // delivered execute pulls one fresh snapshot so the board reflects the
-  // injection promptly. The default mode is a mutable box because the
-  // settings scope (seat 3) resolves after the board mounts — the reader
-  // is late-bound and the box holds the schema default until then.
+  // Optional service: a pending inject fiber allocates no resources and keeps
+  // the module-owned zh fallback. A bridge failure never blocks other seats.
+  try {
+    mountHostLocale(ctx)
+  } catch {
+    // Optional locale injection must not block the remaining client seats.
+  }
+
+  // The detail view hosts injection. A delivered execute pulls one fresh
+  // snapshot so the board reflects it promptly. The default mode remains
+  // late-bound because settings resolve after the board mounts.
   const injectPrefs: { defaultMode: InjectMode } = { defaultMode: 'queue' }
 
-  // Analysis capability (T5.10b): the state snapshot carries no analysis
-  // bit, so the UI gate mirrors the live `analysis.enabled` setting the
-  // same late-bound way (schema default false = fail-closed until the
-  // scope resolves); the server 403 gate stays authoritative regardless.
+  // The state snapshot carries no analysis bit, so the UI mirrors the live
+  // `analysis.enabled` setting. False is fail-closed until settings resolve;
+  // the server's 403 gate remains authoritative.
   const analysisPrefs: { enabled: boolean } = { enabled: false }
 
-  // M3 integration handed to the board tab (design §5.1): detail routing,
-  // project view, dsh deep-query tools, and the analysis panel, each over
-  // its glue store on the real transports.
-  const uiIntegration: SidecarUiIntegration = createDefaultIntegration({
+  // Compose the production stores and detail capabilities behind the
+  // board's narrow port.
+  const uiIntegration: BoardUiPort = createDefaultIntegration({
     inject: {
       actions: createInjectActions({
         onDelivered: () => {
@@ -199,51 +310,96 @@ export function apply(ctx: ClientContext): void {
 
   ctx.effect(keepStylesAlive, 'agent-sidecar: injected styles')
 
-  // Seat 1: cross-agent board as the "Sidecar" conversation tab — since
-  // T5.10b the shell of the M3 information architecture: board/project
-  // switcher, card-click detail routing (timeline + inject + analysis +
-  // dsh lineage/search), all riding the integration seams above.
+  // Seat 1: frame-wide Agent Center. Root scope keeps it reachable from an
+  // empty conversation, and the retained navigation snapshot makes early
+  // open requests visible as soon as the layout declares this official seat.
+  try {
+    const SidecarCenterOverlay = createCenterOverlay(controller, uiIntegration, navigation)
+    ctx.slots.inject('shell.overlay', () => acquireWithHandoff(
+      () => hasOwnEntry(ctx, 'shell.overlay')
+        ? undefined
+        : ctx.slots.register({
+            name: 'shell.overlay',
+            id: CENTER_ENTRY_ID,
+            order: 30,
+          }, SidecarCenterOverlay),
+      {
+        isCollision: isRegistrationCollision,
+        onError: (error) => {
+          console.error('agent-sidecar: center overlay registration failed', error)
+        },
+        onTimeout: () => {
+          console.error('agent-sidecar: center overlay handoff timed out')
+        },
+      },
+    ))
+  } catch (err) {
+    console.error('agent-sidecar: center overlay mount failed', err)
+  }
+
+  // Sidebar navigation shares the same narrow callback as the footer and
+  // `/sidecar`; this adapter owns only its host-side DOM placement.
+  try {
+    ctx.effect(
+      () => mountSidebarEntry(openAgentCenter, sidebarEntryCopy),
+      'agent-sidecar: sidebar entry',
+    )
+  } catch (err) {
+    console.error('agent-sidecar: sidebar entry mount failed', err)
+  }
+
+  // Seat 2: cross-agent board as the "Sidecar" conversation tab.
   try {
     const SidecarBoardTab = createBoardTab(controller, uiIntegration)
-    ctx.slots.inject('conversation.view', () => {
-      if (hasOwnEntry(ctx, 'conversation.view')) return () => {}
-      try {
-        return ctx.slots.register({
-          name: 'conversation.view',
-          id: ENTRY_ID,
-          order: 30,
-          label: 'Sidecar',
-        }, SidecarBoardTab)
-      } catch (err) {
-        console.error('agent-sidecar: board tab registration failed', err)
-        return () => {}
-      }
-    })
+    ctx.slots.inject('conversation.view', () => acquireWithHandoff(
+      () => hasOwnEntry(ctx, 'conversation.view')
+        ? undefined
+        : ctx.slots.register({
+            name: 'conversation.view',
+            id: ENTRY_ID,
+            order: 30,
+            label: 'Sidecar',
+          }, SidecarBoardTab),
+      {
+        isCollision: isRegistrationCollision,
+        onError: (error) => {
+          console.error('agent-sidecar: board tab registration failed', error)
+        },
+        onTimeout: () => {
+          console.error('agent-sidecar: board tab handoff timed out')
+        },
+      },
+    ))
   } catch (err) {
     console.error('agent-sidecar: board tab mount failed', err)
   }
 
-  // Seat 2: footer status widget.
+  // Seat 3: footer status widget.
   try {
-    const SidecarFooterWidget = createFooterWidget(controller)
-    ctx.slots.inject('sidebar.footer.action', () => {
-      if (hasOwnEntry(ctx, 'sidebar.footer.action')) return () => {}
-      try {
-        return ctx.slots.register({
-          name: 'sidebar.footer.action',
-          id: ENTRY_ID,
-          order: 30,
-        }, SidecarFooterWidget)
-      } catch (err) {
-        console.error('agent-sidecar: footer widget registration failed', err)
-        return () => {}
-      }
-    })
+    const SidecarFooterWidget = createFooterWidget(controller, openAgentCenter)
+    ctx.slots.inject('sidebar.footer.action', () => acquireWithHandoff(
+      () => hasOwnEntry(ctx, 'sidebar.footer.action')
+        ? undefined
+        : ctx.slots.register({
+            name: 'sidebar.footer.action',
+            id: ENTRY_ID,
+            order: 30,
+          }, SidecarFooterWidget),
+      {
+        isCollision: isRegistrationCollision,
+        onError: (error) => {
+          console.error('agent-sidecar: footer widget registration failed', error)
+        },
+        onTimeout: () => {
+          console.error('agent-sidecar: footer widget handoff timed out')
+        },
+      },
+    ))
   } catch (err) {
     console.error('agent-sidecar: footer widget mount failed', err)
   }
 
-  // Seat 3: settings card, once the optional settingsScope service resolves.
+  // Seat 4: settings card, once the optional settingsScope service resolves.
   try {
     // The inject callback receives the base cordis Context; narrow once
     // (slots/effect are inherited, settingsScope is the resolved service).
@@ -271,18 +427,23 @@ export function apply(ctx: ClientContext): void {
         adoptDefaults()
 
         const SidecarSettingsCardEntry = createSettingsCardEntry(controller, scope)
-        sctx.slots.inject('settings.plugin.item', () => {
-          if (hasOwnEntry(sctx, 'settings.plugin.item')) return () => {}
-          try {
-            return sctx.slots.register({
-              name: 'settings.plugin.item',
-              key: SETTINGS_NAMESPACE,
-            }, SidecarSettingsCardEntry)
-          } catch (err) {
-            console.error('agent-sidecar: settings card registration failed', err)
-            return () => {}
-          }
-        })
+        sctx.slots.inject('settings.plugin.item', () => acquireWithHandoff(
+          () => hasOwnEntry(sctx, 'settings.plugin.item')
+            ? undefined
+            : sctx.slots.register({
+                name: 'settings.plugin.item',
+                key: SETTINGS_NAMESPACE,
+              }, SidecarSettingsCardEntry),
+          {
+            isCollision: isRegistrationCollision,
+            onError: (error) => {
+              console.error('agent-sidecar: settings card registration failed', error)
+            },
+            onTimeout: () => {
+              console.error('agent-sidecar: settings card handoff timed out')
+            },
+          },
+        ))
       } catch (err) {
         console.error('agent-sidecar: settings card mount failed', err)
       }
@@ -291,19 +452,19 @@ export function apply(ctx: ClientContext): void {
     console.error('agent-sidecar: settings scope injection failed', err)
   }
 
-  // Seat 4: the `/sidecar` slash command, lazy on the commandUi service
-  // (T4.6). registerSidecarCommand catches its own registration failures
-  // (duplicate name on a double apply logs and no-ops); this try/catch
-  // keeps the degradation posture uniform with the slot seats. Disposal
-  // rides the injected fiber — unloading the plugin unregisters it.
+  // Seat 5: the `/sidecar` slash command, lazy on the commandUi service.
+  // registerSidecarCommand catches its own registration failures
+  // and owns the bounded overlap handoff; this try/catch keeps the
+  // degradation posture uniform with the slot seats. Disposal rides the
+  // injected fiber — unloading the plugin unregisters it.
   try {
-    registerSidecarCommand(ctx)
+    registerSidecarCommand(ctx, { openCenter: openAgentCenter })
   } catch (err) {
     console.error('agent-sidecar: /sidecar command mount failed', err)
   }
 
-  // Seat 5 (optional, T6.3): the better-sidebar mini tab, parked on the
-  // lazily-injected `betterSidebar` service (optional peer; runtime
+  // Seat 6 (optional): the better-sidebar mini tab, parked on the
+  // lazily injected `betterSidebar` service (optional peer; runtime
   // duck-typed probe, never imported). Not installed → the fiber stays
   // pending forever: silent skip, zero resources. A probe/registration
   // failure degrades to a log and never touches the other seats.

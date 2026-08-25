@@ -13,13 +13,10 @@
  * and the group-level `lastActivityAt`. Only the fields this view renders
  * are mirrored; extra wire fields are structurally ignored.
  *
- * Reuse contract (T2.2, read-only): tone/glyph/relative-time/label tools
- * are imported from `./logic.ts` without touching its exports, so both
- * board views speak the same visual language. Strings NEW to this view
- * live in the module-local {@link PROJECT_VIEW_STRINGS} table (S7 unifies
- * locales later); strings emitted by reused board tools (status labels,
- * relative time, the unknown-project label) intentionally stay with the
- * board table so the two views can never drift apart.
+ * Reuse contract (T2.2): tone/glyph/relative-time/label tools are imported
+ * from `./logic.ts`, so both board views speak the same visual language.
+ * Project-only copy is exposed through the dynamic
+ * {@link PROJECT_VIEW_STRINGS} locale facade.
  *
  * @module
  */
@@ -35,39 +32,29 @@ import {
   statusRank,
   type StatusBadgeVM,
 } from './logic.ts'
+import { createLocaleView } from '../locales/view.ts'
 
 // ---------------------------------------------------------------------------
-// Module-local strings (project-view-only vocabulary; Chinese primary).
+// Project-view-only locale facade.
 // ---------------------------------------------------------------------------
 
-export const PROJECT_VIEW_STRINGS = {
-  /** View heading. */
-  title: '项目关联',
-  /** Header count summary. */
-  summary: '{projects} 个项目 · {sessions} 个会话',
-  /** Cross-agent badge, shown when a project hosts 2+ agent kinds. */
-  crossAgent: '{n} 种 agent',
-  /** Group header session count. */
-  sessionCount: '{n} 个会话',
-  /** Group header recency line. */
-  lastActive: '最近活跃 {time}',
-  /** Marker on sessions live in this dsh process (UnifiedSession.live). */
-  liveChip: '实时',
-  /** Untitled-session fallback. */
-  untitled: '(无标题)',
-  /** Lane truncation fold (UX-20; mirrors the board's group fold). */
-  showAllSessions: '展开全部 {n} 个会话',
-  showLessSessions: '只看前 {n} 个',
-  /** Empty state (no groups at all). */
+export const PROJECT_VIEW_STRINGS = createLocaleView({
+  title: 'project.title',
+  summary: 'project.summary',
+  crossAgent: 'project.crossAgent',
+  sessionCount: 'project.sessionCount',
+  lastActive: 'project.lastActive',
+  liveChip: 'project.liveChip',
+  untitled: 'project.untitled',
+  showAllSessions: 'project.showAllSessions',
+  showLessSessions: 'project.showLessSessions',
   empty: {
-    title: '暂无项目关联',
-    hint: '时间窗内没有跨 agent 的项目活动;agent 在某个项目目录下开始工作后会出现在这里。',
+    title: 'project.empty.title',
+    hint: 'project.empty.hint',
   },
-  /** Loading placeholder (first fetch, nothing to show yet). */
-  loading: '正在加载项目关联…',
-  /** Error banner prefix; the raw error detail is appended by the view. */
-  errorTitle: '项目关联加载失败',
-} as const
+  loading: 'project.loading',
+  errorTitle: 'project.errorTitle',
+} as const)
 
 export type ProjectViewStrings = typeof PROJECT_VIEW_STRINGS
 

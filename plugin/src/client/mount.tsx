@@ -1,12 +1,13 @@
 /**
- * Slot-facing React glue (T2.4): binds the {@link SidecarController} stores
- * to the three presentational modules via `useSyncExternalStore` and hands
- * back zero-prop components ready for slot registration. Factories close
- * over the controller so subscribe/getSnapshot identities stay stable
- * across renders (uSES resubscribes on identity change).
+ * React bindings for the board tab, footer widget, and settings card.
+ * Factories close over the controller so subscribe/getSnapshot identities
+ * stay stable across renders. The board depends only on {@link BoardUiPort}
+ * and passes its nested detail port to the detail container.
+ * Each exported root factory's top-level component subscribes once to the
+ * active locale, refreshing its complete descendant tree without leaf subscriptions.
  *
- * The settings card entry additionally owns the staged-edit lifecycle over
- * a bound `SettingsScope` (browser mirror of the host settings namespace):
+ * The settings card owns the staged-edit lifecycle over a bound
+ * `SettingsScope` (browser mirror of the host settings namespace):
  * resolved values come from the scope snapshot, edits stage locally, save
  * writes one complete top-level group per changed group (see
  * settings-glue.ts for the write-granularity rationale), and success is
@@ -25,13 +26,15 @@ import { SettingsCard, type SettingsCardValues, type SidecarDaemonStatus } from 
 import { countWorking, deriveWidgetConnection } from './board/logic.ts'
 import type { BoardFilterState } from './board/logic.ts'
 import type { SidecarController, SidecarViewState } from './controller.ts'
-import type { InjectMode } from './inject/logic.ts'
-import type { InjectActions } from './inject-glue.ts'
-import { SidecarDetailView, type SidecarUiIntegration } from './detail-view.tsx'
+import { SidecarDetailView } from './detail-view.tsx'
 import { findCardHint, type DetailHeaderHint } from './detail-glue.ts'
-import { findProjectSessionHint, type ProjectsStore } from './project-glue.ts'
+import { findProjectSessionHint } from './project-glue.ts'
+import type { BoardUiPort, ProjectsStorePort } from './ui-integration.ts'
 import { detailErrorText } from './detail/logic.ts'
 import { t } from './locales/index.ts'
+import { useActiveLocale } from './locales/react.ts'
+import { CenterOverlay } from './navigation/CenterOverlay.tsx'
+import type { CenterNavigation, CenterNavigationStore } from './navigation/center.ts'
 import css from './detail-view.module.css'
 import {
   DEFAULT_CONFIG_VIEW,
@@ -40,21 +43,6 @@ import {
   diffGroups,
   type SidecarConfigView,
 } from './settings-glue.ts'
-
-/**
- * What the board tab needs to host the inject panel (S5 wiring, T4.9).
- * Since T5.10b the panel opens from the detail view's 注入 button; this
- * shape rides {@link SidecarUiIntegration.inject} unchanged.
- */
-export interface BoardInjectIntegration {
-  /** onPrepare/onExecute over the action transport (inject-glue.ts). */
-  actions: InjectActions
-  /**
-   * Late-bound `inject.default-mode` reader: the settings scope resolves
-   * after the tab mounts, so the value is read at panel-open time.
-   */
-  getDefaultMode: () => InjectMode
-}
 
 /** Board-tab main views (detail is an overlay route on top of either). */
 type MainView = 'board' | 'projects'
@@ -65,7 +53,7 @@ type MainView = 'board' | 'projects'
  */
 function ProjectsContainer(props: {
   controller: SidecarController
-  store: ProjectsStore
+  store: ProjectsStorePort
   onSelectSession: (sessionId: string) => void
 }): ReactElement {
   const { controller, store } = props
@@ -85,28 +73,27 @@ function ProjectsContainer(props: {
 }
 
 /**
- * Cross-agent board tab (the "Sidecar" conversation tab), since T5.10b the
- * shell of the whole M3 information architecture (design §5.1):
+ * Cross-agent board content and its project/detail routes:
  *
  * - view 1: the session board, with a 「会话看板 / 项目视图」 switcher
  *   (ProjectView over `GET projects`);
  * - view 2: clicking a session card in EITHER view routes to the full-tab
  *   session-detail view (timeline + 注入 + AI 分析 + dsh 谱系/检索);
  *   detail-internal jumps (lineage nodes, search hits) re-route in place;
- * - view 3: the M2 inject panel opens as a modal from the detail view.
+ * - view 3: the inject panel opens as a modal from the detail view.
  *
  * Without an integration the board renders read-only and inert (no detail
- * routing) — the M1 degradation posture.
+ * routing).
  */
-export function createBoardTab(
+function createBoardContent(
   controller: SidecarController,
-  integration?: SidecarUiIntegration,
+  integration?: BoardUiPort,
 ): () => ReactElement {
   const subscribe = (cb: () => void): (() => void) => controller.subscribe(cb)
   const getState = (): SidecarViewState => controller.getState()
   const getFilters = (): BoardFilterState => controller.getFilters()
 
-  return function SidecarBoardTab(): ReactElement {
+  return function BoardContent(): ReactElement {
     // Third argument (server snapshot) keeps the components renderable under
     // react-dom/server (DOM-level verification harness); same source.
     const state = useSyncExternalStore(subscribe, getState, getState)
@@ -115,9 +102,9 @@ export function createBoardTab(
     const [detail, setDetail] = useState<{ id: string; hint: DetailHeaderHint | null } | null>(
       null,
     )
-    // One ProjectsStore per tab mount, created lazily with the integration
+    // One project store per tab mount, created lazily with the integration
     // seam; state survives board↔projects↔detail switches within the tab.
-    const [projectsStore] = useState<ProjectsStore | null>(
+    const [projectsStore] = useState<ProjectsStorePort | null>(
       () => integration?.createProjectsStore() ?? null,
     )
     useEffect(() => () => { projectsStore?.dispose() }, [projectsStore])
@@ -140,7 +127,7 @@ export function createBoardTab(
           sessionId={detail.id}
           hint={detail.hint}
           controller={controller}
-          integration={integration}
+          integration={integration.detail}
           onClose={() => { setDetail(null) }}
           onSelectSession={openDetail}
         />
@@ -154,6 +141,7 @@ export function createBoardTab(
             type="button"
             className={css['switcherButton']}
             data-active={mainView === 'board' || undefined}
+            aria-pressed={mainView === 'board'}
             onClick={() => { setMainView('board') }}
           >
             {t('board.viewBoard')}
@@ -162,6 +150,7 @@ export function createBoardTab(
             type="button"
             className={css['switcherButton']}
             data-active={mainView === 'projects' || undefined}
+            aria-pressed={mainView === 'projects'}
             onClick={() => { setMainView('projects') }}
           >
             {t('board.viewProjects')}
@@ -197,16 +186,60 @@ export function createBoardTab(
   }
 }
 
+/** Bind board content to its independent React root and locale subscription. */
+export function createBoardTab(
+  controller: SidecarController,
+  integration?: BoardUiPort,
+): () => ReactElement {
+  const BoardContent = createBoardContent(controller, integration)
+  return function SidecarBoardTab(): ReactElement {
+    useActiveLocale()
+    return <BoardContent />
+  }
+}
+
+/** Bind the shared navigation source to the shell overlay and existing board. */
+export function createCenterOverlay(
+  controller: SidecarController,
+  integration: BoardUiPort,
+  navigation: CenterNavigationStore,
+): () => ReactElement {
+  const BoardContent = createBoardContent(controller, integration)
+  return function SidecarCenterOverlay(): ReactElement {
+    useActiveLocale()
+    const open = useSyncExternalStore(
+      navigation.subscribe,
+      navigation.getSnapshot,
+      navigation.getSnapshot,
+    )
+    return (
+      <CenterOverlay
+        open={open}
+        onClose={navigation.close}
+        title={t('board.topbar.title')}
+        closeLabel={t('inject.close')}
+      >
+        {open ? <BoardContent /> : null}
+      </CenterOverlay>
+    )
+  }
+}
+
 /** Footer connection dot + working counter bound to the controller. */
-export function createFooterWidget(controller: SidecarController): () => ReactElement {
+export function createFooterWidget(
+  controller: SidecarController,
+  onOpen: CenterNavigation,
+): () => ReactElement {
   const subscribe = (cb: () => void): (() => void) => controller.subscribe(cb)
   const getState = (): SidecarViewState => controller.getState()
   return function SidecarFooterWidget(): ReactElement {
+    useActiveLocale()
     const state = useSyncExternalStore(subscribe, getState, getState)
     return (
       <SidecarWidget
         connection={deriveWidgetConnection(state.daemonState, state.streamHealth)}
         workingCount={countWorking(state.sessions)}
+        onOpen={onOpen}
       />
     )
   }
@@ -230,6 +263,7 @@ export function createSettingsCardEntry(
   const getSnapshot = (): ReturnType<typeof scope.getSnapshot> => scope.getSnapshot()
 
   return function SidecarSettingsCardEntry(): ReactElement {
+    useActiveLocale()
     const snapshot = useSyncExternalStore(subscribeScope, getSnapshot, getSnapshot)
     const state = useSyncExternalStore(subscribeState, getState, getState)
     const [staged, setStaged] = useState<Partial<SettingsCardValues>>({})

@@ -21,6 +21,13 @@
  * else comes through props.
  */
 
+import {
+  Button,
+  Pill,
+  StateDot,
+  writeClipboard,
+  type StateDotState,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import { Fragment, useEffect, useRef, useState, type ReactElement } from 'react'
 import {
   aggregateChunkRows,
@@ -40,6 +47,8 @@ import {
   type TimelineVM,
 } from './logic.ts'
 import { DETAIL_STRINGS } from './strings.ts'
+import { StaticPill } from '../primitives/StaticPill.tsx'
+import { surfaceProps } from '../theme/parts.ts'
 import styles from './detail.module.css'
 
 export interface SessionDetailHeaderVM {
@@ -100,19 +109,22 @@ function EventRow(props: {
             {DETAIL_STRINGS.timeline.seq.replace('{n}', String(entry.seq))}
           </span>
         )}
-        {row.isNew && <span className={styles['eventNew']}>{DETAIL_STRINGS.timeline.newBadge}</span>}
+        {row.isNew && <Pill className={styles['eventNew']}>{DETAIL_STRINGS.timeline.newBadge}</Pill>}
         <span className={styles['eventSpacer']} />
         <span className={styles['eventTime']}>{row.timeLabel}</span>
       </div>
       {entry.summary !== '' && <div className={styles['eventSummary']}>{entry.summary}</div>}
       {entry.expandable && (
-        <button
+        <Button
           type="button"
+          size="sm"
+          variant="ghost"
           className={styles['expandButton']}
+          aria-expanded={expanded}
           onClick={() => onToggleExpand(entry.key)}
         >
           {expanded ? DETAIL_STRINGS.timeline.collapse : DETAIL_STRINGS.timeline.expand}
-        </button>
+        </Button>
       )}
       {entry.expandable && expanded && entry.body !== null && (
         <pre className={styles['eventBody']}>{entry.body}</pre>
@@ -139,13 +151,16 @@ function ChunkRunRow(props: {
         data-testid="agent-sidecar-detail-chunks"
       >
         <span className={styles['chunkRunLabel']}>{row.label}</span>
-        <button
+        <Button
           type="button"
+          size="sm"
+          variant="ghost"
           className={styles['expandButton']}
+          aria-expanded={props.expanded}
           onClick={() => props.onToggleRun(row.key)}
         >
           {props.expanded ? DETAIL_STRINGS.timeline.collapse : DETAIL_STRINGS.timeline.expand}
-        </button>
+        </Button>
         <span className={styles['eventSpacer']} />
         <span className={styles['eventTime']}>{row.timeLabel}</span>
       </li>
@@ -173,6 +188,7 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
   const listRef = useRef<HTMLOListElement | null>(null)
   const positionedRef = useRef(false)
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const copyAliveRef = useRef(true)
 
   const status = deriveDetailStatus(props.header.status)
   const sourceBadges = deriveSourceBadges(props.timeline.sources)
@@ -209,12 +225,16 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
     }
   }, [listening, entryCount])
 
-  useEffect(
-    () => () => {
-      if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
-    },
-    [],
-  )
+  useEffect(() => {
+    copyAliveRef.current = true
+    return () => {
+      copyAliveRef.current = false
+      if (copyTimerRef.current !== null) {
+        clearTimeout(copyTimerRef.current)
+        copyTimerRef.current = null
+      }
+    }
+  }, [])
 
   const toggleExpand = (key: string): void => {
     setExpandedKeys((prev) => {
@@ -234,31 +254,32 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
     })
   }
 
-  const copySessionId = (): void => {
-    const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard
-    if (clipboard === undefined) return
-    clipboard.writeText(props.sessionId).then(
-      () => {
-        setCopied(true)
-        if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
-        copyTimerRef.current = setTimeout(() => {
-          setCopied(false)
-        }, 2000)
-      },
-      () => {
-        // Clipboard permission denied: silently keep the plain id display.
-      },
-    )
+  const copySessionId = async (): Promise<void> => {
+    if (!(await writeClipboard(props.sessionId))) return
+    if (!copyAliveRef.current) return
+    if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
+    setCopied(true)
+    copyTimerRef.current = setTimeout(() => {
+      copyTimerRef.current = null
+      setCopied(false)
+    }, 2000)
   }
 
+  const statusDotState: StateDotState | null =
+    status.status === 'working'
+      ? 'ongoing'
+      : status.status === 'waiting'
+        ? 'warning'
+        : null
+
   return (
-    <div className={styles['root']} data-testid="agent-sidecar-detail">
+    <div {...surfaceProps('timeline', styles['root'])} data-testid="agent-sidecar-detail">
       <header className={styles['header']}>
         <div className={styles['headerTop']}>
           {props.onClose !== undefined && (
-            <button type="button" className={styles['closeButton']} onClick={props.onClose}>
+            <Button type="button" size="sm" variant="outline" onClick={props.onClose}>
               {DETAIL_STRINGS.header.close}
-            </button>
+            </Button>
           )}
           <span className={styles['agent']}>
             <span className={styles['agentGlyph']} aria-hidden>
@@ -266,15 +287,18 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
             </span>
             {props.header.agent}
           </span>
-          <span className={styles['badge']} data-tone={status.tone} title={DETAIL_STRINGS.header.observedDisclaimer}>
-            <span className={styles['dot']} data-tone={status.tone} />
+          <StaticPill className={styles['badge']} title={DETAIL_STRINGS.header.observedDisclaimer}>
+            {statusDotState === null
+              ? <span className={styles['dot']} data-tone={status.tone} />
+              : <StateDot state={statusDotState} size={8} />}
             {status.label}
-          </span>
+          </StaticPill>
           <span className={styles['spacer']} />
           {props.onRefresh !== undefined && (
-            <button
+            <Button
               type="button"
-              className={styles['refreshButton']}
+              size="sm"
+              variant="outline"
               disabled={props.refreshing === true}
               title={DETAIL_STRINGS.header.refreshHint}
               onClick={props.onRefresh}
@@ -283,18 +307,17 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
               {props.refreshing === true
                 ? DETAIL_STRINGS.header.refreshing
                 : DETAIL_STRINGS.header.refresh}
-            </button>
+            </Button>
           )}
-          <button
+          <Pill
             type="button"
-            className={styles['listenButton']}
+            active={props.listening}
             aria-pressed={props.listening}
-            data-active={props.listening || undefined}
             title={DETAIL_STRINGS.header.listenHint}
             onClick={props.onToggleListen}
           >
             {props.listening ? DETAIL_STRINGS.header.listenOn : DETAIL_STRINGS.header.listenOff}
-          </button>
+          </Pill>
         </div>
         <div className={styles['title']} title={props.header.title}>
           {props.header.title.trim() === '' ? DETAIL_STRINGS.header.untitled : props.header.title}
@@ -305,19 +328,21 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
               ? DETAIL_STRINGS.header.unknownProject
               : props.header.project}
           </span>
-          <button
+          <Button
             type="button"
+            size="sm"
+            variant="ghost"
             className={styles['sessionId']}
             title={`${props.sessionId} · ${DETAIL_STRINGS.header.copyIdTitle}`}
-            onClick={copySessionId}
+            onClick={() => { void copySessionId() }}
             data-testid="agent-sidecar-detail-copy-id"
           >
             {props.sessionId}
-          </button>
+          </Button>
           {copied && (
-            <span className={styles['copiedBubble']} role="status">
+            <StaticPill className={styles['copiedBubble']} role="status">
               {DETAIL_STRINGS.header.copied}
-            </span>
+            </StaticPill>
           )}
         </div>
         <div className={styles['metaRow']}>
@@ -325,9 +350,13 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
           {sourceBadges.length > 0 && (
             <span className={styles['sourceList']} title={DETAIL_STRINGS.sources.title}>
               {sourceBadges.map((badge) => (
-                <span key={badge.id} className={styles['sourceBadge']} data-tone={badge.tone}>
+                <StaticPill
+                  key={badge.id}
+                  className={styles['sourceBadge']}
+                  data-tone={badge.tone}
+                >
                   {badge.label}
-                </span>
+                </StaticPill>
               ))}
             </span>
           )}
@@ -335,13 +364,17 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
       </header>
 
       {bodyState.errorBanner !== null && (
-        <div className={styles['banner']} role="status">
+        <div className={styles['banner']} role="alert">
           {bodyState.errorBanner}
         </div>
       )}
 
       {bodyState.kind !== 'list' ? (
-        <div className={styles['bodyState']} data-kind={bodyState.kind}>
+        <div
+          className={styles['bodyState']}
+          data-kind={bodyState.kind}
+          role={bodyState.kind === 'error' ? 'alert' : bodyState.kind === 'loading' ? 'status' : undefined}
+        >
           <div className={styles['bodyStateTitle']}>{bodyState.title}</div>
           {bodyState.hint !== null && <div className={styles['bodyStateHint']}>{bodyState.hint}</div>}
         </div>
@@ -349,18 +382,17 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
         <>
           <div className={styles['filterRow']} data-testid="agent-sidecar-detail-filter">
             {(['conversation', 'all'] as const).map((mode) => (
-              <button
+              <Pill
                 key={mode}
                 type="button"
-                className={styles['filterChip']}
-                data-active={filterMode === mode || undefined}
+                active={filterMode === mode}
                 aria-pressed={filterMode === mode}
                 onClick={() => {
                   setFilterMode(mode)
                 }}
               >
                 {DETAIL_STRINGS.filter[mode]}
-              </button>
+              </Pill>
             ))}
             {filtered.hiddenCount > 0 && (
               <span className={styles['filterHiddenNote']}>
@@ -370,16 +402,17 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
           </div>
           <div className={styles['pager']}>
             {props.hasMore ? (
-              <button
+              <Button
                 type="button"
-                className={styles['loadMoreButton']}
+                size="sm"
+                variant="outline"
                 disabled={props.loading}
                 onClick={props.onLoadMore}
               >
                 {props.loading
                   ? DETAIL_STRINGS.timeline.loadingMore
                   : DETAIL_STRINGS.timeline.loadMore}
-              </button>
+              </Button>
             ) : (
               <span className={styles['pagerNote']}>{DETAIL_STRINGS.timeline.noMore}</span>
             )}
@@ -387,13 +420,14 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
           {limited.notice !== null && (
             <div className={styles['hiddenNotice']}>
               {limited.notice}
-              <button
+              <Button
                 type="button"
-                className={styles['showAllButton']}
+                size="sm"
+                variant="ghost"
                 onClick={() => setRenderAll(true)}
               >
                 {DETAIL_STRINGS.timeline.showAll}
-              </button>
+              </Button>
             </div>
           )}
           <ol className={styles['timeline']} ref={listRef}>

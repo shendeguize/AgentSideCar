@@ -3,8 +3,11 @@ window.__ModuleLoader__.load({
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")] = {};
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")] = /* @__PURE__ */ new Map();
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
 		let react = require("react");
+		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		//#region src/client/api.ts
 		/**
@@ -131,135 +134,1102 @@ window.__ModuleLoader__.load({
 			}, opts);
 		}
 		//#endregion
-		//#region src/client/board/strings.ts
-		/**
-		* Centralized user-facing strings for the board view and the footer widget
-		* (design §5.1 view 1 / view 4, §5.3 honesty wording).
-		*
-		* Chinese is the primary UI language for now; every string the components
-		* render lives in this single table so the i18n skeleton (T2.3,
-		* `ctx.locale.register`) can take it over without hunting through JSX.
-		* Templates use `{name}` placeholders resolved by `formatTemplate` in
-		* `logic.ts` — plain message strings, locale-registry friendly.
-		*
-		* Pure data module: no imports, no logic.
-		*
-		* @module
-		*/
-		const BOARD_STRINGS = {
-			/** Session status badge labels (observed values, see hover disclaimer). */
-			status: {
-				working: "工作中",
-				waiting: "等待中",
-				idle: "空闲",
-				dead: "已结束",
-				unknown: "未知"
-			},
-			/**
-			* Badge attention markers. Only the per-session gap marker renders at
-			* card level; the global stream-health notice lives in the top banner
-			* alone (UX-18: repeating it on every card was pure noise).
-			*/
-			attention: { gap: "事件缺口" },
-			/** Daemon supervisor state labels for the top-bar badge. */
-			daemon: {
-				probe: "探测中",
-				adopted: "已连接 · 领养",
-				defer: "等待系统服务",
-				reprobe: "重新探测中",
-				hosting: "正在启动",
-				hosted: "已连接 · 托管",
-				backoff: "重启退避中",
-				failed: "离线"
-			},
-			/** Stream health indicator labels. */
-			stream: {
-				ok: "实时流正常",
-				degraded: "实时流重连中",
-				unknown: "实时流未建立"
-			},
-			/** Top banner texts (design §5.3: degraded warning / FAILED red banner). */
-			banner: {
-				daemonFailed: "sidecar 离线:看板显示最后一次快照,数据不再更新",
-				streamDegraded: "实时流重连中,数据可能滞后"
-			},
-			/** Empty-state guidance blocks. */
-			empty: {
-				daemonFailedTitle: "sidecar 已离线",
-				daemonFailedHint: "daemon 连续启动失败已熔断。可在设置卡重试,或手动运行 agent-sidecar daemon start 后等待自动领养。",
-				daemonDeferTitle: "等待系统服务拉起 daemon",
-				daemonDeferHint: "检测到 LaunchAgent 托管,插件不会自行启动 daemon;服务拉起后看板会自动出数。",
-				filteredTitle: "当前过滤条件下没有会话",
-				filteredHint: "试试放宽时间窗、取消状态过滤,或打开「显示已结束」。",
-				noSessionsTitle: "暂无被观测的会话",
-				noSessionsHint: "本机 agent(claude / codex / cursor / dsh …)开始工作后会自动出现在这里。"
-			},
-			/** Top bar controls. */
-			topbar: {
-				title: "Sidecar 多 agent 看板",
-				refresh: "刷新",
-				refreshing: "刷新中…",
-				refreshTitle: "手动拉取最新快照",
-				refreshFailed: "手动刷新失败,看板仍显示原有快照",
-				dismiss: "知道了",
-				showDead: "显示已结束",
-				timeWindow: "时间窗",
-				/** Count badges (UX-01); working/waiting are clickable status filters. */
-				countWorking: "{n} 工作中",
-				countWaiting: "{n} 等待中",
-				countTotal: "共 {n} 个会话",
-				filterByStatusTitle: "只看「{label}」的会话",
-				clearStatusFilterTitle: "取消状态过滤,显示全部会话"
-			},
-			/** Group collapse / truncation controls (UX-02). */
-			group: {
-				collapseTitle: "收起该分组",
-				expandTitle: "展开该分组",
-				showAll: "展开全部 {n} 个会话",
-				showLess: "只看前 {n} 个"
-			},
-			/** Session card texts. */
-			card: {
-				noEvent: "暂无事件",
-				untitled: "(无标题)",
-				/** Design §5.3 / SKILL.md wording: statuses are inferred observations. */
-				observedDisclaimer: "状态为从持久化数据推断的观察值,可能滞后",
-				observedValue: "观察值: {status}",
-				lastReconcile: "最近对账: {time}",
-				neverReconciled: "尚未对账",
-				copyId: "点击复制完整会话 id",
-				copied: "已复制"
-			},
-			/**
-			* Relative time templates. Ages ≥ 24h render as an absolute short date
-			* (`MM-DD HH:mm`, see formatRelativeTime) instead of a `{n} 天前` bucket
-			* (UX-13: whole columns of "3 天前" carried zero information).
-			*/
-			time: {
-				justNow: "刚刚",
-				minutesAgo: "{n} 分钟前",
-				hoursAgo: "{n} 小时前"
-			},
-			/** Time-window option templates. */
-			timeWindow: {
-				hours: "{n} 小时",
-				days: "{n} 天"
-			},
-			/** Group header session count. */
-			groupCount: "{n} 个会话",
-			/** Sessions with an empty `project` fall into this group (task spec). */
-			unknownProject: "未知项目",
-			/** Footer widget. */
-			widget: {
-				label: "Sidecar",
-				connection: {
-					ok: "已连接",
-					degraded: "连接不稳定",
-					off: "离线"
-				},
-				working: "{n} 个会话工作中"
-			}
+		//#region src/client/locales/zh.ts
+		const zh = {
+			"settings.cardTitle": "Agent Sidecar",
+			"settings.cardDescription": "跨 agent 会话监控、注入与旁路分析的运行设置。",
+			"settings.docsLink": "查看文档",
+			"settings.readOnly": "当前设置文档为只读,修改不可保存。",
+			"settings.unsaved": "未保存",
+			"settings.save": "保存",
+			"settings.saving": "保存中…",
+			"settings.discard": "放弃修改",
+			"settings.saveFailed": "保存失败,请重试。",
+			"settings.expand": "展开",
+			"settings.collapse": "收起",
+			"settings.invalidNumber": "请输入不小于 {min} 的整数",
+			"settings.sectionDaemon": "daemon 生命周期",
+			"settings.daemonPolicyLabel": "托管策略",
+			"settings.daemonPolicyHint": "adopt-or-host=探测并领养既有 daemon,否则自行拉起;adopt-only=只领养绝不拉起;off=不管理生命周期(仍只读对账既有 daemon 的数据)。",
+			"settings.daemonPolicyAdoptOrHost": "adopt-or-host(领养或拉起)",
+			"settings.daemonPolicyAdoptOnly": "adopt-only(只领养)",
+			"settings.daemonPolicyOff": "off(不管理)",
+			"settings.daemonBackoffLimitLabel": "熔断阈值",
+			"settings.daemonBackoffLimitHint": "连续托管失败达到该次数后停止重启并进入 failed。",
+			"settings.daemonStatusLabel": "daemon 状态",
+			"settings.daemonStateProbe": "探测中",
+			"settings.daemonStateAdopted": "已领养既有 daemon",
+			"settings.daemonStateDefer": "等待系统服务拉活",
+			"settings.daemonStateReprobe": "重新探测中",
+			"settings.daemonStateHosting": "正在拉起",
+			"settings.daemonStateHosted": "插件托管中",
+			"settings.daemonStateBackoff": "退避重试中",
+			"settings.daemonStateFailed": "已熔断",
+			"settings.daemonPidVersion": "pid {pid} · v{version}",
+			"settings.daemonDeferNote": "daemon 由系统服务(LaunchAgent)托管;插件只探测等待,不重复拉起,也不会终止它。",
+			"settings.daemonFailedNote": "连续托管失败已达熔断阈值;看板降级为最后快照。排查 sidecar 命令后可点击重试。",
+			"settings.daemonRetry": "重试",
+			"settings.sectionSidecar": "sidecar 调用",
+			"settings.sidecarCommandLabel": "可执行命令",
+			"settings.sidecarCommandHint": "PATH 名、绝对路径或空格分隔的多段命令(如 python3 /path/agent-sidecar.pyz);插件绝不代装 sidecar。",
+			"settings.sidecarRuntimeDirLabel": "运行时目录",
+			"settings.sidecarRuntimeDirHint": "留空使用默认 ~/.agent_sidecar(尊重 AGENT_SIDECAR_RUNTIME_DIR 环境变量);非空时经环境变量传给受托管的 daemon。",
+			"settings.sectionStream": "数据流对账",
+			"settings.streamActiveMsLabel": "活跃对账周期(毫秒)",
+			"settings.streamActiveMsHint": "有会话工作中时的 status 快照周期。",
+			"settings.streamIdleMsLabel": "空闲对账周期(毫秒)",
+			"settings.streamIdleMsHint": "无会话工作时的 status 快照周期。",
+			"settings.sectionInject": "消息注入",
+			"settings.injectEnabledLabel": "启用注入",
+			"settings.injectEnabledHint": "关闭后注入面板为只读禁用态,写接口在服务端同步拒绝。",
+			"settings.injectDefaultModeLabel": "默认注入模式",
+			"settings.injectDefaultModeHint": "注入面板打开时预选的模式。",
+			"settings.injectModeQueue": "queue(排队下一轮)",
+			"settings.injectModeSteer": "steer(中途注入)",
+			"settings.injectSafetyNote": "安全须知:注入默认关闭;开启后每次注入仍须经确认对话框逐次放行,无任何批量或定时注入。多用户主机不建议开启。",
+			"settings.sectionAnalysis": "旁路分析",
+			"settings.analysisEnabledLabel": "启用 AI 旁路分析",
+			"settings.analysisEnabledHint": "按需拉起 dsh 分析会话解读被观测会话(消耗模型 token,默认关闭)。",
+			"settings.sectionUi": "看板界面",
+			"settings.uiTimeWindowHoursLabel": "会话时间窗(小时)",
+			"settings.uiTimeWindowHoursHint": "看板只显示该时间窗内活动过的会话。",
+			"settings.uiShowDeadLabel": "显示 dead 会话",
+			"settings.uiShowDeadHint": "把已结束(dead)的会话也列入看板。",
+			"settings.sectionSkill": "skill 模式",
+			"settings.skillProvideLabel": "内嵌提供 skill",
+			"settings.skillProvideHint": "经 registerProvider 向 dsh 提供 agent-sidecar skill(M4 启用;重启后生效)。",
+			"inject.title": "注入消息",
+			"inject.confirmTitle": "确认注入",
+			"inject.close": "关闭",
+			"inject.done": "完成",
+			"inject.capabilityOff": "注入功能未开启;请在设置中开启注入。",
+			"inject.noTarget": "未选择注入目标;请从看板卡片或会话详情发起注入。",
+			"inject.targetLabel": "注入目标",
+			"inject.messageLabel": "消息内容",
+			"inject.messagePlaceholder": "输入要注入的消息(上限 16 KiB;请勿粘贴密钥等敏感内容)",
+			"inject.byteCount": "{bytes} / {limit} 字节",
+			"inject.msgEmpty": "消息不能为空。",
+			"inject.msgNul": "消息包含非法 NUL 字符。",
+			"inject.msgTooLarge": "消息 {bytes} 字节,超出 {limit} 字节上限。",
+			"inject.modeLabel": "注入模式",
+			"inject.modeQueue": "queue(排队下一轮)",
+			"inject.modeQueueHint": "消息排队等待,目标会话下一轮开始时处理。",
+			"inject.modeSteer": "steer(中途注入)",
+			"inject.modeSteerHint": "消息在目标会话当前轮次中途注入,立即介入其工作。",
+			"inject.argvWarning": "目标为 cursor-cli:注入经其原生子进程执行,消息在该进程存续期间对本机进程列表可见;请勿包含密钥等敏感内容。",
+			"inject.auditNote": "本次注入会被记入 sidecar 审计日志(含字节数与内容指纹,不含消息明文)。",
+			"inject.prepare": "准备注入",
+			"inject.preparing": "校验中…",
+			"inject.planTargetLabel": "目标现状",
+			"inject.planStatus": "当前状态:{status}",
+			"inject.statusObservedNote": "状态为从持久化数据推断的观察值,可能滞后。",
+			"inject.planModeLabel": "模式",
+			"inject.planPreviewLabel": "消息摘要({bytes} 字节)",
+			"inject.countdown": "确认令牌 {seconds} 秒后过期",
+			"inject.confirmExecute": "确认注入",
+			"inject.executing": "注入中…",
+			"inject.cancel": "取消",
+			"inject.tokenExpired": "确认已超时,令牌失效;请重新准备注入。",
+			"inject.resultDelivered": "已投递:消息已注入目标会话。",
+			"inject.resultFailed": "注入失败。",
+			"inject.resultUnknown": "结果未知:消息可能已投递。请勿重试;请前往目标会话核对后再决定下一步。",
+			"inject.resultReplayed": "幂等重放:返回的是此前同一请求的结果,未发生二次注入。",
+			"inject.reprepare": "重新准备",
+			"inject.observeListen": "开启监听观察反应",
+			"inject.errInjectDisabled": "注入功能已在服务端关闭;请在设置中开启注入。",
+			"inject.errInvalidMessage": "消息未通过服务端校验。",
+			"inject.errTargetNotFound": "目标会话不存在或已离开观测范围。",
+			"inject.errTargetDead": "目标会话已结束(dead),无法注入。",
+			"inject.errTooManyPending": "待确认的注入请求过多,请稍后再试。",
+			"inject.errTokenMissing": "确认令牌缺失或未被签发;请重新准备。",
+			"inject.errTokenExpired": "确认令牌已过期;请重新准备。",
+			"inject.errTokenReused": "确认令牌已被消费;请重新准备。",
+			"inject.errTokenMismatch": "确认内容与准备时不一致;请重新准备。",
+			"inject.errUnsupportedAgent": "该 agent 没有可用的注入通道。",
+			"inject.errExecutorError": "注入通路执行出错。",
+			"inject.errTimeout": "请求超时,未收到服务端回执。",
+			"inject.errAborted": "请求已取消。",
+			"inject.errNetwork": "网络错误,请求未能送达。",
+			"inject.errParse": "服务端响应无法解析。",
+			"inject.errGeneric": "请求失败({code})。",
+			"board.viewBoard": "会话看板",
+			"board.viewProjects": "项目视图",
+			"board.status.working": "工作中",
+			"board.status.waiting": "等待中",
+			"board.status.idle": "空闲",
+			"board.status.dead": "已结束",
+			"board.status.unknown": "未知",
+			"board.attention.gap": "事件缺口",
+			"board.daemon.probe": "探测中",
+			"board.daemon.adopted": "已连接 · 领养",
+			"board.daemon.defer": "等待系统服务",
+			"board.daemon.reprobe": "重新探测中",
+			"board.daemon.hosting": "正在启动",
+			"board.daemon.hosted": "已连接 · 托管",
+			"board.daemon.backoff": "重启退避中",
+			"board.daemon.failed": "离线",
+			"board.stream.ok": "实时流正常",
+			"board.stream.degraded": "实时流重连中",
+			"board.stream.unknown": "实时流未建立",
+			"board.banner.daemonFailed": "sidecar 离线:看板显示最后一次快照,数据不再更新",
+			"board.banner.streamDegraded": "实时流重连中,数据可能滞后",
+			"board.empty.daemonFailedTitle": "sidecar 已离线",
+			"board.empty.daemonFailedHint": "daemon 连续启动失败已熔断。可在设置卡重试,或手动运行 agent-sidecar daemon start 后等待自动领养。",
+			"board.empty.daemonDeferTitle": "等待系统服务拉起 daemon",
+			"board.empty.daemonDeferHint": "检测到 LaunchAgent 托管,插件不会自行启动 daemon;服务拉起后看板会自动出数。",
+			"board.empty.filteredTitle": "当前过滤条件下没有会话",
+			"board.empty.filteredHint": "试试放宽时间窗、取消状态过滤,或打开「显示已结束」。",
+			"board.empty.noSessionsTitle": "暂无被观测的会话",
+			"board.empty.noSessionsHint": "本机 agent(claude / codex / cursor / dsh …)开始工作后会自动出现在这里。",
+			"board.topbar.title": "Sidecar 多 agent 看板",
+			"board.topbar.refresh": "刷新",
+			"board.topbar.refreshing": "刷新中…",
+			"board.topbar.refreshTitle": "手动拉取最新快照",
+			"board.topbar.refreshFailed": "手动刷新失败,看板仍显示原有快照",
+			"board.topbar.dismiss": "知道了",
+			"board.topbar.showDead": "显示已结束",
+			"board.topbar.timeWindow": "时间窗",
+			"board.topbar.countWorking": "{n} 工作中",
+			"board.topbar.countWaiting": "{n} 等待中",
+			"board.topbar.countTotal": "共 {n} 个会话",
+			"board.topbar.filterByStatusTitle": "只看「{label}」的会话",
+			"board.topbar.clearStatusFilterTitle": "取消状态过滤,显示全部会话",
+			"board.group.collapseTitle": "收起该分组",
+			"board.group.expandTitle": "展开该分组",
+			"board.group.showAll": "展开全部 {n} 个会话",
+			"board.group.showLess": "只看前 {n} 个",
+			"board.card.noEvent": "暂无事件",
+			"board.card.untitled": "(无标题)",
+			"board.card.observedDisclaimer": "状态为从持久化数据推断的观察值,可能滞后",
+			"board.card.observedValue": "观察值: {status}",
+			"board.card.lastReconcile": "最近对账: {time}",
+			"board.card.neverReconciled": "尚未对账",
+			"board.card.copyId": "点击复制完整会话 id",
+			"board.card.copied": "已复制",
+			"board.time.justNow": "刚刚",
+			"board.time.minutesAgo": "{n} 分钟前",
+			"board.time.hoursAgo": "{n} 小时前",
+			"board.timeWindow.hours": "{n} 小时",
+			"board.timeWindow.days": "{n} 天",
+			"board.groupCount": "{n} 个会话",
+			"board.unknownProject": "未知项目",
+			"board.widget.label": "Sidecar",
+			"board.widget.connection.ok": "已连接",
+			"board.widget.connection.degraded": "连接不稳定",
+			"board.widget.connection.off": "离线",
+			"board.widget.working": "{n} 个会话工作中",
+			"detail.header.close": "返回看板",
+			"detail.header.listenOn": "监听中",
+			"detail.header.listenOff": "监听",
+			"detail.header.listenHint": "开启后新事件将实时追加并高亮",
+			"detail.header.refresh": "刷新",
+			"detail.header.refreshing": "刷新中…",
+			"detail.header.refreshHint": "手动拉取最新时间线窗口",
+			"detail.header.copyIdTitle": "点击复制会话 ID",
+			"detail.header.copied": "已复制",
+			"detail.header.untitled": "(无标题)",
+			"detail.header.unknownProject": "未知项目",
+			"detail.header.observedDisclaimer": "状态为从持久化数据推断的观察值,可能滞后",
+			"detail.status.working": "工作中",
+			"detail.status.waiting": "等待中",
+			"detail.status.idle": "空闲",
+			"detail.status.dead": "已结束",
+			"detail.status.unknown": "未知",
+			"detail.sources.title": "数据来源",
+			"detail.sources.dshLive": "dsh 实时",
+			"detail.sources.dshCold": "dsh 冷读",
+			"detail.sources.sidecarReplay": "sidecar 重放",
+			"detail.sources.sidecarBuffer": "sidecar 缓冲",
+			"detail.sources.none": "来源未知",
+			"detail.kind.user": "用户消息",
+			"detail.kind.assistant": "助手回复",
+			"detail.kind.thinking": "思考",
+			"detail.kind.toolCall": "工具调用",
+			"detail.kind.toolResult": "工具结果",
+			"detail.kind.turn": "回合",
+			"detail.kind.step": "步骤",
+			"detail.kind.error": "错误",
+			"detail.kind.other": "事件",
+			"detail.gap.label": "缺口:可能有 {n} 条事件未捕获(256 队列上限或未持久化)",
+			"detail.filter.conversation": "只看对话",
+			"detail.filter.all": "全部事件",
+			"detail.filter.hiddenNotice": "已隐藏 {n} 条协议事件",
+			"detail.timeline.loadMore": "加载更多历史",
+			"detail.timeline.loadingMore": "加载中…",
+			"detail.timeline.noMore": "已到时间线起点",
+			"detail.timeline.expand": "展开",
+			"detail.timeline.collapse": "收起",
+			"detail.timeline.newBadge": "新",
+			"detail.timeline.seq": "seq {n}",
+			"detail.timeline.hiddenNotice": "为保持流畅,较早的 {n} 条已折叠",
+			"detail.timeline.showAll": "全部显示",
+			"detail.timeline.chunkRun": "{n} 个流式分块",
+			"detail.states.loadingTitle": "正在加载时间线…",
+			"detail.states.emptyTitle": "暂无事件",
+			"detail.states.emptyHint": "该会话还没有可展示的规范化事件。",
+			"detail.states.errorTitle": "时间线加载失败",
+			"detail.states.errorFallback": "错误码:{reason}",
+			"detail.states.errors.session_not_found": "会话不存在或已不可见",
+			"detail.states.errors.invalid_cursor": "分页游标无效,请重新打开详情",
+			"detail.states.errors.fusion_not_wired": "当前 host 未启用时间线能力",
+			"detail.states.errors.network_error": "网络错误,无法联系 dsh host",
+			"detail.states.errors.request_timeout": "请求超时",
+			"detail.time.justNow": "刚刚",
+			"detail.time.minutesAgo": "{n} 分钟前",
+			"detail.time.hoursAgo": "{n} 小时前",
+			"detail.time.daysAgo": "{n} 天前",
+			"detail.actions.inject": "注入",
+			"detail.actions.analyze": "AI 分析",
+			"detail.actions.analyzeDisabledHint": "在设置中开启「启用 AI 旁路分析」后可用",
+			"detail.tools.title": "谱系与检索",
+			"detail.tools.show": "展开",
+			"detail.tools.hide": "收起",
+			"dshtools.lineage.title": "会话谱系",
+			"dshtools.lineage.loading": "谱系加载中…",
+			"dshtools.lineage.error": "谱系加载失败",
+			"dshtools.lineage.empty": "暂无谱系数据",
+			"dshtools.lineage.currentBadge": "当前会话",
+			"dshtools.lineage.liveBadge": "运行中",
+			"dshtools.lineage.notPersistedBadge": "未持久化",
+			"dshtools.lineage.role.ancestor": "祖先",
+			"dshtools.lineage.role.target": "目标",
+			"dshtools.lineage.role.descendant": "子会话",
+			"dshtools.lineage.jumpTitle": "跳转到该会话",
+			"dshtools.lineage.currentTitle": "正在查看该会话",
+			"dshtools.lineage.expand": "展开",
+			"dshtools.lineage.collapse": "折叠",
+			"dshtools.lineage.nodeCount": "{n} 个会话",
+			"dshtools.lineage.incompleteWithId": "谱系不完整:父会话 {id} 无法解析",
+			"dshtools.lineage.incomplete": "谱系不完整:部分父链无法解析",
+			"dshtools.lineage.degrade.notDshTitle": "谱系/溯源为 dsh 会话专属",
+			"dshtools.lineage.degrade.notDshBody": "当前会话来自外部 agent,dsh 的谱系与溯源能力不适用。",
+			"dshtools.lineage.degrade.queryUnavailableTitle": "dsh 谱系服务不可用",
+			"dshtools.lineage.degrade.queryUnavailableBody": "当前 dsh 组合未挂载 sessionQuery,谱系与溯源暂不可用。",
+			"dshtools.lineage.degrade.traceFailedTitle": "谱系追溯失败",
+			"dshtools.lineage.degrade.traceFailedBody": "dsh 无法解析该会话的谱系。",
+			"dshtools.lineage.degrade.unknownTitle": "谱系不可用",
+			"dshtools.lineage.degrade.unknownBody": "后端报告谱系不可用(原因: {reason})。",
+			"dshtools.search.title": "会话检索",
+			"dshtools.search.placeholder": "检索会话(标题 / 项目 / 全文)",
+			"dshtools.search.submit": "检索",
+			"dshtools.search.loading": "检索中…",
+			"dshtools.search.error": "检索失败",
+			"dshtools.search.empty": "没有匹配的会话",
+			"dshtools.search.filterOnlyNotice": "dsh 全文检索不可用,已降级为标题/项目过滤",
+			"dshtools.search.projectFilter": "项目过滤: {project}",
+			"dshtools.search.matchedBy.full-text": "全文",
+			"dshtools.search.matchedBy.title": "标题",
+			"dshtools.search.matchedBy.project": "项目",
+			"dshtools.search.matchedBy.other": "其他",
+			"dshtools.search.untitled": "(无标题)",
+			"project.title": "项目关联",
+			"project.summary": "{projects} 个项目 · {sessions} 个会话",
+			"project.crossAgent": "{n} 种 agent",
+			"project.sessionCount": "{n} 个会话",
+			"project.lastActive": "最近活跃 {time}",
+			"project.liveChip": "实时",
+			"project.untitled": "(无标题)",
+			"project.showAllSessions": "展开全部 {n} 个会话",
+			"project.showLessSessions": "只看前 {n} 个",
+			"project.empty.title": "暂无项目关联",
+			"project.empty.hint": "时间窗内没有跨 agent 的项目活动;agent 在某个项目目录下开始工作后会出现在这里。",
+			"project.loading": "正在加载项目关联…",
+			"project.errorTitle": "项目关联加载失败",
+			"analysis.title": "AI 分析",
+			"analysis.close": "关闭",
+			"analysis.disabledNote": "AI 旁路分析未开启;请在设置中开启「启用 AI 旁路分析」。",
+			"analysis.idleHint": "按需拉起一次 dsh 旁路分析,解读该会话的当前状态与走向(消耗模型 token)。",
+			"analysis.start": "开始分析",
+			"analysis.requesting": "分析中…(最长约 60 秒)",
+			"analysis.exchangeInitial": "分析摘要",
+			"analysis.followupLabel": "追问",
+			"analysis.truncatedNotice": "输入超出预算已截断,分析基于部分上下文。",
+			"analysis.emptySummary": "(分析会话未返回摘要)",
+			"analysis.disclaimerFallback": "AI 分析仅供参考,结论以实际会话为准。",
+			"analysis.followupPlaceholder": "继续追问这次分析…",
+			"analysis.followupSubmit": "追问",
+			"analysis.answering": "回答中…",
+			"analysis.stop": "停止分析",
+			"analysis.stopped": "分析已停止,分析会话已释放。",
+			"analysis.restart": "重新分析",
+			"analysis.noticeTimeout": "本次追问超时,可稍后重试;分析会话仍保留。",
+			"analysis.noticeNetwork": "请求未能送达,可重试;分析会话仍保留。",
+			"analysis.noticeCancelFailed": "停止请求未送达,请重试。",
+			"analysis.errDisabled": "AI 分析已在服务端关闭;请在设置中开启后重试。",
+			"analysis.errUnavailable": "当前 host 未接入 AI 分析能力(agents 服务不可用)。",
+			"analysis.errTargetNotFound": "分析目标不存在或已离开观测范围。",
+			"analysis.errTooManyActive": "并发分析会话已达上限,请稍后再试。",
+			"analysis.errTimeout": "分析超时,分析会话已释放;可重新发起。",
+			"analysis.errCreateFailed": "分析会话创建失败。",
+			"analysis.errCancelled": "分析已取消。",
+			"analysis.errNetwork": "网络错误,分析请求未能完成。",
+			"analysis.errGeneric": "分析失败({code})。",
+			"command.description": "查看 Sidecar 状态速览(daemon、连接与会话)",
+			"command.daemon.probe": "探测中",
+			"command.daemon.adopted": "已连接 · 领养",
+			"command.daemon.defer": "等待系统服务",
+			"command.daemon.reprobe": "重新探测中",
+			"command.daemon.hosting": "正在启动",
+			"command.daemon.hosted": "已连接 · 托管",
+			"command.daemon.backoff": "重启退避中",
+			"command.daemon.failed": "离线",
+			"command.daemon.unknown": "状态未知",
+			"command.connection.ok": "已连接",
+			"command.connection.degraded": "连接不稳定",
+			"command.connection.off": "离线",
+			"command.status.working": "工作中",
+			"command.status.waiting": "等待中",
+			"command.status.idle": "空闲",
+			"command.status.dead": "已结束",
+			"command.status.unknown": "未知",
+			"command.daemonRow": "Sidecar · {state}",
+			"command.countsRow": "{working} 个工作中 · {waiting} 个等待中",
+			"command.countsDetail": "共 {total} 个会话",
+			"command.sessionDetail": "{project} · {status} · {time}",
+			"command.noSessions": "暂无被观测的会话",
+			"command.unknownProject": "未知项目",
+			"command.untitled": "(无标题)",
+			"command.truncated": "还有 {n} 个会话未列出",
+			"command.boardHint": "打开会话视图的「Sidecar」Tab 查看完整看板",
+			"command.unreachable": "sidecar 未连接",
+			"command.unreachableHint": "无法获取状态快照;请确认 agent-sidecar 插件已启用、daemon 可用后重试。",
+			"command.offlineFailed": "sidecar 已离线(daemon 连续启动失败已熔断)",
+			"command.offlineFailedHint": "以下为最后一次快照。可在设置卡重试,或手动运行 agent-sidecar daemon start 后等待自动领养。",
+			"command.offlineDefer": "等待系统服务拉起 daemon",
+			"command.offlineDeferHint": "检测到 LaunchAgent 托管,插件只探测等待;服务拉起后速览会自动恢复。",
+			"command.time.justNow": "刚刚",
+			"command.time.minutesAgo": "{n} 分钟前",
+			"command.time.hoursAgo": "{n} 小时前",
+			"command.time.daysAgo": "{n} 天前",
+			"sidebar.centerEntryLabel": "Agent 中心",
+			"sidebar.centerEntryAria": "打开 Agent 中心",
+			"sidebar.tabTitle": "Sidecar",
+			"sidebar.countsRow": "{working} 工作中 · {waiting} 等待中",
+			"sidebar.recentTitle": "最近活跃",
+			"sidebar.connecting": "等待 sidecar 快照…",
+			"sidebar.noSessions": "暂无活跃会话",
+			"sidebar.noEvent": "暂无事件记录",
+			"sidebar.untitled": "(无标题)",
+			"sidebar.boardHint": "完整看板见会话视图的「Sidecar」Tab"
 		};
+		//#endregion
+		//#region src/client/locales/en.ts
+		const en = {
+			"settings.cardTitle": "Agent Sidecar",
+			"settings.cardDescription": "Runtime settings for cross-agent session monitoring, injection and bypass analysis.",
+			"settings.docsLink": "Documentation",
+			"settings.readOnly": "The settings document is read-only; edits cannot be saved.",
+			"settings.unsaved": "Unsaved",
+			"settings.save": "Save",
+			"settings.saving": "Saving…",
+			"settings.discard": "Discard",
+			"settings.saveFailed": "Save failed; please retry.",
+			"settings.expand": "Expand",
+			"settings.collapse": "Collapse",
+			"settings.invalidNumber": "Enter an integer no less than {min}",
+			"settings.sectionDaemon": "Daemon lifecycle",
+			"settings.daemonPolicyLabel": "Management policy",
+			"settings.daemonPolicyHint": "adopt-or-host probes and adopts an existing daemon, else spawns one; adopt-only never spawns; off leaves the lifecycle alone (read-only reconcile still runs).",
+			"settings.daemonPolicyAdoptOrHost": "adopt-or-host (adopt, else spawn)",
+			"settings.daemonPolicyAdoptOnly": "adopt-only (never spawn)",
+			"settings.daemonPolicyOff": "off (unmanaged)",
+			"settings.daemonBackoffLimitLabel": "Backoff limit",
+			"settings.daemonBackoffLimitHint": "After this many consecutive hosting failures the supervisor stops restarting and trips failed.",
+			"settings.daemonStatusLabel": "Daemon status",
+			"settings.daemonStateProbe": "Probing",
+			"settings.daemonStateAdopted": "Adopted an existing daemon",
+			"settings.daemonStateDefer": "Waiting for the system service",
+			"settings.daemonStateReprobe": "Re-probing",
+			"settings.daemonStateHosting": "Spawning",
+			"settings.daemonStateHosted": "Hosted by the plugin",
+			"settings.daemonStateBackoff": "Backing off before retry",
+			"settings.daemonStateFailed": "Tripped (circuit open)",
+			"settings.daemonPidVersion": "pid {pid} · v{version}",
+			"settings.daemonDeferNote": "The daemon is managed by a system service (LaunchAgent); the plugin only probes and waits — it never spawns a duplicate or terminates it.",
+			"settings.daemonFailedNote": "Consecutive hosting failures reached the backoff limit; the board degraded to the last snapshot. Check the sidecar command, then retry.",
+			"settings.daemonRetry": "Retry",
+			"settings.sectionSidecar": "Sidecar invocation",
+			"settings.sidecarCommandLabel": "Executable command",
+			"settings.sidecarCommandHint": "A PATH name, an absolute path, or a space-separated multi-part command (e.g. python3 /path/agent-sidecar.pyz); the plugin never installs the sidecar for you.",
+			"settings.sidecarRuntimeDirLabel": "Runtime directory",
+			"settings.sidecarRuntimeDirHint": "Empty uses the default ~/.agent_sidecar (honoring AGENT_SIDECAR_RUNTIME_DIR); a non-empty value is passed to spawned daemons via the environment.",
+			"settings.sectionStream": "Stream reconciliation",
+			"settings.streamActiveMsLabel": "Active cadence (ms)",
+			"settings.streamActiveMsHint": "Status snapshot cadence while any session is working.",
+			"settings.streamIdleMsLabel": "Idle cadence (ms)",
+			"settings.streamIdleMsHint": "Status snapshot cadence while no session is working.",
+			"settings.sectionInject": "Message injection",
+			"settings.injectEnabledLabel": "Enable injection",
+			"settings.injectEnabledHint": "When off, the inject panel renders read-only and disabled, and the server rejects write actions.",
+			"settings.injectDefaultModeLabel": "Default injection mode",
+			"settings.injectDefaultModeHint": "The mode preselected when the inject panel opens.",
+			"settings.injectModeQueue": "queue (next turn)",
+			"settings.injectModeSteer": "steer (mid-turn)",
+			"settings.injectSafetyNote": "Safety: injection is off by default; even when enabled, every injection still passes a per-request confirmation dialog — there is no batch or scheduled injection. Not recommended on multi-user hosts.",
+			"settings.sectionAnalysis": "Bypass analysis",
+			"settings.analysisEnabledLabel": "Enable AI bypass analysis",
+			"settings.analysisEnabledHint": "Spins up a dsh analysis session over an observed session on demand (consumes model tokens; off by default).",
+			"settings.sectionUi": "Board UI",
+			"settings.uiTimeWindowHoursLabel": "Session time window (hours)",
+			"settings.uiTimeWindowHoursHint": "The board lists only sessions active within this window.",
+			"settings.uiShowDeadLabel": "Show dead sessions",
+			"settings.uiShowDeadHint": "Also list finished (dead) sessions on the board.",
+			"settings.sectionSkill": "Skill mode",
+			"settings.skillProvideLabel": "Provide the skill in-process",
+			"settings.skillProvideHint": "Provide the agent-sidecar skill to dsh via registerProvider (enabled in M4; applies after restart).",
+			"inject.title": "Inject message",
+			"inject.confirmTitle": "Confirm injection",
+			"inject.close": "Close",
+			"inject.done": "Done",
+			"inject.capabilityOff": "Injection is not enabled; turn it on in Settings first.",
+			"inject.noTarget": "No injection target selected; start from a board card or a session detail page.",
+			"inject.targetLabel": "Target",
+			"inject.messageLabel": "Message",
+			"inject.messagePlaceholder": "Message to inject (16 KiB max; never paste secrets)",
+			"inject.byteCount": "{bytes} / {limit} bytes",
+			"inject.msgEmpty": "The message must not be empty.",
+			"inject.msgNul": "The message contains an illegal NUL character.",
+			"inject.msgTooLarge": "The message is {bytes} bytes, over the {limit}-byte limit.",
+			"inject.modeLabel": "Injection mode",
+			"inject.modeQueue": "queue (next turn)",
+			"inject.modeQueueHint": "The message queues and is handled when the target session starts its next turn.",
+			"inject.modeSteer": "steer (mid-turn)",
+			"inject.modeSteerHint": "The message is injected mid-turn and steers the target session immediately.",
+			"inject.argvWarning": "cursor-cli target: injection runs through its native subprocess, and the message is visible in this machine's process list while that process lives; never include secrets.",
+			"inject.auditNote": "This injection is recorded in the sidecar audit log (byte size and content fingerprint; never the message plaintext).",
+			"inject.prepare": "Prepare injection",
+			"inject.preparing": "Validating…",
+			"inject.planTargetLabel": "Target snapshot",
+			"inject.planStatus": "Current status: {status}",
+			"inject.statusObservedNote": "Status is an observed value inferred from persisted data and may lag.",
+			"inject.planModeLabel": "Mode",
+			"inject.planPreviewLabel": "Message digest ({bytes} bytes)",
+			"inject.countdown": "The confirm token expires in {seconds}s",
+			"inject.confirmExecute": "Confirm injection",
+			"inject.executing": "Injecting…",
+			"inject.cancel": "Cancel",
+			"inject.tokenExpired": "Confirmation timed out and the token is void; prepare the injection again.",
+			"inject.resultDelivered": "Delivered: the message was injected into the target session.",
+			"inject.resultFailed": "Injection failed.",
+			"inject.resultUnknown": "Outcome unknown: the message may have been delivered. Do NOT retry; check the target session before deciding anything.",
+			"inject.resultReplayed": "Idempotent replay: this is the earlier result of the same request — no second injection happened.",
+			"inject.reprepare": "Prepare again",
+			"inject.observeListen": "Listen for the reaction",
+			"inject.errInjectDisabled": "Injection is disabled on the server; enable it in Settings.",
+			"inject.errInvalidMessage": "The message failed server-side validation.",
+			"inject.errTargetNotFound": "The target session does not exist or left the observation window.",
+			"inject.errTargetDead": "The target session has ended (dead); it cannot be injected.",
+			"inject.errTooManyPending": "Too many injections are pending confirmation; try again later.",
+			"inject.errTokenMissing": "The confirm token is missing or was never issued; prepare again.",
+			"inject.errTokenExpired": "The confirm token expired; prepare again.",
+			"inject.errTokenReused": "The confirm token was already consumed; prepare again.",
+			"inject.errTokenMismatch": "The confirmation no longer matches what was prepared; prepare again.",
+			"inject.errUnsupportedAgent": "This agent has no injection path.",
+			"inject.errExecutorError": "The injection path failed while executing.",
+			"inject.errTimeout": "The request timed out without a server receipt.",
+			"inject.errAborted": "The request was cancelled.",
+			"inject.errNetwork": "Network error; the request could not be sent.",
+			"inject.errParse": "The server response could not be parsed.",
+			"inject.errGeneric": "Request failed ({code}).",
+			"board.viewBoard": "Session board",
+			"board.viewProjects": "Projects",
+			"board.status.working": "Working",
+			"board.status.waiting": "Waiting",
+			"board.status.idle": "Idle",
+			"board.status.dead": "Finished",
+			"board.status.unknown": "Unknown",
+			"board.attention.gap": "Event gap",
+			"board.daemon.probe": "Probing",
+			"board.daemon.adopted": "Connected · adopted",
+			"board.daemon.defer": "Waiting for the system service",
+			"board.daemon.reprobe": "Re-probing",
+			"board.daemon.hosting": "Starting",
+			"board.daemon.hosted": "Connected · hosted",
+			"board.daemon.backoff": "Restart backoff",
+			"board.daemon.failed": "Offline",
+			"board.stream.ok": "Live stream healthy",
+			"board.stream.degraded": "Live stream reconnecting",
+			"board.stream.unknown": "Live stream not connected",
+			"board.banner.daemonFailed": "sidecar is offline: the board shows the last snapshot and will not update",
+			"board.banner.streamDegraded": "The live stream is reconnecting; data may be stale",
+			"board.empty.daemonFailedTitle": "sidecar is offline",
+			"board.empty.daemonFailedHint": "Repeated daemon start failures tripped the circuit breaker. Retry from Settings, or run agent-sidecar daemon start and wait for automatic adoption.",
+			"board.empty.daemonDeferTitle": "Waiting for the system service to start the daemon",
+			"board.empty.daemonDeferHint": "A LaunchAgent manages the daemon, so the plugin will not start it. The board populates automatically once the service starts it.",
+			"board.empty.filteredTitle": "No sessions match these filters",
+			"board.empty.filteredHint": "Try a wider time window, clear the status filter, or enable \"Show finished\".",
+			"board.empty.noSessionsTitle": "No observed sessions yet",
+			"board.empty.noSessionsHint": "Local agents (claude / codex / cursor / dsh …) appear here automatically once they start working.",
+			"board.topbar.title": "Sidecar multi-agent board",
+			"board.topbar.refresh": "Refresh",
+			"board.topbar.refreshing": "Refreshing…",
+			"board.topbar.refreshTitle": "Fetch the latest snapshot",
+			"board.topbar.refreshFailed": "Refresh failed; the board is still showing the previous snapshot",
+			"board.topbar.dismiss": "Dismiss",
+			"board.topbar.showDead": "Show finished",
+			"board.topbar.timeWindow": "Time window",
+			"board.topbar.countWorking": "{n} working",
+			"board.topbar.countWaiting": "{n} waiting",
+			"board.topbar.countTotal": "{n} sessions total",
+			"board.topbar.filterByStatusTitle": "Show only sessions marked \"{label}\"",
+			"board.topbar.clearStatusFilterTitle": "Clear the status filter and show all sessions",
+			"board.group.collapseTitle": "Collapse this group",
+			"board.group.expandTitle": "Expand this group",
+			"board.group.showAll": "Show all {n} sessions",
+			"board.group.showLess": "Show first {n} only",
+			"board.card.noEvent": "No events yet",
+			"board.card.untitled": "(untitled)",
+			"board.card.observedDisclaimer": "Status is an observed value inferred from persisted data and may lag",
+			"board.card.observedValue": "Observed value: {status}",
+			"board.card.lastReconcile": "Last reconciled: {time}",
+			"board.card.neverReconciled": "Not reconciled yet",
+			"board.card.copyId": "Click to copy the full session ID",
+			"board.card.copied": "Copied",
+			"board.time.justNow": "just now",
+			"board.time.minutesAgo": "{n} min ago",
+			"board.time.hoursAgo": "{n} h ago",
+			"board.timeWindow.hours": "{n} hours",
+			"board.timeWindow.days": "{n} days",
+			"board.groupCount": "{n} sessions",
+			"board.unknownProject": "Unknown project",
+			"board.widget.label": "Sidecar",
+			"board.widget.connection.ok": "Connected",
+			"board.widget.connection.degraded": "Connection unstable",
+			"board.widget.connection.off": "Offline",
+			"board.widget.working": "{n} sessions working",
+			"detail.header.close": "Back to board",
+			"detail.header.listenOn": "Listening",
+			"detail.header.listenOff": "Listen",
+			"detail.header.listenHint": "New events append live and get highlighted while on",
+			"detail.header.refresh": "Refresh",
+			"detail.header.refreshing": "Refreshing…",
+			"detail.header.refreshHint": "Pull the newest timeline window",
+			"detail.header.copyIdTitle": "Click to copy the session ID",
+			"detail.header.copied": "Copied",
+			"detail.header.untitled": "(untitled)",
+			"detail.header.unknownProject": "Unknown project",
+			"detail.header.observedDisclaimer": "Status is an observed value inferred from persisted data and may lag",
+			"detail.status.working": "Working",
+			"detail.status.waiting": "Waiting",
+			"detail.status.idle": "Idle",
+			"detail.status.dead": "Finished",
+			"detail.status.unknown": "Unknown",
+			"detail.sources.title": "Data sources",
+			"detail.sources.dshLive": "dsh live",
+			"detail.sources.dshCold": "dsh cold read",
+			"detail.sources.sidecarReplay": "sidecar replay",
+			"detail.sources.sidecarBuffer": "sidecar buffer",
+			"detail.sources.none": "Unknown source",
+			"detail.kind.user": "User message",
+			"detail.kind.assistant": "Assistant reply",
+			"detail.kind.thinking": "Thinking",
+			"detail.kind.toolCall": "Tool call",
+			"detail.kind.toolResult": "Tool result",
+			"detail.kind.turn": "Turn",
+			"detail.kind.step": "Step",
+			"detail.kind.error": "Error",
+			"detail.kind.other": "Event",
+			"detail.gap.label": "Gap: about {n} events may be uncaptured (256-slot queue cap or not persisted)",
+			"detail.filter.conversation": "Conversation only",
+			"detail.filter.all": "All events",
+			"detail.filter.hiddenNotice": "{n} protocol events hidden",
+			"detail.timeline.loadMore": "Load older history",
+			"detail.timeline.loadingMore": "Loading…",
+			"detail.timeline.noMore": "Start of the timeline",
+			"detail.timeline.expand": "Expand",
+			"detail.timeline.collapse": "Collapse",
+			"detail.timeline.newBadge": "New",
+			"detail.timeline.seq": "seq {n}",
+			"detail.timeline.hiddenNotice": "{n} earlier entries collapsed to stay smooth",
+			"detail.timeline.showAll": "Show all",
+			"detail.timeline.chunkRun": "{n} streaming chunks",
+			"detail.states.loadingTitle": "Loading the timeline…",
+			"detail.states.emptyTitle": "No events yet",
+			"detail.states.emptyHint": "This session has no normalized events to show yet.",
+			"detail.states.errorTitle": "Timeline failed to load",
+			"detail.states.errorFallback": "Error code: {reason}",
+			"detail.states.errors.session_not_found": "The session does not exist or is no longer visible",
+			"detail.states.errors.invalid_cursor": "The paging cursor is invalid; reopen the detail view",
+			"detail.states.errors.fusion_not_wired": "This host has no timeline capability enabled",
+			"detail.states.errors.network_error": "Network error; the dsh host is unreachable",
+			"detail.states.errors.request_timeout": "The request timed out",
+			"detail.time.justNow": "just now",
+			"detail.time.minutesAgo": "{n} min ago",
+			"detail.time.hoursAgo": "{n} h ago",
+			"detail.time.daysAgo": "{n} d ago",
+			"detail.actions.inject": "Inject",
+			"detail.actions.analyze": "AI analysis",
+			"detail.actions.analyzeDisabledHint": "Enable \"AI bypass analysis\" in Settings to use this",
+			"detail.tools.title": "Lineage & search",
+			"detail.tools.show": "Show",
+			"detail.tools.hide": "Hide",
+			"dshtools.lineage.title": "Session lineage",
+			"dshtools.lineage.loading": "Loading lineage…",
+			"dshtools.lineage.error": "Lineage failed to load",
+			"dshtools.lineage.empty": "No lineage data",
+			"dshtools.lineage.currentBadge": "Current session",
+			"dshtools.lineage.liveBadge": "Live",
+			"dshtools.lineage.notPersistedBadge": "Not persisted",
+			"dshtools.lineage.role.ancestor": "Ancestor",
+			"dshtools.lineage.role.target": "Target",
+			"dshtools.lineage.role.descendant": "Child session",
+			"dshtools.lineage.jumpTitle": "Jump to this session",
+			"dshtools.lineage.currentTitle": "Currently viewing this session",
+			"dshtools.lineage.expand": "Expand",
+			"dshtools.lineage.collapse": "Collapse",
+			"dshtools.lineage.nodeCount": "{n} sessions",
+			"dshtools.lineage.incompleteWithId": "Lineage incomplete: parent session {id} could not be resolved",
+			"dshtools.lineage.incomplete": "Lineage incomplete: part of the parent chain is unresolved",
+			"dshtools.lineage.degrade.notDshTitle": "Lineage/provenance is dsh-session only",
+			"dshtools.lineage.degrade.notDshBody": "This session comes from an external agent; dsh's lineage and provenance do not apply.",
+			"dshtools.lineage.degrade.queryUnavailableTitle": "dsh lineage service unavailable",
+			"dshtools.lineage.degrade.queryUnavailableBody": "This dsh composition has no sessionQuery mounted; lineage and provenance are unavailable.",
+			"dshtools.lineage.degrade.traceFailedTitle": "Lineage trace failed",
+			"dshtools.lineage.degrade.traceFailedBody": "dsh could not resolve this session's lineage.",
+			"dshtools.lineage.degrade.unknownTitle": "Lineage unavailable",
+			"dshtools.lineage.degrade.unknownBody": "The backend reports lineage unavailable (reason: {reason}).",
+			"dshtools.search.title": "Session search",
+			"dshtools.search.placeholder": "Search sessions (title / project / full text)",
+			"dshtools.search.submit": "Search",
+			"dshtools.search.loading": "Searching…",
+			"dshtools.search.error": "Search failed",
+			"dshtools.search.empty": "No matching sessions",
+			"dshtools.search.filterOnlyNotice": "dsh full-text search is unavailable; degraded to title/project filtering",
+			"dshtools.search.projectFilter": "Project filter: {project}",
+			"dshtools.search.matchedBy.full-text": "Full text",
+			"dshtools.search.matchedBy.title": "Title",
+			"dshtools.search.matchedBy.project": "Project",
+			"dshtools.search.matchedBy.other": "Other",
+			"dshtools.search.untitled": "(untitled)",
+			"project.title": "Project correlation",
+			"project.summary": "{projects} projects · {sessions} sessions",
+			"project.crossAgent": "{n} agent kinds",
+			"project.sessionCount": "{n} sessions",
+			"project.lastActive": "Last active {time}",
+			"project.liveChip": "Live",
+			"project.untitled": "(untitled)",
+			"project.showAllSessions": "Show all {n} sessions",
+			"project.showLessSessions": "Show first {n} only",
+			"project.empty.title": "No project correlation yet",
+			"project.empty.hint": "No cross-agent project activity within the time window; projects appear here once an agent works inside a project directory.",
+			"project.loading": "Loading project correlation…",
+			"project.errorTitle": "Project correlation failed to load",
+			"analysis.title": "AI analysis",
+			"analysis.close": "Close",
+			"analysis.disabledNote": "AI bypass analysis is off; enable \"AI bypass analysis\" in Settings first.",
+			"analysis.idleHint": "Spin up one dsh bypass-analysis pass over this session on demand (consumes model tokens).",
+			"analysis.start": "Start analysis",
+			"analysis.requesting": "Analyzing… (up to ~60 s)",
+			"analysis.exchangeInitial": "Analysis summary",
+			"analysis.followupLabel": "Follow-up",
+			"analysis.truncatedNotice": "The input exceeded the budget and was truncated; the analysis covers partial context.",
+			"analysis.emptySummary": "(the analysis session returned no summary)",
+			"analysis.disclaimerFallback": "AI analysis is for reference only; trust the actual session over its conclusions.",
+			"analysis.followupPlaceholder": "Ask a follow-up about this analysis…",
+			"analysis.followupSubmit": "Ask",
+			"analysis.answering": "Answering…",
+			"analysis.stop": "Stop analysis",
+			"analysis.stopped": "Analysis stopped; the analysis session was released.",
+			"analysis.restart": "Analyze again",
+			"analysis.noticeTimeout": "This follow-up timed out; retry later — the analysis session is kept.",
+			"analysis.noticeNetwork": "The request could not be sent; retry — the analysis session is kept.",
+			"analysis.noticeCancelFailed": "The stop request did not go through; try again.",
+			"analysis.errDisabled": "AI analysis is disabled on the server; enable it in Settings and retry.",
+			"analysis.errUnavailable": "This host has no AI analysis capability (agents service unavailable).",
+			"analysis.errTargetNotFound": "The analysis target does not exist or left the observation window.",
+			"analysis.errTooManyActive": "Too many concurrent analysis sessions; try again later.",
+			"analysis.errTimeout": "The analysis timed out and its session was released; start again.",
+			"analysis.errCreateFailed": "Failed to create the analysis session.",
+			"analysis.errCancelled": "The analysis was cancelled.",
+			"analysis.errNetwork": "Network error; the analysis request could not complete.",
+			"analysis.errGeneric": "Analysis failed ({code}).",
+			"command.description": "Sidecar status at a glance (daemon, connection, sessions)",
+			"command.daemon.probe": "Probing",
+			"command.daemon.adopted": "Connected · adopted",
+			"command.daemon.defer": "Waiting for the system service",
+			"command.daemon.reprobe": "Re-probing",
+			"command.daemon.hosting": "Starting",
+			"command.daemon.hosted": "Connected · hosted",
+			"command.daemon.backoff": "Restart backoff",
+			"command.daemon.failed": "Offline",
+			"command.daemon.unknown": "State unknown",
+			"command.connection.ok": "Connected",
+			"command.connection.degraded": "Connection unstable",
+			"command.connection.off": "Offline",
+			"command.status.working": "Working",
+			"command.status.waiting": "Waiting",
+			"command.status.idle": "Idle",
+			"command.status.dead": "Finished",
+			"command.status.unknown": "Unknown",
+			"command.daemonRow": "Sidecar · {state}",
+			"command.countsRow": "{working} working · {waiting} waiting",
+			"command.countsDetail": "{total} sessions total",
+			"command.sessionDetail": "{project} · {status} · {time}",
+			"command.noSessions": "No observed sessions yet",
+			"command.unknownProject": "Unknown project",
+			"command.untitled": "(untitled)",
+			"command.truncated": "{n} more sessions not listed",
+			"command.boardHint": "Open the \"Sidecar\" tab in the conversation view for the full board",
+			"command.unreachable": "sidecar is not connected",
+			"command.unreachableHint": "The state snapshot could not be fetched; check that the agent-sidecar plugin is enabled and the daemon is available, then retry.",
+			"command.offlineFailed": "sidecar is offline (daemon start failures tripped the breaker)",
+			"command.offlineFailedHint": "Showing the last snapshot. Retry from the settings card, or run agent-sidecar daemon start manually and wait for adoption.",
+			"command.offlineDefer": "Waiting for the system service to start the daemon",
+			"command.offlineDeferHint": "A LaunchAgent manages the daemon; the plugin only probes and waits. The overview recovers automatically once the service brings it up.",
+			"command.time.justNow": "just now",
+			"command.time.minutesAgo": "{n} min ago",
+			"command.time.hoursAgo": "{n} h ago",
+			"command.time.daysAgo": "{n} d ago",
+			"sidebar.centerEntryLabel": "Agent Center",
+			"sidebar.centerEntryAria": "Open Agent Center",
+			"sidebar.tabTitle": "Sidecar",
+			"sidebar.countsRow": "{working} working · {waiting} waiting",
+			"sidebar.recentTitle": "Recently active",
+			"sidebar.connecting": "Waiting for the sidecar snapshot…",
+			"sidebar.noSessions": "No active sessions",
+			"sidebar.noEvent": "No events recorded yet",
+			"sidebar.untitled": "(untitled)",
+			"sidebar.boardHint": "Full board: the \"Sidecar\" tab in the conversation view"
+		};
+		//#endregion
+		//#region src/client/locales/host.ts
+		function localeTag(value) {
+			if (typeof value === "string") return value;
+			if (value === null || value === void 0) return void 0;
+			return value.active ?? value.preference ?? value.locale ?? value.value?.preference;
+		}
+		/** Map every Chinese locale variant to zh; all other values use en. */
+		function mapHostLocale(value) {
+			return localeTag(value)?.trim().toLowerCase().startsWith("zh") === true ? "zh" : "en";
+		}
+		/**
+		* Register dictionaries, adopt the current Host locale, and follow changes.
+		* Every capability is optional and isolated: absent or throwing Host methods
+		* leave the module-owned locale fallback intact.
+		*/
+		function bridgeHostLocale(host, options) {
+			const disposers = [];
+			const service = host?.locale;
+			for (const locale of ["zh", "en"]) try {
+				const dispose = service?.register?.(options.namespace, locale, options.dictionaries[locale]);
+				if (typeof dispose === "function") disposers.push(dispose);
+			} catch {}
+			const read = () => {
+				try {
+					return service?.getLocale?.();
+				} catch {
+					return;
+				}
+			};
+			const apply = (value) => {
+				if (localeTag(value) === void 0) return;
+				try {
+					options.onLocale(mapHostLocale(value));
+				} catch {}
+			};
+			try {
+				const dispose = host?.on?.("locale/change", (value) => {
+					apply(value === void 0 ? read() : value);
+				});
+				if (typeof dispose === "function") disposers.push(dispose);
+			} catch {}
+			apply(read());
+			let disposed = false;
+			return () => {
+				if (disposed) return;
+				disposed = true;
+				for (const dispose of disposers.reverse()) try {
+					dispose();
+				} catch {}
+			};
+		}
+		/** Host namespace owned by Agent Sidecar dictionaries. */
+		const SIDECAR_LOCALE_NAMESPACE = "agent-sidecar";
+		/** Complete shipped dictionaries keyed by locale id. */
+		const dictionaries = {
+			zh,
+			en
+		};
+		/**
+		* Substitute `{name}` template params; unknown placeholders stay verbatim
+		* (same semantics as the ecosystem LocaleRuntime.translate).
+		*/
+		function interpolate(template, params) {
+			if (!params) return template;
+			return template.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match);
+		}
+		/**
+		* Build a translate engine over an arbitrary (possibly partial) dictionary
+		* set. Lookup chain per key: requested locale → {@link BASE_LOCALE} (zh) →
+		* the key itself. Exposed for tests and for compositions that need a
+		* non-shipped dictionary set; the shipped {@link t} is this engine bound to
+		* {@link dictionaries} and the module's active locale.
+		* @param dicts - dictionaries keyed by locale id (missing locales allowed).
+		* @returns pure translate function addressed by explicit locale.
+		*/
+		function createTranslator(dicts) {
+			return (locale, key, params) => {
+				return interpolate(dicts[locale]?.[key] ?? dicts["zh"]?.[key] ?? key, params);
+			};
+		}
+		const shippedTranslate = createTranslator(dictionaries);
+		let activeLocale = "zh";
+		const localeListeners = /* @__PURE__ */ new Set();
+		/** @returns the active locale id. */
+		function getLocale() {
+			return activeLocale;
+		}
+		/**
+		* Switch the active locale and notify subscribers (no-op when unchanged).
+		* @param locale - a shipped locale id.
+		*/
+		function setLocale(locale) {
+			if (activeLocale === locale) return;
+			activeLocale = locale;
+			for (const fn of [...localeListeners]) fn();
+		}
+		/**
+		* Observe active-locale switches (React consumers pair this with
+		* {@link getLocale} as a uSES source).
+		* @param fn - change callback.
+		* @returns unsubscribe.
+		*/
+		function subscribeLocale(fn) {
+			localeListeners.add(fn);
+			return () => {
+				localeListeners.delete(fn);
+			};
+		}
+		const HOST_LOCALE_LEASES_SYMBOL = Symbol.for("@shendeguize/dsh-agent-sidecar/host-locale-leases");
+		const globalSymbols = globalThis;
+		function hasMethod(value, key) {
+			return typeof value === "object" && value !== null && typeof value[key] === "function";
+		}
+		function isLeaseRegistry(value) {
+			return hasMethod(value, "get") && hasMethod(value, "set") && hasMethod(value, "delete");
+		}
+		function isOwnerSet(value) {
+			return hasMethod(value, "add") && hasMethod(value, "delete") && hasMethod(value, Symbol.iterator) && typeof value.size === "number";
+		}
+		function isHostLocaleArbiter(value) {
+			if (typeof value !== "object" || value === null) return false;
+			const candidate = value;
+			return isLeaseRegistry(candidate.leases) && isOwnerSet(candidate.owners) && (candidate.activeOwner === null || typeof candidate.activeOwner === "object") && typeof candidate.detachEvents === "function";
+		}
+		const sharedLocaleState = globalSymbols[HOST_LOCALE_LEASES_SYMBOL];
+		const hostLocaleArbiter = isHostLocaleArbiter(sharedLocaleState) ? sharedLocaleState : {
+			leases: isLeaseRegistry(sharedLocaleState) ? sharedLocaleState : /* @__PURE__ */ new WeakMap(),
+			owners: /* @__PURE__ */ new Set(),
+			activeOwner: null,
+			detachEvents: () => {}
+		};
+		globalSymbols[HOST_LOCALE_LEASES_SYMBOL] = hostLocaleArbiter;
+		function bridge(host, onLocale) {
+			return bridgeHostLocale(host, {
+				namespace: SIDECAR_LOCALE_NAMESPACE,
+				dictionaries,
+				onLocale
+			});
+		}
+		function followOwner(owner) {
+			return bridge({
+				locale: { getLocale: () => owner.service.getLocale?.() },
+				on: (event, listener) => owner.host.on?.(event, listener)
+			}, (locale) => {
+				if (hostLocaleArbiter.activeOwner === owner) owner.onLocale(locale);
+			});
+		}
+		function latestOwner(owners) {
+			let latest;
+			for (const owner of owners) latest = owner;
+			return latest;
+		}
+		function detachActiveFollower() {
+			const detach = hostLocaleArbiter.detachEvents;
+			hostLocaleArbiter.detachEvents = () => {};
+			try {
+				detach();
+			} catch {}
+		}
+		function activateOwner(owner) {
+			detachActiveFollower();
+			hostLocaleArbiter.activeOwner = owner;
+			hostLocaleArbiter.detachEvents = followOwner(owner);
+		}
+		/**
+		* Lease the shipped dictionaries and locale following for one Host service.
+		* Dictionary ownership is keyed by service identity. Event ownership is
+		* global across services and bundles so only the latest attached owner can
+		* drive its module-local locale.
+		*/
+		function attachHostLocale(host) {
+			if (host?.locale === void 0) return () => {};
+			const service = host.locale;
+			const owner = {
+				host,
+				service,
+				onLocale: setLocale
+			};
+			let lease = hostLocaleArbiter.leases.get(service);
+			if (lease === void 0) {
+				lease = {
+					owners: /* @__PURE__ */ new Set(),
+					detachDictionaries: bridge({ locale: service }, () => {})
+				};
+				hostLocaleArbiter.leases.set(service, lease);
+			}
+			lease.owners.add(owner);
+			hostLocaleArbiter.owners.add(owner);
+			activateOwner(owner);
+			let disposed = false;
+			return () => {
+				if (disposed) return;
+				disposed = true;
+				const wasActive = hostLocaleArbiter.activeOwner === owner;
+				lease.owners.delete(owner);
+				hostLocaleArbiter.owners.delete(owner);
+				if (wasActive) {
+					detachActiveFollower();
+					hostLocaleArbiter.activeOwner = null;
+				}
+				if (lease.owners.size === 0) {
+					lease.detachDictionaries();
+					hostLocaleArbiter.leases.delete(service);
+				}
+				if (!wasActive) return;
+				if (hostLocaleArbiter.owners.size > 0) {
+					activateOwner(latestOwner(hostLocaleArbiter.owners));
+					return;
+				}
+				owner.onLocale("zh");
+			};
+		}
+		/**
+		* Translate a typed key in the active locale. Missing entries fall back to
+		* zh, then to the key itself (see module doc for why the chain ends visible).
+		* @param key - a key of the shipped table.
+		* @param params - optional `{name}` template params.
+		* @returns the translated string.
+		*/
+		function t(key, params) {
+			return shippedTranslate(activeLocale, key, params);
+		}
+		//#endregion
+		//#region src/client/locales/view.ts
+		function buildNode(descriptor) {
+			const view = {};
+			for (const [name, value] of Object.entries(descriptor)) {
+				const property = typeof value === "string" ? {
+					enumerable: true,
+					get: () => t(value)
+				} : {
+					enumerable: true,
+					value: buildNode(value)
+				};
+				Object.defineProperty(view, name, property);
+			}
+			return view;
+		}
+		/**
+		* Build one stable, enumerable locale facade. Leaf getters call {@link t} at
+		* read time, so the same facade follows subsequent active-locale changes.
+		*/
+		function createLocaleView(descriptor) {
+			return buildNode(descriptor);
+		}
+		//#endregion
+		//#region src/client/board/strings.ts
+		/** Dynamic board vocabulary; template leaves are interpolated by `formatTemplate`. */
+		const BOARD_STRINGS = createLocaleView({
+			status: {
+				working: "board.status.working",
+				waiting: "board.status.waiting",
+				idle: "board.status.idle",
+				dead: "board.status.dead",
+				unknown: "board.status.unknown"
+			},
+			attention: { gap: "board.attention.gap" },
+			daemon: {
+				probe: "board.daemon.probe",
+				adopted: "board.daemon.adopted",
+				defer: "board.daemon.defer",
+				reprobe: "board.daemon.reprobe",
+				hosting: "board.daemon.hosting",
+				hosted: "board.daemon.hosted",
+				backoff: "board.daemon.backoff",
+				failed: "board.daemon.failed"
+			},
+			stream: {
+				ok: "board.stream.ok",
+				degraded: "board.stream.degraded",
+				unknown: "board.stream.unknown"
+			},
+			banner: {
+				daemonFailed: "board.banner.daemonFailed",
+				streamDegraded: "board.banner.streamDegraded"
+			},
+			empty: {
+				daemonFailedTitle: "board.empty.daemonFailedTitle",
+				daemonFailedHint: "board.empty.daemonFailedHint",
+				daemonDeferTitle: "board.empty.daemonDeferTitle",
+				daemonDeferHint: "board.empty.daemonDeferHint",
+				filteredTitle: "board.empty.filteredTitle",
+				filteredHint: "board.empty.filteredHint",
+				noSessionsTitle: "board.empty.noSessionsTitle",
+				noSessionsHint: "board.empty.noSessionsHint"
+			},
+			topbar: {
+				title: "board.topbar.title",
+				refresh: "board.topbar.refresh",
+				refreshing: "board.topbar.refreshing",
+				refreshTitle: "board.topbar.refreshTitle",
+				refreshFailed: "board.topbar.refreshFailed",
+				dismiss: "board.topbar.dismiss",
+				showDead: "board.topbar.showDead",
+				timeWindow: "board.topbar.timeWindow",
+				countWorking: "board.topbar.countWorking",
+				countWaiting: "board.topbar.countWaiting",
+				countTotal: "board.topbar.countTotal",
+				filterByStatusTitle: "board.topbar.filterByStatusTitle",
+				clearStatusFilterTitle: "board.topbar.clearStatusFilterTitle"
+			},
+			group: {
+				collapseTitle: "board.group.collapseTitle",
+				expandTitle: "board.group.expandTitle",
+				showAll: "board.group.showAll",
+				showLess: "board.group.showLess"
+			},
+			card: {
+				noEvent: "board.card.noEvent",
+				untitled: "board.card.untitled",
+				observedDisclaimer: "board.card.observedDisclaimer",
+				observedValue: "board.card.observedValue",
+				lastReconcile: "board.card.lastReconcile",
+				neverReconciled: "board.card.neverReconciled",
+				copyId: "board.card.copyId",
+				copied: "board.card.copied"
+			},
+			time: {
+				justNow: "board.time.justNow",
+				minutesAgo: "board.time.minutesAgo",
+				hoursAgo: "board.time.hoursAgo"
+			},
+			timeWindow: {
+				hours: "board.timeWindow.hours",
+				days: "board.timeWindow.days"
+			},
+			groupCount: "board.groupCount",
+			unknownProject: "board.unknownProject",
+			widget: {
+				label: "board.widget.label",
+				connection: {
+					ok: "board.widget.connection.ok",
+					degraded: "board.widget.connection.degraded",
+					off: "board.widget.connection.off"
+				},
+				working: "board.widget.working"
+			}
+		});
 		//#endregion
 		//#region src/client/board/logic.ts
 		/**
@@ -614,1099 +1584,73 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
-		//#region src/client/detail/strings.ts
+		//#region src/client/lifecycle/handoff.ts
+		const DEFAULT_DELAYS_MS = [
+			8,
+			16,
+			32,
+			64,
+			128,
+			256,
+			496
+		];
+		const defaultScheduler = {
+			setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+			clearTimeout: (handle) => globalThis.clearTimeout(handle)
+		};
 		/**
-		* Centralized user-facing strings for the session-detail view (design §5.1
-		* view 2, §5.3 honesty wording). Deliberately a module-local table — NOT
-		* part of the main locale registry (locales/zh.ts / locales/en.ts): the
-		* locale tables are owned by parallel tasks and the S7 integration wave
-		* folds this table in centrally. Same posture as board/strings.ts.
-		*
-		* Chinese is the primary UI language. Templates use `{name}` placeholders
-		* resolved by `formatTemplate` in `logic.ts`.
-		*
-		* Pure data module: no imports, no logic.
-		*
-		* @module
+		* Acquire a registry resource now, or briefly wait for an overlapping old
+		* fiber to release it. The returned lease owns both waiting and acquisition.
 		*/
-		const DETAIL_STRINGS = {
-			/** Header block (session meta + controls). */
-			header: {
-				close: "返回看板",
-				listenOn: "监听中",
-				listenOff: "监听",
-				listenHint: "开启后新事件将实时追加并高亮",
-				refresh: "刷新",
-				refreshing: "刷新中…",
-				refreshHint: "手动拉取最新时间线窗口",
-				copyIdTitle: "点击复制会话 ID",
-				copied: "已复制",
-				untitled: "(无标题)",
-				unknownProject: "未知项目",
-				/** Design §5.3 / SKILL.md wording: statuses are inferred observations. */
-				observedDisclaimer: "状态为从持久化数据推断的观察值,可能滞后"
-			},
-			/** Session status badge labels (observed values, see disclaimer). */
-			status: {
-				working: "工作中",
-				waiting: "等待中",
-				idle: "空闲",
-				dead: "已结束",
-				unknown: "未知"
-			},
-			/** Timeline source badges (provenance of the merged page, honest labels). */
-			sources: {
-				title: "数据来源",
-				dshLive: "dsh 实时",
-				dshCold: "dsh 冷读",
-				sidecarReplay: "sidecar 重放",
-				sidecarBuffer: "sidecar 缓冲",
-				none: "来源未知"
-			},
-			/** Normalized event-kind labels; unknown kinds keep their raw text. */
-			kind: {
-				user: "用户消息",
-				assistant: "助手回复",
-				thinking: "思考",
-				toolCall: "工具调用",
-				toolResult: "工具结果",
-				turn: "回合",
-				step: "步骤",
-				error: "错误",
-				other: "事件"
-			},
-			/** Seq-discontinuity marker row (design §4.b.3 honest presentation). */
-			gap: { label: "缺口:可能有 {n} 条事件未捕获(256 队列上限或未持久化)" },
-			/** Kind filter chips (UX-03): protocol noise hidden by default, honestly counted. */
-			filter: {
-				conversation: "只看对话",
-				all: "全部事件",
-				hiddenNotice: "已隐藏 {n} 条协议事件"
-			},
-			/** Timeline list chrome. */
-			timeline: {
-				loadMore: "加载更多历史",
-				loadingMore: "加载中…",
-				noMore: "已到时间线起点",
-				expand: "展开",
-				collapse: "收起",
-				newBadge: "新",
-				seq: "seq {n}",
-				hiddenNotice: "为保持流畅,较早的 {n} 条已折叠",
-				showAll: "全部显示",
-				/** Aggregated row for an adjacent run of empty streaming chunks (UX-03). */
-				chunkRun: "{n} 个流式分块"
-			},
-			/** Loading / empty / error body states. */
-			states: {
-				loadingTitle: "正在加载时间线…",
-				emptyTitle: "暂无事件",
-				emptyHint: "该会话还没有可展示的规范化事件。",
-				errorTitle: "时间线加载失败",
-				/** Fallback template when the reason code has no friendly mapping. */
-				errorFallback: "错误码:{reason}",
-				errors: {
-					session_not_found: "会话不存在或已不可见",
-					invalid_cursor: "分页游标无效,请重新打开详情",
-					fusion_not_wired: "当前 host 未启用时间线能力",
-					network_error: "网络错误,无法联系 dsh host",
-					request_timeout: "请求超时"
+		function acquireWithHandoff(register, options) {
+			const scheduler = options.scheduler ?? defaultScheduler;
+			let stopped = false;
+			let attempts = 0;
+			let delayIndex = 0;
+			let timer;
+			let acquired;
+			const finishError = (error) => {
+				stopped = true;
+				options.onError(error);
+			};
+			const attempt = () => {
+				if (stopped) return;
+				timer = void 0;
+				attempts += 1;
+				try {
+					acquired = register();
+				} catch (error) {
+					if (!options.isCollision(error)) {
+						finishError(error);
+						return;
+					}
 				}
-			},
-			/** Relative time templates (coarse buckets, matches the board wording). */
-			time: {
-				justNow: "刚刚",
-				minutesAgo: "{n} 分钟前",
-				hoursAgo: "{n} 小时前",
-				daysAgo: "{n} 天前"
-			}
-		};
-		//#endregion
-		//#region src/client/dsh-tools/strings.ts
-		/**
-		* Centralized user-facing strings for the dsh deep-query tools (design
-		* §5.1 view 2 dsh 会话专属区: lineage tree / provenance jump / full-text
-		* search; §5.3 honest degradation wording).
-		*
-		* Deliberately a MODULE-LOCAL table (task T5.4 constraint): the main
-		* locale table (client/locales) and test/locales.test.ts are untouched —
-		* S7 merges this table into the locale registry in one move. Chinese is
-		* the primary UI language, same posture as board/strings.ts. Templates
-		* use `{name}` placeholders resolved by `formatTemplate` in logic.ts.
-		*
-		* Pure data module: no imports, no logic.
-		*
-		* @module
-		*/
-		const DSH_TOOLS_STRINGS = {
-			/** Lineage tree panel (dsh 谱系/溯源). */
-			lineage: {
-				title: "会话谱系",
-				loading: "谱系加载中…",
-				/** Transport/HTTP failure headline (the detail carries the cause). */
-				error: "谱系加载失败",
-				/** available:true but the trace body is missing — honest empty state. */
-				empty: "暂无谱系数据",
-				/** Badge on the session the user is currently inspecting. */
-				currentBadge: "当前会话",
-				/** Badge on records live in this dsh process. */
-				liveBadge: "运行中",
-				/** Badge on records the trace knows but dsh has not persisted. */
-				notPersistedBadge: "未持久化",
-				/** Role labels for tree rows. */
-				role: {
-					ancestor: "祖先",
-					target: "目标",
-					descendant: "子会话"
-				},
-				/** Hover title for a clickable node (provenance jump). */
-				jumpTitle: "跳转到该会话",
-				/** Hover title for the highlighted current node (no jump). */
-				currentTitle: "正在查看该会话",
-				expand: "展开",
-				collapse: "折叠",
-				nodeCount: "{n} 个会话",
-				/** trace.complete === false with a known unresolved parent id. */
-				incompleteWithId: "谱系不完整:父会话 {id} 无法解析",
-				/** trace.complete === false without an unresolved parent id. */
-				incomplete: "谱系不完整:部分父链无法解析",
-				/** Degradation cards — available:false is data, not an error (§4.e.4). */
-				degrade: {
-					/** Client-side reason for sessions of non-dsh agents (task spec copy). */
-					notDshTitle: "谱系/溯源为 dsh 会话专属",
-					notDshBody: "当前会话来自外部 agent,dsh 的谱系与溯源能力不适用。",
-					/** Backend reason `session_query_unavailable`. */
-					queryUnavailableTitle: "dsh 谱系服务不可用",
-					queryUnavailableBody: "当前 dsh 组合未挂载 sessionQuery,谱系与溯源暂不可用。",
-					/** Backend reason `trace_failed`. */
-					traceFailedTitle: "谱系追溯失败",
-					traceFailedBody: "dsh 无法解析该会话的谱系。",
-					/** Any reason outside the known vocabulary (never invent a state). */
-					unknownTitle: "谱系不可用",
-					unknownBody: "后端报告谱系不可用(原因: {reason})。"
+				if (acquired !== void 0) return;
+				if (attempts >= 8 || delayIndex >= DEFAULT_DELAYS_MS.length) {
+					stopped = true;
+					options.onTimeout();
+					return;
 				}
-			},
-			/** Cross-agent search panel (dsh 全文检索 + 降级过滤). */
-			search: {
-				title: "会话检索",
-				placeholder: "检索会话(标题 / 项目 / 全文)",
-				submit: "检索",
-				loading: "检索中…",
-				error: "检索失败",
-				/** Query submitted, zero hits. */
-				empty: "没有匹配的会话",
-				/** mode: 'filter-only' degradation bar (task spec copy, verbatim). */
-				filterOnlyNotice: "dsh 全文检索不可用,已降级为标题/项目过滤",
-				/** Active project-filter chip. */
-				projectFilter: "项目过滤: {project}",
-				/** matchedBy tags on result rows. */
-				matchedBy: {
-					"full-text": "全文",
-					title: "标题",
-					project: "项目",
-					other: "其他"
-				},
-				untitled: "(无标题)"
-			}
-		};
-		//#endregion
-		//#region src/client/board/project-view-logic.ts
-		/**
-		* Pure view-model logic for the cross-agent project correlation view
-		* (design §4.e.2 / §5.1 M3, T5.5). No React, no I/O, no data-layer
-		* imports — plain values in, plain values out, unit-testable in a bare
-		* node environment (same discipline as `logic.ts`).
-		*
-		* Wire contract (hand-written mirror, per module-ownership rules): the
-		* input types below mirror the host's `GET <prefix>/projects` response —
-		* `{groups: ProjectGroup[]}` where `ProjectGroup` is fusion.ts
-		* `getProjectGroups()` output: `project` (normalized path, '' when
-		* unknown), `agents` (distinct, sorted), `sessions` (UnifiedSession[],
-		* camelCase, **epoch milliseconds** `lastActivityAt`, most recent first)
-		* and the group-level `lastActivityAt`. Only the fields this view renders
-		* are mirrored; extra wire fields are structurally ignored.
-		*
-		* Reuse contract (T2.2, read-only): tone/glyph/relative-time/label tools
-		* are imported from `./logic.ts` without touching its exports, so both
-		* board views speak the same visual language. Strings NEW to this view
-		* live in the module-local {@link PROJECT_VIEW_STRINGS} table (S7 unifies
-		* locales later); strings emitted by reused board tools (status labels,
-		* relative time, the unknown-project label) intentionally stay with the
-		* board table so the two views can never drift apart.
-		*
-		* @module
-		*/
-		const PROJECT_VIEW_STRINGS = {
-			/** View heading. */
-			title: "项目关联",
-			/** Header count summary. */
-			summary: "{projects} 个项目 · {sessions} 个会话",
-			/** Cross-agent badge, shown when a project hosts 2+ agent kinds. */
-			crossAgent: "{n} 种 agent",
-			/** Group header session count. */
-			sessionCount: "{n} 个会话",
-			/** Group header recency line. */
-			lastActive: "最近活跃 {time}",
-			/** Marker on sessions live in this dsh process (UnifiedSession.live). */
-			liveChip: "实时",
-			/** Untitled-session fallback. */
-			untitled: "(无标题)",
-			/** Lane truncation fold (UX-20; mirrors the board's group fold). */
-			showAllSessions: "展开全部 {n} 个会话",
-			showLessSessions: "只看前 {n} 个",
-			/** Empty state (no groups at all). */
-			empty: {
-				title: "暂无项目关联",
-				hint: "时间窗内没有跨 agent 的项目活动;agent 在某个项目目录下开始工作后会出现在这里。"
-			},
-			/** Loading placeholder (first fetch, nothing to show yet). */
-			loading: "正在加载项目关联…",
-			/** Error banner prefix; the raw error detail is appended by the view. */
-			errorTitle: "项目关联加载失败"
-		};
-		const KEY_SEP$1 = "\0";
-		/**
-		* Group-key normalization, aligned with fusion's correlation key: trim,
-		* strip trailing slashes (keeping root '/'), whitespace-only → '' (the
-		* unknown bucket). The host already normalizes; this re-run makes the
-		* view robust to hand-fed or merged inputs.
-		*/
-		function normalizeProjectKey(project) {
-			const trimmed = project.trim();
-			if (trimmed === "") return "";
-			if (trimmed.length > 1 && trimmed.endsWith("/")) {
-				const stripped = trimmed.replace(/\/+$/, "");
-				return stripped === "" ? "/" : stripped;
-			}
-			return trimmed;
-		}
-		/**
-		* Distinct participating agents of a session list, sorted by name. This
-		* is derived from the sessions themselves (not the wire `agents` field)
-		* so the badge row can never disagree with the lanes actually rendered —
-		* notably after two wire groups merge under one normalized key.
-		*/
-		function deriveAgentBadges(sessions) {
-			const names = /* @__PURE__ */ new Set();
-			for (const session of sessions) names.add(session.agent);
-			return [...names].sort().map((agent) => ({
-				agent,
-				glyph: agentGlyph$1(agent)
-			}));
-		}
-		/**
-		* Session ordering inside a lane, mirroring the board's card order so
-		* both views read the same way: status rank (working first, dead last),
-		* then recency, then id as the deterministic tiebreak.
-		*/
-		function compareProjectSessions(a, b) {
-			const rankDelta = statusRank(normalizeStatus(a.status)) - statusRank(normalizeStatus(b.status));
-			if (rankDelta !== 0) return rankDelta;
-			if (a.lastActivityAt !== b.lastActivityAt) return b.lastActivityAt - a.lastActivityAt;
-			return a.sessionId.localeCompare(b.sessionId);
-		}
-		function deriveSession(session, nowMs) {
-			const live = session.live === true;
-			const gap = session.gap === true;
-			return {
-				agent: session.agent,
-				sessionId: session.sessionId,
-				status: session.status,
-				title: session.title,
-				lastActivityAt: session.lastActivityAt,
-				live,
-				gap,
-				badge: deriveBadge(session.status, gap),
-				glyph: agentGlyph$1(session.agent),
-				shortId: abbreviateSessionId(session.sessionId),
-				relativeTime: formatRelativeTime$1(session.lastActivityAt, nowMs),
-				displayTitle: session.title.trim() === "" ? PROJECT_VIEW_STRINGS.untitled : session.title
+				const delay = DEFAULT_DELAYS_MS[delayIndex++];
+				try {
+					timer = scheduler.setTimeout(attempt, delay);
+				} catch (error) {
+					finishError(error);
+				}
+			};
+			attempt();
+			return () => {
+				if (stopped) return;
+				stopped = true;
+				if (timer !== void 0) scheduler.clearTimeout(timer);
+				const dispose = acquired;
+				acquired = void 0;
+				dispose?.();
 			};
 		}
-		/**
-		* Split a group's sessions into per-agent lanes. Lanes are sorted by
-		* agent name (matching the header badge order); sessions inside a lane
-		* follow {@link compareProjectSessions}.
-		*/
-		function buildAgentLanes(sessions, nowMs) {
-			const byAgent = /* @__PURE__ */ new Map();
-			for (const session of sessions) {
-				const lane = byAgent.get(session.agent);
-				if (lane === void 0) byAgent.set(session.agent, [session]);
-				else lane.push(session);
-			}
-			return [...byAgent.keys()].sort().map((agent) => {
-				const members = byAgent.get(agent) ?? [];
-				members.sort(compareProjectSessions);
-				return {
-					agent,
-					glyph: agentGlyph$1(agent),
-					sessions: members.map((session) => deriveSession(session, nowMs))
-				};
-			});
-		}
-		/**
-		* normalize/merge → derive → sort; the one call project-view.tsx renders
-		* from.
-		*
-		* Normalization: groups collapsing onto the same normalized key are
-		* merged; duplicate sessions (same agent + sessionId) within a merged
-		* group keep the freshest copy. Group order is `lastActivityAt`
-		* descending (recomputed from member sessions, so a stale wire value
-		* cannot misplace a group), with the unknown-project bucket ('') always
-		* last — same rule as the board.
-		*/
-		function buildProjectViewModel(input) {
-			const { groups, nowMs } = input;
-			const buckets = /* @__PURE__ */ new Map();
-			for (const group of groups) {
-				const key = normalizeProjectKey(group.project);
-				let bucket = buckets.get(key);
-				if (bucket === void 0) {
-					bucket = {
-						sessions: /* @__PURE__ */ new Map(),
-						wireLastActivityAt: Number.NEGATIVE_INFINITY
-					};
-					buckets.set(key, bucket);
-				}
-				if (Number.isFinite(group.lastActivityAt)) bucket.wireLastActivityAt = Math.max(bucket.wireLastActivityAt, group.lastActivityAt);
-				for (const session of group.sessions) {
-					const id = `${session.agent}${KEY_SEP$1}${session.sessionId}`;
-					const existing = bucket.sessions.get(id);
-					if (existing === void 0 || session.lastActivityAt > existing.lastActivityAt) bucket.sessions.set(id, session);
-				}
-			}
-			const derived = [];
-			let sessionCount = 0;
-			for (const [key, bucket] of buckets) {
-				const sessions = [...bucket.sessions.values()];
-				sessionCount += sessions.length;
-				const memberMax = sessions.reduce((max, s) => Number.isFinite(s.lastActivityAt) ? Math.max(max, s.lastActivityAt) : max, Number.NEGATIVE_INFINITY);
-				const lastActivityAt = Math.max(memberMax, bucket.wireLastActivityAt);
-				const agentBadges = deriveAgentBadges(sessions);
-				derived.push({
-					key,
-					label: projectDisplayName(key),
-					fullPath: key,
-					agentBadges,
-					crossAgentLabel: agentBadges.length > 1 ? formatTemplate$2(PROJECT_VIEW_STRINGS.crossAgent, { n: agentBadges.length }) : null,
-					sessionCount: sessions.length,
-					sessionCountLabel: formatTemplate$2(PROJECT_VIEW_STRINGS.sessionCount, { n: sessions.length }),
-					lastActivityAt: Number.isFinite(lastActivityAt) ? lastActivityAt : 0,
-					lastActiveLabel: Number.isFinite(lastActivityAt) ? formatTemplate$2(PROJECT_VIEW_STRINGS.lastActive, { time: formatRelativeTime$1(lastActivityAt, nowMs) }) : "",
-					lanes: buildAgentLanes(sessions, nowMs)
-				});
-			}
-			derived.sort((a, b) => {
-				if (a.key === "") return b.key === "" ? 0 : 1;
-				if (b.key === "") return -1;
-				return b.lastActivityAt - a.lastActivityAt || a.key.localeCompare(b.key);
-			});
-			return {
-				groups: derived,
-				emptyState: derived.length === 0 ? { ...PROJECT_VIEW_STRINGS.empty } : null,
-				projectCount: derived.length,
-				sessionCount,
-				summaryLabel: formatTemplate$2(PROJECT_VIEW_STRINGS.summary, {
-					projects: derived.length,
-					sessions: sessionCount
-				})
-			};
-		}
-		//#endregion
-		//#region src/client/locales/zh.ts
-		/**
-		* Simplified-Chinese dictionary — the key-set source of truth for the
-		* agent-sidecar client locale table (the en dictionary is checked complete
-		* against this key union; see ./en.ts).
-		*
-		* Key-space convention (compile-enforced by the `satisfies` clause): every
-		* key is `<domain>.<leaf>` where the domain is one of
-		* {@link SidecarLocaleDomain}. `settings.*` is owned by the settings card
-		* (T2.3); `inject.*` by the inject panel (T4.5, src/client/inject/);
-		* `board.*` by the board-tab chrome (view switcher); `detail.*` /
-		* `dshtools.*` / `project.*` mirror the M3 module tables (see below);
-		* `analysis.*` is owned by the analysis panel (T5.10b); `command.*` by the
-		* `/sidecar` slash command (T4.6, re-exported via ./command.ts);
-		* `sidebar.*` by the optional better-sidebar mini tab (T6.3,
-		* src/client/sidebar-tab.tsx) — keeping the prefixes in one flat namespace
-		* avoids cross-task collisions.
-		*
-		* M3 unification (T5.10b): the component-local tables `detail/strings.ts`,
-		* `dsh-tools/strings.ts` and `PROJECT_VIEW_STRINGS` stay the rendering
-		* source for their components (decoupling kept), and this table REFERENCES
-		* them entry-by-entry so `t()` covers every M3 string with zero copy drift
-		* (parity is pinned by test/locales.test.ts). en translations for those
-		* domains live in ./en.ts (the module tables are zh-only).
-		*
-		* Copy sources: the schemastery `.description()` strings in src/config.ts
-		* (the authoritative zh copy for each field) and design doc §4.a/§5.3/§6/§8.
-		*/
-		const D = DETAIL_STRINGS;
-		const Q = DSH_TOOLS_STRINGS;
-		const P = PROJECT_VIEW_STRINGS;
-		const zh = {
-			"settings.cardTitle": "Agent Sidecar",
-			"settings.cardDescription": "跨 agent 会话监控、注入与旁路分析的运行设置。",
-			"settings.docsLink": "查看文档",
-			"settings.readOnly": "当前设置文档为只读,修改不可保存。",
-			"settings.unsaved": "未保存",
-			"settings.save": "保存",
-			"settings.saving": "保存中…",
-			"settings.discard": "放弃修改",
-			"settings.saveFailed": "保存失败,请重试。",
-			"settings.expand": "展开",
-			"settings.collapse": "收起",
-			"settings.invalidNumber": "请输入不小于 {min} 的整数",
-			"settings.sectionDaemon": "daemon 生命周期",
-			"settings.daemonPolicyLabel": "托管策略",
-			"settings.daemonPolicyHint": "adopt-or-host=探测并领养既有 daemon,否则自行拉起;adopt-only=只领养绝不拉起;off=不管理生命周期(仍只读对账既有 daemon 的数据)。",
-			"settings.daemonPolicyAdoptOrHost": "adopt-or-host(领养或拉起)",
-			"settings.daemonPolicyAdoptOnly": "adopt-only(只领养)",
-			"settings.daemonPolicyOff": "off(不管理)",
-			"settings.daemonBackoffLimitLabel": "熔断阈值",
-			"settings.daemonBackoffLimitHint": "连续托管失败达到该次数后停止重启并进入 failed。",
-			"settings.daemonStatusLabel": "daemon 状态",
-			"settings.daemonStateProbe": "探测中",
-			"settings.daemonStateAdopted": "已领养既有 daemon",
-			"settings.daemonStateDefer": "等待系统服务拉活",
-			"settings.daemonStateReprobe": "重新探测中",
-			"settings.daemonStateHosting": "正在拉起",
-			"settings.daemonStateHosted": "插件托管中",
-			"settings.daemonStateBackoff": "退避重试中",
-			"settings.daemonStateFailed": "已熔断",
-			"settings.daemonPidVersion": "pid {pid} · v{version}",
-			"settings.daemonDeferNote": "daemon 由系统服务(LaunchAgent)托管;插件只探测等待,不重复拉起,也不会终止它。",
-			"settings.daemonFailedNote": "连续托管失败已达熔断阈值;看板降级为最后快照。排查 sidecar 命令后可点击重试。",
-			"settings.daemonRetry": "重试",
-			"settings.sectionSidecar": "sidecar 调用",
-			"settings.sidecarCommandLabel": "可执行命令",
-			"settings.sidecarCommandHint": "PATH 名、绝对路径或空格分隔的多段命令(如 python3 /path/agent-sidecar.pyz);插件绝不代装 sidecar。",
-			"settings.sidecarRuntimeDirLabel": "运行时目录",
-			"settings.sidecarRuntimeDirHint": "留空使用默认 ~/.agent_sidecar(尊重 AGENT_SIDECAR_RUNTIME_DIR 环境变量);非空时经环境变量传给受托管的 daemon。",
-			"settings.sectionStream": "数据流对账",
-			"settings.streamActiveMsLabel": "活跃对账周期(毫秒)",
-			"settings.streamActiveMsHint": "有会话工作中时的 status 快照周期。",
-			"settings.streamIdleMsLabel": "空闲对账周期(毫秒)",
-			"settings.streamIdleMsHint": "无会话工作时的 status 快照周期。",
-			"settings.sectionInject": "消息注入",
-			"settings.injectEnabledLabel": "启用注入",
-			"settings.injectEnabledHint": "关闭后注入面板为只读禁用态,写接口在服务端同步拒绝。",
-			"settings.injectDefaultModeLabel": "默认注入模式",
-			"settings.injectDefaultModeHint": "注入面板打开时预选的模式。",
-			"settings.injectModeQueue": "queue(排队下一轮)",
-			"settings.injectModeSteer": "steer(中途注入)",
-			"settings.injectSafetyNote": "安全须知:注入默认关闭;开启后每次注入仍须经确认对话框逐次放行,无任何批量或定时注入。多用户主机不建议开启。",
-			"settings.sectionAnalysis": "旁路分析",
-			"settings.analysisEnabledLabel": "启用 AI 旁路分析",
-			"settings.analysisEnabledHint": "按需拉起 dsh 分析会话解读被观测会话(消耗模型 token,默认关闭)。",
-			"settings.sectionUi": "看板界面",
-			"settings.uiTimeWindowHoursLabel": "会话时间窗(小时)",
-			"settings.uiTimeWindowHoursHint": "看板只显示该时间窗内活动过的会话。",
-			"settings.uiShowDeadLabel": "显示 dead 会话",
-			"settings.uiShowDeadHint": "把已结束(dead)的会话也列入看板。",
-			"settings.sectionSkill": "skill 模式",
-			"settings.skillProvideLabel": "内嵌提供 skill",
-			"settings.skillProvideHint": "经 registerProvider 向 dsh 提供 agent-sidecar skill(M4 启用;重启后生效)。",
-			"inject.title": "注入消息",
-			"inject.confirmTitle": "确认注入",
-			"inject.close": "关闭",
-			"inject.done": "完成",
-			"inject.capabilityOff": "注入功能未开启;请在设置中开启注入。",
-			"inject.noTarget": "未选择注入目标;请从看板卡片或会话详情发起注入。",
-			"inject.targetLabel": "注入目标",
-			"inject.messageLabel": "消息内容",
-			"inject.messagePlaceholder": "输入要注入的消息(上限 16 KiB;请勿粘贴密钥等敏感内容)",
-			"inject.byteCount": "{bytes} / {limit} 字节",
-			"inject.msgEmpty": "消息不能为空。",
-			"inject.msgNul": "消息包含非法 NUL 字符。",
-			"inject.msgTooLarge": "消息 {bytes} 字节,超出 {limit} 字节上限。",
-			"inject.modeLabel": "注入模式",
-			"inject.modeQueue": "queue(排队下一轮)",
-			"inject.modeQueueHint": "消息排队等待,目标会话下一轮开始时处理。",
-			"inject.modeSteer": "steer(中途注入)",
-			"inject.modeSteerHint": "消息在目标会话当前轮次中途注入,立即介入其工作。",
-			"inject.argvWarning": "目标为 cursor-cli:注入经其原生子进程执行,消息在该进程存续期间对本机进程列表可见;请勿包含密钥等敏感内容。",
-			"inject.auditNote": "本次注入会被记入 sidecar 审计日志(含字节数与内容指纹,不含消息明文)。",
-			"inject.prepare": "准备注入",
-			"inject.preparing": "校验中…",
-			"inject.planTargetLabel": "目标现状",
-			"inject.planStatus": "当前状态:{status}",
-			"inject.statusObservedNote": "状态为从持久化数据推断的观察值,可能滞后。",
-			"inject.planModeLabel": "模式",
-			"inject.planPreviewLabel": "消息摘要({bytes} 字节)",
-			"inject.countdown": "确认令牌 {seconds} 秒后过期",
-			"inject.confirmExecute": "确认注入",
-			"inject.executing": "注入中…",
-			"inject.cancel": "取消",
-			"inject.tokenExpired": "确认已超时,令牌失效;请重新准备注入。",
-			"inject.resultDelivered": "已投递:消息已注入目标会话。",
-			"inject.resultFailed": "注入失败。",
-			"inject.resultUnknown": "结果未知:消息可能已投递。请勿重试;请前往目标会话核对后再决定下一步。",
-			"inject.resultReplayed": "幂等重放:返回的是此前同一请求的结果,未发生二次注入。",
-			"inject.reprepare": "重新准备",
-			"inject.observeListen": "开启监听观察反应",
-			"inject.errInjectDisabled": "注入功能已在服务端关闭;请在设置中开启注入。",
-			"inject.errInvalidMessage": "消息未通过服务端校验。",
-			"inject.errTargetNotFound": "目标会话不存在或已离开观测范围。",
-			"inject.errTargetDead": "目标会话已结束(dead),无法注入。",
-			"inject.errTooManyPending": "待确认的注入请求过多,请稍后再试。",
-			"inject.errTokenMissing": "确认令牌缺失或未被签发;请重新准备。",
-			"inject.errTokenExpired": "确认令牌已过期;请重新准备。",
-			"inject.errTokenReused": "确认令牌已被消费;请重新准备。",
-			"inject.errTokenMismatch": "确认内容与准备时不一致;请重新准备。",
-			"inject.errUnsupportedAgent": "该 agent 没有可用的注入通道。",
-			"inject.errExecutorError": "注入通路执行出错。",
-			"inject.errTimeout": "请求超时,未收到服务端回执。",
-			"inject.errAborted": "请求已取消。",
-			"inject.errNetwork": "网络错误,请求未能送达。",
-			"inject.errParse": "服务端响应无法解析。",
-			"inject.errGeneric": "请求失败({code})。",
-			"board.viewBoard": "会话看板",
-			"board.viewProjects": "项目视图",
-			"detail.header.close": D.header.close,
-			"detail.header.listenOn": D.header.listenOn,
-			"detail.header.listenOff": D.header.listenOff,
-			"detail.header.listenHint": D.header.listenHint,
-			"detail.header.refresh": D.header.refresh,
-			"detail.header.refreshing": D.header.refreshing,
-			"detail.header.refreshHint": D.header.refreshHint,
-			"detail.header.copyIdTitle": D.header.copyIdTitle,
-			"detail.header.copied": D.header.copied,
-			"detail.header.untitled": D.header.untitled,
-			"detail.header.unknownProject": D.header.unknownProject,
-			"detail.header.observedDisclaimer": D.header.observedDisclaimer,
-			"detail.status.working": D.status.working,
-			"detail.status.waiting": D.status.waiting,
-			"detail.status.idle": D.status.idle,
-			"detail.status.dead": D.status.dead,
-			"detail.status.unknown": D.status.unknown,
-			"detail.sources.title": D.sources.title,
-			"detail.sources.dshLive": D.sources.dshLive,
-			"detail.sources.dshCold": D.sources.dshCold,
-			"detail.sources.sidecarReplay": D.sources.sidecarReplay,
-			"detail.sources.sidecarBuffer": D.sources.sidecarBuffer,
-			"detail.sources.none": D.sources.none,
-			"detail.kind.user": D.kind.user,
-			"detail.kind.assistant": D.kind.assistant,
-			"detail.kind.thinking": D.kind.thinking,
-			"detail.kind.toolCall": D.kind.toolCall,
-			"detail.kind.toolResult": D.kind.toolResult,
-			"detail.kind.turn": D.kind.turn,
-			"detail.kind.step": D.kind.step,
-			"detail.kind.error": D.kind.error,
-			"detail.kind.other": D.kind.other,
-			"detail.gap.label": D.gap.label,
-			"detail.filter.conversation": D.filter.conversation,
-			"detail.filter.all": D.filter.all,
-			"detail.filter.hiddenNotice": D.filter.hiddenNotice,
-			"detail.timeline.loadMore": D.timeline.loadMore,
-			"detail.timeline.loadingMore": D.timeline.loadingMore,
-			"detail.timeline.noMore": D.timeline.noMore,
-			"detail.timeline.expand": D.timeline.expand,
-			"detail.timeline.collapse": D.timeline.collapse,
-			"detail.timeline.newBadge": D.timeline.newBadge,
-			"detail.timeline.seq": D.timeline.seq,
-			"detail.timeline.hiddenNotice": D.timeline.hiddenNotice,
-			"detail.timeline.showAll": D.timeline.showAll,
-			"detail.timeline.chunkRun": D.timeline.chunkRun,
-			"detail.states.loadingTitle": D.states.loadingTitle,
-			"detail.states.emptyTitle": D.states.emptyTitle,
-			"detail.states.emptyHint": D.states.emptyHint,
-			"detail.states.errorTitle": D.states.errorTitle,
-			"detail.states.errorFallback": D.states.errorFallback,
-			"detail.states.errors.session_not_found": D.states.errors.session_not_found,
-			"detail.states.errors.invalid_cursor": D.states.errors.invalid_cursor,
-			"detail.states.errors.fusion_not_wired": D.states.errors.fusion_not_wired,
-			"detail.states.errors.network_error": D.states.errors.network_error,
-			"detail.states.errors.request_timeout": D.states.errors.request_timeout,
-			"detail.time.justNow": D.time.justNow,
-			"detail.time.minutesAgo": D.time.minutesAgo,
-			"detail.time.hoursAgo": D.time.hoursAgo,
-			"detail.time.daysAgo": D.time.daysAgo,
-			"detail.actions.inject": "注入",
-			"detail.actions.analyze": "AI 分析",
-			"detail.actions.analyzeDisabledHint": "在设置中开启「启用 AI 旁路分析」后可用",
-			"detail.tools.title": "谱系与检索",
-			"detail.tools.show": "展开",
-			"detail.tools.hide": "收起",
-			"dshtools.lineage.title": Q.lineage.title,
-			"dshtools.lineage.loading": Q.lineage.loading,
-			"dshtools.lineage.error": Q.lineage.error,
-			"dshtools.lineage.empty": Q.lineage.empty,
-			"dshtools.lineage.currentBadge": Q.lineage.currentBadge,
-			"dshtools.lineage.liveBadge": Q.lineage.liveBadge,
-			"dshtools.lineage.notPersistedBadge": Q.lineage.notPersistedBadge,
-			"dshtools.lineage.role.ancestor": Q.lineage.role.ancestor,
-			"dshtools.lineage.role.target": Q.lineage.role.target,
-			"dshtools.lineage.role.descendant": Q.lineage.role.descendant,
-			"dshtools.lineage.jumpTitle": Q.lineage.jumpTitle,
-			"dshtools.lineage.currentTitle": Q.lineage.currentTitle,
-			"dshtools.lineage.expand": Q.lineage.expand,
-			"dshtools.lineage.collapse": Q.lineage.collapse,
-			"dshtools.lineage.nodeCount": Q.lineage.nodeCount,
-			"dshtools.lineage.incompleteWithId": Q.lineage.incompleteWithId,
-			"dshtools.lineage.incomplete": Q.lineage.incomplete,
-			"dshtools.lineage.degrade.notDshTitle": Q.lineage.degrade.notDshTitle,
-			"dshtools.lineage.degrade.notDshBody": Q.lineage.degrade.notDshBody,
-			"dshtools.lineage.degrade.queryUnavailableTitle": Q.lineage.degrade.queryUnavailableTitle,
-			"dshtools.lineage.degrade.queryUnavailableBody": Q.lineage.degrade.queryUnavailableBody,
-			"dshtools.lineage.degrade.traceFailedTitle": Q.lineage.degrade.traceFailedTitle,
-			"dshtools.lineage.degrade.traceFailedBody": Q.lineage.degrade.traceFailedBody,
-			"dshtools.lineage.degrade.unknownTitle": Q.lineage.degrade.unknownTitle,
-			"dshtools.lineage.degrade.unknownBody": Q.lineage.degrade.unknownBody,
-			"dshtools.search.title": Q.search.title,
-			"dshtools.search.placeholder": Q.search.placeholder,
-			"dshtools.search.submit": Q.search.submit,
-			"dshtools.search.loading": Q.search.loading,
-			"dshtools.search.error": Q.search.error,
-			"dshtools.search.empty": Q.search.empty,
-			"dshtools.search.filterOnlyNotice": Q.search.filterOnlyNotice,
-			"dshtools.search.projectFilter": Q.search.projectFilter,
-			"dshtools.search.matchedBy.full-text": Q.search.matchedBy["full-text"],
-			"dshtools.search.matchedBy.title": Q.search.matchedBy.title,
-			"dshtools.search.matchedBy.project": Q.search.matchedBy.project,
-			"dshtools.search.matchedBy.other": Q.search.matchedBy.other,
-			"dshtools.search.untitled": Q.search.untitled,
-			"project.title": P.title,
-			"project.summary": P.summary,
-			"project.crossAgent": P.crossAgent,
-			"project.sessionCount": P.sessionCount,
-			"project.lastActive": P.lastActive,
-			"project.liveChip": P.liveChip,
-			"project.untitled": P.untitled,
-			"project.showAllSessions": P.showAllSessions,
-			"project.showLessSessions": P.showLessSessions,
-			"project.empty.title": P.empty.title,
-			"project.empty.hint": P.empty.hint,
-			"project.loading": P.loading,
-			"project.errorTitle": P.errorTitle,
-			"analysis.title": "AI 分析",
-			"analysis.close": "关闭",
-			"analysis.disabledNote": "AI 旁路分析未开启;请在设置中开启「启用 AI 旁路分析」。",
-			"analysis.idleHint": "按需拉起一次 dsh 旁路分析,解读该会话的当前状态与走向(消耗模型 token)。",
-			"analysis.start": "开始分析",
-			"analysis.requesting": "分析中…(最长约 60 秒)",
-			"analysis.exchangeInitial": "分析摘要",
-			"analysis.followupLabel": "追问",
-			"analysis.truncatedNotice": "输入超出预算已截断,分析基于部分上下文。",
-			"analysis.emptySummary": "(分析会话未返回摘要)",
-			"analysis.disclaimerFallback": "AI 分析仅供参考,结论以实际会话为准。",
-			"analysis.followupPlaceholder": "继续追问这次分析…",
-			"analysis.followupSubmit": "追问",
-			"analysis.answering": "回答中…",
-			"analysis.stop": "停止分析",
-			"analysis.stopped": "分析已停止,分析会话已释放。",
-			"analysis.restart": "重新分析",
-			"analysis.noticeTimeout": "本次追问超时,可稍后重试;分析会话仍保留。",
-			"analysis.noticeNetwork": "请求未能送达,可重试;分析会话仍保留。",
-			"analysis.noticeCancelFailed": "停止请求未送达,请重试。",
-			"analysis.errDisabled": "AI 分析已在服务端关闭;请在设置中开启后重试。",
-			"analysis.errUnavailable": "当前 host 未接入 AI 分析能力(agents 服务不可用)。",
-			"analysis.errTargetNotFound": "分析目标不存在或已离开观测范围。",
-			"analysis.errTooManyActive": "并发分析会话已达上限,请稍后再试。",
-			"analysis.errTimeout": "分析超时,分析会话已释放;可重新发起。",
-			"analysis.errCreateFailed": "分析会话创建失败。",
-			"analysis.errCancelled": "分析已取消。",
-			"analysis.errNetwork": "网络错误,分析请求未能完成。",
-			"analysis.errGeneric": "分析失败({code})。",
-			"command.description": "查看 Sidecar 状态速览(daemon、连接与会话)",
-			"command.daemon.probe": "探测中",
-			"command.daemon.adopted": "已连接 · 领养",
-			"command.daemon.defer": "等待系统服务",
-			"command.daemon.reprobe": "重新探测中",
-			"command.daemon.hosting": "正在启动",
-			"command.daemon.hosted": "已连接 · 托管",
-			"command.daemon.backoff": "重启退避中",
-			"command.daemon.failed": "离线",
-			"command.daemon.unknown": "状态未知",
-			"command.connection.ok": "已连接",
-			"command.connection.degraded": "连接不稳定",
-			"command.connection.off": "离线",
-			"command.status.working": "工作中",
-			"command.status.waiting": "等待中",
-			"command.status.idle": "空闲",
-			"command.status.dead": "已结束",
-			"command.status.unknown": "未知",
-			"command.daemonRow": "Sidecar · {state}",
-			"command.countsRow": "{working} 个工作中 · {waiting} 个等待中",
-			"command.countsDetail": "共 {total} 个会话",
-			"command.sessionDetail": "{project} · {status} · {time}",
-			"command.noSessions": "暂无被观测的会话",
-			"command.unknownProject": "未知项目",
-			"command.untitled": "(无标题)",
-			"command.truncated": "还有 {n} 个会话未列出",
-			"command.boardHint": "打开会话视图的「Sidecar」Tab 查看完整看板",
-			"command.unreachable": "sidecar 未连接",
-			"command.unreachableHint": "无法获取状态快照;请确认 agent-sidecar 插件已启用、daemon 可用后重试。",
-			"command.offlineFailed": "sidecar 已离线(daemon 连续启动失败已熔断)",
-			"command.offlineFailedHint": "以下为最后一次快照。可在设置卡重试,或手动运行 agent-sidecar daemon start 后等待自动领养。",
-			"command.offlineDefer": "等待系统服务拉起 daemon",
-			"command.offlineDeferHint": "检测到 LaunchAgent 托管,插件只探测等待;服务拉起后速览会自动恢复。",
-			"command.time.justNow": "刚刚",
-			"command.time.minutesAgo": "{n} 分钟前",
-			"command.time.hoursAgo": "{n} 小时前",
-			"command.time.daysAgo": "{n} 天前",
-			"sidebar.tabTitle": "Sidecar",
-			"sidebar.countsRow": "{working} 工作中 · {waiting} 等待中",
-			"sidebar.recentTitle": "最近活跃",
-			"sidebar.connecting": "等待 sidecar 快照…",
-			"sidebar.noSessions": "暂无活跃会话",
-			"sidebar.noEvent": "暂无事件记录",
-			"sidebar.untitled": "(无标题)",
-			"sidebar.boardHint": "完整看板见会话视图的「Sidecar」Tab"
-		};
-		//#endregion
-		//#region src/client/locales/en.ts
-		const en = {
-			"settings.cardTitle": "Agent Sidecar",
-			"settings.cardDescription": "Runtime settings for cross-agent session monitoring, injection and bypass analysis.",
-			"settings.docsLink": "Documentation",
-			"settings.readOnly": "The settings document is read-only; edits cannot be saved.",
-			"settings.unsaved": "Unsaved",
-			"settings.save": "Save",
-			"settings.saving": "Saving…",
-			"settings.discard": "Discard",
-			"settings.saveFailed": "Save failed; please retry.",
-			"settings.expand": "Expand",
-			"settings.collapse": "Collapse",
-			"settings.invalidNumber": "Enter an integer no less than {min}",
-			"settings.sectionDaemon": "Daemon lifecycle",
-			"settings.daemonPolicyLabel": "Management policy",
-			"settings.daemonPolicyHint": "adopt-or-host probes and adopts an existing daemon, else spawns one; adopt-only never spawns; off leaves the lifecycle alone (read-only reconcile still runs).",
-			"settings.daemonPolicyAdoptOrHost": "adopt-or-host (adopt, else spawn)",
-			"settings.daemonPolicyAdoptOnly": "adopt-only (never spawn)",
-			"settings.daemonPolicyOff": "off (unmanaged)",
-			"settings.daemonBackoffLimitLabel": "Backoff limit",
-			"settings.daemonBackoffLimitHint": "After this many consecutive hosting failures the supervisor stops restarting and trips failed.",
-			"settings.daemonStatusLabel": "Daemon status",
-			"settings.daemonStateProbe": "Probing",
-			"settings.daemonStateAdopted": "Adopted an existing daemon",
-			"settings.daemonStateDefer": "Waiting for the system service",
-			"settings.daemonStateReprobe": "Re-probing",
-			"settings.daemonStateHosting": "Spawning",
-			"settings.daemonStateHosted": "Hosted by the plugin",
-			"settings.daemonStateBackoff": "Backing off before retry",
-			"settings.daemonStateFailed": "Tripped (circuit open)",
-			"settings.daemonPidVersion": "pid {pid} · v{version}",
-			"settings.daemonDeferNote": "The daemon is managed by a system service (LaunchAgent); the plugin only probes and waits — it never spawns a duplicate or terminates it.",
-			"settings.daemonFailedNote": "Consecutive hosting failures reached the backoff limit; the board degraded to the last snapshot. Check the sidecar command, then retry.",
-			"settings.daemonRetry": "Retry",
-			"settings.sectionSidecar": "Sidecar invocation",
-			"settings.sidecarCommandLabel": "Executable command",
-			"settings.sidecarCommandHint": "A PATH name, an absolute path, or a space-separated multi-part command (e.g. python3 /path/agent-sidecar.pyz); the plugin never installs the sidecar for you.",
-			"settings.sidecarRuntimeDirLabel": "Runtime directory",
-			"settings.sidecarRuntimeDirHint": "Empty uses the default ~/.agent_sidecar (honoring AGENT_SIDECAR_RUNTIME_DIR); a non-empty value is passed to spawned daemons via the environment.",
-			"settings.sectionStream": "Stream reconciliation",
-			"settings.streamActiveMsLabel": "Active cadence (ms)",
-			"settings.streamActiveMsHint": "Status snapshot cadence while any session is working.",
-			"settings.streamIdleMsLabel": "Idle cadence (ms)",
-			"settings.streamIdleMsHint": "Status snapshot cadence while no session is working.",
-			"settings.sectionInject": "Message injection",
-			"settings.injectEnabledLabel": "Enable injection",
-			"settings.injectEnabledHint": "When off, the inject panel renders read-only and disabled, and the server rejects write actions.",
-			"settings.injectDefaultModeLabel": "Default injection mode",
-			"settings.injectDefaultModeHint": "The mode preselected when the inject panel opens.",
-			"settings.injectModeQueue": "queue (next turn)",
-			"settings.injectModeSteer": "steer (mid-turn)",
-			"settings.injectSafetyNote": "Safety: injection is off by default; even when enabled, every injection still passes a per-request confirmation dialog — there is no batch or scheduled injection. Not recommended on multi-user hosts.",
-			"settings.sectionAnalysis": "Bypass analysis",
-			"settings.analysisEnabledLabel": "Enable AI bypass analysis",
-			"settings.analysisEnabledHint": "Spins up a dsh analysis session over an observed session on demand (consumes model tokens; off by default).",
-			"settings.sectionUi": "Board UI",
-			"settings.uiTimeWindowHoursLabel": "Session time window (hours)",
-			"settings.uiTimeWindowHoursHint": "The board lists only sessions active within this window.",
-			"settings.uiShowDeadLabel": "Show dead sessions",
-			"settings.uiShowDeadHint": "Also list finished (dead) sessions on the board.",
-			"settings.sectionSkill": "Skill mode",
-			"settings.skillProvideLabel": "Provide the skill in-process",
-			"settings.skillProvideHint": "Provide the agent-sidecar skill to dsh via registerProvider (enabled in M4; applies after restart).",
-			"inject.title": "Inject message",
-			"inject.confirmTitle": "Confirm injection",
-			"inject.close": "Close",
-			"inject.done": "Done",
-			"inject.capabilityOff": "Injection is not enabled; turn it on in Settings first.",
-			"inject.noTarget": "No injection target selected; start from a board card or a session detail page.",
-			"inject.targetLabel": "Target",
-			"inject.messageLabel": "Message",
-			"inject.messagePlaceholder": "Message to inject (16 KiB max; never paste secrets)",
-			"inject.byteCount": "{bytes} / {limit} bytes",
-			"inject.msgEmpty": "The message must not be empty.",
-			"inject.msgNul": "The message contains an illegal NUL character.",
-			"inject.msgTooLarge": "The message is {bytes} bytes, over the {limit}-byte limit.",
-			"inject.modeLabel": "Injection mode",
-			"inject.modeQueue": "queue (next turn)",
-			"inject.modeQueueHint": "The message queues and is handled when the target session starts its next turn.",
-			"inject.modeSteer": "steer (mid-turn)",
-			"inject.modeSteerHint": "The message is injected mid-turn and steers the target session immediately.",
-			"inject.argvWarning": "cursor-cli target: injection runs through its native subprocess, and the message is visible in this machine's process list while that process lives; never include secrets.",
-			"inject.auditNote": "This injection is recorded in the sidecar audit log (byte size and content fingerprint; never the message plaintext).",
-			"inject.prepare": "Prepare injection",
-			"inject.preparing": "Validating…",
-			"inject.planTargetLabel": "Target snapshot",
-			"inject.planStatus": "Current status: {status}",
-			"inject.statusObservedNote": "Status is an observed value inferred from persisted data and may lag.",
-			"inject.planModeLabel": "Mode",
-			"inject.planPreviewLabel": "Message digest ({bytes} bytes)",
-			"inject.countdown": "The confirm token expires in {seconds}s",
-			"inject.confirmExecute": "Confirm injection",
-			"inject.executing": "Injecting…",
-			"inject.cancel": "Cancel",
-			"inject.tokenExpired": "Confirmation timed out and the token is void; prepare the injection again.",
-			"inject.resultDelivered": "Delivered: the message was injected into the target session.",
-			"inject.resultFailed": "Injection failed.",
-			"inject.resultUnknown": "Outcome unknown: the message may have been delivered. Do NOT retry; check the target session before deciding anything.",
-			"inject.resultReplayed": "Idempotent replay: this is the earlier result of the same request — no second injection happened.",
-			"inject.reprepare": "Prepare again",
-			"inject.observeListen": "Listen for the reaction",
-			"inject.errInjectDisabled": "Injection is disabled on the server; enable it in Settings.",
-			"inject.errInvalidMessage": "The message failed server-side validation.",
-			"inject.errTargetNotFound": "The target session does not exist or left the observation window.",
-			"inject.errTargetDead": "The target session has ended (dead); it cannot be injected.",
-			"inject.errTooManyPending": "Too many injections are pending confirmation; try again later.",
-			"inject.errTokenMissing": "The confirm token is missing or was never issued; prepare again.",
-			"inject.errTokenExpired": "The confirm token expired; prepare again.",
-			"inject.errTokenReused": "The confirm token was already consumed; prepare again.",
-			"inject.errTokenMismatch": "The confirmation no longer matches what was prepared; prepare again.",
-			"inject.errUnsupportedAgent": "This agent has no injection path.",
-			"inject.errExecutorError": "The injection path failed while executing.",
-			"inject.errTimeout": "The request timed out without a server receipt.",
-			"inject.errAborted": "The request was cancelled.",
-			"inject.errNetwork": "Network error; the request could not be sent.",
-			"inject.errParse": "The server response could not be parsed.",
-			"inject.errGeneric": "Request failed ({code}).",
-			"board.viewBoard": "Session board",
-			"board.viewProjects": "Projects",
-			"detail.header.close": "Back to board",
-			"detail.header.listenOn": "Listening",
-			"detail.header.listenOff": "Listen",
-			"detail.header.listenHint": "New events append live and get highlighted while on",
-			"detail.header.refresh": "Refresh",
-			"detail.header.refreshing": "Refreshing…",
-			"detail.header.refreshHint": "Pull the newest timeline window",
-			"detail.header.copyIdTitle": "Click to copy the session ID",
-			"detail.header.copied": "Copied",
-			"detail.header.untitled": "(untitled)",
-			"detail.header.unknownProject": "Unknown project",
-			"detail.header.observedDisclaimer": "Status is an observed value inferred from persisted data and may lag",
-			"detail.status.working": "Working",
-			"detail.status.waiting": "Waiting",
-			"detail.status.idle": "Idle",
-			"detail.status.dead": "Finished",
-			"detail.status.unknown": "Unknown",
-			"detail.sources.title": "Data sources",
-			"detail.sources.dshLive": "dsh live",
-			"detail.sources.dshCold": "dsh cold read",
-			"detail.sources.sidecarReplay": "sidecar replay",
-			"detail.sources.sidecarBuffer": "sidecar buffer",
-			"detail.sources.none": "Unknown source",
-			"detail.kind.user": "User message",
-			"detail.kind.assistant": "Assistant reply",
-			"detail.kind.thinking": "Thinking",
-			"detail.kind.toolCall": "Tool call",
-			"detail.kind.toolResult": "Tool result",
-			"detail.kind.turn": "Turn",
-			"detail.kind.step": "Step",
-			"detail.kind.error": "Error",
-			"detail.kind.other": "Event",
-			"detail.gap.label": "Gap: about {n} events may be uncaptured (256-slot queue cap or not persisted)",
-			"detail.filter.conversation": "Conversation only",
-			"detail.filter.all": "All events",
-			"detail.filter.hiddenNotice": "{n} protocol events hidden",
-			"detail.timeline.loadMore": "Load older history",
-			"detail.timeline.loadingMore": "Loading…",
-			"detail.timeline.noMore": "Start of the timeline",
-			"detail.timeline.expand": "Expand",
-			"detail.timeline.collapse": "Collapse",
-			"detail.timeline.newBadge": "New",
-			"detail.timeline.seq": "seq {n}",
-			"detail.timeline.hiddenNotice": "{n} earlier entries collapsed to stay smooth",
-			"detail.timeline.showAll": "Show all",
-			"detail.timeline.chunkRun": "{n} streaming chunks",
-			"detail.states.loadingTitle": "Loading the timeline…",
-			"detail.states.emptyTitle": "No events yet",
-			"detail.states.emptyHint": "This session has no normalized events to show yet.",
-			"detail.states.errorTitle": "Timeline failed to load",
-			"detail.states.errorFallback": "Error code: {reason}",
-			"detail.states.errors.session_not_found": "The session does not exist or is no longer visible",
-			"detail.states.errors.invalid_cursor": "The paging cursor is invalid; reopen the detail view",
-			"detail.states.errors.fusion_not_wired": "This host has no timeline capability enabled",
-			"detail.states.errors.network_error": "Network error; the dsh host is unreachable",
-			"detail.states.errors.request_timeout": "The request timed out",
-			"detail.time.justNow": "just now",
-			"detail.time.minutesAgo": "{n} min ago",
-			"detail.time.hoursAgo": "{n} h ago",
-			"detail.time.daysAgo": "{n} d ago",
-			"detail.actions.inject": "Inject",
-			"detail.actions.analyze": "AI analysis",
-			"detail.actions.analyzeDisabledHint": "Enable \"AI bypass analysis\" in Settings to use this",
-			"detail.tools.title": "Lineage & search",
-			"detail.tools.show": "Show",
-			"detail.tools.hide": "Hide",
-			"dshtools.lineage.title": "Session lineage",
-			"dshtools.lineage.loading": "Loading lineage…",
-			"dshtools.lineage.error": "Lineage failed to load",
-			"dshtools.lineage.empty": "No lineage data",
-			"dshtools.lineage.currentBadge": "Current session",
-			"dshtools.lineage.liveBadge": "Live",
-			"dshtools.lineage.notPersistedBadge": "Not persisted",
-			"dshtools.lineage.role.ancestor": "Ancestor",
-			"dshtools.lineage.role.target": "Target",
-			"dshtools.lineage.role.descendant": "Child session",
-			"dshtools.lineage.jumpTitle": "Jump to this session",
-			"dshtools.lineage.currentTitle": "Currently viewing this session",
-			"dshtools.lineage.expand": "Expand",
-			"dshtools.lineage.collapse": "Collapse",
-			"dshtools.lineage.nodeCount": "{n} sessions",
-			"dshtools.lineage.incompleteWithId": "Lineage incomplete: parent session {id} could not be resolved",
-			"dshtools.lineage.incomplete": "Lineage incomplete: part of the parent chain is unresolved",
-			"dshtools.lineage.degrade.notDshTitle": "Lineage/provenance is dsh-session only",
-			"dshtools.lineage.degrade.notDshBody": "This session comes from an external agent; dsh's lineage and provenance do not apply.",
-			"dshtools.lineage.degrade.queryUnavailableTitle": "dsh lineage service unavailable",
-			"dshtools.lineage.degrade.queryUnavailableBody": "This dsh composition has no sessionQuery mounted; lineage and provenance are unavailable.",
-			"dshtools.lineage.degrade.traceFailedTitle": "Lineage trace failed",
-			"dshtools.lineage.degrade.traceFailedBody": "dsh could not resolve this session's lineage.",
-			"dshtools.lineage.degrade.unknownTitle": "Lineage unavailable",
-			"dshtools.lineage.degrade.unknownBody": "The backend reports lineage unavailable (reason: {reason}).",
-			"dshtools.search.title": "Session search",
-			"dshtools.search.placeholder": "Search sessions (title / project / full text)",
-			"dshtools.search.submit": "Search",
-			"dshtools.search.loading": "Searching…",
-			"dshtools.search.error": "Search failed",
-			"dshtools.search.empty": "No matching sessions",
-			"dshtools.search.filterOnlyNotice": "dsh full-text search is unavailable; degraded to title/project filtering",
-			"dshtools.search.projectFilter": "Project filter: {project}",
-			"dshtools.search.matchedBy.full-text": "Full text",
-			"dshtools.search.matchedBy.title": "Title",
-			"dshtools.search.matchedBy.project": "Project",
-			"dshtools.search.matchedBy.other": "Other",
-			"dshtools.search.untitled": "(untitled)",
-			"project.title": "Project correlation",
-			"project.summary": "{projects} projects · {sessions} sessions",
-			"project.crossAgent": "{n} agent kinds",
-			"project.sessionCount": "{n} sessions",
-			"project.lastActive": "Last active {time}",
-			"project.liveChip": "Live",
-			"project.untitled": "(untitled)",
-			"project.showAllSessions": "Show all {n} sessions",
-			"project.showLessSessions": "Show first {n} only",
-			"project.empty.title": "No project correlation yet",
-			"project.empty.hint": "No cross-agent project activity within the time window; projects appear here once an agent works inside a project directory.",
-			"project.loading": "Loading project correlation…",
-			"project.errorTitle": "Project correlation failed to load",
-			"analysis.title": "AI analysis",
-			"analysis.close": "Close",
-			"analysis.disabledNote": "AI bypass analysis is off; enable \"AI bypass analysis\" in Settings first.",
-			"analysis.idleHint": "Spin up one dsh bypass-analysis pass over this session on demand (consumes model tokens).",
-			"analysis.start": "Start analysis",
-			"analysis.requesting": "Analyzing… (up to ~60 s)",
-			"analysis.exchangeInitial": "Analysis summary",
-			"analysis.followupLabel": "Follow-up",
-			"analysis.truncatedNotice": "The input exceeded the budget and was truncated; the analysis covers partial context.",
-			"analysis.emptySummary": "(the analysis session returned no summary)",
-			"analysis.disclaimerFallback": "AI analysis is for reference only; trust the actual session over its conclusions.",
-			"analysis.followupPlaceholder": "Ask a follow-up about this analysis…",
-			"analysis.followupSubmit": "Ask",
-			"analysis.answering": "Answering…",
-			"analysis.stop": "Stop analysis",
-			"analysis.stopped": "Analysis stopped; the analysis session was released.",
-			"analysis.restart": "Analyze again",
-			"analysis.noticeTimeout": "This follow-up timed out; retry later — the analysis session is kept.",
-			"analysis.noticeNetwork": "The request could not be sent; retry — the analysis session is kept.",
-			"analysis.noticeCancelFailed": "The stop request did not go through; try again.",
-			"analysis.errDisabled": "AI analysis is disabled on the server; enable it in Settings and retry.",
-			"analysis.errUnavailable": "This host has no AI analysis capability (agents service unavailable).",
-			"analysis.errTargetNotFound": "The analysis target does not exist or left the observation window.",
-			"analysis.errTooManyActive": "Too many concurrent analysis sessions; try again later.",
-			"analysis.errTimeout": "The analysis timed out and its session was released; start again.",
-			"analysis.errCreateFailed": "Failed to create the analysis session.",
-			"analysis.errCancelled": "The analysis was cancelled.",
-			"analysis.errNetwork": "Network error; the analysis request could not complete.",
-			"analysis.errGeneric": "Analysis failed ({code}).",
-			"command.description": "Sidecar status at a glance (daemon, connection, sessions)",
-			"command.daemon.probe": "Probing",
-			"command.daemon.adopted": "Connected · adopted",
-			"command.daemon.defer": "Waiting for the system service",
-			"command.daemon.reprobe": "Re-probing",
-			"command.daemon.hosting": "Starting",
-			"command.daemon.hosted": "Connected · hosted",
-			"command.daemon.backoff": "Restart backoff",
-			"command.daemon.failed": "Offline",
-			"command.daemon.unknown": "State unknown",
-			"command.connection.ok": "Connected",
-			"command.connection.degraded": "Connection unstable",
-			"command.connection.off": "Offline",
-			"command.status.working": "Working",
-			"command.status.waiting": "Waiting",
-			"command.status.idle": "Idle",
-			"command.status.dead": "Finished",
-			"command.status.unknown": "Unknown",
-			"command.daemonRow": "Sidecar · {state}",
-			"command.countsRow": "{working} working · {waiting} waiting",
-			"command.countsDetail": "{total} sessions total",
-			"command.sessionDetail": "{project} · {status} · {time}",
-			"command.noSessions": "No observed sessions yet",
-			"command.unknownProject": "Unknown project",
-			"command.untitled": "(untitled)",
-			"command.truncated": "{n} more sessions not listed",
-			"command.boardHint": "Open the \"Sidecar\" tab in the conversation view for the full board",
-			"command.unreachable": "sidecar is not connected",
-			"command.unreachableHint": "The state snapshot could not be fetched; check that the agent-sidecar plugin is enabled and the daemon is available, then retry.",
-			"command.offlineFailed": "sidecar is offline (daemon start failures tripped the breaker)",
-			"command.offlineFailedHint": "Showing the last snapshot. Retry from the settings card, or run agent-sidecar daemon start manually and wait for adoption.",
-			"command.offlineDefer": "Waiting for the system service to start the daemon",
-			"command.offlineDeferHint": "A LaunchAgent manages the daemon; the plugin only probes and waits. The overview recovers automatically once the service brings it up.",
-			"command.time.justNow": "just now",
-			"command.time.minutesAgo": "{n} min ago",
-			"command.time.hoursAgo": "{n} h ago",
-			"command.time.daysAgo": "{n} d ago",
-			"sidebar.tabTitle": "Sidecar",
-			"sidebar.countsRow": "{working} working · {waiting} waiting",
-			"sidebar.recentTitle": "Recently active",
-			"sidebar.connecting": "Waiting for the sidecar snapshot…",
-			"sidebar.noSessions": "No active sessions",
-			"sidebar.noEvent": "No events recorded yet",
-			"sidebar.untitled": "(untitled)",
-			"sidebar.boardHint": "Full board: the \"Sidecar\" tab in the conversation view"
-		};
-		/** Complete shipped dictionaries keyed by locale id. */
-		const dictionaries = {
-			zh,
-			en
-		};
-		/**
-		* Substitute `{name}` template params; unknown placeholders stay verbatim
-		* (same semantics as the ecosystem LocaleRuntime.translate).
-		*/
-		function interpolate(template, params) {
-			if (!params) return template;
-			return template.replace(/\{(\w+)\}/g, (match, name) => name in params ? String(params[name]) : match);
-		}
-		/**
-		* Build a translate engine over an arbitrary (possibly partial) dictionary
-		* set. Lookup chain per key: requested locale → {@link BASE_LOCALE} (zh) →
-		* the key itself. Exposed for tests and for compositions that need a
-		* non-shipped dictionary set; the shipped {@link t} is this engine bound to
-		* {@link dictionaries} and the module's active locale.
-		* @param dicts - dictionaries keyed by locale id (missing locales allowed).
-		* @returns pure translate function addressed by explicit locale.
-		*/
-		function createTranslator(dicts) {
-			return (locale, key, params) => {
-				return interpolate(dicts[locale]?.[key] ?? dicts["zh"]?.[key] ?? key, params);
-			};
-		}
-		const shippedTranslate = createTranslator(dictionaries);
-		let activeLocale = "zh";
-		/**
-		* Translate a typed key in the active locale. Missing entries fall back to
-		* zh, then to the key itself (see module doc for why the chain ends visible).
-		* @param key - a key of the shipped table.
-		* @param params - optional `{name}` template params.
-		* @returns the translated string.
-		*/
-		function t(key, params) {
-			return shippedTranslate(activeLocale, key, params);
+		/** Only known duplicate-registry diagnostics are eligible for handoff. */
+		function isRegistrationCollision(error) {
+			return error instanceof Error && /\b(?:duplicate|already registered)\b/i.test(error.message);
 		}
 		//#endregion
 		//#region src/client/locales/command.ts
@@ -1763,8 +1707,8 @@ window.__ModuleLoader__.load({
 		*   `dsh-agent-teams/src/command.ts`).
 		* - The only `ui.kind` this dsh version supports is `popupSelect`:
 		*   an async `options(session, signal)` provider plus `onSelect`. The
-		*   `/sidecar` overview therefore presents as a popup card of rows — a
-		*   read-only glance; every row's onSelect is a no-op.
+		*   `/sidecar` overview therefore presents as a popup card of rows; its
+		*   board row opens Agent Center while informational rows remain inert.
 		*
 		* The `commandUi` service type is NOT part of the published plugin SDK
 		* (same situation as `settingsScope` in ./index.ts), so this module keeps
@@ -2001,7 +1945,9 @@ window.__ModuleLoader__.load({
 						if (deps.topN !== void 0) overviewOpts.topN = deps.topN;
 						return overviewToOptions(buildOverview(snapshot, overviewOpts));
 					},
-					onSelect: () => {}
+					onSelect: (option) => {
+						if (option.id === "board") deps.openCenter?.();
+					}
 				}
 			};
 		}
@@ -2010,21 +1956,23 @@ window.__ModuleLoader__.load({
 		* the design's `ctx.commands` consumption row — a composition without the
 		* slash-menu runtime simply never gains the command).
 		*
-		* Idempotency: the ui-commands registry throws on a duplicate contribution
-		* name; that throw is caught and logged, so a double apply (HMR re-apply
-		* before the old fiber unloads) degrades to a no-op instead of taking the
-		* client half down. Disposal is owned by the registry's effect on the
-		* injected fiber — unloading the plugin unregisters the command.
+		* HMR handoff: a duplicate contribution means the old fiber still owns the
+		* name. The new injected fiber retries briefly, then registers its own fresh
+		* contribution after the old disposer runs. Foreign squatters time out.
 		*/
 		function registerSidecarCommand(ctx, deps = {}) {
 			try {
 				ctx.inject(["commandUi"], (injected) => {
 					const { commandUi } = injected;
-					try {
-						commandUi.register(createSidecarCommandContribution(deps));
-					} catch (err) {
-						console.error("agent-sidecar: /sidecar command registration skipped", err);
-					}
+					return acquireWithHandoff(() => commandUi.register(createSidecarCommandContribution(deps)), {
+						isCollision: isRegistrationCollision,
+						onError: (error) => {
+							console.error("agent-sidecar: /sidecar command registration failed", error);
+						},
+						onTimeout: () => {
+							console.error("agent-sidecar: /sidecar command handoff timed out");
+						}
+					});
 				});
 			} catch (err) {
 				console.error("agent-sidecar: commandUi injection failed", err);
@@ -2645,52 +2593,118 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
-		//#region \0dsh-css:/Users/jingyu/Workspace/Projects/agent_sidecar/plugin/src/client/board/board.module.css.mjs
-		const css$8 = ".aJ0YNW_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-base,transparent);flex-direction:column;gap:12px;padding:16px 20px;display:flex;overflow-y:auto}.aJ0YNW_topbar{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.aJ0YNW_title{color:var(--dsw-alias-label-primary,#1f2328);margin-right:2px;font-size:15px;font-weight:650}.aJ0YNW_badge{border:1px solid var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-bg-layer-1,#00000008);color:var(--dsw-alias-label-secondary,#57606a);white-space:nowrap;border-radius:999px;align-items:center;gap:5px;padding:0 8px;font-size:12px;line-height:20px;display:inline-flex}.aJ0YNW_dot{background:var(--dsw-alias-label-tertiary,#6e7781);border-radius:50%;flex:none;width:8px;height:8px}.aJ0YNW_dot[data-tone=success]{background:var(--dsw-alias-state-success-primary,#1a7f37)}.aJ0YNW_dot[data-tone=warn]{background:var(--dsw-alias-state-warn-primary,#9a6700)}.aJ0YNW_dot[data-tone=danger]{background:var(--dsw-alias-state-error-primary,#cf222e)}.aJ0YNW_dot[data-tone=neutral]{background:var(--dsw-alias-label-tertiary,#6e7781)}.aJ0YNW_dot[data-tone=muted]{background:var(--dsw-alias-label-dimmed,#8c959f)}.aJ0YNW_countBadge{border:1px solid var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-bg-layer-1,#00000008);color:var(--dsw-alias-label-secondary,#57606a);white-space:nowrap;cursor:pointer;border-radius:999px;align-items:center;gap:5px;padding:0 8px;font-family:inherit;font-size:12px;line-height:20px;display:inline-flex}.aJ0YNW_countBadge:hover{color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.aJ0YNW_countBadge[aria-pressed=true]{color:var(--dsw-alias-brand-primary,#4d6bfe);border-color:var(--dsw-alias-brand-primary,#4d6bfe)}.aJ0YNW_countTotal{color:var(--dsw-alias-label-secondary,#57606a);white-space:nowrap;font-size:12px}.aJ0YNW_spacer{flex:1}.aJ0YNW_control{color:var(--dsw-alias-label-secondary,#57606a);white-space:nowrap;align-items:center;gap:5px;font-size:12px;display:inline-flex}.aJ0YNW_select{color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-layer-1,transparent);border:1px solid var(--dsw-alias-border-l2,#0000001f);border-radius:6px;padding:2px 6px;font-family:inherit;font-size:12px}.aJ0YNW_checkbox{accent-color:var(--dsw-alias-brand-primary,#4d6bfe);margin:0}.aJ0YNW_refresh{color:var(--dsw-alias-label-secondary,#57606a);border:1px solid var(--dsw-alias-border-l1,#00000014);cursor:pointer;background:0 0;border-radius:6px;padding:2px 10px;font-family:inherit;font-size:12px}.aJ0YNW_refresh:hover{color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.aJ0YNW_refresh:disabled{cursor:default;opacity:.6}.aJ0YNW_banner{border:1px solid var(--dsw-alias-border-l1,#00000014);border-radius:8px;padding:6px 10px;font-size:12px;line-height:18px}.aJ0YNW_banner[data-tone=warn]{color:var(--dsw-alias-state-warn-label,var(--dsw-alias-state-warn-primary,#9a6700));background:var(--dsw-alias-state-warn-tertiary,#9a670014);border-color:var(--dsw-alias-state-warn-secondary,#9a67003d)}.aJ0YNW_banner[data-tone=danger]{color:var(--dsw-alias-state-error-primary,#cf222e);background:var(--dsw-alias-state-error-secondary,#cf222e14);border-color:var(--dsw-alias-state-error-secondary,#cf222e3d)}.aJ0YNW_bannerDismiss{color:inherit;cursor:pointer;background:0 0;border:none;margin-left:10px;padding:0;font-family:inherit;font-size:12px;text-decoration:underline}.aJ0YNW_empty{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:180px;padding:24px;display:flex}.aJ0YNW_emptyTitle{color:var(--dsw-alias-label-primary,#1f2328);font-size:14px;font-weight:600}.aJ0YNW_emptyHint{max-width:420px;color:var(--dsw-alias-label-secondary,#57606a);font-size:12px;line-height:20px}.aJ0YNW_group{flex-direction:column;gap:8px;display:flex}.aJ0YNW_groupHead{text-align:left;cursor:pointer;background:0 0;border:none;align-items:baseline;gap:8px;width:100%;min-width:0;padding:0;font-family:inherit;display:flex}.aJ0YNW_chevron{color:var(--dsw-alias-label-tertiary,#6e7781);flex:none;font-size:10px}.aJ0YNW_groupAttention{color:var(--dsw-alias-state-warn-primary,#9a6700);flex:none;font-size:11px}.aJ0YNW_showMore{color:var(--dsw-alias-label-secondary,#57606a);border:1px dashed var(--dsw-alias-border-l2,#0000001f);cursor:pointer;background:0 0;border-radius:6px;align-self:flex-start;padding:2px 10px;font-family:inherit;font-size:12px}.aJ0YNW_showMore:hover{color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.aJ0YNW_groupName{color:var(--dsw-alias-label-primary,#1f2328);text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;overflow:hidden}.aJ0YNW_groupCount{color:var(--dsw-alias-label-secondary,#57606a);background:var(--dsw-alias-bg-layer-2,#0000000a);border-radius:999px;flex:none;padding:0 8px;font-size:11px;line-height:18px}.aJ0YNW_grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;display:grid}.aJ0YNW_card{text-align:left;border:1px solid var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-bg-layer-1,#00000005);cursor:pointer;border-radius:8px;flex-direction:column;gap:6px;min-width:0;padding:10px 12px;font-family:inherit;display:flex}.aJ0YNW_card:hover{border-color:var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.aJ0YNW_card:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:1px}.aJ0YNW_cardHead{justify-content:space-between;align-items:center;gap:8px;min-width:0;display:flex}.aJ0YNW_agent{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-primary,#1f2328);align-items:center;gap:5px;font-size:12px;font-weight:600;display:inline-flex;overflow:hidden}.aJ0YNW_glyph{color:var(--dsw-alias-brand-primary,#4d6bfe);flex:none}.aJ0YNW_attention{color:var(--dsw-alias-state-warn-primary,#9a6700);font-size:11px}.aJ0YNW_attention[data-kind=gap]{color:var(--dsw-alias-state-error-primary,#cf222e)}.aJ0YNW_cardTitle{color:var(--dsw-alias-label-primary,#1f2328);text-overflow:ellipsis;white-space:nowrap;font-size:13px;overflow:hidden}.aJ0YNW_cardId{color:var(--dsw-alias-label-tertiary,#6e7781);text-overflow:ellipsis;white-space:nowrap;cursor:copy;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;overflow:hidden}.aJ0YNW_cardId:hover{color:var(--dsw-alias-label-secondary,#57606a)}.aJ0YNW_copied{color:var(--dsw-alias-state-success-primary,#1a7f37);margin-left:6px;font-family:inherit}.aJ0YNW_cardEvent{color:var(--dsw-alias-label-secondary,#57606a);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.aJ0YNW_cardTime{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary,#6e7781));font-size:11px}";
-		const tagId$8 = "@shendeguize/dsh-agent-sidecar/board.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$8) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
-			tag.dataset.pluginCss = tagId$8;
-			tag.textContent = css$8;
-			document.head.appendChild(tag);
+		//#region \0dsh-css:src/client/theme/agsc.module.css.mjs
+		const css$11 = ".V4kgfa_root{--agsc-accent:var(--dsw-alias-brand-primary);--agsc-bg:var(--dsw-alias-bg-layer-1);--agsc-bg-raised:var(--dsw-alias-bg-layer-3);--agsc-fg:var(--dsw-alias-label-primary);--agsc-fg-secondary:var(--dsw-alias-label-secondary);--agsc-fg-dimmed:var(--dsw-alias-label-dimmed);--agsc-border:var(--dsw-alias-border-l1);--agsc-border-strong:var(--dsw-alias-border-l2);--agsc-ok:var(--dsw-alias-state-success-primary);--agsc-warn:var(--dsw-alias-state-warn-primary);--agsc-err:var(--dsw-alias-state-error-primary);--agsc-radius-card:12px;--agsc-radius-control:8px;--agsc-shadow-card:var(--dsw-shadow-lv2);--agsc-font-mono:var(--ds-font-family-code);color:var(--agsc-fg);font-family:inherit}";
+		const tagId$11 = "@shendeguize/dsh-agent-sidecar/src/client/theme/agsc.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$11, css$11);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$11) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$11;
+				created = true;
+			}
+			tag.textContent = css$11;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
+		}
+		var agsc_module_css_default = { "root": "V4kgfa_root" };
+		//#endregion
+		//#region src/client/theme/parts.ts
+		/** Stable owner value for Agent Sidecar skin anchors. */
+		const PLUGIN_DOM_ID = "agent-sidecar";
+		Object.freeze([
+			"board",
+			"board-toolbar",
+			"board-card",
+			"project-view",
+			"detail",
+			"timeline",
+			"inject-panel",
+			"analysis-panel",
+			"dsh-tools",
+			"footer-widget",
+			"sidebar-entry",
+			"settings-card",
+			"overlay",
+			"sidebar-tab"
+		]);
+		function requireThemeClass(name) {
+			const className = agsc_module_css_default[name];
+			if (className === void 0 || className.length === 0) throw new Error(`Agent Sidecar theme is missing its ${name} class`);
+			return className;
+		}
+		const rootClassName = requireThemeClass("root");
+		/**
+		* Returns the complete, spreadable contract for one mounted surface.
+		* This keeps hashed CSS classes internal while exposing stable DSH anchors.
+		*/
+		function surfaceProps(part, className) {
+			const localClassName = className?.trim();
+			return {
+				className: localClassName ? `${rootClassName} ${localClassName}` : rootClassName,
+				"data-dsh-plugin": PLUGIN_DOM_ID,
+				"data-dsh-part": part
+			};
+		}
+		//#endregion
+		//#region \0dsh-css:src/client/board/board.module.css.mjs
+		const css$10 = ".PLm6rG_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:12px;padding:16px 20px;display:flex;overflow-y:auto}.PLm6rG_topbar{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.PLm6rG_title{color:var(--agsc-fg);margin-right:2px;font-size:15px;font-weight:650}.PLm6rG_dot{background:var(--dsw-alias-label-tertiary);border-radius:50%;flex:none;width:8px;height:8px}.PLm6rG_dot[data-tone=neutral]{background:var(--dsw-alias-label-tertiary)}.PLm6rG_dot[data-tone=muted]{background:var(--agsc-fg-dimmed)}.PLm6rG_countBadge{white-space:nowrap}.PLm6rG_countTotal{color:var(--agsc-fg-secondary);white-space:nowrap;font-size:12px}.PLm6rG_spacer{flex:1}.PLm6rG_control{color:var(--agsc-fg-secondary);white-space:nowrap;align-items:center;gap:5px;font-size:12px;display:inline-flex}.PLm6rG_select{height:28px;color:var(--agsc-fg);background:var(--agsc-bg-raised);border:1px solid var(--agsc-border-strong);border-radius:14px;padding:0 10px;font-family:inherit;font-size:12px}.PLm6rG_checkbox{accent-color:var(--agsc-accent);margin:0}.PLm6rG_banner{border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);padding:6px 10px;font-size:12px;line-height:18px}.PLm6rG_banner[data-tone=warn]{color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border-color:var(--dsw-alias-state-warn-secondary)}.PLm6rG_banner[data-tone=danger]{color:var(--agsc-err);background:var(--dsw-alias-state-error-secondary);border-color:var(--dsw-alias-state-error-secondary)}.PLm6rG_bannerDismiss{color:inherit;margin-left:10px;text-decoration:underline}.PLm6rG_empty{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:180px;padding:24px;display:flex}.PLm6rG_emptyTitle{color:var(--agsc-fg);font-size:14px;font-weight:600}.PLm6rG_emptyHint{max-width:420px;color:var(--agsc-fg-secondary);font-size:12px;line-height:20px}.PLm6rG_group{flex-direction:column;gap:8px;display:flex}.PLm6rG_groupHead{text-align:left;cursor:pointer;background:0 0;border:none;align-items:baseline;gap:8px;width:100%;min-width:0;padding:0;font-family:inherit;display:flex}.PLm6rG_chevron{color:var(--agsc-fg-dimmed);flex:none;font-size:10px}.PLm6rG_groupAttention{color:var(--agsc-warn);flex:none;font-size:11px}.PLm6rG_showMore{align-self:flex-start}.PLm6rG_groupName{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;overflow:hidden}.PLm6rG_groupCount{color:var(--agsc-fg-secondary);background:var(--dsw-alias-bg-layer-2);border-radius:999px;flex:none;padding:0 8px;font-size:11px;line-height:18px}.PLm6rG_grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;display:grid}.PLm6rG_card{border-radius:var(--agsc-radius-card);border:1px solid var(--agsc-border-strong);background:var(--agsc-bg-raised);flex-direction:column;gap:6px;min-width:0;padding:10px 12px;display:flex}.PLm6rG_card:hover{border-color:var(--dsw-alias-label-dimmed);background:var(--dsw-alias-interactive-bg-hover)}.PLm6rG_cardOpen{border-radius:var(--agsc-radius-control);width:100%;min-width:0;color:inherit;font:inherit;text-align:left;cursor:pointer;background:0 0;border:0;flex-direction:column;gap:6px;padding:0;display:flex}.PLm6rG_cardOpen:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:2px}.PLm6rG_cardHead{justify-content:space-between;align-items:center;gap:8px;min-width:0;display:flex}.PLm6rG_agent{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--agsc-fg);align-items:center;gap:5px;font-size:12px;font-weight:600;display:inline-flex;overflow:hidden}.PLm6rG_glyph{color:var(--agsc-accent);flex:none}.PLm6rG_statusPill{max-width:100%}.PLm6rG_attention{color:var(--agsc-warn);font-size:11px}.PLm6rG_attention[data-kind=gap]{color:var(--agsc-err)}.PLm6rG_cardTitle{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;overflow:hidden}.PLm6rG_cardId{max-width:100%;font-size:11px;font-family:var(--agsc-font-mono);color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;justify-content:flex-start;align-self:flex-start;overflow:hidden}.PLm6rG_copied{color:var(--agsc-ok);margin-left:6px;font-family:inherit}.PLm6rG_cardEvent{color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.PLm6rG_cardTime{color:var(--agsc-fg-secondary);font-size:11px}";
+		const tagId$10 = "@shendeguize/dsh-agent-sidecar/src/client/board/board.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$10, css$10);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$10) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$10;
+				created = true;
+			}
+			tag.textContent = css$10;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
 		}
 		var board_module_css_default = {
-			"agent": "aJ0YNW_agent",
-			"attention": "aJ0YNW_attention",
-			"badge": "aJ0YNW_badge",
-			"banner": "aJ0YNW_banner",
-			"bannerDismiss": "aJ0YNW_bannerDismiss",
-			"card": "aJ0YNW_card",
-			"cardEvent": "aJ0YNW_cardEvent",
-			"cardHead": "aJ0YNW_cardHead",
-			"cardId": "aJ0YNW_cardId",
-			"cardTime": "aJ0YNW_cardTime",
-			"cardTitle": "aJ0YNW_cardTitle",
-			"checkbox": "aJ0YNW_checkbox",
-			"chevron": "aJ0YNW_chevron",
-			"control": "aJ0YNW_control",
-			"copied": "aJ0YNW_copied",
-			"countBadge": "aJ0YNW_countBadge",
-			"countTotal": "aJ0YNW_countTotal",
-			"dot": "aJ0YNW_dot",
-			"empty": "aJ0YNW_empty",
-			"emptyHint": "aJ0YNW_emptyHint",
-			"emptyTitle": "aJ0YNW_emptyTitle",
-			"glyph": "aJ0YNW_glyph",
-			"grid": "aJ0YNW_grid",
-			"group": "aJ0YNW_group",
-			"groupAttention": "aJ0YNW_groupAttention",
-			"groupCount": "aJ0YNW_groupCount",
-			"groupHead": "aJ0YNW_groupHead",
-			"groupName": "aJ0YNW_groupName",
-			"refresh": "aJ0YNW_refresh",
-			"root": "aJ0YNW_root",
-			"select": "aJ0YNW_select",
-			"showMore": "aJ0YNW_showMore",
-			"spacer": "aJ0YNW_spacer",
-			"title": "aJ0YNW_title",
-			"topbar": "aJ0YNW_topbar"
+			"agent": "PLm6rG_agent",
+			"attention": "PLm6rG_attention",
+			"banner": "PLm6rG_banner",
+			"bannerDismiss": "PLm6rG_bannerDismiss",
+			"card": "PLm6rG_card",
+			"cardEvent": "PLm6rG_cardEvent",
+			"cardHead": "PLm6rG_cardHead",
+			"cardId": "PLm6rG_cardId",
+			"cardOpen": "PLm6rG_cardOpen",
+			"cardTime": "PLm6rG_cardTime",
+			"cardTitle": "PLm6rG_cardTitle",
+			"checkbox": "PLm6rG_checkbox",
+			"chevron": "PLm6rG_chevron",
+			"control": "PLm6rG_control",
+			"copied": "PLm6rG_copied",
+			"countBadge": "PLm6rG_countBadge",
+			"countTotal": "PLm6rG_countTotal",
+			"dot": "PLm6rG_dot",
+			"empty": "PLm6rG_empty",
+			"emptyHint": "PLm6rG_emptyHint",
+			"emptyTitle": "PLm6rG_emptyTitle",
+			"glyph": "PLm6rG_glyph",
+			"grid": "PLm6rG_grid",
+			"group": "PLm6rG_group",
+			"groupAttention": "PLm6rG_groupAttention",
+			"groupCount": "PLm6rG_groupCount",
+			"groupHead": "PLm6rG_groupHead",
+			"groupName": "PLm6rG_groupName",
+			"root": "PLm6rG_root",
+			"select": "PLm6rG_select",
+			"showMore": "PLm6rG_showMore",
+			"spacer": "PLm6rG_spacer",
+			"statusPill": "PLm6rG_statusPill",
+			"title": "PLm6rG_title",
+			"topbar": "PLm6rG_topbar"
 		};
 		//#endregion
 		//#region src/client/board/Board.tsx
@@ -2721,59 +2735,87 @@ window.__ModuleLoader__.load({
 			48,
 			168
 		];
+		function sessionDotState$1(status) {
+			if (status === "working") return "ongoing";
+			if (status === "waiting") return "warning";
+			return null;
+		}
 		function SessionCard(props) {
 			const { card, onSelect } = props;
 			const [copied, setCopied] = (0, react.useState)(false);
-			const onCopyId = (ev) => {
-				ev.stopPropagation();
+			const copyTimerRef = (0, react.useRef)(null);
+			const copyAliveRef = (0, react.useRef)(true);
+			const dotState = sessionDotState$1(card.badge.status);
+			(0, react.useEffect)(() => {
+				copyAliveRef.current = true;
+				return () => {
+					copyAliveRef.current = false;
+					if (copyTimerRef.current !== null) {
+						clearTimeout(copyTimerRef.current);
+						copyTimerRef.current = null;
+					}
+				};
+			}, []);
+			const onCopyId = () => {
 				const clipboard = typeof navigator === "undefined" ? void 0 : navigator.clipboard;
 				if (clipboard === void 0) return;
 				clipboard.writeText(card.sessionId).then(() => {
+					if (!copyAliveRef.current) return;
+					if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
 					setCopied(true);
-					setTimeout(() => {
+					copyTimerRef.current = setTimeout(() => {
+						copyTimerRef.current = null;
 						setCopied(false);
 					}, 2e3);
 				}, () => {});
 			};
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
-				type: "button",
-				className: board_module_css_default["card"],
-				onClick: () => onSelect(card.sessionId),
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("article", {
+				...surfaceProps("board-card", board_module_css_default["card"]),
 				"data-testid": "agent-sidecar-card",
 				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: board_module_css_default["cardHead"],
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+						type: "button",
+						className: board_module_css_default["cardOpen"],
+						onClick: () => onSelect(card.sessionId),
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-							className: board_module_css_default["agent"],
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-								className: board_module_css_default["glyph"],
-								"aria-hidden": true,
-								children: card.glyph
-							}), card.agent]
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-							className: board_module_css_default["badge"],
-							"data-tone": card.badge.tone,
-							title: card.hoverTitle,
-							children: [
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: board_module_css_default["dot"],
-									"data-tone": card.badge.tone
-								}),
-								card.badge.label,
-								card.badge.attention !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: board_module_css_default["attention"],
-									"data-kind": card.badge.attention,
-									children: card.badge.attentionLabel
+							className: board_module_css_default["cardHead"],
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+								className: board_module_css_default["agent"],
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: board_module_css_default["glyph"],
+									"aria-hidden": true,
+									children: card.glyph
+								}), card.agent]
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								title: card.hoverTitle,
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
+									className: board_module_css_default["statusPill"],
+									children: [
+										dotState === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+											className: board_module_css_default["dot"],
+											"data-tone": card.badge.tone
+										}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+											state: dotState,
+											size: 8
+										}),
+										card.badge.label,
+										card.badge.attention !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+											className: board_module_css_default["attention"],
+											"data-kind": card.badge.attention,
+											children: card.badge.attentionLabel
+										})
+									]
 								})
-							]
+							})]
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: board_module_css_default["cardTitle"],
+							title: card.title,
+							children: card.title.trim() === "" ? BOARD_STRINGS.card.untitled : card.title
 						})]
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: board_module_css_default["cardTitle"],
-						title: card.title,
-						children: card.title.trim() === "" ? BOARD_STRINGS.card.untitled : card.title
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+						size: "sm",
+						variant: "ghost",
 						className: board_module_css_default["cardId"],
 						title: `${card.sessionId}\n${BOARD_STRINGS.card.copyId}`,
 						onClick: onCopyId,
@@ -2839,16 +2881,18 @@ window.__ModuleLoader__.load({
 							onSelect
 						}, `${card.agent}:${card.sessionId}`))
 					}),
-					hiddenCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
+					hiddenCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+						size: "sm",
+						variant: "outline",
 						className: board_module_css_default["showMore"],
 						onClick: () => {
 							setExpanded(true);
 						},
 						children: formatTemplate$2(BOARD_STRINGS.group.showAll, { n: group.cards.length })
 					}),
-					expanded && group.cards.length > 20 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
+					expanded && group.cards.length > 20 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+						size: "sm",
+						variant: "outline",
 						className: board_module_css_default["showMore"],
 						onClick: () => {
 							setExpanded(false);
@@ -2894,60 +2938,62 @@ window.__ModuleLoader__.load({
 				props.onFiltersChange(next);
 			};
 			const statusBadgeTitle = (status) => props.filters.statusFilter === status ? BOARD_STRINGS.topbar.clearStatusFilterTitle : formatTemplate$2(BOARD_STRINGS.topbar.filterByStatusTitle, { label: BOARD_STRINGS.status[status] });
+			const daemonDotState = props.daemonState === "failed" ? "error" : props.daemonState === "defer" || props.daemonState === "backoff" ? "warning" : props.daemonState === "adopted" || props.daemonState === "hosted" ? "done" : "ongoing";
+			const streamDotState = props.streamHealth === "ok" ? "done" : props.streamHealth === "degraded" ? "warning" : "ongoing";
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: board_module_css_default["root"],
+				...surfaceProps("board", board_module_css_default["root"]),
 				"data-testid": "agent-sidecar-board",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
-						className: board_module_css_default["topbar"],
+						...surfaceProps("board-toolbar", board_module_css_default["topbar"]),
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 								className: board_module_css_default["title"],
 								children: BOARD_STRINGS.topbar.title
 							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-								className: board_module_css_default["badge"],
-								"data-tone": vm.daemonBadge.tone,
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 								title: props.daemonDetail,
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: board_module_css_default["dot"],
-									"data-tone": vm.daemonBadge.tone
-								}), vm.daemonBadge.label]
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Pill, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+									state: daemonDotState,
+									size: 8
+								}), vm.daemonBadge.label] })
 							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-								className: board_module_css_default["badge"],
-								"data-tone": vm.streamTone,
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: board_module_css_default["dot"],
-									"data-tone": vm.streamTone
-								}), vm.streamLabel]
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
-								type: "button",
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Pill, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+								state: streamDotState,
+								size: 8
+							}), vm.streamLabel] }),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 								className: board_module_css_default["countBadge"],
+								active: props.filters.statusFilter === "working",
 								"aria-pressed": props.filters.statusFilter === "working",
 								title: statusBadgeTitle("working"),
 								onClick: () => {
 									toggleStatusFilter("working");
 								},
 								"data-testid": "agent-sidecar-count-working",
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								children: [vm.workingCount > 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+									state: "ongoing",
+									size: 8
+								}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									className: board_module_css_default["dot"],
-									"data-tone": vm.workingCount > 0 ? "success" : "neutral"
+									"data-tone": "neutral"
 								}), formatTemplate$2(BOARD_STRINGS.topbar.countWorking, { n: vm.workingCount })]
 							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
-								type: "button",
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 								className: board_module_css_default["countBadge"],
+								active: props.filters.statusFilter === "waiting",
 								"aria-pressed": props.filters.statusFilter === "waiting",
 								title: statusBadgeTitle("waiting"),
 								onClick: () => {
 									toggleStatusFilter("waiting");
 								},
 								"data-testid": "agent-sidecar-count-waiting",
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								children: [vm.waitingCount > 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+									state: "warning",
+									size: 8
+								}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									className: board_module_css_default["dot"],
-									"data-tone": vm.waitingCount > 0 ? "warn" : "neutral"
+									"data-tone": "neutral"
 								}), formatTemplate$2(BOARD_STRINGS.topbar.countWaiting, { n: vm.waitingCount })]
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -2983,9 +3029,9 @@ window.__ModuleLoader__.load({
 									})
 								}), BOARD_STRINGS.topbar.showDead]
 							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-								type: "button",
-								className: board_module_css_default["refresh"],
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+								size: "sm",
+								variant: "toolbar",
 								title: BOARD_STRINGS.topbar.refreshTitle,
 								disabled: refreshing,
 								onClick: onRefreshClick,
@@ -2997,8 +3043,9 @@ window.__ModuleLoader__.load({
 						className: board_module_css_default["banner"],
 						"data-tone": "warn",
 						role: "status",
-						children: [BOARD_STRINGS.topbar.refreshFailed, /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
+						children: [BOARD_STRINGS.topbar.refreshFailed, /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							size: "sm",
+							variant: "ghost",
 							className: board_module_css_default["bannerDismiss"],
 							onClick: () => {
 								setRefreshFailed(false);
@@ -3030,48 +3077,245 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region \0dsh-css:/Users/jingyu/Workspace/Projects/agent_sidecar/plugin/src/client/board/project-view.module.css.mjs
-		const css$7 = ".i_F0aW_root{box-sizing:border-box;height:100%;min-height:320px;color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-base,transparent);flex-direction:column;gap:12px;padding:16px 20px;display:flex;overflow-y:auto}.i_F0aW_topbar{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.i_F0aW_title{color:var(--dsw-alias-label-primary,#1f2328);font-size:15px;font-weight:650}.i_F0aW_summary{color:var(--dsw-alias-label-secondary,#57606a);font-size:12px}.i_F0aW_loadingChip{color:var(--dsw-alias-label-secondary,#57606a);background:var(--dsw-alias-bg-layer-2,#0000000a);border-radius:999px;padding:0 8px;font-size:11px;line-height:18px}.i_F0aW_banner{border:1px solid var(--dsw-alias-border-l1,#00000014);border-radius:8px;padding:6px 10px;font-size:12px;line-height:18px}.i_F0aW_banner[data-tone=danger]{color:var(--dsw-alias-state-error-primary,#cf222e);background:var(--dsw-alias-state-error-secondary,#cf222e14);border-color:var(--dsw-alias-state-error-secondary,#cf222e3d)}.i_F0aW_empty{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:160px;padding:24px;display:flex}.i_F0aW_emptyTitle{color:var(--dsw-alias-label-primary,#1f2328);font-size:14px;font-weight:600}.i_F0aW_emptyHint{max-width:420px;color:var(--dsw-alias-label-secondary,#57606a);font-size:12px;line-height:20px}.i_F0aW_group{border:1px solid var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-bg-layer-1,#00000005);border-radius:10px;flex-direction:column;gap:8px;padding:10px 12px;display:flex}.i_F0aW_groupHead{flex-wrap:wrap;align-items:baseline;gap:8px;min-width:0;display:flex}.i_F0aW_groupName{color:var(--dsw-alias-label-primary,#1f2328);text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;overflow:hidden}.i_F0aW_agentBadges{flex-wrap:wrap;align-items:center;gap:4px;display:inline-flex}.i_F0aW_agentBadge{border:1px solid var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-bg-layer-2,#0000000a);color:var(--dsw-alias-label-secondary,#57606a);white-space:nowrap;border-radius:999px;align-items:center;gap:4px;padding:0 7px;font-size:11px;line-height:18px;display:inline-flex}.i_F0aW_crossBadge{color:var(--dsw-alias-static-white,#fff);background:var(--dsw-alias-brand-primary,#4d6bfe);white-space:nowrap;border-radius:999px;padding:0 7px;font-size:11px;line-height:18px}.i_F0aW_spacer{flex:1}.i_F0aW_groupMeta{color:var(--dsw-alias-label-tertiary,#6e7781);white-space:nowrap;flex:none;font-size:11px}.i_F0aW_lanes{flex-direction:column;gap:6px;display:flex}.i_F0aW_lane{flex-direction:column;gap:4px;display:flex}.i_F0aW_laneHead{color:var(--dsw-alias-label-primary,#1f2328);align-items:center;gap:5px;font-size:12px;font-weight:600;display:inline-flex}.i_F0aW_glyph{color:var(--dsw-alias-brand-primary,#4d6bfe);flex:none}.i_F0aW_laneSessions{flex-direction:column;gap:4px;display:flex}.i_F0aW_showMore{color:var(--dsw-alias-label-secondary,#57606a);border:1px dashed var(--dsw-alias-border-l2,#0000001f);cursor:pointer;background:0 0;border-radius:6px;align-self:flex-start;padding:2px 10px;font-family:inherit;font-size:12px}.i_F0aW_showMore:hover{color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.i_F0aW_session{text-align:left;border:1px solid var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-bg-base,transparent);min-width:0;color:var(--dsw-alias-label-primary,#1f2328);cursor:pointer;border-radius:7px;align-items:center;gap:8px;padding:5px 8px;font-family:inherit;font-size:12px;display:flex}.i_F0aW_session:hover{border-color:var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.i_F0aW_session:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:1px}.i_F0aW_badge{border:1px solid var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-bg-layer-1,#00000008);color:var(--dsw-alias-label-secondary,#57606a);white-space:nowrap;border-radius:999px;flex:none;align-items:center;gap:5px;padding:0 7px;font-size:11px;line-height:18px;display:inline-flex}.i_F0aW_dot{background:var(--dsw-alias-label-tertiary,#6e7781);border-radius:50%;flex:none;width:7px;height:7px}.i_F0aW_dot[data-tone=success]{background:var(--dsw-alias-state-success-primary,#1a7f37)}.i_F0aW_dot[data-tone=warn]{background:var(--dsw-alias-state-warn-primary,#9a6700)}.i_F0aW_dot[data-tone=danger]{background:var(--dsw-alias-state-error-primary,#cf222e)}.i_F0aW_dot[data-tone=neutral]{background:var(--dsw-alias-label-tertiary,#6e7781)}.i_F0aW_dot[data-tone=muted]{background:var(--dsw-alias-label-dimmed,#8c959f)}.i_F0aW_attention{color:var(--dsw-alias-state-warn-primary,#9a6700);font-size:11px}.i_F0aW_attention[data-kind=gap]{color:var(--dsw-alias-state-error-primary,#cf222e)}.i_F0aW_sessionTitle{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.i_F0aW_liveChip{color:var(--dsw-alias-state-success-primary,#1a7f37);border:1px solid var(--dsw-alias-state-success-primary,#1a7f3766);border-radius:999px;flex:none;padding:0 6px;font-size:10px;line-height:16px}.i_F0aW_sessionId{color:var(--dsw-alias-label-tertiary,#6e7781);flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}.i_F0aW_sessionTime{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary,#6e7781));flex:none;margin-left:auto;font-size:11px}";
-		const tagId$7 = "@shendeguize/dsh-agent-sidecar/project-view.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$7) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
-			tag.dataset.pluginCss = tagId$7;
-			tag.textContent = css$7;
-			document.head.appendChild(tag);
+		//#region src/client/board/project-view-logic.ts
+		/**
+		* Pure view-model logic for the cross-agent project correlation view
+		* (design §4.e.2 / §5.1 M3, T5.5). No React, no I/O, no data-layer
+		* imports — plain values in, plain values out, unit-testable in a bare
+		* node environment (same discipline as `logic.ts`).
+		*
+		* Wire contract (hand-written mirror, per module-ownership rules): the
+		* input types below mirror the host's `GET <prefix>/projects` response —
+		* `{groups: ProjectGroup[]}` where `ProjectGroup` is fusion.ts
+		* `getProjectGroups()` output: `project` (normalized path, '' when
+		* unknown), `agents` (distinct, sorted), `sessions` (UnifiedSession[],
+		* camelCase, **epoch milliseconds** `lastActivityAt`, most recent first)
+		* and the group-level `lastActivityAt`. Only the fields this view renders
+		* are mirrored; extra wire fields are structurally ignored.
+		*
+		* Reuse contract (T2.2): tone/glyph/relative-time/label tools are imported
+		* from `./logic.ts`, so both board views speak the same visual language.
+		* Project-only copy is exposed through the dynamic
+		* {@link PROJECT_VIEW_STRINGS} locale facade.
+		*
+		* @module
+		*/
+		const PROJECT_VIEW_STRINGS = createLocaleView({
+			title: "project.title",
+			summary: "project.summary",
+			crossAgent: "project.crossAgent",
+			sessionCount: "project.sessionCount",
+			lastActive: "project.lastActive",
+			liveChip: "project.liveChip",
+			untitled: "project.untitled",
+			showAllSessions: "project.showAllSessions",
+			showLessSessions: "project.showLessSessions",
+			empty: {
+				title: "project.empty.title",
+				hint: "project.empty.hint"
+			},
+			loading: "project.loading",
+			errorTitle: "project.errorTitle"
+		});
+		const KEY_SEP$1 = "\0";
+		/**
+		* Group-key normalization, aligned with fusion's correlation key: trim,
+		* strip trailing slashes (keeping root '/'), whitespace-only → '' (the
+		* unknown bucket). The host already normalizes; this re-run makes the
+		* view robust to hand-fed or merged inputs.
+		*/
+		function normalizeProjectKey(project) {
+			const trimmed = project.trim();
+			if (trimmed === "") return "";
+			if (trimmed.length > 1 && trimmed.endsWith("/")) {
+				const stripped = trimmed.replace(/\/+$/, "");
+				return stripped === "" ? "/" : stripped;
+			}
+			return trimmed;
+		}
+		/**
+		* Distinct participating agents of a session list, sorted by name. This
+		* is derived from the sessions themselves (not the wire `agents` field)
+		* so the badge row can never disagree with the lanes actually rendered —
+		* notably after two wire groups merge under one normalized key.
+		*/
+		function deriveAgentBadges(sessions) {
+			const names = /* @__PURE__ */ new Set();
+			for (const session of sessions) names.add(session.agent);
+			return [...names].sort().map((agent) => ({
+				agent,
+				glyph: agentGlyph$1(agent)
+			}));
+		}
+		/**
+		* Session ordering inside a lane, mirroring the board's card order so
+		* both views read the same way: status rank (working first, dead last),
+		* then recency, then id as the deterministic tiebreak.
+		*/
+		function compareProjectSessions(a, b) {
+			const rankDelta = statusRank(normalizeStatus(a.status)) - statusRank(normalizeStatus(b.status));
+			if (rankDelta !== 0) return rankDelta;
+			if (a.lastActivityAt !== b.lastActivityAt) return b.lastActivityAt - a.lastActivityAt;
+			return a.sessionId.localeCompare(b.sessionId);
+		}
+		function deriveSession(session, nowMs) {
+			const live = session.live === true;
+			const gap = session.gap === true;
+			return {
+				agent: session.agent,
+				sessionId: session.sessionId,
+				status: session.status,
+				title: session.title,
+				lastActivityAt: session.lastActivityAt,
+				live,
+				gap,
+				badge: deriveBadge(session.status, gap),
+				glyph: agentGlyph$1(session.agent),
+				shortId: abbreviateSessionId(session.sessionId),
+				relativeTime: formatRelativeTime$1(session.lastActivityAt, nowMs),
+				displayTitle: session.title.trim() === "" ? PROJECT_VIEW_STRINGS.untitled : session.title
+			};
+		}
+		/**
+		* Split a group's sessions into per-agent lanes. Lanes are sorted by
+		* agent name (matching the header badge order); sessions inside a lane
+		* follow {@link compareProjectSessions}.
+		*/
+		function buildAgentLanes(sessions, nowMs) {
+			const byAgent = /* @__PURE__ */ new Map();
+			for (const session of sessions) {
+				const lane = byAgent.get(session.agent);
+				if (lane === void 0) byAgent.set(session.agent, [session]);
+				else lane.push(session);
+			}
+			return [...byAgent.keys()].sort().map((agent) => {
+				const members = byAgent.get(agent) ?? [];
+				members.sort(compareProjectSessions);
+				return {
+					agent,
+					glyph: agentGlyph$1(agent),
+					sessions: members.map((session) => deriveSession(session, nowMs))
+				};
+			});
+		}
+		/**
+		* normalize/merge → derive → sort; the one call project-view.tsx renders
+		* from.
+		*
+		* Normalization: groups collapsing onto the same normalized key are
+		* merged; duplicate sessions (same agent + sessionId) within a merged
+		* group keep the freshest copy. Group order is `lastActivityAt`
+		* descending (recomputed from member sessions, so a stale wire value
+		* cannot misplace a group), with the unknown-project bucket ('') always
+		* last — same rule as the board.
+		*/
+		function buildProjectViewModel(input) {
+			const { groups, nowMs } = input;
+			const buckets = /* @__PURE__ */ new Map();
+			for (const group of groups) {
+				const key = normalizeProjectKey(group.project);
+				let bucket = buckets.get(key);
+				if (bucket === void 0) {
+					bucket = {
+						sessions: /* @__PURE__ */ new Map(),
+						wireLastActivityAt: Number.NEGATIVE_INFINITY
+					};
+					buckets.set(key, bucket);
+				}
+				if (Number.isFinite(group.lastActivityAt)) bucket.wireLastActivityAt = Math.max(bucket.wireLastActivityAt, group.lastActivityAt);
+				for (const session of group.sessions) {
+					const id = `${session.agent}${KEY_SEP$1}${session.sessionId}`;
+					const existing = bucket.sessions.get(id);
+					if (existing === void 0 || session.lastActivityAt > existing.lastActivityAt) bucket.sessions.set(id, session);
+				}
+			}
+			const derived = [];
+			let sessionCount = 0;
+			for (const [key, bucket] of buckets) {
+				const sessions = [...bucket.sessions.values()];
+				sessionCount += sessions.length;
+				const memberMax = sessions.reduce((max, s) => Number.isFinite(s.lastActivityAt) ? Math.max(max, s.lastActivityAt) : max, Number.NEGATIVE_INFINITY);
+				const lastActivityAt = Math.max(memberMax, bucket.wireLastActivityAt);
+				const agentBadges = deriveAgentBadges(sessions);
+				derived.push({
+					key,
+					label: projectDisplayName(key),
+					fullPath: key,
+					agentBadges,
+					crossAgentLabel: agentBadges.length > 1 ? formatTemplate$2(PROJECT_VIEW_STRINGS.crossAgent, { n: agentBadges.length }) : null,
+					sessionCount: sessions.length,
+					sessionCountLabel: formatTemplate$2(PROJECT_VIEW_STRINGS.sessionCount, { n: sessions.length }),
+					lastActivityAt: Number.isFinite(lastActivityAt) ? lastActivityAt : 0,
+					lastActiveLabel: Number.isFinite(lastActivityAt) ? formatTemplate$2(PROJECT_VIEW_STRINGS.lastActive, { time: formatRelativeTime$1(lastActivityAt, nowMs) }) : "",
+					lanes: buildAgentLanes(sessions, nowMs)
+				});
+			}
+			derived.sort((a, b) => {
+				if (a.key === "") return b.key === "" ? 0 : 1;
+				if (b.key === "") return -1;
+				return b.lastActivityAt - a.lastActivityAt || a.key.localeCompare(b.key);
+			});
+			return {
+				groups: derived,
+				emptyState: derived.length === 0 ? { ...PROJECT_VIEW_STRINGS.empty } : null,
+				projectCount: derived.length,
+				sessionCount,
+				summaryLabel: formatTemplate$2(PROJECT_VIEW_STRINGS.summary, {
+					projects: derived.length,
+					sessions: sessionCount
+				})
+			};
+		}
+		//#endregion
+		//#region \0dsh-css:src/client/board/project-view.module.css.mjs
+		const css$9 = ".Twjdya_root{box-sizing:border-box;height:100%;min-height:320px;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:12px;padding:16px 20px;display:flex;overflow-y:auto}.Twjdya_topbar{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.Twjdya_title{color:var(--agsc-fg);font-size:15px;font-weight:650}.Twjdya_summary{color:var(--agsc-fg-secondary);font-size:12px}.Twjdya_banner{border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);padding:6px 10px;font-size:12px;line-height:18px}.Twjdya_banner[data-tone=danger]{color:var(--agsc-err);background:var(--dsw-alias-state-error-secondary);border-color:var(--dsw-alias-state-error-secondary)}.Twjdya_empty{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:160px;padding:24px;display:flex}.Twjdya_emptyTitle{color:var(--agsc-fg);font-size:14px;font-weight:600}.Twjdya_emptyHint{max-width:420px;color:var(--agsc-fg-secondary);font-size:12px;line-height:20px}.Twjdya_group{border-radius:var(--agsc-radius-card);border:1px solid var(--agsc-border-strong);background:var(--agsc-bg-raised);flex-direction:column;gap:8px;padding:10px 12px;display:flex}.Twjdya_groupHead{flex-wrap:wrap;align-items:baseline;gap:8px;min-width:0;display:flex}.Twjdya_groupName{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;overflow:hidden}.Twjdya_agentBadges{flex-wrap:wrap;align-items:center;gap:4px;display:inline-flex}.Twjdya_agentBadge{border:1px solid var(--agsc-border);background:var(--dsw-alias-bg-layer-2);color:var(--agsc-fg-secondary);white-space:nowrap;border-radius:999px;align-items:center;gap:4px;padding:0 7px;font-size:11px;line-height:18px;display:inline-flex}.Twjdya_crossBadge{color:var(--dsw-alias-label-primary-foreground);background:var(--agsc-accent);white-space:nowrap;border-radius:999px;padding:0 7px;font-size:11px;line-height:18px}.Twjdya_spacer{flex:1}.Twjdya_groupMeta{color:var(--agsc-fg-dimmed);white-space:nowrap;flex:none;font-size:11px}.Twjdya_lanes{flex-direction:column;gap:6px;display:flex}.Twjdya_lane{flex-direction:column;gap:4px;display:flex}.Twjdya_laneHead{color:var(--agsc-fg);align-items:center;gap:5px;font-size:12px;font-weight:600;display:inline-flex}.Twjdya_glyph{color:var(--agsc-accent);flex:none}.Twjdya_laneSessions{flex-direction:column;gap:4px;display:flex}.Twjdya_showMore{align-self:flex-start}.Twjdya_session{text-align:left;border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);background:var(--dsw-alias-bg-base);min-width:0;color:var(--agsc-fg);cursor:pointer;align-items:center;gap:8px;padding:5px 8px;font-family:inherit;font-size:12px;display:flex}.Twjdya_session:hover{border-color:var(--agsc-border-strong);background:var(--dsw-alias-interactive-bg-hover)}.Twjdya_session:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:1px}.Twjdya_statusPill{flex:none}.Twjdya_dot{background:var(--dsw-alias-label-tertiary);border-radius:50%;flex:none;width:7px;height:7px}.Twjdya_dot[data-tone=neutral]{background:var(--dsw-alias-label-tertiary)}.Twjdya_dot[data-tone=muted]{background:var(--agsc-fg-dimmed)}.Twjdya_attention{color:var(--agsc-warn);font-size:11px}.Twjdya_attention[data-kind=gap]{color:var(--agsc-err)}.Twjdya_sessionTitle{text-overflow:ellipsis;white-space:nowrap;min-width:0;overflow:hidden}.Twjdya_liveChip{color:var(--agsc-ok);flex:none}.Twjdya_sessionId{font-size:11px;font-family:var(--agsc-font-mono);color:var(--agsc-fg-dimmed);flex:none}.Twjdya_sessionTime{color:var(--agsc-fg-dimmed);flex:none;margin-left:auto;font-size:11px}";
+		const tagId$9 = "@shendeguize/dsh-agent-sidecar/src/client/board/project-view.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$9, css$9);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$9) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$9;
+				created = true;
+			}
+			tag.textContent = css$9;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
 		}
 		var project_view_module_css_default = {
-			"agentBadge": "i_F0aW_agentBadge",
-			"agentBadges": "i_F0aW_agentBadges",
-			"attention": "i_F0aW_attention",
-			"badge": "i_F0aW_badge",
-			"banner": "i_F0aW_banner",
-			"crossBadge": "i_F0aW_crossBadge",
-			"dot": "i_F0aW_dot",
-			"empty": "i_F0aW_empty",
-			"emptyHint": "i_F0aW_emptyHint",
-			"emptyTitle": "i_F0aW_emptyTitle",
-			"glyph": "i_F0aW_glyph",
-			"group": "i_F0aW_group",
-			"groupHead": "i_F0aW_groupHead",
-			"groupMeta": "i_F0aW_groupMeta",
-			"groupName": "i_F0aW_groupName",
-			"lane": "i_F0aW_lane",
-			"laneHead": "i_F0aW_laneHead",
-			"laneSessions": "i_F0aW_laneSessions",
-			"lanes": "i_F0aW_lanes",
-			"liveChip": "i_F0aW_liveChip",
-			"loadingChip": "i_F0aW_loadingChip",
-			"root": "i_F0aW_root",
-			"session": "i_F0aW_session",
-			"sessionId": "i_F0aW_sessionId",
-			"sessionTime": "i_F0aW_sessionTime",
-			"sessionTitle": "i_F0aW_sessionTitle",
-			"showMore": "i_F0aW_showMore",
-			"spacer": "i_F0aW_spacer",
-			"summary": "i_F0aW_summary",
-			"title": "i_F0aW_title",
-			"topbar": "i_F0aW_topbar"
+			"agentBadge": "Twjdya_agentBadge",
+			"agentBadges": "Twjdya_agentBadges",
+			"attention": "Twjdya_attention",
+			"banner": "Twjdya_banner",
+			"crossBadge": "Twjdya_crossBadge",
+			"dot": "Twjdya_dot",
+			"empty": "Twjdya_empty",
+			"emptyHint": "Twjdya_emptyHint",
+			"emptyTitle": "Twjdya_emptyTitle",
+			"glyph": "Twjdya_glyph",
+			"group": "Twjdya_group",
+			"groupHead": "Twjdya_groupHead",
+			"groupMeta": "Twjdya_groupMeta",
+			"groupName": "Twjdya_groupName",
+			"lane": "Twjdya_lane",
+			"laneHead": "Twjdya_laneHead",
+			"laneSessions": "Twjdya_laneSessions",
+			"lanes": "Twjdya_lanes",
+			"liveChip": "Twjdya_liveChip",
+			"root": "Twjdya_root",
+			"session": "Twjdya_session",
+			"sessionId": "Twjdya_sessionId",
+			"sessionTime": "Twjdya_sessionTime",
+			"sessionTitle": "Twjdya_sessionTitle",
+			"showMore": "Twjdya_showMore",
+			"spacer": "Twjdya_spacer",
+			"statusPill": "Twjdya_statusPill",
+			"summary": "Twjdya_summary",
+			"title": "Twjdya_title",
+			"topbar": "Twjdya_topbar"
 		};
 		//#endregion
 		//#region src/client/board/project-view.tsx
@@ -3090,21 +3334,29 @@ window.__ModuleLoader__.load({
 		* `loading` shows as a quiet header chip — honest degradation without
 		* blanking data the user already has.
 		*/
+		function sessionDotState(status) {
+			if (status === "working") return "ongoing";
+			if (status === "waiting") return "warning";
+			return null;
+		}
 		function SessionRow$1(props) {
 			const { session, onSelect } = props;
+			const dotState = sessionDotState(session.badge.status);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 				type: "button",
 				className: project_view_module_css_default["session"],
 				onClick: () => onSelect(session.sessionId),
 				"data-testid": "agent-sidecar-project-session",
 				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-						className: project_view_module_css_default["badge"],
-						"data-tone": session.badge.tone,
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
+						className: project_view_module_css_default["statusPill"],
 						children: [
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							dotState === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 								className: project_view_module_css_default["dot"],
 								"data-tone": session.badge.tone
+							}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+								state: dotState,
+								size: 8
 							}),
 							session.badge.label,
 							session.badge.attention !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -3119,7 +3371,7 @@ window.__ModuleLoader__.load({
 						title: session.title,
 						children: session.displayTitle
 					}),
-					session.live && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					session.live && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 						className: project_view_module_css_default["liveChip"],
 						children: PROJECT_VIEW_STRINGS.liveChip
 					}),
@@ -3157,16 +3409,18 @@ window.__ModuleLoader__.load({
 							onSelect
 						}, `${session.agent}:${session.sessionId}`))
 					}),
-					hiddenCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
+					hiddenCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+						size: "sm",
+						variant: "outline",
 						className: project_view_module_css_default["showMore"],
 						onClick: () => {
 							setExpanded(true);
 						},
 						children: formatTemplate$2(PROJECT_VIEW_STRINGS.showAllSessions, { n: lane.sessions.length })
 					}),
-					expanded && lane.sessions.length > 10 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
+					expanded && lane.sessions.length > 10 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+						size: "sm",
+						variant: "outline",
 						className: project_view_module_css_default["showMore"],
 						onClick: () => {
 							setExpanded(false);
@@ -3232,7 +3486,7 @@ window.__ModuleLoader__.load({
 			});
 			const hasContent = vm.groups.length > 0;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: project_view_module_css_default["root"],
+				...surfaceProps("project-view", project_view_module_css_default["root"]),
 				"data-testid": "agent-sidecar-project-view",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
@@ -3247,9 +3501,8 @@ window.__ModuleLoader__.load({
 								children: vm.summaryLabel
 							}),
 							props.loading && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-								className: project_view_module_css_default["loadingChip"],
 								role: "status",
-								children: PROJECT_VIEW_STRINGS.loading
+								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, { children: PROJECT_VIEW_STRINGS.loading })
 							})
 						]
 					}),
@@ -3301,12 +3554,12 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/client/widget.tsx
-		const DOT_COLORS$1 = {
-			ok: "var(--dsw-alias-state-success-primary, #1a7f37)",
-			degraded: "var(--dsw-alias-state-warn-primary, #9a6700)",
-			off: "var(--dsw-alias-label-dimmed, #8c959f)"
+		const DOT_COLORS = {
+			ok: "var(--agsc-ok)",
+			degraded: "var(--agsc-warn)",
+			off: "var(--agsc-fg-dimmed)"
 		};
-		const rootStyle$1 = {
+		const rootStyle = {
 			display: "inline-flex",
 			alignItems: "center",
 			gap: 4,
@@ -3315,7 +3568,7 @@ window.__ModuleLoader__.load({
 			borderRadius: 6,
 			background: "transparent",
 			font: "inherit",
-			color: "var(--dsw-alias-label-secondary, #57606a)"
+			color: "var(--agsc-fg-secondary)"
 		};
 		const countStyle = {
 			fontSize: 11,
@@ -3326,10 +3579,8 @@ window.__ModuleLoader__.load({
 		/**
 		* Connection dot + working-session counter (e.g. `▸2`) for the footer.
 		*
-		* Without a wired `onOpen` the widget renders as an inert status `<span>`
-		* (UX-06): button semantics + pointer cursor on a control that does
-		* nothing would be a lie. The button form returns as soon as the
-		* integration layer supplies the callback.
+		* Without `onOpen` the widget remains an inert status `<span>` so button
+		* semantics are only emitted for an actual control.
 		*/
 		function SidecarWidget(props) {
 			const title = widgetTitle(props.connection, props.workingCount);
@@ -3340,7 +3591,7 @@ window.__ModuleLoader__.load({
 					height: 8,
 					borderRadius: "50%",
 					flex: "none",
-					background: DOT_COLORS$1[props.connection]
+					background: DOT_COLORS[props.connection]
 				}
 			}), props.workingCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 				style: countStyle,
@@ -3348,7 +3599,8 @@ window.__ModuleLoader__.load({
 				children: `▸${props.workingCount}`
 			})] });
 			if (props.onOpen === void 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-				style: rootStyle$1,
+				...surfaceProps("footer-widget"),
+				style: rootStyle,
 				title,
 				"aria-label": title,
 				role: "status",
@@ -3357,9 +3609,10 @@ window.__ModuleLoader__.load({
 				children: body
 			});
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+				...surfaceProps("footer-widget"),
 				type: "button",
 				style: {
-					...rootStyle$1,
+					...rootStyle,
 					cursor: "pointer"
 				},
 				title,
@@ -3371,53 +3624,187 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region \0dsh-css:/Users/jingyu/Workspace/Projects/agent_sidecar/plugin/src/client/settings-card.module.css.mjs
-		const css$6 = ".TiEuyW_card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}.TiEuyW_card:hover{border-color:var(--dsw-alias-label-dimmed)}.TiEuyW_cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}.TiEuyW_header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}.TiEuyW_header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}.TiEuyW_headText{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}.TiEuyW_name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}.TiEuyW_description{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}.TiEuyW_pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.TiEuyW_chevron{border-right:1.5px solid var(--dsw-alias-label-tertiary);border-bottom:1.5px solid var(--dsw-alias-label-tertiary);flex:none;width:8px;height:8px;transition:transform .16s;transform:rotate(45deg)translateY(-2px)}.TiEuyW_chevronOpen{transform:rotate(225deg)translateY(-2px)}.TiEuyW_body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}.TiEuyW_readOnly{color:var(--dsw-alias-label-tertiary);margin:12px 0 0;font-size:12px;line-height:1.5}.TiEuyW_section{padding:12px 0 4px}.TiEuyW_section+.TiEuyW_section{border-top:1px solid var(--dsw-alias-border-l2)}.TiEuyW_sectionTitle{color:var(--dsw-alias-label-primary);margin:0 0 4px;font-size:13px;font-weight:600;line-height:1.5}.TiEuyW_field{flex-direction:column;gap:6px;padding:8px 0;display:flex}.TiEuyW_label{color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5}.TiEuyW_hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}.TiEuyW_invalidHint{color:var(--dsw-alias-label-error);margin:0;font-size:12px;line-height:1.5}.TiEuyW_input,.TiEuyW_select{appearance:none;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);max-width:420px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:6px 10px;font-size:13px;line-height:1.5}.TiEuyW_input:focus-visible,.TiEuyW_select:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}.TiEuyW_input::placeholder{color:var(--dsw-alias-label-tertiary)}.TiEuyW_input:disabled,.TiEuyW_select:disabled{opacity:.5;cursor:default}.TiEuyW_inputInvalid{border-color:var(--dsw-alias-label-error)}.TiEuyW_toggleRow{cursor:pointer;align-items:center;gap:10px;display:flex}.TiEuyW_toggleRow input{accent-color:var(--dsw-alias-brand-primary);cursor:pointer;width:16px;height:16px;margin:0}.TiEuyW_toggleRow input:disabled{cursor:default}.TiEuyW_note{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:8px;margin:6px 0 2px;padding:8px 10px;font-size:12px;line-height:1.6}.TiEuyW_statusRow{align-items:center;gap:8px;padding:4px 0;display:flex}.TiEuyW_statusDot{background:var(--dsw-alias-label-tertiary);border-radius:50%;flex:none;width:8px;height:8px}.TiEuyW_statusOk{background:var(--dsw-alias-brand-primary)}.TiEuyW_statusError{background:var(--dsw-alias-label-error)}.TiEuyW_statusText{color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5}.TiEuyW_statusMeta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5}.TiEuyW_retry{appearance:none;border:1px solid var(--dsw-alias-border-l2);font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border-radius:8px;padding:3px 12px;font-size:12px;line-height:1.5}.TiEuyW_retry:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}.TiEuyW_retry:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}.TiEuyW_footer{border-top:1px solid var(--dsw-alias-border-l2);align-items:center;gap:8px;padding:12px 0 4px;display:flex}.TiEuyW_docs{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5;text-decoration:none}.TiEuyW_docs:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}.TiEuyW_failed{text-align:right;min-width:0;color:var(--dsw-alias-label-error);flex:1;margin:0;font-size:12px;line-height:1.5}.TiEuyW_spacer{flex:1}.TiEuyW_discard,.TiEuyW_save{appearance:none;font:inherit;cursor:pointer;border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}.TiEuyW_discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:0 0}.TiEuyW_discard:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}.TiEuyW_save{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}.TiEuyW_discard:disabled,.TiEuyW_save:disabled{opacity:.4;cursor:default}.TiEuyW_discard:focus-visible,.TiEuyW_save:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}";
-		const tagId$6 = "@shendeguize/dsh-agent-sidecar/settings-card.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$6) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
-			tag.dataset.pluginCss = tagId$6;
-			tag.textContent = css$6;
-			document.head.appendChild(tag);
+		//#region \0dsh-css:src/client/settings-card.module.css.mjs
+		const css$8 = ".KApx_W_card{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--agsc-radius-card);background:var(--dsw-alias-bg-layer-3);width:100%;max-width:760px;list-style:none;transition:border-color .16s,background .16s}.KApx_W_card:hover{border-color:var(--dsw-alias-label-dimmed)}.KApx_W_cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}.KApx_W_header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;border-radius:var(--agsc-radius-card);background:0 0;border:0;align-items:center;gap:12px;padding:14px 16px;display:flex}.KApx_W_header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}.KApx_W_headText{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}.KApx_W_name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}.KApx_W_description{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}.KApx_W_pending{white-space:nowrap;flex:none}.KApx_W_chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}.KApx_W_chevronOpen{transform:rotate(180deg)}.KApx_W_body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}.KApx_W_readOnly{color:var(--dsw-alias-label-tertiary);margin:12px 0 0;font-size:12px;line-height:1.5}.KApx_W_section{padding:12px 0 4px}.KApx_W_section+.KApx_W_section{border-top:1px solid var(--dsw-alias-border-l2)}.KApx_W_sectionTitle{color:var(--dsw-alias-label-primary);margin:0 0 4px;font-size:13px;font-weight:600;line-height:1.5}.KApx_W_field{flex-direction:column;gap:6px;padding:8px 0;display:flex}.KApx_W_label{color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5}.KApx_W_hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}.KApx_W_invalidHint{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:1.5}.KApx_W_input{box-sizing:border-box;width:100%;max-width:420px}.KApx_W_inputInvalid{border-color:var(--dsw-alias-state-error-primary)}.KApx_W_input:has(input:disabled){opacity:.5}.KApx_W_select{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--agsc-radius-control);background:var(--dsw-alias-bg-layer-1);width:100%;max-width:420px;height:32px;font:inherit;color:var(--dsw-alias-label-primary);padding:0 8px;font-size:13px;line-height:1.5}.KApx_W_select:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}.KApx_W_select:disabled{opacity:.5;cursor:default}.KApx_W_toggleRow{cursor:pointer;align-items:center;gap:10px;display:flex}.KApx_W_toggleRow input{accent-color:var(--dsw-alias-brand-primary);cursor:pointer;width:16px;height:16px;margin:0}.KApx_W_toggleRow input:disabled{cursor:default}.KApx_W_note{background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:8px;margin:6px 0 2px;padding:8px 10px;font-size:12px;line-height:1.6}.KApx_W_statusRow{align-items:center;gap:8px;padding:4px 0;display:flex}.KApx_W_statusDot{background:var(--agsc-fg-dimmed);border-radius:50%;flex:none;width:8px;height:8px}.KApx_W_statusOk{background:var(--agsc-ok)}.KApx_W_statusError{background:var(--agsc-err)}.KApx_W_statusText{color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5}.KApx_W_statusMeta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5}.KApx_W_retry{margin-left:auto}.KApx_W_footer{border-top:1px solid var(--dsw-alias-border-l2);align-items:center;gap:8px;padding:12px 0 4px;display:flex}.KApx_W_docs{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5;text-decoration:none}.KApx_W_docs:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}.KApx_W_failed{text-align:right;min-width:0;color:var(--dsw-alias-state-error-primary);flex:1;margin:0;font-size:12px;line-height:1.5}.KApx_W_spacer{flex:1}";
+		const tagId$8 = "@shendeguize/dsh-agent-sidecar/src/client/settings-card.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$8, css$8);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$8) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$8;
+				created = true;
+			}
+			tag.textContent = css$8;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
 		}
 		var settings_card_module_css_default = {
-			"body": "TiEuyW_body",
-			"card": "TiEuyW_card",
-			"cardOpen": "TiEuyW_cardOpen",
-			"chevron": "TiEuyW_chevron",
-			"chevronOpen": "TiEuyW_chevronOpen",
-			"description": "TiEuyW_description",
-			"discard": "TiEuyW_discard",
-			"docs": "TiEuyW_docs",
-			"failed": "TiEuyW_failed",
-			"field": "TiEuyW_field",
-			"footer": "TiEuyW_footer",
-			"headText": "TiEuyW_headText",
-			"header": "TiEuyW_header",
-			"hint": "TiEuyW_hint",
-			"input": "TiEuyW_input",
-			"inputInvalid": "TiEuyW_inputInvalid",
-			"invalidHint": "TiEuyW_invalidHint",
-			"label": "TiEuyW_label",
-			"name": "TiEuyW_name",
-			"note": "TiEuyW_note",
-			"pending": "TiEuyW_pending",
-			"readOnly": "TiEuyW_readOnly",
-			"retry": "TiEuyW_retry",
-			"save": "TiEuyW_save",
-			"section": "TiEuyW_section",
-			"sectionTitle": "TiEuyW_sectionTitle",
-			"select": "TiEuyW_select",
-			"spacer": "TiEuyW_spacer",
-			"statusDot": "TiEuyW_statusDot",
-			"statusError": "TiEuyW_statusError",
-			"statusMeta": "TiEuyW_statusMeta",
-			"statusOk": "TiEuyW_statusOk",
-			"statusRow": "TiEuyW_statusRow",
-			"statusText": "TiEuyW_statusText",
-			"toggleRow": "TiEuyW_toggleRow"
+			"body": "KApx_W_body",
+			"card": "KApx_W_card",
+			"cardOpen": "KApx_W_cardOpen",
+			"chevron": "KApx_W_chevron",
+			"chevronOpen": "KApx_W_chevronOpen",
+			"description": "KApx_W_description",
+			"docs": "KApx_W_docs",
+			"failed": "KApx_W_failed",
+			"field": "KApx_W_field",
+			"footer": "KApx_W_footer",
+			"headText": "KApx_W_headText",
+			"header": "KApx_W_header",
+			"hint": "KApx_W_hint",
+			"input": "KApx_W_input",
+			"inputInvalid": "KApx_W_inputInvalid",
+			"invalidHint": "KApx_W_invalidHint",
+			"label": "KApx_W_label",
+			"name": "KApx_W_name",
+			"note": "KApx_W_note",
+			"pending": "KApx_W_pending",
+			"readOnly": "KApx_W_readOnly",
+			"retry": "KApx_W_retry",
+			"section": "KApx_W_section",
+			"sectionTitle": "KApx_W_sectionTitle",
+			"select": "KApx_W_select",
+			"spacer": "KApx_W_spacer",
+			"statusDot": "KApx_W_statusDot",
+			"statusError": "KApx_W_statusError",
+			"statusMeta": "KApx_W_statusMeta",
+			"statusOk": "KApx_W_statusOk",
+			"statusRow": "KApx_W_statusRow",
+			"statusText": "KApx_W_statusText",
+			"toggleRow": "KApx_W_toggleRow"
 		};
+		//#endregion
+		//#region src/client/settings-fields.tsx
+		function SelectField(props) {
+			const id = (0, react.useId)();
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: settings_card_module_css_default["field"],
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
+						className: settings_card_module_css_default["label"],
+						htmlFor: id,
+						children: props.label
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("select", {
+						id,
+						className: settings_card_module_css_default["select"],
+						value: props.value,
+						disabled: props.disabled,
+						onChange: (event) => {
+							props.onCommit(event.target.value);
+						},
+						children: props.options.map((option) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+							value: option.value,
+							children: option.label
+						}, option.value))
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: settings_card_module_css_default["hint"],
+						children: props.hint
+					})
+				]
+			});
+		}
+		function ToggleField(props) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: settings_card_module_css_default["field"],
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
+					className: settings_card_module_css_default["toggleRow"],
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+						type: "checkbox",
+						checked: props.checked,
+						disabled: props.disabled,
+						onChange: (event) => {
+							props.onCommit(event.target.checked);
+						}
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						className: settings_card_module_css_default["label"],
+						children: props.label
+					})]
+				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+					className: settings_card_module_css_default["hint"],
+					children: props.hint
+				})]
+			});
+		}
+		function TextField(props) {
+			const id = (0, react.useId)();
+			const [draft, setDraft] = (0, react.useState)(props.value);
+			(0, react.useEffect)(() => {
+				setDraft(props.value);
+			}, [props.value]);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: settings_card_module_css_default["field"],
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
+						className: settings_card_module_css_default["label"],
+						htmlFor: id,
+						children: props.label
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Input, {
+						id,
+						className: settings_card_module_css_default["input"],
+						type: "text",
+						value: draft,
+						placeholder: props.placeholder ?? "",
+						disabled: props.disabled,
+						onChange: (event) => {
+							setDraft(event.target.value);
+							props.onCommit(event.target.value);
+						}
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: settings_card_module_css_default["hint"],
+						children: props.hint
+					})
+				]
+			});
+		}
+		function NumberField(props) {
+			const id = (0, react.useId)();
+			const [draft, setDraft] = (0, react.useState)(String(props.value));
+			const [invalid, setInvalid] = (0, react.useState)(false);
+			(0, react.useEffect)(() => {
+				setDraft(String(props.value));
+				setInvalid(false);
+			}, [props.value]);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: settings_card_module_css_default["field"],
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
+						className: settings_card_module_css_default["label"],
+						htmlFor: id,
+						children: props.label
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Input, {
+						id,
+						className: `${settings_card_module_css_default["input"]} ${invalid ? settings_card_module_css_default["inputInvalid"] : ""}`,
+						type: "text",
+						inputMode: "numeric",
+						value: draft,
+						disabled: props.disabled,
+						...invalid ? { "aria-invalid": true } : {},
+						onChange: (event) => {
+							const text = event.target.value;
+							const parsed = Number(text);
+							const acceptable = text.trim() !== "" && Number.isInteger(parsed) && parsed >= props.min;
+							setDraft(text);
+							setInvalid(!acceptable);
+							if (acceptable && parsed !== props.value) props.onCommit(parsed);
+						}
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: invalid ? settings_card_module_css_default["invalidHint"] : settings_card_module_css_default["hint"],
+						...invalid ? { role: "alert" } : {},
+						children: invalid ? props.invalidHint : props.hint
+					})
+				]
+			});
+		}
 		//#endregion
 		//#region src/client/settings-card.tsx
 		/**
@@ -3476,141 +3863,6 @@ window.__ModuleLoader__.load({
 				}), props.children]
 			});
 		}
-		function SelectField(props) {
-			const id = (0, react.useId)();
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: settings_card_module_css_default["field"],
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
-						className: settings_card_module_css_default["label"],
-						htmlFor: id,
-						children: props.label
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("select", {
-						id,
-						className: settings_card_module_css_default["select"],
-						value: props.value,
-						disabled: props.disabled,
-						onChange: (event) => {
-							props.onCommit(event.target.value);
-						},
-						children: props.options.map((option) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
-							value: option.value,
-							children: option.label
-						}, option.value))
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: settings_card_module_css_default["hint"],
-						children: props.hint
-					})
-				]
-			});
-		}
-		function ToggleField(props) {
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: settings_card_module_css_default["field"],
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
-					className: settings_card_module_css_default["toggleRow"],
-					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
-						type: "checkbox",
-						checked: props.checked,
-						disabled: props.disabled,
-						onChange: (event) => {
-							props.onCommit(event.target.checked);
-						}
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-						className: settings_card_module_css_default["label"],
-						children: props.label
-					})]
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-					className: settings_card_module_css_default["hint"],
-					children: props.hint
-				})]
-			});
-		}
-		/** Text field with a local draft so typing survives a non-echoing beat. */
-		function TextField(props) {
-			const id = (0, react.useId)();
-			const [draft, setDraft] = (0, react.useState)(props.value);
-			(0, react.useEffect)(() => {
-				setDraft(props.value);
-			}, [props.value]);
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: settings_card_module_css_default["field"],
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
-						className: settings_card_module_css_default["label"],
-						htmlFor: id,
-						children: props.label
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
-						id,
-						className: settings_card_module_css_default["input"],
-						type: "text",
-						value: draft,
-						placeholder: props.placeholder ?? "",
-						disabled: props.disabled,
-						onChange: (event) => {
-							setDraft(event.target.value);
-							props.onCommit(event.target.value);
-						}
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: settings_card_module_css_default["hint"],
-						children: props.hint
-					})
-				]
-			});
-		}
-		/**
-		* Integer field with a local draft: invalid intermediate text (empty,
-		* non-numeric, below the schema minimum) shows the invalid hint and commits
-		* nothing, so the staged value can never leave the schema's domain.
-		*/
-		function NumberField(props) {
-			const id = (0, react.useId)();
-			const [draft, setDraft] = (0, react.useState)(String(props.value));
-			const [invalid, setInvalid] = (0, react.useState)(false);
-			(0, react.useEffect)(() => {
-				setDraft(String(props.value));
-				setInvalid(false);
-			}, [props.value]);
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: settings_card_module_css_default["field"],
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
-						className: settings_card_module_css_default["label"],
-						htmlFor: id,
-						children: props.label
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
-						id,
-						className: invalid ? `${settings_card_module_css_default["input"]} ${settings_card_module_css_default["inputInvalid"]}` : settings_card_module_css_default["input"],
-						type: "text",
-						inputMode: "numeric",
-						value: draft,
-						disabled: props.disabled,
-						...invalid ? { "aria-invalid": true } : {},
-						onChange: (event) => {
-							const text = event.target.value;
-							setDraft(text);
-							const parsed = Number(text);
-							const acceptable = text.trim() !== "" && Number.isInteger(parsed) && parsed >= props.min;
-							setInvalid(!acceptable);
-							if (acceptable && parsed !== props.value) props.onCommit(parsed);
-						}
-					}),
-					invalid ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: settings_card_module_css_default["invalidHint"],
-						role: "alert",
-						children: props.invalidHint
-					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: settings_card_module_css_default["hint"],
-						children: props.hint
-					})
-				]
-			});
-		}
 		/**
 		* Render the Agent Sidecar settings card.
 		* @param props - staged values, form state, and the wiring callbacks.
@@ -3624,7 +3876,7 @@ window.__ModuleLoader__.load({
 			const title = t$2("settings.cardTitle");
 			const daemonNote = props.daemon?.state === "defer" ? t$2("settings.daemonDeferNote") : props.daemon?.state === "failed" ? t$2("settings.daemonFailedNote") : void 0;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
-				className: `${settings_card_module_css_default["card"]} ${open ? settings_card_module_css_default["cardOpen"] : ""}`,
+				...surfaceProps("settings-card", `${settings_card_module_css_default["card"]} ${open ? settings_card_module_css_default["cardOpen"] : ""}`),
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 					type: "button",
 					className: settings_card_module_css_default["header"],
@@ -3644,14 +3896,11 @@ window.__ModuleLoader__.load({
 								children: t$2("settings.cardDescription")
 							})]
 						}),
-						props.dirty ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						props.dirty ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 							className: settings_card_module_css_default["pending"],
 							children: t$2("settings.unsaved")
 						}) : null,
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							className: `${settings_card_module_css_default["chevron"]} ${open ? settings_card_module_css_default["chevronOpen"] : ""}`,
-							"aria-hidden": true
-						})
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.IconChevronDownOutline14, { className: `${settings_card_module_css_default["chevron"]} ${open ? settings_card_module_css_default["chevronOpen"] : ""}` })
 					]
 				}), open ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					className: settings_card_module_css_default["body"],
@@ -3689,8 +3938,10 @@ window.__ModuleLoader__.load({
 														version: props.daemon.version
 													})
 												}) : null,
-												props.daemon.state === "failed" && props.onDaemonRetry !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+												props.daemon.state === "failed" && props.onDaemonRetry !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 													type: "button",
+													size: "sm",
+													variant: "outline",
 													className: settings_card_module_css_default["retry"],
 													onClick: props.onDaemonRetry,
 													children: t$2("settings.daemonRetry")
@@ -3880,16 +4131,18 @@ window.__ModuleLoader__.load({
 									role: "status",
 									children: t$2("settings.saveFailed")
 								}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: settings_card_module_css_default["spacer"] }),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 									type: "button",
-									className: settings_card_module_css_default["discard"],
+									size: "sm",
+									variant: "outline",
 									disabled: !props.dirty || props.saving,
 									onClick: props.onDiscard,
 									children: t$2("settings.discard")
 								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 									type: "button",
-									className: settings_card_module_css_default["save"],
+									size: "sm",
+									variant: "primary",
 									disabled: !props.dirty || props.saving || !props.writable,
 									onClick: props.onSave,
 									children: t$2(props.saving ? "settings.saving" : "settings.save")
@@ -3900,6 +4153,89 @@ window.__ModuleLoader__.load({
 				}) : null]
 			});
 		}
+		//#endregion
+		//#region src/client/detail/strings.ts
+		/** Dynamic session-detail vocabulary; templates are interpolated by `formatTemplate`. */
+		const DETAIL_STRINGS = createLocaleView({
+			header: {
+				close: "detail.header.close",
+				listenOn: "detail.header.listenOn",
+				listenOff: "detail.header.listenOff",
+				listenHint: "detail.header.listenHint",
+				refresh: "detail.header.refresh",
+				refreshing: "detail.header.refreshing",
+				refreshHint: "detail.header.refreshHint",
+				copyIdTitle: "detail.header.copyIdTitle",
+				copied: "detail.header.copied",
+				untitled: "detail.header.untitled",
+				unknownProject: "detail.header.unknownProject",
+				observedDisclaimer: "detail.header.observedDisclaimer"
+			},
+			status: {
+				working: "detail.status.working",
+				waiting: "detail.status.waiting",
+				idle: "detail.status.idle",
+				dead: "detail.status.dead",
+				unknown: "detail.status.unknown"
+			},
+			sources: {
+				title: "detail.sources.title",
+				dshLive: "detail.sources.dshLive",
+				dshCold: "detail.sources.dshCold",
+				sidecarReplay: "detail.sources.sidecarReplay",
+				sidecarBuffer: "detail.sources.sidecarBuffer",
+				none: "detail.sources.none"
+			},
+			kind: {
+				user: "detail.kind.user",
+				assistant: "detail.kind.assistant",
+				thinking: "detail.kind.thinking",
+				toolCall: "detail.kind.toolCall",
+				toolResult: "detail.kind.toolResult",
+				turn: "detail.kind.turn",
+				step: "detail.kind.step",
+				error: "detail.kind.error",
+				other: "detail.kind.other"
+			},
+			gap: { label: "detail.gap.label" },
+			filter: {
+				conversation: "detail.filter.conversation",
+				all: "detail.filter.all",
+				hiddenNotice: "detail.filter.hiddenNotice"
+			},
+			timeline: {
+				loadMore: "detail.timeline.loadMore",
+				loadingMore: "detail.timeline.loadingMore",
+				noMore: "detail.timeline.noMore",
+				expand: "detail.timeline.expand",
+				collapse: "detail.timeline.collapse",
+				newBadge: "detail.timeline.newBadge",
+				seq: "detail.timeline.seq",
+				hiddenNotice: "detail.timeline.hiddenNotice",
+				showAll: "detail.timeline.showAll",
+				chunkRun: "detail.timeline.chunkRun"
+			},
+			states: {
+				loadingTitle: "detail.states.loadingTitle",
+				emptyTitle: "detail.states.emptyTitle",
+				emptyHint: "detail.states.emptyHint",
+				errorTitle: "detail.states.errorTitle",
+				errorFallback: "detail.states.errorFallback",
+				errors: {
+					session_not_found: "detail.states.errors.session_not_found",
+					invalid_cursor: "detail.states.errors.invalid_cursor",
+					fusion_not_wired: "detail.states.errors.fusion_not_wired",
+					network_error: "detail.states.errors.network_error",
+					request_timeout: "detail.states.errors.request_timeout"
+				}
+			},
+			time: {
+				justNow: "detail.time.justNow",
+				minutesAgo: "detail.time.minutesAgo",
+				hoursAgo: "detail.time.hoursAgo",
+				daysAgo: "detail.time.daysAgo"
+			}
+		});
 		//#endregion
 		//#region src/client/detail/logic.ts
 		/**
@@ -4553,64 +4889,80 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
-		//#region \0dsh-css:/Users/jingyu/Workspace/Projects/agent_sidecar/plugin/src/client/detail/detail.module.css.mjs
-		const css$5 = ".V1TWBW_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-base,transparent);flex-direction:column;gap:10px;padding:16px 20px;display:flex}.V1TWBW_header{flex-direction:column;gap:6px;display:flex}.V1TWBW_headerTop{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.V1TWBW_closeButton{color:var(--dsw-alias-label-secondary,#57606a);border:1px solid var(--dsw-alias-border-l1,#00000014);cursor:pointer;background:0 0;border-radius:6px;padding:2px 10px;font-family:inherit;font-size:12px}.V1TWBW_closeButton:hover{color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.V1TWBW_agent{color:var(--dsw-alias-label-primary,#1f2328);align-items:center;gap:5px;font-size:13px;font-weight:650;display:inline-flex}.V1TWBW_agentGlyph{color:var(--dsw-alias-brand-primary,#4d6bfe);flex:none}.V1TWBW_badge{border:1px solid var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-bg-layer-1,#00000008);color:var(--dsw-alias-label-secondary,#57606a);white-space:nowrap;border-radius:999px;align-items:center;gap:5px;padding:0 8px;font-size:12px;line-height:20px;display:inline-flex}.V1TWBW_dot{background:var(--dsw-alias-label-tertiary,#6e7781);border-radius:50%;flex:none;width:8px;height:8px}.V1TWBW_dot[data-tone=success]{background:var(--dsw-alias-state-success-primary,#1a7f37)}.V1TWBW_dot[data-tone=warn]{background:var(--dsw-alias-state-warn-primary,#9a6700)}.V1TWBW_dot[data-tone=danger]{background:var(--dsw-alias-state-error-primary,#cf222e)}.V1TWBW_dot[data-tone=neutral]{background:var(--dsw-alias-label-tertiary,#6e7781)}.V1TWBW_dot[data-tone=muted]{background:var(--dsw-alias-label-dimmed,#8c959f)}.V1TWBW_spacer{flex:1}.V1TWBW_listenButton{color:var(--dsw-alias-label-secondary,#57606a);border:1px solid var(--dsw-alias-border-l1,#00000014);cursor:pointer;background:0 0;border-radius:999px;padding:2px 12px;font-family:inherit;font-size:12px}.V1TWBW_listenButton:hover{color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-border-l2,#0000001f)}.V1TWBW_listenButton[data-active]{color:var(--dsw-alias-brand-primary,#4d6bfe);border-color:var(--dsw-alias-brand-primary,#4d6bfe);background:color-mix(in srgb, var(--dsw-alias-brand-primary,#4d6bfe) 8%, transparent)}.V1TWBW_refreshButton{color:var(--dsw-alias-label-secondary,#57606a);border:1px solid var(--dsw-alias-border-l1,#00000014);cursor:pointer;background:0 0;border-radius:999px;padding:2px 12px;font-family:inherit;font-size:12px}.V1TWBW_refreshButton:hover:enabled{color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-border-l2,#0000001f)}.V1TWBW_refreshButton:disabled{cursor:default;opacity:.6}.V1TWBW_title{color:var(--dsw-alias-label-primary,#1f2328);text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:600;overflow:hidden}.V1TWBW_meta{align-items:baseline;gap:10px;min-width:0;display:flex}.V1TWBW_project{color:var(--dsw-alias-label-secondary,#57606a);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.V1TWBW_sessionId{color:var(--dsw-alias-label-tertiary,#6e7781);text-overflow:ellipsis;white-space:nowrap;cursor:pointer;background:0 0;border:none;flex:none;max-width:40%;padding:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;overflow:hidden}.V1TWBW_sessionId:hover{color:var(--dsw-alias-label-primary,#1f2328);text-decoration:underline}.V1TWBW_copiedBubble{color:var(--dsw-alias-state-success-primary,#1a7f37);border:1px solid var(--dsw-alias-state-success-secondary,#1a7f373d);border-radius:999px;flex:none;padding:0 6px;font-size:10px;line-height:16px}.V1TWBW_metaRow{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.V1TWBW_disclaimer{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary,#6e7781));font-size:11px}.V1TWBW_sourceList{align-items:center;gap:4px;display:inline-flex}.V1TWBW_sourceBadge{border:1px solid var(--dsw-alias-border-l1,#00000014);color:var(--dsw-alias-label-secondary,#57606a);background:var(--dsw-alias-bg-layer-1,#00000008);white-space:nowrap;border-radius:999px;padding:0 6px;font-size:11px;line-height:16px}.V1TWBW_sourceBadge[data-tone=success]{color:var(--dsw-alias-state-success-primary,#1a7f37);border-color:var(--dsw-alias-state-success-secondary,#1a7f373d)}.V1TWBW_sourceBadge[data-tone=muted]{color:var(--dsw-alias-label-dimmed,#8c959f)}.V1TWBW_banner{color:var(--dsw-alias-state-warn-label,var(--dsw-alias-state-warn-primary,#9a6700));background:var(--dsw-alias-state-warn-tertiary,#9a670014);border:1px solid var(--dsw-alias-state-warn-secondary,#9a67003d);border-radius:8px;padding:6px 10px;font-size:12px;line-height:18px}.V1TWBW_bodyState{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:160px;padding:24px;display:flex}.V1TWBW_bodyStateTitle{color:var(--dsw-alias-label-primary,#1f2328);font-size:14px;font-weight:600}.V1TWBW_bodyState[data-kind=error] .V1TWBW_bodyStateTitle{color:var(--dsw-alias-state-error-primary,#cf222e)}.V1TWBW_bodyStateHint{max-width:420px;color:var(--dsw-alias-label-secondary,#57606a);font-size:12px;line-height:20px}.V1TWBW_filterRow{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.V1TWBW_filterChip{color:var(--dsw-alias-label-secondary,#57606a);border:1px solid var(--dsw-alias-border-l1,#00000014);cursor:pointer;background:0 0;border-radius:999px;padding:0 10px;font-family:inherit;font-size:11px;line-height:18px}.V1TWBW_filterChip:hover{color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-border-l2,#0000001f)}.V1TWBW_filterChip[data-active]{color:var(--dsw-alias-brand-primary,#4d6bfe);border-color:var(--dsw-alias-brand-primary,#4d6bfe);background:color-mix(in srgb, var(--dsw-alias-brand-primary,#4d6bfe) 8%, transparent)}.V1TWBW_filterHiddenNote{color:var(--dsw-alias-label-tertiary,#6e7781);font-size:11px}.V1TWBW_pager{justify-content:center;display:flex}.V1TWBW_loadMoreButton{color:var(--dsw-alias-label-secondary,#57606a);border:1px solid var(--dsw-alias-border-l1,#00000014);cursor:pointer;background:0 0;border-radius:6px;padding:3px 14px;font-family:inherit;font-size:12px}.V1TWBW_loadMoreButton:hover:enabled{color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.V1TWBW_loadMoreButton:disabled{cursor:default;opacity:.6}.V1TWBW_pagerNote{color:var(--dsw-alias-label-tertiary,#6e7781);font-size:11px}.V1TWBW_hiddenNotice{color:var(--dsw-alias-label-tertiary,#6e7781);justify-content:center;align-items:center;gap:8px;font-size:11px;display:flex}.V1TWBW_showAllButton{color:var(--dsw-alias-brand-primary,#4d6bfe);cursor:pointer;background:0 0;border:none;padding:0;font-family:inherit;font-size:11px}.V1TWBW_timeline{flex-direction:column;flex:1;gap:6px;margin:0;padding:0 2px 8px 0;list-style:none;display:flex;overflow-y:auto}.V1TWBW_event{border:1px solid var(--dsw-alias-border-l1,#0000000f);background:var(--dsw-alias-bg-layer-1,#00000005);border-radius:8px;flex-direction:column;gap:4px;padding:6px 10px;display:flex}.V1TWBW_event[data-new]{border-color:var(--dsw-alias-brand-primary,#4d6bfe);background:color-mix(in srgb, var(--dsw-alias-brand-primary,#4d6bfe) 6%, transparent)}.V1TWBW_chunkRun{color:var(--dsw-alias-label-tertiary,#6e7781);background:var(--dsw-alias-bg-layer-1,#00000005);border:1px dashed var(--dsw-alias-border-l2,#0000001f);border-radius:6px;align-items:center;gap:8px;padding:4px 10px;font-size:11px;line-height:16px;display:flex}.V1TWBW_chunkRun[data-new]{border-color:var(--dsw-alias-brand-primary,#4d6bfe)}.V1TWBW_chunkRunLabel{flex:none}.V1TWBW_eventHead{align-items:center;gap:6px;min-width:0;display:flex}.V1TWBW_eventGlyph{color:var(--dsw-alias-label-tertiary,#6e7781);flex:none;font-size:12px}.V1TWBW_event[data-kind=user] .V1TWBW_eventGlyph,.V1TWBW_event[data-kind=assistant] .V1TWBW_eventGlyph{color:var(--dsw-alias-brand-primary,#4d6bfe)}.V1TWBW_event[data-kind=error] .V1TWBW_eventGlyph{color:var(--dsw-alias-state-error-primary,#cf222e)}.V1TWBW_eventLabel{color:var(--dsw-alias-label-primary,#1f2328);white-space:nowrap;text-overflow:ellipsis;font-size:12px;font-weight:600;overflow:hidden}.V1TWBW_eventSeq{color:var(--dsw-alias-label-tertiary,#6e7781);flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}.V1TWBW_eventNew{color:var(--dsw-alias-brand-primary,#4d6bfe);border:1px solid var(--dsw-alias-brand-primary,#4d6bfe);border-radius:999px;flex:none;padding:0 5px;font-size:10px;line-height:14px}.V1TWBW_eventSpacer{flex:1}.V1TWBW_eventTime{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary,#6e7781));flex:none;font-size:11px}.V1TWBW_eventSummary{color:var(--dsw-alias-label-secondary,#57606a);overflow-wrap:anywhere;font-size:12px;line-height:18px}.V1TWBW_expandButton{color:var(--dsw-alias-brand-primary,#4d6bfe);cursor:pointer;background:0 0;border:none;align-self:flex-start;padding:0;font-family:inherit;font-size:11px}.V1TWBW_eventBody{color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-layer-2,#0000000a);white-space:pre-wrap;overflow-wrap:anywhere;border-radius:6px;max-height:320px;margin:0;padding:8px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:16px;overflow-y:auto}.V1TWBW_gap{text-align:center;color:var(--dsw-alias-state-warn-label,var(--dsw-alias-state-warn-primary,#9a6700));background:var(--dsw-alias-state-warn-tertiary,#9a67000f);border:1px dashed var(--dsw-alias-state-warn-secondary,#9a670052);border-radius:6px;padding:4px 10px;font-size:11px;line-height:16px}";
-		const tagId$5 = "@shendeguize/dsh-agent-sidecar/detail.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$5) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
-			tag.dataset.pluginCss = tagId$5;
-			tag.textContent = css$5;
-			document.head.appendChild(tag);
+		//#region src/client/primitives/StaticPill.tsx
+		/**
+		* Preserve native span attributes around the rc.2 Pill static branch, which
+		* currently omits its rest props. The inner primitive remains the sole owner
+		* of the DSH pill visuals.
+		*/
+		function StaticPill({ className, children, ...rest }) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+				className,
+				...rest,
+				children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, { children })
+			});
+		}
+		//#endregion
+		//#region \0dsh-css:src/client/detail/detail.module.css.mjs
+		const css$7 = ".cBtswW_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:10px;padding:16px 20px;display:flex}.cBtswW_header{flex-direction:column;gap:6px;display:flex}.cBtswW_headerTop{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.cBtswW_agent{color:var(--dsw-alias-label-primary);align-items:center;gap:5px;font-size:13px;font-weight:650;display:inline-flex}.cBtswW_agentGlyph{color:var(--dsw-alias-brand-primary);flex:none}.cBtswW_badge{white-space:nowrap}.cBtswW_dot{background:var(--agsc-fg-dimmed);border-radius:50%;flex:none;width:8px;height:8px}.cBtswW_dot[data-tone=success]{background:var(--agsc-ok)}.cBtswW_dot[data-tone=warn]{background:var(--agsc-warn)}.cBtswW_dot[data-tone=danger]{background:var(--agsc-err)}.cBtswW_dot[data-tone=neutral]{background:var(--agsc-fg-secondary)}.cBtswW_dot[data-tone=muted]{background:var(--agsc-fg-dimmed)}.cBtswW_spacer{flex:1}.cBtswW_title{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:600;overflow:hidden}.cBtswW_meta{align-items:baseline;gap:10px;min-width:0;display:flex}.cBtswW_project{color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.cBtswW_sessionId{font-size:11px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:none;max-width:40%;overflow:hidden}.cBtswW_sessionId:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}.cBtswW_copiedBubble{color:var(--agsc-ok);flex:none}.cBtswW_copiedBubble>span,.cBtswW_sourceBadge>span{color:inherit}.cBtswW_metaRow{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.cBtswW_disclaimer{color:var(--dsw-alias-label-caption);font-size:11px}.cBtswW_sourceList{align-items:center;gap:4px;display:inline-flex}.cBtswW_sourceBadge{white-space:nowrap}.cBtswW_sourceBadge[data-tone=success]{color:var(--agsc-ok)}.cBtswW_sourceBadge[data-tone=muted]{color:var(--agsc-fg-dimmed)}.cBtswW_banner{border-radius:var(--agsc-radius-control);color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border:1px solid var(--dsw-alias-state-warn-secondary);padding:6px 10px;font-size:12px;line-height:18px}.cBtswW_bodyState{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:160px;padding:24px;display:flex}.cBtswW_bodyStateTitle{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:600}.cBtswW_bodyState[data-kind=error] .cBtswW_bodyStateTitle{color:var(--agsc-err)}.cBtswW_bodyStateHint{max-width:420px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}.cBtswW_filterRow{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.cBtswW_filterHiddenNote{color:var(--dsw-alias-label-tertiary);font-size:11px}.cBtswW_pager{justify-content:center;display:flex}.cBtswW_pagerNote{color:var(--dsw-alias-label-tertiary);font-size:11px}.cBtswW_hiddenNotice{color:var(--dsw-alias-label-tertiary);justify-content:center;align-items:center;gap:8px;font-size:11px;display:flex}.cBtswW_timeline{flex-direction:column;flex:1;gap:6px;margin:0;padding:0 2px 8px 0;list-style:none;display:flex;overflow-y:auto}.cBtswW_event{border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);background:var(--agsc-bg-raised);flex-direction:column;gap:4px;padding:6px 10px;display:flex}.cBtswW_event[data-new]{border-color:var(--agsc-accent);background:color-mix(in srgb, var(--agsc-accent) 6%, transparent)}.cBtswW_chunkRun{border-radius:var(--agsc-radius-control);color:var(--dsw-alias-label-tertiary);background:var(--agsc-bg-raised);border:1px dashed var(--agsc-border-strong);align-items:center;gap:8px;padding:4px 10px;font-size:11px;line-height:16px;display:flex}.cBtswW_chunkRun[data-new]{border-color:var(--agsc-accent)}.cBtswW_chunkRunLabel{flex:none}.cBtswW_eventHead{align-items:center;gap:6px;min-width:0;display:flex}.cBtswW_eventGlyph{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px}.cBtswW_event[data-kind=user] .cBtswW_eventGlyph,.cBtswW_event[data-kind=assistant] .cBtswW_eventGlyph{color:var(--dsw-alias-brand-primary)}.cBtswW_event[data-kind=error] .cBtswW_eventGlyph{color:var(--dsw-alias-state-error-primary)}.cBtswW_eventLabel{color:var(--dsw-alias-label-primary);white-space:nowrap;text-overflow:ellipsis;font-size:12px;font-weight:600;overflow:hidden}.cBtswW_eventSeq{font-size:10px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-tertiary);flex:none}.cBtswW_eventNew{color:var(--agsc-accent);flex:none}.cBtswW_eventSpacer{flex:1}.cBtswW_eventTime{color:var(--dsw-alias-label-caption);flex:none;font-size:11px}.cBtswW_eventSummary{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;font-size:12px;line-height:18px}.cBtswW_expandButton{align-self:flex-start}.cBtswW_eventBody{border-radius:var(--agsc-radius-control);font-size:11px;line-height:16px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;margin:0;padding:8px 10px;overflow-y:auto}.cBtswW_gap{border-radius:var(--agsc-radius-control);text-align:center;color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border:1px dashed var(--dsw-alias-state-warn-secondary);padding:4px 10px;font-size:11px;line-height:16px}";
+		const tagId$7 = "@shendeguize/dsh-agent-sidecar/src/client/detail/detail.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$7, css$7);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$7) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$7;
+				created = true;
+			}
+			tag.textContent = css$7;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
 		}
 		var detail_module_css_default = {
-			"agent": "V1TWBW_agent",
-			"agentGlyph": "V1TWBW_agentGlyph",
-			"badge": "V1TWBW_badge",
-			"banner": "V1TWBW_banner",
-			"bodyState": "V1TWBW_bodyState",
-			"bodyStateHint": "V1TWBW_bodyStateHint",
-			"bodyStateTitle": "V1TWBW_bodyStateTitle",
-			"chunkRun": "V1TWBW_chunkRun",
-			"chunkRunLabel": "V1TWBW_chunkRunLabel",
-			"closeButton": "V1TWBW_closeButton",
-			"copiedBubble": "V1TWBW_copiedBubble",
-			"disclaimer": "V1TWBW_disclaimer",
-			"dot": "V1TWBW_dot",
-			"event": "V1TWBW_event",
-			"eventBody": "V1TWBW_eventBody",
-			"eventGlyph": "V1TWBW_eventGlyph",
-			"eventHead": "V1TWBW_eventHead",
-			"eventLabel": "V1TWBW_eventLabel",
-			"eventNew": "V1TWBW_eventNew",
-			"eventSeq": "V1TWBW_eventSeq",
-			"eventSpacer": "V1TWBW_eventSpacer",
-			"eventSummary": "V1TWBW_eventSummary",
-			"eventTime": "V1TWBW_eventTime",
-			"expandButton": "V1TWBW_expandButton",
-			"filterChip": "V1TWBW_filterChip",
-			"filterHiddenNote": "V1TWBW_filterHiddenNote",
-			"filterRow": "V1TWBW_filterRow",
-			"gap": "V1TWBW_gap",
-			"header": "V1TWBW_header",
-			"headerTop": "V1TWBW_headerTop",
-			"hiddenNotice": "V1TWBW_hiddenNotice",
-			"listenButton": "V1TWBW_listenButton",
-			"loadMoreButton": "V1TWBW_loadMoreButton",
-			"meta": "V1TWBW_meta",
-			"metaRow": "V1TWBW_metaRow",
-			"pager": "V1TWBW_pager",
-			"pagerNote": "V1TWBW_pagerNote",
-			"project": "V1TWBW_project",
-			"refreshButton": "V1TWBW_refreshButton",
-			"root": "V1TWBW_root",
-			"sessionId": "V1TWBW_sessionId",
-			"showAllButton": "V1TWBW_showAllButton",
-			"sourceBadge": "V1TWBW_sourceBadge",
-			"sourceList": "V1TWBW_sourceList",
-			"spacer": "V1TWBW_spacer",
-			"timeline": "V1TWBW_timeline",
-			"title": "V1TWBW_title"
+			"agent": "cBtswW_agent",
+			"agentGlyph": "cBtswW_agentGlyph",
+			"badge": "cBtswW_badge",
+			"banner": "cBtswW_banner",
+			"bodyState": "cBtswW_bodyState",
+			"bodyStateHint": "cBtswW_bodyStateHint",
+			"bodyStateTitle": "cBtswW_bodyStateTitle",
+			"chunkRun": "cBtswW_chunkRun",
+			"chunkRunLabel": "cBtswW_chunkRunLabel",
+			"copiedBubble": "cBtswW_copiedBubble",
+			"disclaimer": "cBtswW_disclaimer",
+			"dot": "cBtswW_dot",
+			"event": "cBtswW_event",
+			"eventBody": "cBtswW_eventBody",
+			"eventGlyph": "cBtswW_eventGlyph",
+			"eventHead": "cBtswW_eventHead",
+			"eventLabel": "cBtswW_eventLabel",
+			"eventNew": "cBtswW_eventNew",
+			"eventSeq": "cBtswW_eventSeq",
+			"eventSpacer": "cBtswW_eventSpacer",
+			"eventSummary": "cBtswW_eventSummary",
+			"eventTime": "cBtswW_eventTime",
+			"expandButton": "cBtswW_expandButton",
+			"filterHiddenNote": "cBtswW_filterHiddenNote",
+			"filterRow": "cBtswW_filterRow",
+			"gap": "cBtswW_gap",
+			"header": "cBtswW_header",
+			"headerTop": "cBtswW_headerTop",
+			"hiddenNotice": "cBtswW_hiddenNotice",
+			"meta": "cBtswW_meta",
+			"metaRow": "cBtswW_metaRow",
+			"pager": "cBtswW_pager",
+			"pagerNote": "cBtswW_pagerNote",
+			"project": "cBtswW_project",
+			"root": "cBtswW_root",
+			"sessionId": "cBtswW_sessionId",
+			"sourceBadge": "cBtswW_sourceBadge",
+			"sourceList": "cBtswW_sourceList",
+			"spacer": "cBtswW_spacer",
+			"timeline": "cBtswW_timeline",
+			"title": "cBtswW_title"
 		};
 		//#endregion
 		//#region src/client/detail/SessionDetail.tsx
@@ -4662,7 +5014,7 @@ window.__ModuleLoader__.load({
 								className: detail_module_css_default["eventSeq"],
 								children: DETAIL_STRINGS.timeline.seq.replace("{n}", String(entry.seq))
 							}),
-							row.isNew && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							row.isNew && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 								className: detail_module_css_default["eventNew"],
 								children: DETAIL_STRINGS.timeline.newBadge
 							}),
@@ -4677,9 +5029,12 @@ window.__ModuleLoader__.load({
 						className: detail_module_css_default["eventSummary"],
 						children: entry.summary
 					}),
-					entry.expandable && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+					entry.expandable && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 						type: "button",
+						size: "sm",
+						variant: "ghost",
 						className: detail_module_css_default["expandButton"],
+						"aria-expanded": expanded,
 						onClick: () => onToggleExpand(entry.key),
 						children: expanded ? DETAIL_STRINGS.timeline.collapse : DETAIL_STRINGS.timeline.expand
 					}),
@@ -4703,9 +5058,12 @@ window.__ModuleLoader__.load({
 						className: detail_module_css_default["chunkRunLabel"],
 						children: row.label
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 						type: "button",
+						size: "sm",
+						variant: "ghost",
 						className: detail_module_css_default["expandButton"],
+						"aria-expanded": props.expanded,
 						onClick: () => props.onToggleRun(row.key),
 						children: props.expanded ? DETAIL_STRINGS.timeline.collapse : DETAIL_STRINGS.timeline.expand
 					}),
@@ -4732,6 +5090,7 @@ window.__ModuleLoader__.load({
 			const listRef = (0, react.useRef)(null);
 			const positionedRef = (0, react.useRef)(false);
 			const copyTimerRef = (0, react.useRef)(null);
+			const copyAliveRef = (0, react.useRef)(true);
 			const status = deriveDetailStatus(props.header.status);
 			const sourceBadges = deriveSourceBadges(props.timeline.sources);
 			const bodyState = deriveDetailBodyState({
@@ -4760,8 +5119,15 @@ window.__ModuleLoader__.load({
 					positionedRef.current = true;
 				}
 			}, [listening, entryCount]);
-			(0, react.useEffect)(() => () => {
-				if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+			(0, react.useEffect)(() => {
+				copyAliveRef.current = true;
+				return () => {
+					copyAliveRef.current = false;
+					if (copyTimerRef.current !== null) {
+						clearTimeout(copyTimerRef.current);
+						copyTimerRef.current = null;
+					}
+				};
 			}, []);
 			const toggleExpand = (key) => {
 				setExpandedKeys((prev) => {
@@ -4779,19 +5145,19 @@ window.__ModuleLoader__.load({
 					return next;
 				});
 			};
-			const copySessionId = () => {
-				const clipboard = typeof navigator === "undefined" ? void 0 : navigator.clipboard;
-				if (clipboard === void 0) return;
-				clipboard.writeText(props.sessionId).then(() => {
-					setCopied(true);
-					if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
-					copyTimerRef.current = setTimeout(() => {
-						setCopied(false);
-					}, 2e3);
-				}, () => {});
+			const copySessionId = async () => {
+				if (!await (0, _deepseek_ai_dsh_client_ui_primitives.writeClipboard)(props.sessionId)) return;
+				if (!copyAliveRef.current) return;
+				if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
+				setCopied(true);
+				copyTimerRef.current = setTimeout(() => {
+					copyTimerRef.current = null;
+					setCopied(false);
+				}, 2e3);
 			};
+			const statusDotState = status.status === "working" ? "ongoing" : status.status === "waiting" ? "warning" : null;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: detail_module_css_default["root"],
+				...surfaceProps("timeline", detail_module_css_default["root"]),
 				"data-testid": "agent-sidecar-detail",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
@@ -4800,9 +5166,10 @@ window.__ModuleLoader__.load({
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								className: detail_module_css_default["headerTop"],
 								children: [
-									props.onClose !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									props.onClose !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 										type: "button",
-										className: detail_module_css_default["closeButton"],
+										size: "sm",
+										variant: "outline",
 										onClick: props.onClose,
 										children: DETAIL_STRINGS.header.close
 									}),
@@ -4814,30 +5181,32 @@ window.__ModuleLoader__.load({
 											children: agentGlyph(props.header.agent)
 										}), props.header.agent]
 									}),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(StaticPill, {
 										className: detail_module_css_default["badge"],
-										"data-tone": status.tone,
 										title: DETAIL_STRINGS.header.observedDisclaimer,
-										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										children: [statusDotState === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 											className: detail_module_css_default["dot"],
 											"data-tone": status.tone
+										}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+											state: statusDotState,
+											size: 8
 										}), status.label]
 									}),
 									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: detail_module_css_default["spacer"] }),
-									props.onRefresh !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									props.onRefresh !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 										type: "button",
-										className: detail_module_css_default["refreshButton"],
+										size: "sm",
+										variant: "outline",
 										disabled: props.refreshing === true,
 										title: DETAIL_STRINGS.header.refreshHint,
 										onClick: props.onRefresh,
 										"data-testid": "agent-sidecar-detail-refresh",
 										children: props.refreshing === true ? DETAIL_STRINGS.header.refreshing : DETAIL_STRINGS.header.refresh
 									}),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 										type: "button",
-										className: detail_module_css_default["listenButton"],
+										active: props.listening,
 										"aria-pressed": props.listening,
-										"data-active": props.listening || void 0,
 										title: DETAIL_STRINGS.header.listenHint,
 										onClick: props.onToggleListen,
 										children: props.listening ? DETAIL_STRINGS.header.listenOn : DETAIL_STRINGS.header.listenOff
@@ -4857,15 +5226,19 @@ window.__ModuleLoader__.load({
 										title: props.header.project,
 										children: props.header.project.trim() === "" ? DETAIL_STRINGS.header.unknownProject : props.header.project
 									}),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 										type: "button",
+										size: "sm",
+										variant: "ghost",
 										className: detail_module_css_default["sessionId"],
 										title: `${props.sessionId} · ${DETAIL_STRINGS.header.copyIdTitle}`,
-										onClick: copySessionId,
+										onClick: () => {
+											copySessionId();
+										},
 										"data-testid": "agent-sidecar-detail-copy-id",
 										children: props.sessionId
 									}),
-									copied && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									copied && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
 										className: detail_module_css_default["copiedBubble"],
 										role: "status",
 										children: DETAIL_STRINGS.header.copied
@@ -4880,7 +5253,7 @@ window.__ModuleLoader__.load({
 								}), sourceBadges.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									className: detail_module_css_default["sourceList"],
 									title: DETAIL_STRINGS.sources.title,
-									children: sourceBadges.map((badge) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									children: sourceBadges.map((badge) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
 										className: detail_module_css_default["sourceBadge"],
 										"data-tone": badge.tone,
 										children: badge.label
@@ -4891,12 +5264,13 @@ window.__ModuleLoader__.load({
 					}),
 					bodyState.errorBanner !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: detail_module_css_default["banner"],
-						role: "status",
+						role: "alert",
 						children: bodyState.errorBanner
 					}),
 					bodyState.kind !== "list" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: detail_module_css_default["bodyState"],
 						"data-kind": bodyState.kind,
+						role: bodyState.kind === "error" ? "alert" : bodyState.kind === "loading" ? "status" : void 0,
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 							className: detail_module_css_default["bodyStateTitle"],
 							children: bodyState.title
@@ -4908,10 +5282,9 @@ window.__ModuleLoader__.load({
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: detail_module_css_default["filterRow"],
 							"data-testid": "agent-sidecar-detail-filter",
-							children: [["conversation", "all"].map((mode) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							children: [["conversation", "all"].map((mode) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 								type: "button",
-								className: detail_module_css_default["filterChip"],
-								"data-active": filterMode === mode || void 0,
+								active: filterMode === mode,
 								"aria-pressed": filterMode === mode,
 								onClick: () => {
 									setFilterMode(mode);
@@ -4924,9 +5297,10 @@ window.__ModuleLoader__.load({
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 							className: detail_module_css_default["pager"],
-							children: props.hasMore ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							children: props.hasMore ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 								type: "button",
-								className: detail_module_css_default["loadMoreButton"],
+								size: "sm",
+								variant: "outline",
 								disabled: props.loading,
 								onClick: props.onLoadMore,
 								children: props.loading ? DETAIL_STRINGS.timeline.loadingMore : DETAIL_STRINGS.timeline.loadMore
@@ -4937,9 +5311,10 @@ window.__ModuleLoader__.load({
 						}),
 						limited.notice !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: detail_module_css_default["hiddenNotice"],
-							children: [limited.notice, /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							children: [limited.notice, /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 								type: "button",
-								className: detail_module_css_default["showAllButton"],
+								size: "sm",
+								variant: "ghost",
 								onClick: () => setRenderAll(true),
 								children: DETAIL_STRINGS.timeline.showAll
 							})]
@@ -4969,53 +5344,113 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region \0dsh-css:/Users/jingyu/Workspace/Projects/agent_sidecar/plugin/src/client/dsh-tools/dsh-tools.module.css.mjs
-		const css$4 = ".f29_TW_panel{min-width:0;color:var(--dsw-alias-label-primary,#1f2328);flex-direction:column;gap:8px;display:flex}.f29_TW_panelHead{align-items:baseline;gap:8px;min-width:0;display:flex}.f29_TW_panelTitle{color:var(--dsw-alias-label-primary,#1f2328);font-size:13px;font-weight:600}.f29_TW_panelCount{color:var(--dsw-alias-label-secondary,#57606a);background:var(--dsw-alias-bg-layer-2,#0000000a);border-radius:999px;flex:none;padding:0 8px;font-size:11px;line-height:18px}.f29_TW_mutedLine{color:var(--dsw-alias-label-secondary,#57606a);font-size:12px}.f29_TW_errorCard{color:var(--dsw-alias-state-error-primary,#cf222e);background:var(--dsw-alias-state-error-secondary,#cf222e14);border:1px solid var(--dsw-alias-state-error-secondary,#cf222e3d);border-radius:8px;padding:8px 10px;font-size:12px;line-height:18px}.f29_TW_errorDetail{color:var(--dsw-alias-label-secondary,#57606a);word-break:break-all;margin-top:2px;font-size:11px;display:block}.f29_TW_degradeCard{border:1px dashed var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-bg-layer-1,#00000005);border-radius:8px;flex-direction:column;gap:4px;padding:10px 12px;display:flex}.f29_TW_degradeTitle{color:var(--dsw-alias-label-primary,#1f2328);font-size:12px;font-weight:600}.f29_TW_degradeBody{color:var(--dsw-alias-label-secondary,#57606a);font-size:12px;line-height:18px}.f29_TW_degradeDetail{color:var(--dsw-alias-label-tertiary,#6e7781);word-break:break-all;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}.f29_TW_noticeBar{color:var(--dsw-alias-state-warn-label,var(--dsw-alias-state-warn-primary,#9a6700));background:var(--dsw-alias-state-warn-tertiary,#9a670014);border:1px solid var(--dsw-alias-state-warn-secondary,#9a67003d);border-radius:8px;padding:5px 10px;font-size:12px;line-height:18px}.f29_TW_tree{flex-direction:column;gap:2px;min-width:0;display:flex}.f29_TW_treeRow{align-items:center;gap:4px;min-width:0;display:flex}.f29_TW_toggle{width:18px;height:18px;color:var(--dsw-alias-label-tertiary,#6e7781);cursor:pointer;background:0 0;border:none;border-radius:4px;flex:none;padding:0;font-size:10px;line-height:1}.f29_TW_toggle:hover{color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.f29_TW_toggleSpacer{flex:none;width:18px}.f29_TW_node{text-align:left;min-width:0;color:var(--dsw-alias-label-primary,#1f2328);cursor:pointer;background:0 0;border:1px solid #0000;border-radius:6px;align-items:center;gap:6px;padding:2px 8px;font-family:inherit;font-size:12px;display:inline-flex}.f29_TW_node:hover{border-color:var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.f29_TW_node:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:1px}.f29_TW_node[data-current=true]{border-color:var(--dsw-alias-brand-primary,#4d6bfe);background:color-mix(in srgb, var(--dsw-alias-brand-primary,#4d6bfe) 8%, transparent);cursor:default}.f29_TW_nodeId{text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden}.f29_TW_nodeRole{color:var(--dsw-alias-label-tertiary,#6e7781);flex:none;font-size:11px}.f29_TW_nodeBadge{color:var(--dsw-alias-label-secondary,#57606a);background:var(--dsw-alias-bg-layer-2,#0000000a);border:1px solid var(--dsw-alias-border-l1,#00000014);border-radius:999px;flex:none;padding:0 6px;font-size:11px;line-height:16px}.f29_TW_nodeBadge[data-kind=current]{color:var(--dsw-alias-brand-primary,#4d6bfe);border-color:var(--dsw-alias-brand-primary,#4d6bfe);background:0 0}.f29_TW_nodeBadge[data-kind=live]{color:var(--dsw-alias-state-success-primary,#1a7f37);border-color:var(--dsw-alias-state-success-secondary,#1a7f3752);background:0 0}.f29_TW_searchForm{align-items:center;gap:8px;display:flex}.f29_TW_searchInput{min-width:0;color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-layer-1,transparent);border:1px solid var(--dsw-alias-border-l2,#0000001f);border-radius:6px;flex:1;padding:4px 8px;font-family:inherit;font-size:12px}.f29_TW_searchInput:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:0}.f29_TW_searchSubmit{color:var(--dsw-alias-label-secondary,#57606a);border:1px solid var(--dsw-alias-border-l1,#00000014);cursor:pointer;background:0 0;border-radius:6px;flex:none;padding:3px 10px;font-family:inherit;font-size:12px}.f29_TW_searchSubmit:hover{color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.f29_TW_projectChip{color:var(--dsw-alias-label-secondary,#57606a);background:var(--dsw-alias-bg-layer-2,#0000000a);border:1px solid var(--dsw-alias-border-l1,#00000014);border-radius:999px;align-self:flex-start;padding:0 8px;font-size:11px;line-height:18px}.f29_TW_resultList{flex-direction:column;gap:4px;min-width:0;display:flex}.f29_TW_resultItem{text-align:left;border:1px solid var(--dsw-alias-border-l1,#00000014);background:var(--dsw-alias-bg-layer-1,#00000005);cursor:pointer;border-radius:8px;flex-direction:column;gap:3px;min-width:0;padding:6px 10px;font-family:inherit;display:flex}.f29_TW_resultItem:hover{border-color:var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-interactive-bg-hover,#0000000a)}.f29_TW_resultItem:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:1px}.f29_TW_resultHead{align-items:center;gap:6px;min-width:0;display:flex}.f29_TW_resultAgent{color:var(--dsw-alias-label-secondary,#57606a);flex:none;font-size:11px;font-weight:600}.f29_TW_resultTitle{color:var(--dsw-alias-label-primary,#1f2328);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.f29_TW_matchTag{color:var(--dsw-alias-label-secondary,#57606a);background:var(--dsw-alias-bg-layer-2,#0000000a);border:1px solid var(--dsw-alias-border-l1,#00000014);border-radius:999px;flex:none;margin-left:auto;padding:0 6px;font-size:11px;line-height:16px}.f29_TW_matchTag[data-kind=full-text]{color:var(--dsw-alias-brand-primary,#4d6bfe);border-color:color-mix(in srgb, var(--dsw-alias-brand-primary,#4d6bfe) 32%, transparent);background:0 0}.f29_TW_resultMeta{min-width:0;color:var(--dsw-alias-label-tertiary,#6e7781);align-items:center;gap:8px;font-size:11px;display:flex}.f29_TW_resultProject{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.f29_TW_resultId{flex:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.f29_TW_snippet{color:var(--dsw-alias-label-secondary,#57606a);text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px;overflow:hidden}.f29_TW_snippetMark{color:var(--dsw-alias-brand-primary,#4d6bfe);background:color-mix(in srgb, var(--dsw-alias-brand-primary,#4d6bfe) 12%, transparent);border-radius:2px;font-weight:600}";
-		const tagId$4 = "@shendeguize/dsh-agent-sidecar/dsh-tools.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$4) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
-			tag.dataset.pluginCss = tagId$4;
-			tag.textContent = css$4;
-			document.head.appendChild(tag);
+		//#region \0dsh-css:src/client/dsh-tools/dsh-tools.module.css.mjs
+		const css$6 = "._1R83Ca_panel{min-width:0;color:var(--agsc-fg);flex-direction:column;gap:8px;display:flex}._1R83Ca_panelHead{align-items:baseline;gap:8px;min-width:0;display:flex}._1R83Ca_panelTitle{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:600}._1R83Ca_panelCount{flex:none}._1R83Ca_mutedLine{color:var(--dsw-alias-label-secondary);font-size:12px}._1R83Ca_errorCard{border-radius:var(--agsc-radius-control);color:var(--agsc-err);background:var(--dsw-alias-state-error-secondary);border:1px solid var(--dsw-alias-state-error-secondary);padding:8px 10px;font-size:12px;line-height:18px}._1R83Ca_errorDetail{color:var(--dsw-alias-label-secondary);word-break:break-all;margin-top:2px;font-size:11px;display:block}._1R83Ca_degradeCard{border-radius:var(--agsc-radius-control);border:1px dashed var(--agsc-border-strong);background:var(--agsc-bg-raised);flex-direction:column;gap:4px;padding:10px 12px;display:flex}._1R83Ca_degradeTitle{color:var(--dsw-alias-label-primary);font-size:12px;font-weight:600}._1R83Ca_degradeBody{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}._1R83Ca_degradeDetail{font-size:11px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-tertiary);word-break:break-all}._1R83Ca_noticeBar{border-radius:var(--agsc-radius-control);color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border:1px solid var(--dsw-alias-state-warn-secondary);padding:5px 10px;font-size:12px;line-height:18px}._1R83Ca_tree{flex-direction:column;gap:2px;min-width:0;display:flex}._1R83Ca_treeRow{align-items:center;gap:4px;min-width:0;display:flex}._1R83Ca_toggle{flex:none;width:18px;height:18px;padding:0;font-size:10px;line-height:1}._1R83Ca_toggleSpacer{flex:none;width:18px}._1R83Ca_node{text-align:left;justify-content:flex-start;gap:6px;min-width:0;height:auto;padding:2px 8px}._1R83Ca_node[data-current=true]{color:var(--agsc-accent);background:color-mix(in srgb, var(--agsc-accent) 8%, transparent);box-shadow:inset 0 0 0 1px var(--agsc-accent);cursor:default}._1R83Ca_nodeId{font-family:var(--ds-font-family-code);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}._1R83Ca_nodeRole{color:var(--dsw-alias-label-tertiary);flex:none;font-size:11px}._1R83Ca_nodeBadge{flex:none}._1R83Ca_nodeBadge>span,._1R83Ca_matchTag>span{color:inherit}._1R83Ca_nodeBadge[data-kind=current]{color:var(--agsc-accent)}._1R83Ca_nodeBadge[data-kind=live]{color:var(--agsc-ok)}._1R83Ca_searchForm{align-items:center;gap:8px;display:flex}._1R83Ca_searchInput{flex:1;min-width:0}._1R83Ca_projectChip{align-self:flex-start}._1R83Ca_resultList{flex-direction:column;gap:4px;min-width:0;display:flex}._1R83Ca_resultItem{text-align:left;border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);background:var(--agsc-bg-raised);flex-direction:column;justify-content:flex-start;align-items:stretch;gap:3px;min-width:0;height:auto;padding:6px 10px;display:flex}._1R83Ca_resultItem:hover{border-color:var(--agsc-border-strong)}._1R83Ca_resultItem:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:1px}._1R83Ca_resultHead{align-items:center;gap:6px;min-width:0;display:flex}._1R83Ca_resultAgent{color:var(--dsw-alias-label-secondary);flex:none;font-size:11px;font-weight:600}._1R83Ca_resultTitle{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}._1R83Ca_matchTag{flex:none;margin-left:auto}._1R83Ca_matchTag[data-kind=full-text]{color:var(--agsc-accent)}._1R83Ca_resultMeta{min-width:0;color:var(--dsw-alias-label-tertiary);align-items:center;gap:8px;font-size:11px;display:flex}._1R83Ca_resultProject{text-overflow:ellipsis;white-space:nowrap;overflow:hidden}._1R83Ca_resultId{font-family:var(--ds-font-family-code);flex:none}._1R83Ca_snippet{color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px;overflow:hidden}._1R83Ca_snippetMark{color:var(--agsc-accent);background:color-mix(in srgb, var(--agsc-accent) 12%, transparent);border-radius:2px;font-weight:600}";
+		const tagId$6 = "@shendeguize/dsh-agent-sidecar/src/client/dsh-tools/dsh-tools.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$6, css$6);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$6) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$6;
+				created = true;
+			}
+			tag.textContent = css$6;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
 		}
 		var dsh_tools_module_css_default = {
-			"degradeBody": "f29_TW_degradeBody",
-			"degradeCard": "f29_TW_degradeCard",
-			"degradeDetail": "f29_TW_degradeDetail",
-			"degradeTitle": "f29_TW_degradeTitle",
-			"errorCard": "f29_TW_errorCard",
-			"errorDetail": "f29_TW_errorDetail",
-			"matchTag": "f29_TW_matchTag",
-			"mutedLine": "f29_TW_mutedLine",
-			"node": "f29_TW_node",
-			"nodeBadge": "f29_TW_nodeBadge",
-			"nodeId": "f29_TW_nodeId",
-			"nodeRole": "f29_TW_nodeRole",
-			"noticeBar": "f29_TW_noticeBar",
-			"panel": "f29_TW_panel",
-			"panelCount": "f29_TW_panelCount",
-			"panelHead": "f29_TW_panelHead",
-			"panelTitle": "f29_TW_panelTitle",
-			"projectChip": "f29_TW_projectChip",
-			"resultAgent": "f29_TW_resultAgent",
-			"resultHead": "f29_TW_resultHead",
-			"resultId": "f29_TW_resultId",
-			"resultItem": "f29_TW_resultItem",
-			"resultList": "f29_TW_resultList",
-			"resultMeta": "f29_TW_resultMeta",
-			"resultProject": "f29_TW_resultProject",
-			"resultTitle": "f29_TW_resultTitle",
-			"searchForm": "f29_TW_searchForm",
-			"searchInput": "f29_TW_searchInput",
-			"searchSubmit": "f29_TW_searchSubmit",
-			"snippet": "f29_TW_snippet",
-			"snippetMark": "f29_TW_snippetMark",
-			"toggle": "f29_TW_toggle",
-			"toggleSpacer": "f29_TW_toggleSpacer",
-			"tree": "f29_TW_tree",
-			"treeRow": "f29_TW_treeRow"
+			"degradeBody": "_1R83Ca_degradeBody",
+			"degradeCard": "_1R83Ca_degradeCard",
+			"degradeDetail": "_1R83Ca_degradeDetail",
+			"degradeTitle": "_1R83Ca_degradeTitle",
+			"errorCard": "_1R83Ca_errorCard",
+			"errorDetail": "_1R83Ca_errorDetail",
+			"matchTag": "_1R83Ca_matchTag",
+			"mutedLine": "_1R83Ca_mutedLine",
+			"node": "_1R83Ca_node",
+			"nodeBadge": "_1R83Ca_nodeBadge",
+			"nodeId": "_1R83Ca_nodeId",
+			"nodeRole": "_1R83Ca_nodeRole",
+			"noticeBar": "_1R83Ca_noticeBar",
+			"panel": "_1R83Ca_panel",
+			"panelCount": "_1R83Ca_panelCount",
+			"panelHead": "_1R83Ca_panelHead",
+			"panelTitle": "_1R83Ca_panelTitle",
+			"projectChip": "_1R83Ca_projectChip",
+			"resultAgent": "_1R83Ca_resultAgent",
+			"resultHead": "_1R83Ca_resultHead",
+			"resultId": "_1R83Ca_resultId",
+			"resultItem": "_1R83Ca_resultItem",
+			"resultList": "_1R83Ca_resultList",
+			"resultMeta": "_1R83Ca_resultMeta",
+			"resultProject": "_1R83Ca_resultProject",
+			"resultTitle": "_1R83Ca_resultTitle",
+			"searchForm": "_1R83Ca_searchForm",
+			"searchInput": "_1R83Ca_searchInput",
+			"snippet": "_1R83Ca_snippet",
+			"snippetMark": "_1R83Ca_snippetMark",
+			"toggle": "_1R83Ca_toggle",
+			"toggleSpacer": "_1R83Ca_toggleSpacer",
+			"tree": "_1R83Ca_tree",
+			"treeRow": "_1R83Ca_treeRow"
 		};
+		//#endregion
+		//#region src/client/dsh-tools/strings.ts
+		/** Dynamic dsh-tools vocabulary; templates are interpolated by `formatTemplate`. */
+		const DSH_TOOLS_STRINGS = createLocaleView({
+			lineage: {
+				title: "dshtools.lineage.title",
+				loading: "dshtools.lineage.loading",
+				error: "dshtools.lineage.error",
+				empty: "dshtools.lineage.empty",
+				currentBadge: "dshtools.lineage.currentBadge",
+				liveBadge: "dshtools.lineage.liveBadge",
+				notPersistedBadge: "dshtools.lineage.notPersistedBadge",
+				role: {
+					ancestor: "dshtools.lineage.role.ancestor",
+					target: "dshtools.lineage.role.target",
+					descendant: "dshtools.lineage.role.descendant"
+				},
+				jumpTitle: "dshtools.lineage.jumpTitle",
+				currentTitle: "dshtools.lineage.currentTitle",
+				expand: "dshtools.lineage.expand",
+				collapse: "dshtools.lineage.collapse",
+				nodeCount: "dshtools.lineage.nodeCount",
+				incompleteWithId: "dshtools.lineage.incompleteWithId",
+				incomplete: "dshtools.lineage.incomplete",
+				degrade: {
+					notDshTitle: "dshtools.lineage.degrade.notDshTitle",
+					notDshBody: "dshtools.lineage.degrade.notDshBody",
+					queryUnavailableTitle: "dshtools.lineage.degrade.queryUnavailableTitle",
+					queryUnavailableBody: "dshtools.lineage.degrade.queryUnavailableBody",
+					traceFailedTitle: "dshtools.lineage.degrade.traceFailedTitle",
+					traceFailedBody: "dshtools.lineage.degrade.traceFailedBody",
+					unknownTitle: "dshtools.lineage.degrade.unknownTitle",
+					unknownBody: "dshtools.lineage.degrade.unknownBody"
+				}
+			},
+			search: {
+				title: "dshtools.search.title",
+				placeholder: "dshtools.search.placeholder",
+				submit: "dshtools.search.submit",
+				loading: "dshtools.search.loading",
+				error: "dshtools.search.error",
+				empty: "dshtools.search.empty",
+				filterOnlyNotice: "dshtools.search.filterOnlyNotice",
+				projectFilter: "dshtools.search.projectFilter",
+				matchedBy: {
+					"full-text": "dshtools.search.matchedBy.full-text",
+					title: "dshtools.search.matchedBy.title",
+					project: "dshtools.search.matchedBy.project",
+					other: "dshtools.search.matchedBy.other"
+				},
+				untitled: "dshtools.search.untitled"
+			}
+		});
 		//#endregion
 		//#region src/client/dsh-tools/logic.ts
 		/**
@@ -5376,8 +5811,10 @@ window.__ModuleLoader__.load({
 				style: { paddingLeft: node.depth * 16 },
 				"data-testid": "agent-sidecar-lineage-row",
 				"data-role": node.role,
-				children: [node.hasChildren ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+				children: [node.hasChildren ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 					type: "button",
+					size: "sm",
+					variant: "ghost",
 					className: dsh_tools_module_css_default["toggle"],
 					"aria-expanded": !collapsed,
 					"aria-label": collapsed ? S$1.expand : S$1.collapse,
@@ -5386,8 +5823,10 @@ window.__ModuleLoader__.load({
 				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 					className: dsh_tools_module_css_default["toggleSpacer"],
 					"aria-hidden": true
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+				}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 					type: "button",
+					size: "sm",
+					variant: "ghost",
 					className: dsh_tools_module_css_default["node"],
 					"data-current": node.isCurrent ? "true" : "false",
 					"aria-current": node.isCurrent ? "true" : void 0,
@@ -5405,17 +5844,17 @@ window.__ModuleLoader__.load({
 							title: node.id,
 							children: node.shortId
 						}),
-						node.isCurrent && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						node.isCurrent && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
 							className: dsh_tools_module_css_default["nodeBadge"],
 							"data-kind": "current",
 							children: S$1.currentBadge
 						}),
-						node.live && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						node.live && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
 							className: dsh_tools_module_css_default["nodeBadge"],
 							"data-kind": "live",
 							children: S$1.liveBadge
 						}),
-						!node.persisted && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						!node.persisted && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 							className: dsh_tools_module_css_default["nodeBadge"],
 							children: S$1.notPersistedBadge
 						})
@@ -5468,7 +5907,7 @@ window.__ModuleLoader__.load({
 				currentSessionId: props.currentSessionId
 			});
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-				className: dsh_tools_module_css_default["panel"],
+				...surfaceProps("dsh-tools", dsh_tools_module_css_default["panel"]),
 				"data-testid": "agent-sidecar-lineage",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -5476,13 +5915,14 @@ window.__ModuleLoader__.load({
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							className: dsh_tools_module_css_default["panelTitle"],
 							children: S$1.title
-						}), view.kind === "tree" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						}), view.kind === "tree" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 							className: dsh_tools_module_css_default["panelCount"],
 							children: formatTemplate(S$1.nodeCount, { n: view.tree.nodeCount })
 						})]
 					}),
 					view.kind === "loading" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: dsh_tools_module_css_default["mutedLine"],
+						role: "status",
 						children: view.text
 					}),
 					view.kind === "error" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -5526,11 +5966,28 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/client/dsh-tools/SearchPanel.tsx
+		/**
+		* Cross-agent session search panel (design §4.e.4 / §5.1: dsh 全文检索,
+		* 外部会话标题/项目过滤降级).
+		*
+		* Fully controlled and presentational — the component does NO data
+		* fetching; the integration layer owns the query state, calls
+		* `GET <prefix>/search?q=&project=&limit=`, maps the response through
+		* `normalizeSearchItems` (./logic.ts) and feeds the rows plus the wire
+		* `mode` back in. `mode: 'filter-only'` renders the honest degradation
+		* bar (§5.3) — the panel keeps working as a title/project filter and
+		* never pretends full-text ran.
+		*
+		* Snippets arrive pre-split into highlight segments (React-safe, no HTML
+		* injection); full-text hits carry them, filter hits render without.
+		*/
 		const S = DSH_TOOLS_STRINGS.search;
 		function ResultItem(props) {
 			const { item } = props;
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 				type: "button",
+				size: "sm",
+				variant: "ghost",
 				className: dsh_tools_module_css_default["resultItem"],
 				onClick: () => props.onSelectSession(item.sessionId),
 				"data-testid": "agent-sidecar-search-item",
@@ -5547,7 +6004,7 @@ window.__ModuleLoader__.load({
 								title: item.title,
 								children: item.titleLabel
 							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
 								className: dsh_tools_module_css_default["matchTag"],
 								"data-kind": item.matchedBy,
 								children: item.matchedByLabel
@@ -5587,7 +6044,7 @@ window.__ModuleLoader__.load({
 			});
 			const project = props.project ?? null;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-				className: dsh_tools_module_css_default["panel"],
+				...surfaceProps("dsh-tools", dsh_tools_module_css_default["panel"]),
 				"data-testid": "agent-sidecar-search",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -5603,19 +6060,20 @@ window.__ModuleLoader__.load({
 							ev.preventDefault();
 							props.onSubmit();
 						},
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Input, {
 							type: "search",
 							className: dsh_tools_module_css_default["searchInput"],
 							value: props.query,
 							placeholder: S.placeholder,
 							onChange: (ev) => props.onQueryChange(ev.target.value)
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 							type: "submit",
-							className: dsh_tools_module_css_default["searchSubmit"],
+							size: "sm",
+							variant: "outline",
 							children: S.submit
 						})]
 					}),
-					project !== null && project !== "" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					project !== null && project !== "" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
 						className: dsh_tools_module_css_default["projectChip"],
 						title: project,
 						children: formatTemplate(S.projectFilter, { project })
@@ -5628,6 +6086,7 @@ window.__ModuleLoader__.load({
 					}),
 					view.body === "loading" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: dsh_tools_module_css_default["mutedLine"],
+						role: "status",
 						children: view.text
 					}),
 					view.body === "error" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -5653,53 +6112,45 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region \0dsh-css:/Users/jingyu/Workspace/Projects/agent_sidecar/plugin/src/client/analysis/analysis.module.css.mjs
-		const css$3 = ".jX1QBq_panel{border:1px solid var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-bg-layer-1,#00000005);min-width:0;color:var(--dsw-alias-label-primary,#1f2328);border-radius:10px;flex-direction:column;gap:8px;padding:10px 12px;display:flex}.jX1QBq_head{align-items:center;gap:8px;min-width:0;display:flex}.jX1QBq_title{color:var(--dsw-alias-label-primary,#1f2328);font-size:13px;font-weight:600}.jX1QBq_spacer{flex:1}.jX1QBq_closeButton,.jX1QBq_textButton{border:1px solid var(--dsw-alias-border-l2,#0000001f);color:var(--dsw-alias-label-secondary,#57606a);cursor:pointer;background:0 0;border-radius:6px;flex:none;padding:2px 8px;font-size:12px}.jX1QBq_closeButton:hover,.jX1QBq_textButton:hover{background:var(--dsw-alias-bg-layer-2,#0000000a)}.jX1QBq_primaryButton{border:1px solid var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-bg-layer-2,#0000000a);color:var(--dsw-alias-label-primary,#1f2328);cursor:pointer;border-radius:6px;align-self:flex-start;padding:4px 12px;font-size:12px;font-weight:600}.jX1QBq_primaryButton:disabled,.jX1QBq_textButton:disabled{opacity:.5;cursor:not-allowed}.jX1QBq_mutedLine{color:var(--dsw-alias-label-secondary,#57606a);font-size:12px;line-height:18px}.jX1QBq_noteCard{border:1px dashed var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-bg-layer-1,#00000005);color:var(--dsw-alias-label-secondary,#57606a);border-radius:8px;padding:8px 10px;font-size:12px;line-height:18px}.jX1QBq_errorCard{color:var(--dsw-alias-state-error-primary,#cf222e);background:var(--dsw-alias-state-error-secondary,#cf222e14);border:1px solid var(--dsw-alias-state-error-secondary,#cf222e3d);border-radius:8px;padding:8px 10px;font-size:12px;line-height:18px}.jX1QBq_noticeBar{color:var(--dsw-alias-state-warning-primary,#9a6700);background:var(--dsw-alias-state-warning-secondary,#9a67001a);border:1px solid var(--dsw-alias-state-warning-secondary,#9a670047);border-radius:8px;padding:6px 10px;font-size:12px;line-height:18px}.jX1QBq_exchange{flex-direction:column;gap:4px;display:flex}.jX1QBq_exchangeLabel{color:var(--dsw-alias-label-secondary,#57606a);font-size:11px;font-weight:600}.jX1QBq_question{background:var(--dsw-alias-bg-layer-2,#0000000a);color:var(--dsw-alias-label-primary,#1f2328);white-space:pre-wrap;word-break:break-word;border-radius:8px;padding:6px 10px;font-size:12px;line-height:18px}.jX1QBq_summary{background:var(--dsw-alias-bg-layer-1,#00000005);border:1px solid var(--dsw-alias-border-l2,#0000001f);color:var(--dsw-alias-label-primary,#1f2328);white-space:pre-wrap;word-break:break-word;border-radius:8px;max-height:320px;margin:0;padding:8px 10px;font-family:inherit;font-size:12px;line-height:18px;overflow:auto}.jX1QBq_truncated{color:var(--dsw-alias-state-warning-primary,#9a6700);font-size:11px}.jX1QBq_disclaimer{color:var(--dsw-alias-label-secondary,#57606a);border-top:1px solid var(--dsw-alias-border-l2,#00000014);padding-top:6px;font-size:11px;line-height:16px}.jX1QBq_followupForm{gap:6px;display:flex}.jX1QBq_followupInput{border:1px solid var(--dsw-alias-border-l2,#00000029);background:var(--dsw-alias-bg-layer-0,#fff);min-width:0;color:var(--dsw-alias-label-primary,#1f2328);border-radius:6px;flex:1;padding:4px 8px;font-size:12px}.jX1QBq_actionsRow{align-items:center;gap:8px;display:flex}";
-		const tagId$3 = "@shendeguize/dsh-agent-sidecar/analysis.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$3) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
-			tag.dataset.pluginCss = tagId$3;
-			tag.textContent = css$3;
-			document.head.appendChild(tag);
+		//#region \0dsh-css:src/client/analysis/analysis.module.css.mjs
+		const css$5 = ".WYj1Qa_panel{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg);min-width:0;color:var(--agsc-fg);flex-direction:column;gap:8px;padding:10px 12px;display:flex}.WYj1Qa_head{align-items:center;gap:8px;min-width:0;display:flex}.WYj1Qa_title{color:var(--agsc-fg);font-size:13px;font-weight:600}.WYj1Qa_spacer{flex:1}.WYj1Qa_startButton{align-self:flex-start}.WYj1Qa_mutedLine{color:var(--agsc-fg-secondary);font-size:12px;line-height:18px}.WYj1Qa_noteCard,.WYj1Qa_errorCard,.WYj1Qa_noticeBar{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);padding:8px 10px;font-size:12px;line-height:18px}.WYj1Qa_errorCard{border-color:var(--agsc-err);color:var(--agsc-err)}.WYj1Qa_noticeBar{border-color:var(--agsc-warn);color:var(--agsc-warn)}.WYj1Qa_exchange{flex-direction:column;gap:4px;display:flex}.WYj1Qa_exchangeLabel{color:var(--agsc-fg-secondary);font-size:11px;font-weight:600}.WYj1Qa_question{border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg);white-space:pre-wrap;word-break:break-word;padding:6px 10px;font-size:12px;line-height:18px}.WYj1Qa_summary{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);max-height:320px;color:var(--agsc-fg);white-space:pre-wrap;word-break:break-word;margin:0;padding:8px 10px;font-family:inherit;font-size:12px;line-height:18px;overflow:auto}.WYj1Qa_truncated{color:var(--agsc-warn);font-size:11px}.WYj1Qa_disclaimer{border-top:1px solid var(--agsc-border-strong);color:var(--agsc-fg-secondary);padding-top:6px;font-size:11px;line-height:16px}.WYj1Qa_followupForm{gap:6px;display:flex}.WYj1Qa_followupInput{flex:1;min-width:0}";
+		const tagId$5 = "@shendeguize/dsh-agent-sidecar/src/client/analysis/analysis.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$5, css$5);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$5) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$5;
+				created = true;
+			}
+			tag.textContent = css$5;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
 		}
 		var analysis_module_css_default = {
-			"actionsRow": "jX1QBq_actionsRow",
-			"closeButton": "jX1QBq_closeButton",
-			"disclaimer": "jX1QBq_disclaimer",
-			"errorCard": "jX1QBq_errorCard",
-			"exchange": "jX1QBq_exchange",
-			"exchangeLabel": "jX1QBq_exchangeLabel",
-			"followupForm": "jX1QBq_followupForm",
-			"followupInput": "jX1QBq_followupInput",
-			"head": "jX1QBq_head",
-			"mutedLine": "jX1QBq_mutedLine",
-			"noteCard": "jX1QBq_noteCard",
-			"noticeBar": "jX1QBq_noticeBar",
-			"panel": "jX1QBq_panel",
-			"primaryButton": "jX1QBq_primaryButton",
-			"question": "jX1QBq_question",
-			"spacer": "jX1QBq_spacer",
-			"summary": "jX1QBq_summary",
-			"textButton": "jX1QBq_textButton",
-			"title": "jX1QBq_title",
-			"truncated": "jX1QBq_truncated"
+			"disclaimer": "WYj1Qa_disclaimer",
+			"errorCard": "WYj1Qa_errorCard",
+			"exchange": "WYj1Qa_exchange",
+			"exchangeLabel": "WYj1Qa_exchangeLabel",
+			"followupForm": "WYj1Qa_followupForm",
+			"followupInput": "WYj1Qa_followupInput",
+			"head": "WYj1Qa_head",
+			"mutedLine": "WYj1Qa_mutedLine",
+			"noteCard": "WYj1Qa_noteCard",
+			"noticeBar": "WYj1Qa_noticeBar",
+			"panel": "WYj1Qa_panel",
+			"question": "WYj1Qa_question",
+			"spacer": "WYj1Qa_spacer",
+			"startButton": "WYj1Qa_startButton",
+			"summary": "WYj1Qa_summary",
+			"title": "WYj1Qa_title",
+			"truncated": "WYj1Qa_truncated"
 		};
 		//#endregion
 		//#region src/client/analysis/AnalysisPanel.tsx
-		/**
-		* AI bypass-analysis panel (T5.10b, design §4.e.3 / §5.1 view 2): fully
-		* controlled presentation over an {@link AnalysisGlueState} — the owner
-		* (detail view) holds the AnalysisStore and passes state + intents down.
-		*
-		* Honesty posture (§5.3): the engine disclaimer (fallback copy when a
-		* settle never happened) renders with every result, truncation is called
-		* out per exchange, terminal errors carry the vocabulary code, and the
-		* capability-off state explains where to enable analysis instead of
-		* hiding the entry. Strings ride the main locale table (`analysis.*`).
-		*
-		* @module
-		*/
 		/** Terminal failure code → locale key ('' falls back to the generic). */
 		const ERROR_KEYS = {
 			analysis_disabled: "analysis.errDisabled",
@@ -5760,7 +6211,7 @@ window.__ModuleLoader__.load({
 				props.onFollowup(q);
 			};
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-				className: analysis_module_css_default["panel"],
+				...surfaceProps("analysis-panel", analysis_module_css_default["panel"]),
 				"data-testid": "agent-sidecar-analysis",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -5771,17 +6222,19 @@ window.__ModuleLoader__.load({
 								children: t("analysis.title")
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: analysis_module_css_default["spacer"] }),
-							conversationLive && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							conversationLive && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 								type: "button",
-								className: analysis_module_css_default["textButton"],
+								size: "sm",
+								variant: "ghost",
 								disabled: !enabled,
 								onClick: props.onStop,
 								"data-testid": "agent-sidecar-analysis-stop",
 								children: t("analysis.stop")
 							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 								type: "button",
-								className: analysis_module_css_default["closeButton"],
+								size: "sm",
+								variant: "ghost",
 								onClick: props.onClose,
 								children: t("analysis.close")
 							})
@@ -5810,9 +6263,11 @@ window.__ModuleLoader__.load({
 					enabled && showStart && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [state.phase === "idle" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: analysis_module_css_default["mutedLine"],
 						children: t("analysis.idleHint")
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 						type: "button",
-						className: analysis_module_css_default["primaryButton"],
+						size: "sm",
+						variant: "primary",
+						className: analysis_module_css_default["startButton"],
 						onClick: props.onStart,
 						"data-testid": "agent-sidecar-analysis-start",
 						children: state.phase === "idle" ? t("analysis.start") : t("analysis.restart")
@@ -5827,7 +6282,7 @@ window.__ModuleLoader__.load({
 					}),
 					conversationLive && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: analysis_module_css_default["followupForm"],
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Input, {
 							className: analysis_module_css_default["followupInput"],
 							value: question,
 							placeholder: t("analysis.followupPlaceholder"),
@@ -5839,9 +6294,10 @@ window.__ModuleLoader__.load({
 								if (event.key === "Enter") submitFollowup();
 							},
 							"data-testid": "agent-sidecar-analysis-question"
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 							type: "button",
-							className: analysis_module_css_default["textButton"],
+							size: "sm",
+							variant: "ghost",
 							disabled: !enabled || state.phase !== "ready" || question.trim() === "",
 							onClick: submitFollowup,
 							"data-testid": "agent-sidecar-analysis-followup",
@@ -5857,62 +6313,68 @@ window.__ModuleLoader__.load({
 			});
 		}
 		//#endregion
-		//#region \0dsh-css:/Users/jingyu/Workspace/Projects/agent_sidecar/plugin/src/client/inject/inject.module.css.mjs
-		const css$2 = ".KlwADW_panel{border:1px solid var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-bg-layer-2,#0000000a);border-radius:12px;flex-direction:column;max-width:560px;display:flex}.KlwADW_header{border-bottom:1px solid var(--dsw-alias-border-l2,#0000001f);align-items:center;gap:12px;padding:14px 16px 10px;display:flex}.KlwADW_title{min-width:0;color:var(--dsw-alias-label-primary,#1f2328);flex:1;margin:0;font-size:15px;font-weight:600;line-height:1.4}.KlwADW_body{flex-direction:column;gap:10px;padding:12px 16px 14px;display:flex}.KlwADW_capabilityOff{background:var(--dsw-alias-bg-module-platform,#00000008);color:var(--dsw-alias-label-secondary,#57606a);border-radius:8px;margin:0;padding:10px 12px;font-size:13px;line-height:1.6}.KlwADW_noticeWarn,.KlwADW_noticeError{background:var(--dsw-alias-bg-module-platform,#00000008);color:var(--dsw-alias-label-secondary,#57606a);border-radius:8px;margin:0;padding:8px 10px;font-size:12px;line-height:1.6}.KlwADW_noticeError{border:1px solid var(--dsw-alias-state-error-primary,#cf222e);color:var(--dsw-alias-state-error-primary,#cf222e)}.KlwADW_noticeDetail{color:var(--dsw-alias-label-tertiary,#6e7781)}.KlwADW_targetRow{align-items:baseline;gap:10px;min-width:0;display:flex}.KlwADW_noTarget{color:var(--dsw-alias-label-tertiary,#6e7781);font-size:12px;line-height:1.5}.KlwADW_agentTag{background:var(--dsw-alias-bg-module-platform,#00000008);color:var(--dsw-alias-label-secondary,#57606a);border-radius:999px;flex:none;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px}.KlwADW_planTitle{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--dsw-alias-label-primary,#1f2328);font-size:13px;line-height:1.5;overflow:hidden}.KlwADW_field{flex-direction:column;gap:6px;display:flex}.KlwADW_label{color:var(--dsw-alias-label-primary,#1f2328);font-size:13px;line-height:1.5}.KlwADW_textarea{appearance:none;resize:vertical;border:1px solid var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-bg-layer-3,#fff);min-height:96px;font:inherit;color:var(--dsw-alias-label-primary,#1f2328);border-radius:8px;padding:8px 10px;font-size:13px;line-height:1.6}.KlwADW_textarea:focus-visible{border-color:var(--dsw-alias-brand-primary,#4d6bfe);outline:none}.KlwADW_textarea::placeholder{color:var(--dsw-alias-label-tertiary,#6e7781)}.KlwADW_textarea:disabled{opacity:.5;cursor:default}.KlwADW_byteRow{align-items:center;gap:10px;display:flex}.KlwADW_byteBar{background:var(--dsw-alias-bg-module-platform,#00000008);border-radius:2px;flex:1;height:3px;overflow:hidden}.KlwADW_byteFill{background:var(--dsw-alias-brand-primary,#4d6bfe);border-radius:2px;height:100%;transition:width .12s}.KlwADW_byteFillOver{background:var(--dsw-alias-state-error-primary,#cf222e)}.KlwADW_byteText,.KlwADW_byteTextOver{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary,#6e7781);flex:none;font-size:11px;line-height:1.5}.KlwADW_byteTextOver{color:var(--dsw-alias-state-error-primary,#cf222e)}.KlwADW_invalid{color:var(--dsw-alias-state-error-primary,#cf222e);margin:0;font-size:12px;line-height:1.5}.KlwADW_modes{border:0;flex-direction:column;gap:8px;margin:0;padding:0;display:flex}.KlwADW_modeOption{cursor:pointer;align-items:flex-start;gap:10px;display:flex}.KlwADW_modeOption input{accent-color:var(--dsw-alias-brand-primary,#4d6bfe);cursor:pointer;width:14px;height:14px;margin:3px 0 0}.KlwADW_modeOption input:disabled{cursor:default}.KlwADW_modeText{flex-direction:column;gap:2px;min-width:0;display:flex}.KlwADW_modeLabel{color:var(--dsw-alias-label-primary,#1f2328);font-size:13px;line-height:1.5}.KlwADW_modeHint{color:var(--dsw-alias-label-tertiary,#6e7781);font-size:12px;line-height:1.5}.KlwADW_warnBar{border:1px solid var(--dsw-alias-state-error-primary,#cf222e);background:var(--dsw-alias-bg-module-platform,#00000008);color:var(--dsw-alias-state-error-primary,#cf222e);border-radius:8px;margin:0;padding:8px 10px;font-size:12px;line-height:1.6}.KlwADW_auditNote{background:var(--dsw-alias-bg-module-platform,#00000008);color:var(--dsw-alias-label-secondary,#57606a);border-radius:8px;margin:0;padding:8px 10px;font-size:12px;line-height:1.6}.KlwADW_planBox{border:1px solid var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-bg-layer-3,#fff);border-radius:8px;flex-direction:column;gap:6px;padding:10px 12px;display:flex}.KlwADW_planRow{align-items:baseline;gap:10px;min-width:0;display:flex}.KlwADW_planKey{color:var(--dsw-alias-label-tertiary,#6e7781);flex:none;font-size:12px;line-height:1.5}.KlwADW_planValue{min-width:0;color:var(--dsw-alias-label-primary,#1f2328);align-items:baseline;gap:8px;font-size:13px;line-height:1.5;display:flex}.KlwADW_observedNote{color:var(--dsw-alias-label-tertiary,#6e7781);margin:0;font-size:11px;line-height:1.5}.KlwADW_planPreview{flex-direction:column;gap:4px;min-width:0;display:flex}.KlwADW_preview{border:1px solid var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-bg-layer-2,#0000000a);white-space:pre-wrap;word-break:break-word;max-height:120px;color:var(--dsw-alias-label-secondary,#57606a);border-radius:6px;margin:0;padding:8px 10px;font-size:12px;line-height:1.6;overflow:auto}.KlwADW_countdown{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,#57606a);margin:0;font-size:12px;line-height:1.5}.KlwADW_resultOk,.KlwADW_resultFail,.KlwADW_resultUnknown{background:var(--dsw-alias-bg-module-platform,#00000008);color:var(--dsw-alias-label-primary,#1f2328);border-radius:8px;margin:0;padding:10px 12px;font-size:13px;line-height:1.6}.KlwADW_resultOk{border:1px solid var(--dsw-alias-brand-primary,#4d6bfe)}.KlwADW_resultFail{border:1px solid var(--dsw-alias-state-error-primary,#cf222e);color:var(--dsw-alias-state-error-primary,#cf222e)}.KlwADW_resultUnknown{border:1px solid var(--dsw-alias-label-dimmed,#8c959f);color:var(--dsw-alias-label-secondary,#57606a)}.KlwADW_resultDetail{color:var(--dsw-alias-label-tertiary,#6e7781);margin:0;font-size:12px;line-height:1.6}.KlwADW_footer{justify-content:flex-end;align-items:center;gap:8px;padding-top:4px;display:flex}.KlwADW_btn,.KlwADW_btnPrimary,.KlwADW_btnDanger{appearance:none;font:inherit;cursor:pointer;border:1px solid #0000;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}.KlwADW_btn{border-color:var(--dsw-alias-border-l2,#0000001f);color:var(--dsw-alias-label-secondary,#57606a);background:0 0}.KlwADW_btn:hover:not(:disabled){color:var(--dsw-alias-label-primary,#1f2328);border-color:var(--dsw-alias-label-dimmed,#8c959f)}.KlwADW_btnPrimary{background:var(--dsw-alias-label-primary,#1f2328);color:var(--dsw-alias-bg-layer-3,#fff)}.KlwADW_btnDanger{border-color:var(--dsw-alias-state-error-primary,#cf222e);color:var(--dsw-alias-state-error-primary,#cf222e);background:0 0;font-weight:600}.KlwADW_btnDanger:hover:not(:disabled){background:var(--dsw-alias-state-error-primary,#cf222e);color:var(--dsw-alias-bg-layer-3,#fff)}.KlwADW_btn:disabled,.KlwADW_btnPrimary:disabled,.KlwADW_btnDanger:disabled{opacity:.4;cursor:default}.KlwADW_btn:focus-visible,.KlwADW_btnPrimary:focus-visible,.KlwADW_btnDanger:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:1px}";
-		const tagId$2 = "@shendeguize/dsh-agent-sidecar/inject.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$2) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
-			tag.dataset.pluginCss = tagId$2;
-			tag.textContent = css$2;
-			document.head.appendChild(tag);
+		//#region \0dsh-css:src/client/inject/inject.module.css.mjs
+		const css$4 = ".a2ZgPq_panel{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-card);background:var(--agsc-bg);flex-direction:column;max-width:560px;display:flex}.a2ZgPq_header{border-bottom:1px solid var(--agsc-border-strong);align-items:center;gap:12px;padding:14px 16px 10px;display:flex}.a2ZgPq_title{min-width:0;color:var(--agsc-fg);flex:1;margin:0;font-size:15px;font-weight:600;line-height:1.4}.a2ZgPq_body{flex-direction:column;gap:10px;padding:12px 16px 14px;display:flex}.a2ZgPq_capabilityOff,.a2ZgPq_noticeWarn,.a2ZgPq_noticeError,.a2ZgPq_warnBar,.a2ZgPq_auditNote,.a2ZgPq_resultOk,.a2ZgPq_resultFail,.a2ZgPq_resultUnknown{border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);margin:0;padding:8px 10px;font-size:12px;line-height:1.6}.a2ZgPq_noticeWarn,.a2ZgPq_warnBar{border:1px solid var(--agsc-warn);color:var(--agsc-warn)}.a2ZgPq_noticeError,.a2ZgPq_resultFail{border:1px solid var(--agsc-err);color:var(--agsc-err)}.a2ZgPq_noticeDetail,.a2ZgPq_noTarget,.a2ZgPq_modeHint,.a2ZgPq_planKey,.a2ZgPq_observedNote,.a2ZgPq_resultDetail{color:var(--agsc-fg-dimmed)}.a2ZgPq_targetRow,.a2ZgPq_planRow{align-items:baseline;gap:10px;min-width:0;display:flex}.a2ZgPq_noTarget,.a2ZgPq_planKey,.a2ZgPq_modeHint,.a2ZgPq_resultDetail{font-size:12px;line-height:1.5}.a2ZgPq_agentTag{flex:none}.a2ZgPq_planTitle{min-width:0;color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;line-height:1.5;overflow:hidden}.a2ZgPq_field,.a2ZgPq_modeText,.a2ZgPq_planPreview{flex-direction:column;display:flex}.a2ZgPq_field{gap:6px}.a2ZgPq_label,.a2ZgPq_modeLabel{color:var(--agsc-fg);font-size:13px;line-height:1.5}.a2ZgPq_textarea{appearance:none;resize:vertical;border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);min-height:96px;color:var(--agsc-fg);font:inherit;padding:8px 10px;font-size:13px;line-height:1.6}.a2ZgPq_textarea:focus-visible{border-color:var(--agsc-accent);outline:none}.a2ZgPq_textarea::placeholder{color:var(--agsc-fg-dimmed)}.a2ZgPq_textarea:disabled{cursor:default;opacity:.5}.a2ZgPq_byteRow{align-items:center;gap:10px;display:flex}.a2ZgPq_byteBar{background:var(--agsc-border);border-radius:2px;flex:1;height:3px;overflow:hidden}.a2ZgPq_byteFill{background:var(--agsc-accent);border-radius:2px;height:100%;transition:width .12s}.a2ZgPq_byteFillOver{background:var(--agsc-err)}.a2ZgPq_byteText,.a2ZgPq_byteTextOver{color:var(--agsc-fg-dimmed);font-variant-numeric:tabular-nums;flex:none;font-size:11px;line-height:1.5}.a2ZgPq_byteTextOver,.a2ZgPq_invalid{color:var(--agsc-err)}.a2ZgPq_invalid{margin:0;font-size:12px;line-height:1.5}.a2ZgPq_modes{border:0;flex-direction:column;gap:8px;margin:0;padding:0;display:flex}.a2ZgPq_modeOption{cursor:pointer;align-items:flex-start;gap:10px;display:flex}.a2ZgPq_modeOption input{width:14px;height:14px;accent-color:var(--agsc-accent);cursor:pointer;margin:3px 0 0}.a2ZgPq_modeOption input:disabled{cursor:default}.a2ZgPq_modeText{gap:2px;min-width:0}.a2ZgPq_auditNote{padding:8px 10px}.a2ZgPq_planBox{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);flex-direction:column;gap:6px;padding:10px 12px;display:flex}.a2ZgPq_planKey{flex:none}.a2ZgPq_planValue{min-width:0;color:var(--agsc-fg);align-items:baseline;gap:8px;font-size:13px;line-height:1.5;display:flex}.a2ZgPq_observedNote{margin:0;font-size:11px;line-height:1.5}.a2ZgPq_planPreview{gap:4px;min-width:0}.a2ZgPq_preview{border:1px solid var(--agsc-border-strong);background:var(--agsc-bg);max-height:120px;color:var(--agsc-fg-secondary);white-space:pre-wrap;word-break:break-word;border-radius:6px;margin:0;padding:8px 10px;font-size:12px;line-height:1.6;overflow:auto}.a2ZgPq_countdown{color:var(--agsc-fg-secondary);font-variant-numeric:tabular-nums;margin:0;font-size:12px;line-height:1.5}.a2ZgPq_resultOk,.a2ZgPq_resultFail,.a2ZgPq_resultUnknown{color:var(--agsc-fg);padding:10px 12px;font-size:13px}.a2ZgPq_resultOk{border:1px solid var(--agsc-ok)}.a2ZgPq_resultUnknown{border:1px solid var(--agsc-fg-dimmed);color:var(--agsc-fg-secondary)}.a2ZgPq_resultDetail{margin:0;line-height:1.6}.a2ZgPq_footer{justify-content:flex-end;align-items:center;gap:8px;padding-top:4px;display:flex}.a2ZgPq_btnDanger{appearance:none;border:1px solid var(--agsc-err);border-radius:var(--agsc-radius-control);color:var(--agsc-err);font:inherit;cursor:pointer;background:0 0;padding:5px 14px;font-size:13px;font-weight:600;line-height:1.5}.a2ZgPq_btnDanger:hover:not(:disabled){background:var(--agsc-err);color:var(--agsc-bg-raised)}.a2ZgPq_btnDanger:disabled{cursor:default;opacity:.4}.a2ZgPq_btnDanger:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:1px}";
+		const tagId$4 = "@shendeguize/dsh-agent-sidecar/src/client/inject/inject.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$4, css$4);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$4) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$4;
+				created = true;
+			}
+			tag.textContent = css$4;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
 		}
 		var inject_module_css_default = {
-			"agentTag": "KlwADW_agentTag",
-			"auditNote": "KlwADW_auditNote",
-			"body": "KlwADW_body",
-			"btn": "KlwADW_btn",
-			"btnDanger": "KlwADW_btnDanger",
-			"btnPrimary": "KlwADW_btnPrimary",
-			"byteBar": "KlwADW_byteBar",
-			"byteFill": "KlwADW_byteFill",
-			"byteFillOver": "KlwADW_byteFillOver",
-			"byteRow": "KlwADW_byteRow",
-			"byteText": "KlwADW_byteText",
-			"byteTextOver": "KlwADW_byteTextOver",
-			"capabilityOff": "KlwADW_capabilityOff",
-			"countdown": "KlwADW_countdown",
-			"field": "KlwADW_field",
-			"footer": "KlwADW_footer",
-			"header": "KlwADW_header",
-			"invalid": "KlwADW_invalid",
-			"label": "KlwADW_label",
-			"modeHint": "KlwADW_modeHint",
-			"modeLabel": "KlwADW_modeLabel",
-			"modeOption": "KlwADW_modeOption",
-			"modeText": "KlwADW_modeText",
-			"modes": "KlwADW_modes",
-			"noTarget": "KlwADW_noTarget",
-			"noticeDetail": "KlwADW_noticeDetail",
-			"noticeError": "KlwADW_noticeError",
-			"noticeWarn": "KlwADW_noticeWarn",
-			"observedNote": "KlwADW_observedNote",
-			"panel": "KlwADW_panel",
-			"planBox": "KlwADW_planBox",
-			"planKey": "KlwADW_planKey",
-			"planPreview": "KlwADW_planPreview",
-			"planRow": "KlwADW_planRow",
-			"planTitle": "KlwADW_planTitle",
-			"planValue": "KlwADW_planValue",
-			"preview": "KlwADW_preview",
-			"resultDetail": "KlwADW_resultDetail",
-			"resultFail": "KlwADW_resultFail",
-			"resultOk": "KlwADW_resultOk",
-			"resultUnknown": "KlwADW_resultUnknown",
-			"targetRow": "KlwADW_targetRow",
-			"textarea": "KlwADW_textarea",
-			"title": "KlwADW_title",
-			"warnBar": "KlwADW_warnBar"
+			"agentTag": "a2ZgPq_agentTag",
+			"auditNote": "a2ZgPq_auditNote",
+			"body": "a2ZgPq_body",
+			"btnDanger": "a2ZgPq_btnDanger",
+			"byteBar": "a2ZgPq_byteBar",
+			"byteFill": "a2ZgPq_byteFill",
+			"byteFillOver": "a2ZgPq_byteFillOver",
+			"byteRow": "a2ZgPq_byteRow",
+			"byteText": "a2ZgPq_byteText",
+			"byteTextOver": "a2ZgPq_byteTextOver",
+			"capabilityOff": "a2ZgPq_capabilityOff",
+			"countdown": "a2ZgPq_countdown",
+			"field": "a2ZgPq_field",
+			"footer": "a2ZgPq_footer",
+			"header": "a2ZgPq_header",
+			"invalid": "a2ZgPq_invalid",
+			"label": "a2ZgPq_label",
+			"modeHint": "a2ZgPq_modeHint",
+			"modeLabel": "a2ZgPq_modeLabel",
+			"modeOption": "a2ZgPq_modeOption",
+			"modeText": "a2ZgPq_modeText",
+			"modes": "a2ZgPq_modes",
+			"noTarget": "a2ZgPq_noTarget",
+			"noticeDetail": "a2ZgPq_noticeDetail",
+			"noticeError": "a2ZgPq_noticeError",
+			"noticeWarn": "a2ZgPq_noticeWarn",
+			"observedNote": "a2ZgPq_observedNote",
+			"panel": "a2ZgPq_panel",
+			"planBox": "a2ZgPq_planBox",
+			"planKey": "a2ZgPq_planKey",
+			"planPreview": "a2ZgPq_planPreview",
+			"planRow": "a2ZgPq_planRow",
+			"planTitle": "a2ZgPq_planTitle",
+			"planValue": "a2ZgPq_planValue",
+			"preview": "a2ZgPq_preview",
+			"resultDetail": "a2ZgPq_resultDetail",
+			"resultFail": "a2ZgPq_resultFail",
+			"resultOk": "a2ZgPq_resultOk",
+			"resultUnknown": "a2ZgPq_resultUnknown",
+			"targetRow": "a2ZgPq_targetRow",
+			"textarea": "a2ZgPq_textarea",
+			"title": "a2ZgPq_title",
+			"warnBar": "a2ZgPq_warnBar"
 		};
 		//#endregion
 		//#region src/client/inject/logic.ts
@@ -6256,29 +6718,6 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region src/client/inject/InjectPanel.tsx
-		/**
-		* Inject panel (design §5.1 view 3): the two-phase confirmation UI for
-		* message injection. Fully controlled and presentational — the component
-		* does NO data fetching; the integration layer supplies `onPrepare` /
-		* `onExecute` callbacks that speak to `POST <prefix>/action` and resolve
-		* with either the wire success shape or the data layer's normalized
-		* ApiError (matched structurally, never imported).
-		*
-		* Three zones, driven by the pure reducer in ./logic.ts:
-		*
-		* 1. editor  — message textarea + live UTF-8 byte counter, queue/steer mode
-		*    radios, target row, cursor-cli process-list warning (§4.d/S7) and the
-		*    audit-fingerprint note (§5.3);
-		* 2. confirm — the prepare plan (live target-status snapshot + message
-		*    digest), the 60s confirmToken countdown, and the deliberately
-		*    restrained danger button;
-		* 3. result  — delivered / failed (re-prepare offered) / unknown (terminal:
-		*    the reducer itself refuses a reset, so no retry affordance can exist —
-		*    S6 — and the copy points at the session to verify).
-		*
-		* `capability.inject === false` disables the whole panel with the
-		* "enable injection in Settings" note.
-		*/
 		/** Countdown re-render cadence while a confirm token is live. */
 		const TICK_MS = 500;
 		function renderCopy(t, copy) {
@@ -6310,7 +6749,7 @@ window.__ModuleLoader__.load({
 							children: t("inject.planTargetLabel")
 						}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 							className: inject_module_css_default["planValue"],
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 								className: inject_module_css_default["agentTag"],
 								children: plan.target.agent
 							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -6354,11 +6793,6 @@ window.__ModuleLoader__.load({
 				]
 			});
 		}
-		/**
-		* Render the two-phase inject panel.
-		* @param props - capability, target, and the integration callbacks.
-		* @returns the panel.
-		*/
 		function InjectPanel(props) {
 			const t$1 = props.t ?? t;
 			const now = props.nowMs ?? Date.now;
@@ -6456,14 +6890,16 @@ window.__ModuleLoader__.load({
 					handlePrepare();
 				}
 			};
-			const closeButton = props.onClose !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+			const panelSurface = surfaceProps("inject-panel", inject_module_css_default["panel"]);
+			const closeButton = props.onClose !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 				type: "button",
-				className: inject_module_css_default["btn"],
+				size: "sm",
+				variant: "outline",
 				onClick: props.onClose,
 				children: t$1("inject.close")
 			}) : null;
 			if (!props.capability.inject) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-				className: inject_module_css_default["panel"],
+				...panelSurface,
 				"aria-label": t$1("inject.title"),
 				onKeyDown: handleKeyDown,
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
@@ -6489,7 +6925,7 @@ window.__ModuleLoader__.load({
 				const actions = resultActions(result.outcome);
 				const toneClass = result.outcome === "delivered" ? inject_module_css_default["resultOk"] : result.outcome === "failed" ? inject_module_css_default["resultFail"] : inject_module_css_default["resultUnknown"];
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-					className: inject_module_css_default["panel"],
+					...panelSurface,
 					"aria-label": t$1("inject.title"),
 					onKeyDown: handleKeyDown,
 					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
@@ -6518,24 +6954,27 @@ window.__ModuleLoader__.load({
 								className: inject_module_css_default["footer"],
 								children: [
 									closeButton,
-									isDeliveredResult(result) && props.onObserve !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									isDeliveredResult(result) && props.onObserve !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 										type: "button",
-										className: inject_module_css_default["btnPrimary"],
+										size: "sm",
+										variant: "primary",
 										onClick: props.onObserve,
 										"data-testid": "agent-sidecar-inject-observe",
 										children: t$1("inject.observeListen")
 									}) : null,
-									actions.canReprepare ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									actions.canReprepare ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 										type: "button",
-										className: inject_module_css_default["btnPrimary"],
+										size: "sm",
+										variant: "primary",
 										onClick: () => {
 											dispatch({ type: "RESET" });
 										},
 										children: t$1("inject.reprepare")
 									}) : null,
-									result.outcome === "delivered" && props.onClose === void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+									result.outcome === "delivered" && props.onClose === void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 										type: "button",
-										className: inject_module_css_default["btnPrimary"],
+										size: "sm",
+										variant: "primary",
 										onClick: () => {
 											dispatch({ type: "RESET" });
 										},
@@ -6551,7 +6990,7 @@ window.__ModuleLoader__.load({
 				const executing = state.phase === "executing";
 				const countdown = state.phase === "confirm" ? tokenCountdown(state.expiresAt, clock) : null;
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-					className: inject_module_css_default["panel"],
+					...panelSurface,
 					"aria-label": t$1("inject.confirmTitle"),
 					onKeyDown: handleKeyDown,
 					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
@@ -6578,9 +7017,10 @@ window.__ModuleLoader__.load({
 							}) : null,
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								className: inject_module_css_default["footer"],
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 									type: "button",
-									className: inject_module_css_default["btn"],
+									size: "sm",
+									variant: "outline",
 									disabled: executing,
 									onClick: () => {
 										dispatch({ type: "CANCEL" });
@@ -6606,7 +7046,7 @@ window.__ModuleLoader__.load({
 			const notice = state.phase === "idle" ? state.notice : null;
 			const showInvalid = !validation.ok && validation.code !== "empty";
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-				className: inject_module_css_default["panel"],
+				...panelSurface,
 				"aria-label": t$1("inject.title"),
 				onKeyDown: handleKeyDown,
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
@@ -6633,7 +7073,7 @@ window.__ModuleLoader__.load({
 								children: t$1("inject.targetLabel")
 							}), props.target !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 								className: inject_module_css_default["planValue"],
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
 									className: inject_module_css_default["agentTag"],
 									children: props.target.agent
 								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -6724,9 +7164,10 @@ window.__ModuleLoader__.load({
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: inject_module_css_default["footer"],
-							children: [closeButton, /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							children: [closeButton, /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 								type: "button",
-								className: inject_module_css_default["btnPrimary"],
+								size: "sm",
+								variant: "primary",
 								disabled: !gate.canPrepare,
 								onClick: () => {
 									handlePrepare();
@@ -7261,329 +7702,248 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
-		//#region src/client/search-glue.ts
-		/**
-		* Cross-agent search data glue (T5.10b): a framework-free store feeding
-		* the controlled SearchPanel. Normalization (matchedBy vocabulary, snippet
-		* highlighting) stays in dsh-tools/logic.ts — this store owns the query
-		* box state and transport orchestration only.
-		*
-		* Submit model: explicit user submit (no as-you-type dialing). A blank
-		* query with no project filter clears the results locally — the host
-		* answers 400 `invalid_request` for it, so the store never dials that.
-		* Stale results are replaced per settle; a failed submit keeps the last
-		* results visible with an error banner (SearchPanel renders error-first).
-		*
-		* Same store discipline as controller.ts: subscribe/getState for
-		* `useSyncExternalStore`, immutable snapshots, dispose() = late no-ops.
-		* Out-of-order settles are ignored via a submit ticket.
-		*
-		* @module
-		*/
-		const INITIAL_STATE$1 = {
-			query: "",
-			submittedQuery: "",
-			mode: "full-text",
-			items: [],
-			loading: false,
-			error: null,
-			project: null
-		};
-		var SearchStore = class {
-			state;
-			listeners = /* @__PURE__ */ new Set();
-			fetchSearchFn;
-			limit;
-			disposed = false;
-			ticket = 0;
-			constructor(options = {}) {
-				this.fetchSearchFn = options.fetchSearchFn ?? fetchSearch;
-				this.limit = options.limit;
-				this.state = {
-					...INITIAL_STATE$1,
-					project: options.project ?? null
-				};
+		//#region \0dsh-css:src/client/detail-view.module.css.mjs
+		const css$3 = ".T5Nmwa_switcherBar{align-items:center;gap:4px;padding:8px 12px 0;display:flex}.T5Nmwa_switcherButton{color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:1px solid #0000;border-radius:999px;padding:3px 10px;font-size:12px}.T5Nmwa_switcherButton:hover{background:var(--dsw-alias-bg-layer-1)}.T5Nmwa_switcherButton[data-active=true]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-border-l2);font-weight:600}.T5Nmwa_detailRoot{box-sizing:border-box;flex-direction:column;gap:12px;min-width:0;height:100%;padding:12px;display:flex;overflow-y:auto}.T5Nmwa_actionsRow{flex-wrap:wrap;align-items:center;gap:8px;display:flex}.T5Nmwa_analysisDisabledReason{max-width:360px;color:var(--agsc-fg-secondary);font-size:11px;line-height:16px}.T5Nmwa_toolsSection{border:1px solid var(--agsc-border);border-radius:var(--agsc-radius-control);flex-direction:column;gap:16px;padding:8px 12px;display:flex}.T5Nmwa_toolsToggle{align-self:flex-start}.T5Nmwa_toolsToggleGlyph{color:var(--agsc-fg-dimmed);flex:none;font-size:10px}.T5Nmwa_injectDialog{gap:0;width:min(560px,100%);max-height:min(85vh,720px);padding:0;overflow:auto}.T5Nmwa_injectDialog>[data-dsh-part=inject-panel]{border-radius:inherit;background:0 0;border:0;width:100%;max-width:none}";
+		const tagId$3 = "@shendeguize/dsh-agent-sidecar/src/client/detail-view.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$3, css$3);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$3) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$3;
+				created = true;
 			}
-			subscribe = (fn) => {
-				this.listeners.add(fn);
-				return () => {
-					this.listeners.delete(fn);
-				};
-			};
-			getState = () => this.state;
-			setState(patch) {
-				if (this.disposed) return;
-				this.state = {
-					...this.state,
-					...patch
-				};
-				for (const fn of [...this.listeners]) fn();
-			}
-			/** Controlled input change (no dialing). */
-			setQuery(query) {
-				this.setState({ query });
-			}
-			/** Submit the current query; blank + no project filter clears locally. */
-			async submit() {
-				if (this.disposed) return;
-				const q = this.state.query.trim();
-				const project = this.state.project;
-				if (q === "" && (project === null || project.trim() === "")) {
-					this.ticket += 1;
-					this.setState({
-						items: [],
-						submittedQuery: "",
-						loading: false,
-						error: null
-					});
-					return;
-				}
-				const ticket = this.ticket += 1;
-				this.setState({
-					loading: true,
-					error: null
-				});
-				try {
-					const response = await this.fetchSearchFn({
-						q,
-						project,
-						...this.limit !== void 0 ? { limit: this.limit } : {}
-					});
-					if (this.disposed || ticket !== this.ticket) return;
-					this.adoptResponse(response);
-				} catch (err) {
-					if (this.disposed || ticket !== this.ticket) return;
-					this.setState({
-						loading: false,
-						error: isApiError(err) ? err.reason : "network_error"
-					});
-				}
-			}
-			/** Apply one settled wire response (public seam for tests/materialize). */
-			adoptResponse(response) {
-				this.setState({
-					items: normalizeSearchItems(response),
-					mode: response.mode,
-					submittedQuery: response.query,
-					project: response.project,
-					loading: false,
-					error: null
-				});
-			}
-			dispose() {
-				this.disposed = true;
-				this.listeners.clear();
-			}
+			tag.textContent = css$3;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
+		}
+		var detail_view_module_css_default = {
+			"actionsRow": "T5Nmwa_actionsRow",
+			"analysisDisabledReason": "T5Nmwa_analysisDisabledReason",
+			"detailRoot": "T5Nmwa_detailRoot",
+			"injectDialog": "T5Nmwa_injectDialog",
+			"switcherBar": "T5Nmwa_switcherBar",
+			"switcherButton": "T5Nmwa_switcherButton",
+			"toolsSection": "T5Nmwa_toolsSection",
+			"toolsToggle": "T5Nmwa_toolsToggle",
+			"toolsToggleGlyph": "T5Nmwa_toolsToggleGlyph"
 		};
 		//#endregion
-		//#region src/client/analysis-glue.ts
+		//#region src/client/detail-view.tsx
 		/**
-		* AI bypass-analysis data glue (T5.10b, design §4.e.3 / §5.1): a
-		* framework-free store per analysis conversation, driving the controlled
-		* AnalysisPanel over the `POST action` `analysis.*` trio (host contract:
-		* routes.ts handleAnalysis* over analysis.ts AnalysisEngine).
+		* Session-detail React container. It composes the timeline, lineage,
+		* search, analysis, and optional injection surfaces over stores supplied
+		* by {@link DetailUiPort}.
 		*
-		* Wire semantics this store encodes:
-		* - a settled engine result comes back with the HTTP status derived from
-		*   its `errorCode` (timeout→504, too_many_active→429, create_failed→502,
-		*   cancelled→200); api.ts postAction folds non-200 bodies into ApiError
-		*   with `reason` = that code — so failures arrive here as ApiError and
-		*   the cancelled-terminal arrives as a 200 body;
-		* - the write gate answers 403 `analysis_disabled` (fail-closed), an
-		*   agents-less composition answers 501 `analysis_unavailable`, and a
-		*   pre-analysis host answers 400 `unknown_action` (mapped to the same
-		*   honest "unavailable" terminal);
-		* - a request timeout DISPOSES the engine session (terminal), a followup
-		*   timeout KEEPS it (non-terminal notice; analysis.ts contract).
-		*
-		* Token honesty: this store dials analysis turns only on explicit user
-		* intent (start / followup / stop) — never automatically. The one
-		* automatic call is dispose()'s fire-and-forget cancel, which spends no
-		* tokens and only releases the engine session slot (F2).
+		* Stores are scoped to one opened session and disposed on unmount. Each
+		* controller state frame refreshes the header hint and drives the
+		* detail store's bounded listen-mode refetch.
 		*
 		* @module
 		*/
-		function analysisRequestEnvelope(target) {
-			return {
-				type: "analysis.request",
-				targetKind: target.targetKind,
-				...target.targetId !== void 0 ? { targetId: target.targetId } : {},
-				...target.question !== void 0 && target.question.trim() !== "" ? { question: target.question } : {}
-			};
-		}
-		function analysisFollowupEnvelope(analysisSessionId, question) {
-			return {
-				type: "analysis.followup",
-				analysisSessionId,
-				question
-			};
-		}
-		function analysisCancelEnvelope(analysisSessionId) {
-			return {
-				type: "analysis.cancel",
-				analysisSessionId
-			};
-		}
-		const INITIAL_STATE = {
-			phase: "idle",
-			analysisSessionId: null,
-			exchanges: [],
-			disclaimer: null,
-			errorCode: null,
-			noticeCode: null
-		};
-		/** ApiError reason codes that keep a live followup session usable. */
-		const RETRYABLE_FOLLOWUP_CODES = /* @__PURE__ */ new Set([
-			"timeout",
-			"request_timeout",
-			"network_error"
-		]);
-		function failureCode(err) {
-			if (isApiError(err)) return err.reason === "unknown_action" ? "analysis_unavailable" : err.reason;
-			return "network_error";
-		}
-		var AnalysisStore = class {
-			state = INITIAL_STATE;
-			listeners = /* @__PURE__ */ new Set();
-			postActionFn;
-			timeoutMs;
-			disposed = false;
-			constructor(options = {}) {
-				this.postActionFn = options.postActionFn ?? postAction;
-				this.timeoutMs = options.timeoutMs ?? 75e3;
-			}
-			subscribe = (fn) => {
-				this.listeners.add(fn);
+		const ANALYSIS_DISABLED_REASON_ID = "agent-sidecar-analysis-disabled-reason";
+		/**
+		* The detail view. Owner remounts it per session id (`key={sessionId}`),
+		* so every store below is scoped to exactly one session.
+		*/
+		function SidecarDetailView(props) {
+			const { controller, integration, sessionId } = props;
+			const [detailStore] = (0, react.useState)(() => integration.createDetailStore(sessionId, props.hint));
+			const [searchStore] = (0, react.useState)(() => integration.createSearchStore());
+			const [analysisStore] = (0, react.useState)(() => integration.createAnalysisStore());
+			const [injectOpen, setInjectOpen] = (0, react.useState)(false);
+			const [analysisOpen, setAnalysisOpen] = (0, react.useState)(false);
+			const [toolsOpen, setToolsOpen] = (0, react.useState)(false);
+			(0, react.useEffect)(() => {
+				detailStore.open();
+				const unsubscribe = controller.subscribe(() => {
+					detailStore.notifySnapshot(findCardHint(controller.getState().sessions, sessionId));
+				});
 				return () => {
-					this.listeners.delete(fn);
+					unsubscribe();
+					detailStore.dispose();
+					searchStore.dispose();
+					analysisStore.dispose();
 				};
+			}, [
+				controller,
+				detailStore,
+				searchStore,
+				analysisStore,
+				sessionId
+			]);
+			const detail = (0, react.useSyncExternalStore)(detailStore.subscribe, detailStore.getState, detailStore.getState);
+			const search = (0, react.useSyncExternalStore)(searchStore.subscribe, searchStore.getState, searchStore.getState);
+			const analysis = (0, react.useSyncExternalStore)(analysisStore.subscribe, analysisStore.getState, analysisStore.getState);
+			const view = (0, react.useSyncExternalStore)((cb) => controller.subscribe(cb), () => controller.getState(), () => controller.getState());
+			const analysisEnabled = integration.getAnalysisEnabled();
+			const analysisDisabledHint = analysisEnabled ? void 0 : t("detail.actions.analyzeDisabledHint");
+			const injectIntegration = props.integration.inject;
+			const closeInject = () => {
+				setInjectOpen(false);
 			};
-			getState = () => this.state;
-			setState(patch) {
-				if (this.disposed) return;
-				this.state = {
-					...this.state,
-					...patch
-				};
-				for (const fn of [...this.listeners]) fn();
-			}
-			post(body) {
-				const opts = { timeoutMs: this.timeoutMs };
-				return this.postActionFn(body, opts);
-			}
-			/** Start one analysis (allowed from idle and from the terminal phases). */
-			async start(target) {
-				const { phase } = this.state;
-				if (this.disposed || phase === "requesting" || phase === "ready" || phase === "answering") return;
-				this.setState({
-					...INITIAL_STATE,
-					phase: "requesting"
-				});
-				try {
-					const result = await this.post(analysisRequestEnvelope(target));
-					if (this.disposed) {
-						const id = result?.analysisSessionId;
-						if (result?.outcome === "completed" && typeof id === "string" && id !== "") this.fireCancel(id);
-						return;
-					}
-					if (this.state.phase !== "requesting") return;
-					this.adoptResult(null, result);
-				} catch (err) {
-					if (this.disposed || this.state.phase !== "requesting") return;
-					this.setState({
-						phase: "failed",
-						errorCode: failureCode(err)
-					});
+			const title = detail.header.title.trim();
+			const injectActions = injectIntegration === void 0 ? void 0 : {
+				onPrepare: injectIntegration.actions.onPrepare,
+				onExecute: async (req) => {
+					const result = await injectIntegration.actions.onExecute(req);
+					if (isDeliveredResult(result)) detailStore.refreshNewest();
+					return result;
 				}
-			}
-			/** Ask a follow-up in the live analysis session. */
-			async followup(question) {
-				const id = this.state.analysisSessionId;
-				const q = question.trim();
-				if (this.disposed || this.state.phase !== "ready" || id === null || q === "") return;
-				this.setState({
-					phase: "answering",
-					noticeCode: null
-				});
-				const phaseNow = () => this.state.phase;
-				try {
-					const result = await this.post(analysisFollowupEnvelope(id, q));
-					if (this.disposed || phaseNow() !== "answering") return;
-					this.adoptResult(q, result);
-				} catch (err) {
-					if (this.disposed || phaseNow() !== "answering") return;
-					const code = failureCode(err);
-					if (RETRYABLE_FOLLOWUP_CODES.has(code)) this.setState({
-						phase: "ready",
-						noticeCode: code
-					});
-					else this.setState({
-						phase: "failed",
-						errorCode: code
-					});
-				}
-			}
-			/** Release the analysis session (idempotent on the engine side). */
-			async stop() {
-				const id = this.state.analysisSessionId;
-				const { phase } = this.state;
-				if (this.disposed || id === null || phase !== "ready" && phase !== "answering") return;
-				try {
-					await this.post(analysisCancelEnvelope(id));
-					if (this.disposed) return;
-					this.setState({
-						phase: "stopped",
-						noticeCode: null
-					});
-				} catch {
-					if (this.disposed) return;
-					this.setState({ noticeCode: "cancel_failed" });
-				}
-			}
-			/** Fold one settled 200 result into the conversation. */
-			adoptResult(question, result) {
-				if (result.outcome === "completed") {
-					this.setState({
-						phase: "ready",
-						analysisSessionId: result.analysisSessionId ?? this.state.analysisSessionId,
-						exchanges: [...this.state.exchanges, {
-							question,
-							summary: result.summary ?? "",
-							truncated: result.truncated,
-							tokensHint: result.tokensHint ?? null
-						}],
-						disclaimer: result.disclaimer,
-						errorCode: null,
-						noticeCode: null
-					});
-					return;
-				}
-				this.setState({
-					phase: result.errorCode === "cancelled" || result.outcome === "cancelled" ? "stopped" : "failed",
-					errorCode: result.errorCode ?? result.outcome,
-					disclaimer: result.disclaimer
-				});
-			}
-			/**
-			* Late settlements become no-ops; subscribers are dropped. Idempotent.
-			* A live engine session is released with a fire-and-forget cancel so
-			* unmount / session-switch remounts cannot strand `maxActiveSessions`
-			* slots until plugin unload (F2). Cancel is idempotent on the engine
-			* side; a transport failure is silently ignored (nothing to surface —
-			* the store is gone).
-			*/
-			dispose() {
-				if (this.disposed) return;
-				const { analysisSessionId, phase } = this.state;
-				this.disposed = true;
-				this.listeners.clear();
-				if (analysisSessionId !== null && (phase === "ready" || phase === "answering")) this.fireCancel(analysisSessionId);
-			}
-			/** Fire-and-forget analysis.cancel (failures are deliberately silent). */
-			fireCancel(analysisSessionId) {
-				this.post(analysisCancelEnvelope(analysisSessionId)).catch(() => {});
-			}
-		};
+			};
+			const observeReaction = () => {
+				if (!detailStore.getState().listening) detailStore.toggleListen();
+				closeInject();
+			};
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				...surfaceProps("detail", detail_view_module_css_default["detailRoot"]),
+				"data-testid": "agent-sidecar-detail-view",
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: detail_view_module_css_default["actionsRow"],
+						children: [
+							injectIntegration !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+								size: "sm",
+								variant: "outline",
+								onClick: () => {
+									setInjectOpen(true);
+								},
+								"data-testid": "agent-sidecar-detail-inject",
+								children: t("detail.actions.inject")
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+								size: "sm",
+								variant: "outline",
+								disabled: !analysisEnabled,
+								title: analysisDisabledHint,
+								"aria-describedby": analysisEnabled ? void 0 : ANALYSIS_DISABLED_REASON_ID,
+								onClick: () => {
+									setAnalysisOpen(true);
+								},
+								"data-testid": "agent-sidecar-detail-analyze",
+								children: t("detail.actions.analyze")
+							}),
+							!analysisEnabled && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								id: ANALYSIS_DISABLED_REASON_ID,
+								className: detail_view_module_css_default["analysisDisabledReason"],
+								children: analysisDisabledHint
+							})
+						]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						...surfaceProps("dsh-tools", detail_view_module_css_default["toolsSection"]),
+						"data-testid": "agent-sidecar-detail-tools",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							size: "sm",
+							variant: "ghost",
+							className: detail_view_module_css_default["toolsToggle"],
+							"aria-expanded": toolsOpen,
+							onClick: () => {
+								setToolsOpen((open) => !open);
+							},
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: detail_view_module_css_default["toolsToggleGlyph"],
+									"aria-hidden": true,
+									children: toolsOpen ? "▾" : "▸"
+								}),
+								t("detail.tools.title"),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: detail_view_module_css_default["toolsToggleGlyph"],
+									children: toolsOpen ? t("detail.tools.hide") : t("detail.tools.show")
+								})
+							]
+						}), toolsOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(LineageTree, {
+							trace: detail.lineage.trace,
+							available: detail.lineage.available,
+							reason: detail.lineage.reason,
+							detail: detail.lineage.detail,
+							currentSessionId: sessionId,
+							onSelectSession: props.onSelectSession,
+							loading: detail.lineage.loading,
+							error: detail.lineage.error
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SearchPanel, {
+							query: search.query,
+							project: search.project,
+							mode: search.mode,
+							items: search.items,
+							loading: search.loading,
+							error: search.error,
+							onQueryChange: (query) => {
+								searchStore.setQuery(query);
+							},
+							onSubmit: () => {
+								searchStore.submit();
+							},
+							onSelectSession: props.onSelectSession
+						})] })]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionDetail, {
+						sessionId,
+						header: detail.header,
+						timeline: detail.timeline,
+						loading: detail.loading,
+						error: detail.error,
+						hasMore: detail.hasMore,
+						listening: detail.listening,
+						refreshing: detail.refreshing,
+						onLoadMore: () => {
+							detailStore.loadMore();
+						},
+						onToggleListen: () => {
+							detailStore.toggleListen();
+						},
+						onRefresh: () => {
+							detailStore.refreshNewest();
+						},
+						onClose: props.onClose
+					}),
+					analysisOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(AnalysisPanel, {
+						enabled: analysisEnabled,
+						state: analysis,
+						onStart: () => {
+							analysisStore.start({
+								targetKind: "session",
+								targetId: sessionId
+							});
+						},
+						onFollowup: (question) => {
+							analysisStore.followup(question);
+						},
+						onStop: () => {
+							analysisStore.stop();
+						},
+						onClose: () => {
+							setAnalysisOpen(false);
+						}
+					}),
+					injectIntegration !== void 0 && injectActions !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Modal, {
+						open: injectOpen,
+						onClose: closeInject,
+						title: t("inject.title"),
+						closeLabel: t("inject.close"),
+						className: detail_view_module_css_default["injectDialog"],
+						headless: true,
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(InjectPanel, {
+							capability: { inject: view.injectCapability },
+							target: {
+								agent: detail.header.agent,
+								sessionId,
+								...title !== "" ? { title } : {}
+							},
+							defaultMode: injectIntegration.getDefaultMode(),
+							onPrepare: injectActions.onPrepare,
+							onExecute: injectActions.onExecute,
+							onClose: closeInject,
+							onObserve: observeReaction
+						})
+					})
+				]
+			});
+		}
 		var ProjectsStore = class {
 			state = {
 				groups: [],
@@ -7671,267 +8031,218 @@ window.__ModuleLoader__.load({
 			return null;
 		}
 		//#endregion
-		//#region \0dsh-css:/Users/jingyu/Workspace/Projects/agent_sidecar/plugin/src/client/detail-view.module.css.mjs
-		const css$1 = ".p-2YEW_switcherBar{align-items:center;gap:4px;padding:8px 12px 0;display:flex}.p-2YEW_switcherButton{color:var(--dsw-alias-label-secondary,#57606a);cursor:pointer;background:0 0;border:1px solid #0000;border-radius:999px;padding:3px 10px;font-size:12px}.p-2YEW_switcherButton:hover{background:var(--dsw-alias-bg-layer-1,#00000005)}.p-2YEW_switcherButton[data-active=true]{color:var(--dsw-alias-label-primary,#1f2328);background:var(--dsw-alias-bg-layer-2,#0000000a);border-color:var(--dsw-alias-border-l2,#0000001f);font-weight:600}.p-2YEW_detailRoot{box-sizing:border-box;flex-direction:column;gap:12px;min-width:0;height:100%;padding:12px;display:flex;overflow-y:auto}.p-2YEW_actionsRow{align-items:center;gap:8px;display:flex}.p-2YEW_actionButton{border:1px solid var(--dsw-alias-border-l2,#0000001f);background:var(--dsw-alias-bg-layer-1,#00000005);color:var(--dsw-alias-label-primary,#1f2328);cursor:pointer;border-radius:6px;padding:3px 12px;font-size:12px}.p-2YEW_actionButton:hover{background:var(--dsw-alias-bg-layer-2,#0000000a)}.p-2YEW_actionButton:disabled{opacity:.5;cursor:not-allowed}.p-2YEW_toolsSection{border:1px solid var(--dsw-alias-border-l1,#00000014);border-radius:8px;flex-direction:column;gap:16px;padding:8px 12px;display:flex}.p-2YEW_toolsToggle{color:var(--dsw-alias-label-secondary,#57606a);cursor:pointer;background:0 0;border:none;align-self:flex-start;align-items:center;gap:6px;padding:0;font-family:inherit;font-size:12px;display:inline-flex}.p-2YEW_toolsToggle:hover{color:var(--dsw-alias-label-primary,#1f2328)}.p-2YEW_toolsToggleGlyph{color:var(--dsw-alias-label-tertiary,#6e7781);flex:none;font-size:10px}";
-		const tagId$1 = "@shendeguize/dsh-agent-sidecar/detail-view.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId$1) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
-			tag.dataset.pluginCss = tagId$1;
-			tag.textContent = css$1;
-			document.head.appendChild(tag);
+		//#region src/client/locales/react.ts
+		/**
+		* Subscribe the calling React root to the module-owned active locale.
+		* Reading translations remains late-bound through `t` and locale facades.
+		*/
+		function useActiveLocale() {
+			return (0, react.useSyncExternalStore)(subscribeLocale, getLocale, getLocale);
 		}
-		var detail_view_module_css_default = {
-			"actionButton": "p-2YEW_actionButton",
-			"actionsRow": "p-2YEW_actionsRow",
-			"detailRoot": "p-2YEW_detailRoot",
-			"switcherBar": "p-2YEW_switcherBar",
-			"switcherButton": "p-2YEW_switcherButton",
-			"toolsSection": "p-2YEW_toolsSection",
-			"toolsToggle": "p-2YEW_toolsToggle",
-			"toolsToggleGlyph": "p-2YEW_toolsToggleGlyph"
+		//#endregion
+		//#region \0dsh-css:src/client/navigation/center-overlay.module.css.mjs
+		const css$2 = ".nkYc2a_dialog{border-color:var(--agsc-border-strong);border-radius:var(--agsc-radius-card);background:var(--agsc-bg);width:min(1180px,100vw - 48px);height:min(860px,100vh - 48px);max-height:calc(100vh - 48px);box-shadow:var(--agsc-shadow-card);gap:0;padding:0}.nkYc2a_content{height:100%;min-height:0;overflow:hidden}.nkYc2a_content>:last-child{flex:1;min-height:0;margin-top:0;padding:0;overflow:hidden}.nkYc2a_surface{min-width:0;height:100%;min-height:0;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;display:flex;overflow:hidden}.nkYc2a_surface>:last-child{flex:1;height:auto;min-height:0}@media (width<=720px){.nkYc2a_dialog{border-radius:var(--agsc-radius-control);width:calc(100vw - 16px);height:calc(100dvh - 16px);max-height:calc(100dvh - 16px)}}";
+		const tagId$2 = "@shendeguize/dsh-agent-sidecar/src/client/navigation/center-overlay.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$2, css$2);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$2) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$2;
+				created = true;
+			}
+			tag.textContent = css$2;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
+		}
+		var center_overlay_module_css_default = {
+			"content": "nkYc2a_content",
+			"dialog": "nkYc2a_dialog",
+			"surface": "nkYc2a_surface"
 		};
 		//#endregion
-		//#region \0dsh-css:/Users/jingyu/Workspace/Projects/agent_sidecar/plugin/src/client/inject/overlay.module.css.mjs
-		const css = "._2WYemW_backdrop{z-index:1000;background:var(--dsw-alias-bg-mask-1,#00000073);justify-content:center;align-items:center;padding:24px;display:flex;position:fixed;inset:0}._2WYemW_dialog{border-radius:12px;width:min(560px,100%);max-height:min(85vh,720px);overflow:auto}";
-		const tagId = "@shendeguize/dsh-agent-sidecar/overlay.module.css";
-		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
-			tag.dataset.pluginCss = tagId;
-			tag.textContent = css;
-			document.head.appendChild(tag);
+		//#region src/client/navigation/modal-isolation.ts
+		const DIALOG_SELECTOR$1 = "[role=\"dialog\"][aria-modal=\"true\"]";
+		const FOCUSABLE_SELECTOR = [
+			"a[href],area[href],button:not([disabled])",
+			"input:not([disabled]):not([type=\"hidden\"]),select:not([disabled])",
+			"textarea:not([disabled]),iframe,[contenteditable=\"true\"],[tabindex]"
+		].join(",");
+		function focusableElements(dialog) {
+			return Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter((element) => element.tabIndex >= 0 && !element.hidden && element.closest("[inert],[aria-hidden=\"true\"]") === null && element.getClientRects().length > 0);
 		}
-		var overlay_module_css_default = {
-			"backdrop": "_2WYemW_backdrop",
-			"dialog": "_2WYemW_dialog"
-		};
-		//#endregion
-		//#region src/client/detail-view.tsx
-		/**
-		* Session-detail container (T5.10b, design §5.1 view 2): the full-tab
-		* detail surface opened by clicking a session card on the board or in the
-		* project view. Composes the M3 presentational components over their glue
-		* stores:
-		*
-		* - SessionDetail (timeline) ← DetailStore (fetchSessionDetail +
-		*   fetchTimelinePage pagination + SSE-triggered listen refetch);
-		* - action row: 注入 (M2 InjectPanel as a modal, reused verbatim) and
-		*   AI 分析 (AnalysisPanel over AnalysisStore; disabled with an honest
-		*   hint while `analysis.enabled` is off);
-		* - dsh 会话专属区: LineageTree ← the DetailStore lineage slice (non-dsh
-		*   sessions degrade client-side, no dialing) and SearchPanel ←
-		*   SearchStore (full-text or filter-only degradation; a result click
-		*   navigates the detail view to that session).
-		*
-		* The stores live in component state (one set per opened session id — the
-		* owner keys this component by session id) and are disposed on unmount.
-		* SSE coupling: the controller's subscribe seam notifies the DetailStore
-		* on every state frame (header refresh + listen-mode refetch trigger).
-		*
-		* @module
-		*/
-		/** Default integration over the real transports (analysis off until read). */
-		function createDefaultIntegration(base) {
-			return {
-				...base,
-				createDetailStore: (sessionId, hint) => new DetailStore(sessionId, { hint }),
-				createSearchStore: () => new SearchStore(),
-				createAnalysisStore: () => new AnalysisStore(),
-				createProjectsStore: () => new ProjectsStore()
-			};
+		function restorableIn(element, dialog) {
+			return element?.isConnected === true && dialog.contains(element) && !element.hidden && element.closest("[inert],[aria-hidden=\"true\"]") === null && element.getClientRects().length > 0;
 		}
-		/**
-		* The detail view. Owner remounts it per session id (`key={sessionId}`),
-		* so every store below is scoped to exactly one session.
-		*/
-		function SidecarDetailView(props) {
-			const { controller, integration, sessionId } = props;
-			const [detailStore] = (0, react.useState)(() => integration.createDetailStore(sessionId, props.hint));
-			const [searchStore] = (0, react.useState)(() => integration.createSearchStore());
-			const [analysisStore] = (0, react.useState)(() => integration.createAnalysisStore());
-			const [injectOpen, setInjectOpen] = (0, react.useState)(false);
-			const [analysisOpen, setAnalysisOpen] = (0, react.useState)(false);
-			const [toolsOpen, setToolsOpen] = (0, react.useState)(false);
+		/** Isolate the active official Modal, including sibling-portaled nested dialogs. */
+		function useModalIsolation(open, surfaceRef) {
 			(0, react.useEffect)(() => {
-				detailStore.open();
-				const unsubscribe = controller.subscribe(() => {
-					detailStore.notifySnapshot(findCardHint(controller.getState().sessions, sessionId));
-				});
-				return () => {
-					unsubscribe();
-					detailStore.dispose();
-					searchStore.dispose();
-					analysisStore.dispose();
+				if (!open || typeof document === "undefined" || typeof window === "undefined") return;
+				const body = document.body;
+				if (body === null || typeof window.MutationObserver === "undefined") return;
+				const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+				const originalInert = /* @__PURE__ */ new Map();
+				const dialogStack = [];
+				let topDialog = null;
+				let focusFrame = null;
+				const getTopDialog = () => {
+					const outer = surfaceRef.current?.closest(DIALOG_SELECTOR$1) ?? null;
+					if (outer === null) return null;
+					const dialogs = Array.from(body.querySelectorAll(DIALOG_SELECTOR$1));
+					return dialogs.indexOf(outer) < 0 ? null : dialogs.at(-1) ?? null;
 				};
-			}, [
-				controller,
-				detailStore,
-				searchStore,
-				analysisStore,
-				sessionId
-			]);
-			const detail = (0, react.useSyncExternalStore)(detailStore.subscribe, detailStore.getState, detailStore.getState);
-			const search = (0, react.useSyncExternalStore)(searchStore.subscribe, searchStore.getState, searchStore.getState);
-			const analysis = (0, react.useSyncExternalStore)(analysisStore.subscribe, analysisStore.getState, analysisStore.getState);
-			const view = (0, react.useSyncExternalStore)((cb) => controller.subscribe(cb), () => controller.getState(), () => controller.getState());
-			const analysisEnabled = integration.getAnalysisEnabled();
-			const injectIntegration = props.integration.inject;
-			const closeInject = () => {
-				setInjectOpen(false);
-			};
-			const title = detail.header.title.trim();
-			const injectActions = injectIntegration === void 0 ? void 0 : {
-				onPrepare: injectIntegration.actions.onPrepare,
-				onExecute: async (req) => {
-					const result = await injectIntegration.actions.onExecute(req);
-					if (isDeliveredResult(result)) detailStore.refreshNewest();
-					return result;
-				}
-			};
-			const observeReaction = () => {
-				if (!detailStore.getState().listening) detailStore.toggleListen();
-				closeInject();
-			};
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: detail_view_module_css_default["detailRoot"],
-				"data-testid": "agent-sidecar-detail-view",
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: detail_view_module_css_default["actionsRow"],
-						children: [injectIntegration !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: detail_view_module_css_default["actionButton"],
-							onClick: () => {
-								setInjectOpen(true);
-							},
-							"data-testid": "agent-sidecar-detail-inject",
-							children: t("detail.actions.inject")
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: detail_view_module_css_default["actionButton"],
-							disabled: !analysisEnabled,
-							title: analysisEnabled ? void 0 : t("detail.actions.analyzeDisabledHint"),
-							onClick: () => {
-								setAnalysisOpen(true);
-							},
-							"data-testid": "agent-sidecar-detail-analyze",
-							children: t("detail.actions.analyze")
-						})]
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: detail_view_module_css_default["toolsSection"],
-						"data-testid": "agent-sidecar-detail-tools",
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
-							type: "button",
-							className: detail_view_module_css_default["toolsToggle"],
-							"aria-expanded": toolsOpen,
-							onClick: () => {
-								setToolsOpen((open) => !open);
-							},
-							children: [
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: detail_view_module_css_default["toolsToggleGlyph"],
-									"aria-hidden": true,
-									children: toolsOpen ? "▾" : "▸"
-								}),
-								t("detail.tools.title"),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: detail_view_module_css_default["toolsToggleGlyph"],
-									children: toolsOpen ? t("detail.tools.hide") : t("detail.tools.show")
-								})
-							]
-						}), toolsOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(LineageTree, {
-							trace: detail.lineage.trace,
-							available: detail.lineage.available,
-							reason: detail.lineage.reason,
-							detail: detail.lineage.detail,
-							currentSessionId: sessionId,
-							onSelectSession: props.onSelectSession,
-							loading: detail.lineage.loading,
-							error: detail.lineage.error
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SearchPanel, {
-							query: search.query,
-							project: search.project,
-							mode: search.mode,
-							items: search.items,
-							loading: search.loading,
-							error: search.error,
-							onQueryChange: (query) => {
-								searchStore.setQuery(query);
-							},
-							onSubmit: () => {
-								searchStore.submit();
-							},
-							onSelectSession: props.onSelectSession
-						})] })]
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionDetail, {
-						sessionId,
-						header: detail.header,
-						timeline: detail.timeline,
-						loading: detail.loading,
-						error: detail.error,
-						hasMore: detail.hasMore,
-						listening: detail.listening,
-						refreshing: detail.refreshing,
-						onLoadMore: () => {
-							detailStore.loadMore();
-						},
-						onToggleListen: () => {
-							detailStore.toggleListen();
-						},
-						onRefresh: () => {
-							detailStore.refreshNewest();
-						},
-						onClose: props.onClose
-					}),
-					analysisOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(AnalysisPanel, {
-						enabled: analysisEnabled,
-						state: analysis,
-						onStart: () => {
-							analysisStore.start({
-								targetKind: "session",
-								targetId: sessionId
+				const bodyBranch = (dialog) => {
+					let branch = dialog;
+					while (branch.parentNode !== null && branch.parentNode !== body) branch = branch.parentNode;
+					return branch instanceof HTMLElement ? branch : null;
+				};
+				const isolateAround = (dialog) => {
+					const activeBranch = dialog === null ? null : bodyBranch(dialog);
+					const next = new Set(Array.from(body.children).filter((element) => element instanceof HTMLElement && element !== activeBranch));
+					for (const [element, wasInert] of originalInert) {
+						if (next.has(element)) continue;
+						element.inert = wasInert;
+						originalInert.delete(element);
+					}
+					for (const element of next) {
+						if (!originalInert.has(element)) originalInert.set(element, element.inert);
+						element.inert = true;
+					}
+				};
+				const queueFocus = (dialog, preferred = null) => {
+					if (focusFrame !== null) window.cancelAnimationFrame(focusFrame);
+					focusFrame = window.requestAnimationFrame(() => {
+						focusFrame = null;
+						if (getTopDialog() !== dialog) return;
+						(restorableIn(preferred, dialog) ? preferred : focusableElements(dialog)[0])?.focus({ preventScroll: true });
+					});
+				};
+				const sync = () => {
+					const next = getTopDialog();
+					const changed = next !== topDialog;
+					let closed = [];
+					if (changed && next !== null) {
+						const index = dialogStack.findIndex((frame) => frame.dialog === next);
+						if (index < 0) {
+							const parent = dialogStack.at(-1);
+							const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+							const opener = parent !== void 0 && restorableIn(active, parent.dialog) ? active : parent?.focus ?? null;
+							dialogStack.push({
+								dialog: next,
+								opener,
+								focus: null
 							});
-						},
-						onFollowup: (question) => {
-							analysisStore.followup(question);
-						},
-						onStop: () => {
-							analysisStore.stop();
-						},
-						onClose: () => {
-							setAnalysisOpen(false);
-						}
-					}),
-					injectIntegration !== void 0 && injectActions !== void 0 && injectOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: overlay_module_css_default["backdrop"],
-						role: "presentation",
-						onClick: closeInject,
-						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-							className: overlay_module_css_default["dialog"],
-							role: "dialog",
-							"aria-modal": "true",
-							onClick: (event) => {
-								event.stopPropagation();
-							},
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(InjectPanel, {
-								capability: { inject: view.injectCapability },
-								target: {
-									agent: detail.header.agent,
-									sessionId,
-									...title !== "" ? { title } : {}
-								},
-								defaultMode: injectIntegration.getDefaultMode(),
-								onPrepare: injectActions.onPrepare,
-								onExecute: injectActions.onExecute,
-								onClose: closeInject,
-								onObserve: observeReaction
-							})
-						})
-					})
-				]
+						} else closed = dialogStack.splice(index + 1);
+					}
+					topDialog = next;
+					isolateAround(next);
+					const opener = next === null ? null : closed.reverse().find((frame) => restorableIn(frame.opener, next))?.opener ?? null;
+					if (next !== null && (changed || !next.contains(document.activeElement))) queueFocus(next, opener);
+				};
+				const onFocusIn = (event) => {
+					if (!(event.target instanceof HTMLElement)) return;
+					const dialog = event.target.closest(DIALOG_SELECTOR$1);
+					const frame = dialogStack.find((item) => item.dialog === dialog);
+					if (frame !== void 0) frame.focus = event.target;
+				};
+				const onKeyDown = (event) => {
+					if (event.key !== "Tab" || event.defaultPrevented) return;
+					const dialog = getTopDialog();
+					if (dialog === null) return;
+					if (dialog !== topDialog) sync();
+					const focusable = focusableElements(dialog);
+					if (focusable.length === 0) {
+						event.preventDefault();
+						return;
+					}
+					const activeIndex = focusable.indexOf(document.activeElement);
+					const wrapsBackward = event.shiftKey && activeIndex <= 0;
+					const wrapsForward = !event.shiftKey && activeIndex === focusable.length - 1;
+					if (activeIndex < 0 || wrapsBackward || wrapsForward) {
+						event.preventDefault();
+						(event.shiftKey ? focusable.at(-1) : focusable[0])?.focus({ preventScroll: true });
+					}
+				};
+				const observer = new window.MutationObserver(sync);
+				observer.observe(body, {
+					childList: true,
+					subtree: true
+				});
+				document.addEventListener("focusin", onFocusIn);
+				document.addEventListener("keydown", onKeyDown, true);
+				sync();
+				return () => {
+					observer.disconnect();
+					document.removeEventListener("focusin", onFocusIn);
+					document.removeEventListener("keydown", onKeyDown, true);
+					if (focusFrame !== null) window.cancelAnimationFrame(focusFrame);
+					for (const [element, wasInert] of originalInert) element.inert = wasInert;
+					if (previousFocus?.isConnected === true) previousFocus.focus({ preventScroll: true });
+				};
+			}, [open, surfaceRef]);
+		}
+		//#endregion
+		//#region src/client/navigation/modal-surface-anchor.ts
+		const DIALOG_SELECTOR = "[role=\"dialog\"][aria-modal=\"true\"]";
+		const MODAL_SURFACE_OWNER = Symbol.for("@shendeguize/dsh-agent-sidecar/modal-surface-anchor-owner");
+		/** Use a pre-paint effect in the browser without warning during SSR. */
+		function selectModalSurfaceAnchorEffect(hasDocument) {
+			return hasDocument ? react.useLayoutEffect : react.useEffect;
+		}
+		const useIsomorphicLayoutEffect = selectModalSurfaceAnchorEffect(typeof document !== "undefined");
+		function ownerSlot(target) {
+			return target;
+		}
+		/** Attach the public surface attributes with latest-owner-safe cleanup. */
+		function attachModalSurfaceAnchor(target, attributes) {
+			if (target === null) return () => {};
+			const owner = Symbol("modal-surface-anchor");
+			const slot = ownerSlot(target);
+			slot[MODAL_SURFACE_OWNER] = owner;
+			target.setAttribute("data-dsh-plugin", attributes["data-dsh-plugin"]);
+			target.setAttribute("data-dsh-part", attributes["data-dsh-part"]);
+			return () => {
+				if (slot[MODAL_SURFACE_OWNER] !== owner) return;
+				target.removeAttribute("data-dsh-plugin");
+				target.removeAttribute("data-dsh-part");
+				delete slot[MODAL_SURFACE_OWNER];
+			};
+		}
+		/** Commit the public anchor onto the official Modal's real dialog element. */
+		function useModalSurfaceAnchor(open, surfaceRef, attributes) {
+			useIsomorphicLayoutEffect(() => {
+				if (!open || typeof document === "undefined") return;
+				return attachModalSurfaceAnchor(surfaceRef.current?.closest(DIALOG_SELECTOR) ?? null, attributes);
+			}, [
+				open,
+				surfaceRef,
+				attributes["data-dsh-plugin"],
+				attributes["data-dsh-part"]
+			]);
+		}
+		//#endregion
+		//#region src/client/navigation/CenterOverlay.tsx
+		/** Pure Agent Center presentation over the shell's frame-wide overlay seat. */
+		function CenterOverlay(props) {
+			const surfaceRef = (0, react.useRef)(null);
+			const surface = surfaceProps("overlay", center_overlay_module_css_default["dialog"]);
+			useModalIsolation(props.open, surfaceRef);
+			useModalSurfaceAnchor(props.open, surfaceRef, surface);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Modal, {
+				open: props.open,
+				onClose: props.onClose,
+				title: props.title,
+				closeLabel: props.closeLabel,
+				className: surface.className,
+				contentClassName: center_overlay_module_css_default["content"],
+				children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					ref: surfaceRef,
+					className: center_overlay_module_css_default["surface"],
+					children: props.children
+				})
 			});
 		}
 		//#endregion
@@ -8044,14 +8355,15 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/mount.tsx
 		/**
-		* Slot-facing React glue (T2.4): binds the {@link SidecarController} stores
-		* to the three presentational modules via `useSyncExternalStore` and hands
-		* back zero-prop components ready for slot registration. Factories close
-		* over the controller so subscribe/getSnapshot identities stay stable
-		* across renders (uSES resubscribes on identity change).
+		* React bindings for the board tab, footer widget, and settings card.
+		* Factories close over the controller so subscribe/getSnapshot identities
+		* stay stable across renders. The board depends only on {@link BoardUiPort}
+		* and passes its nested detail port to the detail container.
+		* Each exported root factory's top-level component subscribes once to the
+		* active locale, refreshing its complete descendant tree without leaf subscriptions.
 		*
-		* The settings card entry additionally owns the staged-edit lifecycle over
-		* a bound `SettingsScope` (browser mirror of the host settings namespace):
+		* The settings card owns the staged-edit lifecycle over a bound
+		* `SettingsScope` (browser mirror of the host settings namespace):
 		* resolved values come from the scope snapshot, edits stage locally, save
 		* writes one complete top-level group per changed group (see
 		* settings-glue.ts for the write-granularity rationale), and success is
@@ -8080,24 +8392,23 @@ window.__ModuleLoader__.load({
 			});
 		}
 		/**
-		* Cross-agent board tab (the "Sidecar" conversation tab), since T5.10b the
-		* shell of the whole M3 information architecture (design §5.1):
+		* Cross-agent board content and its project/detail routes:
 		*
 		* - view 1: the session board, with a 「会话看板 / 项目视图」 switcher
 		*   (ProjectView over `GET projects`);
 		* - view 2: clicking a session card in EITHER view routes to the full-tab
 		*   session-detail view (timeline + 注入 + AI 分析 + dsh 谱系/检索);
 		*   detail-internal jumps (lineage nodes, search hits) re-route in place;
-		* - view 3: the M2 inject panel opens as a modal from the detail view.
+		* - view 3: the inject panel opens as a modal from the detail view.
 		*
 		* Without an integration the board renders read-only and inert (no detail
-		* routing) — the M1 degradation posture.
+		* routing).
 		*/
-		function createBoardTab(controller, integration) {
+		function createBoardContent(controller, integration) {
 			const subscribe = (cb) => controller.subscribe(cb);
 			const getState = () => controller.getState();
 			const getFilters = () => controller.getFilters();
-			return function SidecarBoardTab() {
+			return function BoardContent() {
 				const state = (0, react.useSyncExternalStore)(subscribe, getState, getState);
 				const filters = (0, react.useSyncExternalStore)(subscribe, getFilters, getFilters);
 				const [mainView, setMainView] = (0, react.useState)("board");
@@ -8118,7 +8429,7 @@ window.__ModuleLoader__.load({
 					sessionId: detail.id,
 					hint: detail.hint,
 					controller,
-					integration,
+					integration: integration.detail,
 					onClose: () => {
 						setDetail(null);
 					},
@@ -8131,6 +8442,7 @@ window.__ModuleLoader__.load({
 						type: "button",
 						className: detail_view_module_css_default["switcherButton"],
 						"data-active": mainView === "board" || void 0,
+						"aria-pressed": mainView === "board",
 						onClick: () => {
 							setMainView("board");
 						},
@@ -8139,6 +8451,7 @@ window.__ModuleLoader__.load({
 						type: "button",
 						className: detail_view_module_css_default["switcherButton"],
 						"data-active": mainView === "projects" || void 0,
+						"aria-pressed": mainView === "projects",
 						onClick: () => {
 							setMainView("projects");
 						},
@@ -8163,15 +8476,40 @@ window.__ModuleLoader__.load({
 				})] });
 			};
 		}
+		/** Bind board content to its independent React root and locale subscription. */
+		function createBoardTab(controller, integration) {
+			const BoardContent = createBoardContent(controller, integration);
+			return function SidecarBoardTab() {
+				useActiveLocale();
+				return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(BoardContent, {});
+			};
+		}
+		/** Bind the shared navigation source to the shell overlay and existing board. */
+		function createCenterOverlay(controller, integration, navigation) {
+			const BoardContent = createBoardContent(controller, integration);
+			return function SidecarCenterOverlay() {
+				useActiveLocale();
+				const open = (0, react.useSyncExternalStore)(navigation.subscribe, navigation.getSnapshot, navigation.getSnapshot);
+				return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CenterOverlay, {
+					open,
+					onClose: navigation.close,
+					title: t("board.topbar.title"),
+					closeLabel: t("inject.close"),
+					children: open ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(BoardContent, {}) : null
+				});
+			};
+		}
 		/** Footer connection dot + working counter bound to the controller. */
-		function createFooterWidget(controller) {
+		function createFooterWidget(controller, onOpen) {
 			const subscribe = (cb) => controller.subscribe(cb);
 			const getState = () => controller.getState();
 			return function SidecarFooterWidget() {
+				useActiveLocale();
 				const state = (0, react.useSyncExternalStore)(subscribe, getState, getState);
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SidecarWidget, {
 					connection: deriveWidgetConnection(state.daemonState, state.streamHealth),
-					workingCount: countWorking(state.sessions)
+					workingCount: countWorking(state.sessions),
+					onOpen
 				});
 			};
 		}
@@ -8188,6 +8526,7 @@ window.__ModuleLoader__.load({
 			const subscribeScope = (cb) => scope.subscribe(cb);
 			const getSnapshot = () => scope.getSnapshot();
 			return function SidecarSettingsCardEntry() {
+				useActiveLocale();
 				const snapshot = (0, react.useSyncExternalStore)(subscribeScope, getSnapshot, getSnapshot);
 				const state = (0, react.useSyncExternalStore)(subscribeState, getState, getState);
 				const [staged, setStaged] = (0, react.useState)({});
@@ -8253,37 +8592,507 @@ window.__ModuleLoader__.load({
 			};
 		}
 		//#endregion
+		//#region src/client/navigation/center.ts
+		/**
+		* Create one DOM-free navigation source for every Agent Center entry point.
+		* Opening is always accepted; a shell overlay that mounts later observes the
+		* retained snapshot instead of losing the request.
+		*/
+		function createCenterNavigation() {
+			let isOpen = false;
+			const listeners = /* @__PURE__ */ new Set();
+			const notify = () => {
+				for (const listener of [...listeners]) listener();
+			};
+			const open = () => {
+				if (!isOpen) {
+					isOpen = true;
+					notify();
+				}
+				return true;
+			};
+			return {
+				open,
+				close: () => {
+					if (!isOpen) return;
+					isOpen = false;
+					notify();
+				},
+				subscribe: (listener) => {
+					listeners.add(listener);
+					return () => {
+						listeners.delete(listener);
+					};
+				},
+				getSnapshot: () => isOpen
+			};
+		}
+		//#endregion
+		//#region \0dsh-css:src/client/navigation/sidebar-entry.module.css.mjs
+		const css$1 = ".D5hMGG_entry{box-sizing:border-box;border-radius:var(--agsc-radius-control);width:100%;height:36px;color:var(--agsc-fg-secondary);cursor:pointer;font:inherit;text-align:left;white-space:nowrap;background:0 0;border:0;align-items:center;gap:8px;padding:0 10px;font-size:13px;transition:background-color .12s,color .12s,transform .12s;display:flex}.D5hMGG_entry:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--agsc-fg)}.D5hMGG_entry:active{background:var(--dsw-alias-interactive-bg-active);color:var(--agsc-fg);transform:translateY(1px)}.D5hMGG_entry:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:2px}.D5hMGG_entryIcon{flex:none;justify-content:center;align-items:center;width:24px;height:24px;display:inline-flex}.D5hMGG_entryIcon svg{width:16px;height:16px;display:block}.D5hMGG_entryLabel{text-overflow:ellipsis;overflow:hidden}[data-dsh-frame][data-sidebar-collapsed] .D5hMGG_entry{border-radius:50%;justify-content:center;width:36px;margin:0 auto 12px;padding:0}[data-dsh-frame][data-sidebar-collapsed] .D5hMGG_entryLabel{display:none}@media (prefers-reduced-motion:reduce){.D5hMGG_entry{transition:none}}";
+		const tagId$1 = "@shendeguize/dsh-agent-sidecar/src/client/navigation/sidebar-entry.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$1, css$1);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId$1) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId$1;
+				created = true;
+			}
+			tag.textContent = css$1;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
+		}
+		var sidebar_entry_module_css_default = {
+			"entry": "D5hMGG_entry",
+			"entryIcon": "D5hMGG_entryIcon",
+			"entryLabel": "D5hMGG_entryLabel"
+		};
+		//#endregion
+		//#region src/client/navigation/sidebar-entry.ts
+		const SIDEBAR_ENTRY_SELECTOR = "[data-agent-sidecar-sidebar-entry]";
+		const ENTRY_ATTRIBUTE = "data-agent-sidecar-sidebar-entry";
+		const LABEL_ATTRIBUTE = "data-agent-sidecar-sidebar-entry-label";
+		const SVG_NS = "http://www.w3.org/2000/svg";
+		const ENTRY_BINDING = Symbol.for("@shendeguize/dsh-agent-sidecar/sidebar-entry-binding");
+		const ENTRY_BRAND = Symbol.for("@shendeguize/dsh-agent-sidecar/sidebar-entry-brand");
+		const ENTRY_DISPATCHER = Symbol.for("@shendeguize/dsh-agent-sidecar/sidebar-entry-dispatcher");
+		const warnedForeignEntries = /* @__PURE__ */ new WeakSet();
+		function applyCopy(target, copy) {
+			target.label.textContent = copy.label;
+			target.button.setAttribute("aria-label", copy.accessibilityLabel);
+			target.button.title = copy.accessibilityLabel;
+		}
+		function bindSidebarEntryCopy(target, copy) {
+			const update = () => {
+				applyCopy(target, copy);
+			};
+			update();
+			return copy.subscribe(update);
+		}
+		function bindingOf(button) {
+			return button[ENTRY_BINDING];
+		}
+		function hasCurrentDispatcher(button) {
+			const record = button;
+			return (record[ENTRY_BRAND] === true || record[ENTRY_BINDING] !== void 0) && record[ENTRY_DISPATCHER] === true;
+		}
+		/** A pure, DOM-independent ownership check; the idempotency attribute alone is foreign. */
+		function isOwnedSidebarEntry(candidate) {
+			if (candidate === null || typeof candidate !== "object" && typeof candidate !== "function") return false;
+			const record = candidate;
+			if (record[ENTRY_BRAND] === true || record[ENTRY_BINDING] !== void 0) return true;
+			const element = candidate;
+			return element.tagName === "BUTTON" && element.getAttribute?.("data-dsh-plugin") === "agent-sidecar" && element.getAttribute?.("data-dsh-part") === "sidebar-entry" && element.querySelector?.(`[${LABEL_ATTRIBUTE}]`) != null;
+		}
+		function brandSidebarEntry(button) {
+			button[ENTRY_BRAND] = true;
+		}
+		function installClickDispatcher(button) {
+			const record = button;
+			if (record[ENTRY_DISPATCHER] === true) return;
+			button.addEventListener("click", () => {
+				openBoundSidebarEntry(button);
+			});
+			record[ENTRY_DISPATCHER] = true;
+		}
+		function once(dispose) {
+			let active = true;
+			return () => {
+				if (!active) return;
+				active = false;
+				dispose();
+			};
+		}
+		/** Invoke the latest cross-bundle binding, never a captured HMR closure. */
+		function openBoundSidebarEntry(button) {
+			try {
+				bindingOf(button)?.openCenter();
+			} catch {}
+		}
+		/** Latest-owner-wins binding over one shared DOM button. */
+		function bindSidebarEntryOwner(target, owner, openCenter, copy, startObserver) {
+			const previous = bindingOf(target.button);
+			previous?.observer?.disconnect();
+			previous?.stopCopy();
+			const binding = {
+				owner,
+				openCenter,
+				stopCopy: () => {},
+				observer: null
+			};
+			const sharedButton = target.button;
+			sharedButton[ENTRY_BINDING] = binding;
+			binding.stopCopy = once(bindSidebarEntryCopy(target, copy));
+			binding.observer = startObserver();
+			return () => {
+				binding.observer?.disconnect();
+				if (bindingOf(target.button)?.owner !== owner) return;
+				binding.stopCopy();
+				delete sharedButton[ENTRY_BINDING];
+				target.button.remove();
+			};
+		}
+		function createIcon() {
+			const icon = document.createElementNS(SVG_NS, "svg");
+			for (const [name, value] of Object.entries({
+				viewBox: "0 0 16 16",
+				width: "16",
+				height: "16",
+				fill: "none",
+				stroke: "currentColor",
+				"stroke-width": "1.4",
+				"stroke-linecap": "round",
+				"stroke-linejoin": "round",
+				"aria-hidden": "true",
+				focusable: "false"
+			})) icon.setAttribute(name, value);
+			const orbit = document.createElementNS(SVG_NS, "circle");
+			orbit.setAttribute("cx", "8");
+			orbit.setAttribute("cy", "8");
+			orbit.setAttribute("r", "5.5");
+			const center = document.createElementNS(SVG_NS, "circle");
+			center.setAttribute("cx", "8");
+			center.setAttribute("cy", "8");
+			center.setAttribute("r", "1.75");
+			const path = document.createElementNS(SVG_NS, "path");
+			path.setAttribute("d", "M8 2.5v3.75M8 9.75v3.75M2.5 8h3.75M9.75 8h3.75");
+			icon.append(orbit, center, path);
+			return icon;
+		}
+		function createEntry() {
+			const entry = document.createElement("button");
+			brandSidebarEntry(entry);
+			const surface = surfaceProps("sidebar-entry", sidebar_entry_module_css_default.entry);
+			entry.type = "button";
+			entry.className = surface.className;
+			entry.setAttribute(ENTRY_ATTRIBUTE, "");
+			entry.setAttribute("data-dsh-plugin", surface["data-dsh-plugin"]);
+			entry.setAttribute("data-dsh-part", surface["data-dsh-part"]);
+			const icon = document.createElement("span");
+			icon.className = sidebar_entry_module_css_default.entryIcon ?? "";
+			icon.setAttribute("aria-hidden", "true");
+			icon.appendChild(createIcon());
+			const label = document.createElement("span");
+			label.className = sidebar_entry_module_css_default.entryLabel ?? "";
+			label.setAttribute(LABEL_ATTRIBUTE, "");
+			entry.append(icon, label);
+			installClickDispatcher(entry);
+			return {
+				button: entry,
+				label
+			};
+		}
+		function existingEntry(button) {
+			const label = button.querySelector(`[${LABEL_ATTRIBUTE}]`) ?? button.lastElementChild;
+			return label === null ? null : {
+				button,
+				label
+			};
+		}
+		function rejectLegacyEntry() {
+			console.warn("[agent-sidecar] Sidebar legacy entry cannot be safely replaced; leaving it untouched.");
+			return null;
+		}
+		function replaceLegacyEntry(button) {
+			if (typeof button.cloneNode !== "function" || typeof button.replaceWith !== "function") return rejectLegacyEntry();
+			let clone;
+			try {
+				clone = button.cloneNode(true);
+			} catch {
+				return rejectLegacyEntry();
+			}
+			const elements = clone.tagName === "BUTTON" && typeof clone.addEventListener === "function" ? existingEntry(clone) : null;
+			if (elements === null) return rejectLegacyEntry();
+			try {
+				button.replaceWith(clone);
+			} catch {
+				return rejectLegacyEntry();
+			}
+			brandSidebarEntry(clone);
+			installClickDispatcher(clone);
+			return elements;
+		}
+		function sidebarRoot() {
+			const column = document.querySelector("[data-pane=\"sidebar\"], [class*=\"sidebarCol\"]");
+			if (column === null) return null;
+			return column.querySelector("[class*=\"logoRow\"]")?.parentElement ?? column.firstElementChild;
+		}
+		function newSessionRow(root) {
+			const button = root.querySelector("button[class*=\"newSession\"]") ?? Array.from(root.children).find((child) => child.tagName === "BUTTON");
+			if (button === void 0) return null;
+			const row = button.closest("[class*=\"logoRow\"]");
+			if (row !== null && row.parentElement === root) return row;
+			return button.parentElement === root ? button : null;
+		}
+		function placeEntry(entry) {
+			const root = sidebarRoot();
+			if (root === null) return false;
+			const anchor = newSessionRow(root);
+			if (anchor === null) return false;
+			if (entry.parentElement !== root || anchor.nextElementSibling !== entry) root.insertBefore(entry, anchor.nextElementSibling);
+			return true;
+		}
+		/**
+		* Wait for the sidebar, restore the row after React rebuilds, and return full
+		* cleanup. Overlapping applies synchronously adopt the existing row.
+		*/
+		function mountSidebarEntry(openCenter, copy) {
+			if (typeof document === "undefined") return () => {};
+			const candidate = document.querySelector(SIDEBAR_ENTRY_SELECTOR);
+			if (candidate !== null && !isOwnedSidebarEntry(candidate)) {
+				if (!warnedForeignEntries.has(candidate)) {
+					warnedForeignEntries.add(candidate);
+					console.warn("[agent-sidecar] Sidebar entry collision: refusing to modify a foreign [data-agent-sidecar-sidebar-entry] node.");
+				}
+				return () => {};
+			}
+			const elements = candidate === null ? createEntry() : hasCurrentDispatcher(candidate) ? existingEntry(candidate) : replaceLegacyEntry(candidate);
+			if (elements === null) return () => {};
+			brandSidebarEntry(elements.button);
+			const entry = elements.button;
+			const owner = {};
+			let disposed = false;
+			const ensurePlaced = () => {
+				if (disposed) return;
+				if (entry.isConnected) return;
+				const existing = document.querySelector(SIDEBAR_ENTRY_SELECTOR);
+				if (existing !== null && existing !== entry) return;
+				placeEntry(entry);
+			};
+			ensurePlaced();
+			const disposeBinding = bindSidebarEntryOwner(elements, owner, openCenter, copy, () => {
+				if (typeof MutationObserver === "undefined") return null;
+				const observer = new MutationObserver(ensurePlaced);
+				observer.observe(document.body, {
+					childList: true,
+					subtree: true
+				});
+				return observer;
+			});
+			return () => {
+				if (disposed) return;
+				disposed = true;
+				disposeBinding();
+			};
+		}
+		//#endregion
+		//#region \0dsh-css:src/client/sidebar/sidebar-tab.module.css.mjs
+		const css = "._6whfGW_root{box-sizing:border-box;min-width:0;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:8px;padding:10px 12px;font-size:12px;display:flex;overflow-y:auto}._6whfGW_header{align-items:center;min-width:0;display:flex}._6whfGW_counts{font-variant-numeric:tabular-nums;max-width:100%;color:var(--agsc-fg-secondary)}._6whfGW_counts>span{color:inherit}._6whfGW_sectionTitle{color:var(--agsc-fg-secondary);margin:0;font-size:11px;font-weight:600;line-height:16px}._6whfGW_sessionList{flex-direction:column;gap:2px;min-width:0;margin:0;padding:0;list-style:none;display:flex}._6whfGW_sessionItem{min-width:0;list-style:none}._6whfGW_sessionButton{width:100%;min-width:0;height:auto;color:var(--agsc-fg);text-align:left;justify-content:flex-start;align-items:center;gap:6px;padding:4px 6px;display:flex}._6whfGW_glyph{color:var(--agsc-accent);flex:none}._6whfGW_sessionTitle{min-width:0;color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}._6whfGW_sessionMeta{color:var(--agsc-fg-dimmed);white-space:nowrap;flex:none;font-size:11px}._6whfGW_detail{overflow-wrap:anywhere;color:var(--agsc-fg-secondary);margin:0 6px 4px 20px;font-size:11px;line-height:16px}._6whfGW_muted{color:var(--agsc-fg-dimmed);margin:0}._6whfGW_hint{color:var(--agsc-fg-dimmed);margin:0;font-size:11px;line-height:16px}._6whfGW_icon{color:var(--agsc-fg-secondary);flex:none;display:block}._6whfGW_icon path,._6whfGW_icon circle{fill:currentColor}";
+		const tagId = "@shendeguize/dsh-agent-sidecar/src/client/sidebar/sidebar-tab.module.css";
+		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId, css);
+		if (typeof document !== "undefined") {
+			const selector = "style[data-plugin=\"@shendeguize/dsh-agent-sidecar\"][data-plugin-css=" + JSON.stringify(tagId) + "]";
+			let tag = document.querySelector(selector);
+			let created = false;
+			if (tag === null) {
+				tag = document.createElement("style");
+				tag.dataset.plugin = "@shendeguize/dsh-agent-sidecar";
+				tag.dataset.pluginCss = tagId;
+				created = true;
+			}
+			tag.textContent = css;
+			tag[Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner")] = globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")];
+			if (created) document.head.appendChild(tag);
+		}
+		var sidebar_tab_module_css_default = {
+			"counts": "_6whfGW_counts",
+			"detail": "_6whfGW_detail",
+			"glyph": "_6whfGW_glyph",
+			"header": "_6whfGW_header",
+			"hint": "_6whfGW_hint",
+			"icon": "_6whfGW_icon",
+			"muted": "_6whfGW_muted",
+			"root": "_6whfGW_root",
+			"sectionTitle": "_6whfGW_sectionTitle",
+			"sessionButton": "_6whfGW_sessionButton",
+			"sessionItem": "_6whfGW_sessionItem",
+			"sessionList": "_6whfGW_sessionList",
+			"sessionMeta": "_6whfGW_sessionMeta",
+			"sessionTitle": "_6whfGW_sessionTitle"
+		};
+		//#endregion
+		//#region src/client/sidebar/SidebarTab.tsx
+		/** Presentation-only compact view for the optional better-sidebar surface.
+		* Integration owns discovery and view-model derivation; this root subscribes
+		* once to locale changes for its complete presentation subtree. */
+		const STATUS_LABEL_KEY = {
+			working: "detail.status.working",
+			waiting: "detail.status.waiting",
+			idle: "detail.status.idle",
+			dead: "detail.status.dead",
+			unknown: "detail.status.unknown"
+		};
+		const CONNECTION_DOT_STATE = {
+			ok: "done",
+			degraded: "warning",
+			off: "error"
+		};
+		/** Icon renderer kept beside the view while preserving the descriptor callback API. */
+		function SidebarTabIcon({ size }) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("svg", {
+				className: sidebar_tab_module_css_default["icon"],
+				width: size,
+				height: size,
+				viewBox: "0 0 24 24",
+				"aria-hidden": true,
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("path", { d: "M12 2 22 12 12 22 2 12 12 2Zm0 3.4L5.4 12l6.6 6.6 6.6-6.6L12 5.4Z" }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("circle", {
+					cx: "12",
+					cy: "12",
+					r: "2.2"
+				})]
+			});
+		}
+		function SessionRow(props) {
+			const { session, nowMs, expanded, detailId } = props;
+			const status = normalizeStatus(session.status);
+			const title = session.title.trim() === "" ? t("sidebar.untitled") : session.title;
+			const lastEvent = session.lastEvent === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+				className: sidebar_tab_module_css_default["muted"],
+				children: t("sidebar.noEvent")
+			}) : `${session.lastEvent.kind}: ${session.lastEvent.text}`;
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
+				className: sidebar_tab_module_css_default["sessionItem"],
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+					type: "button",
+					size: "sm",
+					variant: "ghost",
+					className: sidebar_tab_module_css_default["sessionButton"],
+					onClick: props.onToggle,
+					"data-testid": "agent-sidecar-sidebar-session",
+					"data-session-id": session.sessionId,
+					"data-status": status,
+					"aria-expanded": expanded,
+					"aria-controls": detailId,
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: sidebar_tab_module_css_default["glyph"],
+							"aria-hidden": true,
+							children: agentGlyph$1(session.agent)
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: sidebar_tab_module_css_default["sessionTitle"],
+							title: session.sessionId,
+							children: title
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+							className: sidebar_tab_module_css_default["sessionMeta"],
+							children: [
+								t(STATUS_LABEL_KEY[status]),
+								" · ",
+								formatRelativeTime$1(session.updatedAtMs, nowMs)
+							]
+						})
+					]
+				}), expanded && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					id: detailId,
+					className: sidebar_tab_module_css_default["detail"],
+					role: "region",
+					"aria-label": title,
+					"data-testid": "agent-sidecar-sidebar-detail",
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: projectDisplayName(session.project) }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: lastEvent })]
+				})]
+			});
+		}
+		/** Compact better-sidebar body. No controller, service, or transport imports. */
+		function SidebarTab({ vm, visible, nowMs = Date.now() }) {
+			useActiveLocale();
+			const [expandedId, setExpandedId] = (0, react.useState)(null);
+			const recentTitleId = "agent-sidecar-sidebar-recent-title";
+			let body;
+			if (!vm.hasSnapshot) body = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+				className: sidebar_tab_module_css_default["muted"],
+				children: t("sidebar.connecting")
+			});
+			else if (vm.recent.length === 0) body = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+				className: sidebar_tab_module_css_default["muted"],
+				children: t("sidebar.noSessions")
+			});
+			else body = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+				className: sidebar_tab_module_css_default["sessionList"],
+				"aria-labelledby": recentTitleId,
+				children: vm.recent.map((session, index) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionRow, {
+					session,
+					nowMs,
+					expanded: expandedId === session.sessionId,
+					detailId: `agent-sidecar-sidebar-detail-${index}`,
+					onToggle: () => {
+						setExpandedId((previous) => previous === session.sessionId ? null : session.sessionId);
+					}
+				}, session.sessionId))
+			});
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
+				...surfaceProps("sidebar-tab", sidebar_tab_module_css_default["root"]),
+				"data-testid": "agent-sidecar-sidebar-tab",
+				"data-visible": visible,
+				"aria-label": t("sidebar.tabTitle"),
+				"aria-hidden": !visible,
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
+						className: sidebar_tab_module_css_default["header"],
+						title: vm.connectionTitle,
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(StaticPill, {
+							className: sidebar_tab_module_css_default["counts"],
+							"data-testid": "agent-sidecar-sidebar-counts",
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+								state: CONNECTION_DOT_STATE[vm.connection],
+								size: 8
+							}), t("sidebar.countsRow", {
+								working: vm.workingCount,
+								waiting: vm.waitingCount
+							})]
+						})
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h2", {
+						id: recentTitleId,
+						className: sidebar_tab_module_css_default["sectionTitle"],
+						children: t("sidebar.recentTitle")
+					}),
+					body,
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: sidebar_tab_module_css_default["hint"],
+						children: t("sidebar.boardHint")
+					})
+				]
+			});
+		}
+		/** Count of sessions currently observed as waiting. */
+		function countWaiting(sessions) {
+			let count = 0;
+			for (const session of sessions) if (normalizeStatus(session.status) === "waiting") count += 1;
+			return count;
+		}
+		/**
+		* Return non-dead sessions by descending update time, capped for the compact
+		* view. Ties break by session id for stability.
+		*/
+		function recentActiveSessions(sessions, limit = 5) {
+			return sessions.filter((session) => normalizeStatus(session.status) !== "dead").sort((a, b) => b.updatedAtMs !== a.updatedAtMs ? b.updatedAtMs - a.updatedAtMs : a.sessionId.localeCompare(b.sessionId)).slice(0, limit);
+		}
+		/** Fold the shared view state into the mini tab's view model. */
+		function deriveMiniVM(state) {
+			const connection = deriveWidgetConnection(state.daemonState, state.streamHealth);
+			const workingCount = countWorking(state.sessions);
+			return {
+				connection,
+				connectionTitle: widgetTitle(connection, workingCount),
+				workingCount,
+				waitingCount: countWaiting(state.sessions),
+				recent: recentActiveSessions(state.sessions),
+				hasSnapshot: state.hasSnapshot
+			};
+		}
+		//#endregion
 		//#region src/client/sidebar-tab.tsx
 		/**
-		* Optional better-sidebar mini tab (T6.3, design §5.2 / ADR-5 option C).
-		*
-		* dsh-better-sidebar (npm, ≥0.4.0) turns the sidebar into a registry
-		* service: its client half runs `ctx.provide('betterSidebar', service)` and
-		* consumers call `service.registerTab(descriptor)` (source of record:
-		* better-sidebar docs/external-plugin-guide.md + src/client/service.ts).
-		* This module integrates as a SOFT dependency, dsh-sentinel style:
-		*
-		* - NO value import and NO type import of `dsh-better-sidebar` — the client
-		*   bundle purity gate stays react-only. The minimal service contract is
-		*   restated locally ({@link BetterSidebarServiceFace}) and the live service
-		*   is duck-typed at runtime ({@link probeBetterSidebar}).
-		* - Absent → silent skip: {@link mountSidebarTab} parks the registration in
-		*   `ctx.inject(['betterSidebar'], …)` — a cordis fiber that stays PENDING
-		*   until some plugin provides the service (zero timers, zero polling, zero
-		*   resources), plus one debug-level log line at mount time. If
-		*   better-sidebar is installed later (any load order), the fiber activates
-		*   and the tab registers; if never, nothing ever runs.
-		* - Present → one compact "Sidecar" tab (`agent-sidecar:monitor`): daemon
-		*   connection dot, working/waiting counts, and the most recently active
-		*   sessions, all read from the SHARED {@link SidecarController} stores —
-		*   no second poller, no second SSE.
-		* - `visible === false` releases resources: better-sidebar hands tab
-		*   components a `visible` prop (false while the panel is collapsed or
-		*   another tab is active). The shared controller has no pause/refcount
-		*   surface (its stream is plugin-lifetime, `stop()` is terminal), so the
-		*   gate lives in this view: {@link VisibleGatedStore} unsubscribes from the
-		*   controller while hidden (re-render churn stops; the view triggers no
-		*   fetches of its own) and resubscribes + catches up on show.
+		* Soft dsh-better-sidebar integration (design §5.2 / ADR-5 option C).
+		* The dependency stays duck-typed: absence parks a zero-resource inject
+		* fiber, presence registers one compact tab over the shared controller.
+		* `visible=false` drops only this view's subscription; the plugin-lifetime
+		* controller remains untouched.
 		*/
 		/** Registered tab type id (design §5.2 names it verbatim). */
 		const SIDEBAR_TAB_ID = "agent-sidecar:monitor";
@@ -8353,154 +9162,8 @@ window.__ModuleLoader__.load({
 				for (const fn of [...this.listeners]) fn();
 			}
 		};
-		/** Count of sessions currently observed as waiting. */
-		function countWaiting(sessions) {
-			let count = 0;
-			for (const session of sessions) if (normalizeStatus(session.status) === "waiting") count += 1;
-			return count;
-		}
 		/**
-		* The compact list: non-dead sessions, most recently updated first, capped
-		* at {@link MAX_RECENT_SESSIONS} (ties break by session id for stability).
-		*/
-		function recentActiveSessions(sessions, limit = 5) {
-			return sessions.filter((session) => normalizeStatus(session.status) !== "dead").sort((a, b) => b.updatedAtMs !== a.updatedAtMs ? b.updatedAtMs - a.updatedAtMs : a.sessionId.localeCompare(b.sessionId)).slice(0, limit);
-		}
-		/** Fold the shared view state into the mini tab's view model (pure). */
-		function deriveMiniVM(state) {
-			const connection = deriveWidgetConnection(state.daemonState, state.streamHealth);
-			const workingCount = countWorking(state.sessions);
-			return {
-				connection,
-				connectionTitle: widgetTitle(connection, workingCount),
-				workingCount,
-				waitingCount: countWaiting(state.sessions),
-				recent: recentActiveSessions(state.sessions),
-				hasSnapshot: state.hasSnapshot
-			};
-		}
-		const STATUS_LABEL_KEY = {
-			working: "detail.status.working",
-			waiting: "detail.status.waiting",
-			idle: "detail.status.idle",
-			dead: "detail.status.dead",
-			unknown: "detail.status.unknown"
-		};
-		const DOT_COLORS = {
-			ok: "var(--dsw-alias-state-success-primary, #1a7f37)",
-			degraded: "var(--dsw-alias-state-warn-primary, #9a6700)",
-			off: "var(--dsw-alias-label-dimmed, #8c959f)"
-		};
-		const rootStyle = {
-			display: "flex",
-			flexDirection: "column",
-			gap: 8,
-			padding: "10px 12px",
-			fontSize: 12,
-			color: "var(--dsw-alias-label-primary, #1f2328)"
-		};
-		const headerStyle = {
-			display: "flex",
-			alignItems: "center",
-			gap: 6
-		};
-		const dotStyle = (connection) => ({
-			width: 8,
-			height: 8,
-			borderRadius: "50%",
-			flex: "none",
-			background: DOT_COLORS[connection]
-		});
-		const countsStyle = {
-			fontVariantNumeric: "tabular-nums",
-			color: "var(--dsw-alias-label-secondary, #57606a)"
-		};
-		const sectionTitleStyle = {
-			fontSize: 11,
-			fontWeight: 600,
-			color: "var(--dsw-alias-label-secondary, #57606a)"
-		};
-		const rowStyle = {
-			display: "flex",
-			alignItems: "center",
-			gap: 6,
-			width: "100%",
-			padding: "4px 6px",
-			border: "none",
-			borderRadius: 6,
-			background: "transparent",
-			cursor: "pointer",
-			font: "inherit",
-			textAlign: "left",
-			color: "inherit"
-		};
-		const rowTitleStyle = {
-			flex: 1,
-			minWidth: 0,
-			overflow: "hidden",
-			textOverflow: "ellipsis",
-			whiteSpace: "nowrap"
-		};
-		const rowMetaStyle = {
-			flex: "none",
-			fontSize: 11,
-			color: "var(--dsw-alias-label-dimmed, #8c959f)",
-			whiteSpace: "nowrap"
-		};
-		const detailStyle = {
-			margin: "0 6px 4px 20px",
-			fontSize: 11,
-			lineHeight: "16px",
-			color: "var(--dsw-alias-label-secondary, #57606a)",
-			overflowWrap: "anywhere"
-		};
-		const mutedStyle = { color: "var(--dsw-alias-label-dimmed, #8c959f)" };
-		const hintStyle = {
-			fontSize: 11,
-			color: "var(--dsw-alias-label-dimmed, #8c959f)"
-		};
-		/** One session row + its inline expansion (last event, project, id). */
-		function SessionRow(props) {
-			const { session, nowMs, expanded } = props;
-			const status = normalizeStatus(session.status);
-			const title = session.title.trim() === "" ? t("sidebar.untitled") : session.title;
-			const rowChildren = [
-				(0, react.createElement)("span", {
-					key: "glyph",
-					"aria-hidden": true
-				}, agentGlyph$1(session.agent)),
-				(0, react.createElement)("span", {
-					key: "title",
-					style: rowTitleStyle,
-					title: session.sessionId
-				}, title),
-				(0, react.createElement)("span", {
-					key: "meta",
-					style: rowMetaStyle
-				}, `${t(STATUS_LABEL_KEY[status])} · ${formatRelativeTime$1(session.updatedAtMs, nowMs)}`)
-			];
-			const children = [(0, react.createElement)("button", {
-				key: "row",
-				type: "button",
-				style: rowStyle,
-				onClick: props.onToggle,
-				"data-testid": "agent-sidecar-sidebar-session",
-				"data-session-id": session.sessionId,
-				"data-status": status,
-				"aria-expanded": expanded
-			}, ...rowChildren)];
-			if (expanded) {
-				const lastEvent = session.lastEvent === null ? (0, react.createElement)("span", { style: mutedStyle }, t("sidebar.noEvent")) : `${session.lastEvent.kind}: ${session.lastEvent.text}`;
-				children.push((0, react.createElement)("div", {
-					key: "detail",
-					style: detailStyle,
-					"data-testid": "agent-sidecar-sidebar-detail"
-				}, (0, react.createElement)("div", { key: "project" }, projectDisplayName(session.project)), (0, react.createElement)("div", { key: "event" }, lastEvent)));
-			}
-			return (0, react.createElement)("li", { style: { listStyle: "none" } }, ...children);
-		}
-		/**
-		* Build the tab component bound to the shared controller. One
+		* Bind the presentation-only tab to the shared controller. One
 		* {@link VisibleGatedStore} per mounted tab instance: the `visible` prop is
 		* synced into it by effect, unmount disposes it.
 		*/
@@ -8513,42 +9176,10 @@ window.__ModuleLoader__.load({
 				(0, react.useEffect)(() => {
 					gate.setVisible(visible);
 				}, [gate, visible]);
-				const state = (0, react.useSyncExternalStore)(gate.subscribe, gate.getState, gate.getState);
-				const [expandedId, setExpandedId] = (0, react.useState)(null);
-				const vm = deriveMiniVM(state);
-				const nowMs = Date.now();
-				let body;
-				if (!vm.hasSnapshot) body = (0, react.createElement)("div", { style: mutedStyle }, t("sidebar.connecting"));
-				else if (vm.recent.length === 0) body = (0, react.createElement)("div", { style: mutedStyle }, t("sidebar.noSessions"));
-				else body = (0, react.createElement)("ul", { style: {
-					margin: 0,
-					padding: 0
-				} }, ...vm.recent.map((session) => (0, react.createElement)(SessionRow, {
-					key: session.sessionId,
-					session,
-					nowMs,
-					expanded: expandedId === session.sessionId,
-					onToggle: () => {
-						setExpandedId((prev) => prev === session.sessionId ? null : session.sessionId);
-					}
-				})));
-				return (0, react.createElement)("div", {
-					style: rootStyle,
-					"data-testid": "agent-sidecar-sidebar-tab",
-					"data-visible": visible
-				}, (0, react.createElement)("div", {
-					style: headerStyle,
-					title: vm.connectionTitle
-				}, (0, react.createElement)("span", {
-					"aria-hidden": true,
-					style: dotStyle(vm.connection)
-				}), (0, react.createElement)("span", {
-					style: countsStyle,
-					"data-testid": "agent-sidecar-sidebar-counts"
-				}, t("sidebar.countsRow", {
-					working: vm.workingCount,
-					waiting: vm.waitingCount
-				}))), (0, react.createElement)("div", { style: sectionTitleStyle }, t("sidebar.recentTitle")), body, (0, react.createElement)("div", { style: hintStyle }, t("sidebar.boardHint")));
+				return (0, react.createElement)(SidebarTab, {
+					vm: deriveMiniVM((0, react.useSyncExternalStore)(gate.subscribe, gate.getState, gate.getState)),
+					visible
+				});
 			};
 		}
 		/**
@@ -8556,9 +9187,9 @@ window.__ModuleLoader__.load({
 		* installed → the inject fiber never activates (silent skip, one debug
 		* line, zero resources). Installed (before or after this plugin, order
 		* does not matter) → duck-type the service and register the mini tab
-		* inside `ctx.effect`, so plugin unload / HMR unregisters it. A duplicate
-		* registration (double apply) or a service throw degrades to a logged
-		* no-op — never past this seat.
+		* inside `ctx.effect`, so plugin unload / HMR unregisters it. During overlap,
+		* the new fiber waits briefly for the old tab to leave, then contributes its
+		* own component closure. Foreign collisions time out without eviction.
 		*/
 		function mountSidebarTab(ctx, controller) {
 			const mount = ctx;
@@ -8571,72 +9202,474 @@ window.__ModuleLoader__.load({
 					return;
 				}
 				const component = createSidebarTabComponent(controller);
-				bctx.effect(() => {
-					try {
-						return service.registerTab({
-							id: SIDEBAR_TAB_ID,
-							title: () => t("sidebar.tabTitle"),
-							icon: (size) => (0, react.createElement)("span", {
-								"aria-hidden": true,
-								style: { fontSize: Math.round(size * .75) }
-							}, "◈"),
-							order: 60,
-							single: true,
-							component
-						});
-					} catch (err) {
-						console.error("agent-sidecar: better-sidebar tab registration failed", err);
-						return () => {};
+				bctx.effect(() => acquireWithHandoff(() => service.registerTab({
+					id: SIDEBAR_TAB_ID,
+					title: () => t("sidebar.tabTitle"),
+					icon: (size) => (0, react.createElement)(SidebarTabIcon, { size }),
+					order: 60,
+					single: true,
+					component
+				}), {
+					isCollision: isRegistrationCollision,
+					onError: (error) => {
+						console.error("agent-sidecar: better-sidebar tab registration failed", error);
+					},
+					onTimeout: () => {
+						console.error("agent-sidecar: better-sidebar tab handoff timed out");
 					}
-				}, "agent-sidecar: better-sidebar tab");
+				}), "agent-sidecar: better-sidebar tab");
 			});
+		}
+		//#endregion
+		//#region src/client/analysis-glue.ts
+		/**
+		* AI bypass-analysis data glue (T5.10b, design §4.e.3 / §5.1): a
+		* framework-free store per analysis conversation, driving the controlled
+		* AnalysisPanel over the `POST action` `analysis.*` trio (host contract:
+		* routes.ts handleAnalysis* over analysis.ts AnalysisEngine).
+		*
+		* Wire semantics this store encodes:
+		* - a settled engine result comes back with the HTTP status derived from
+		*   its `errorCode` (timeout→504, too_many_active→429, create_failed→502,
+		*   cancelled→200); api.ts postAction folds non-200 bodies into ApiError
+		*   with `reason` = that code — so failures arrive here as ApiError and
+		*   the cancelled-terminal arrives as a 200 body;
+		* - the write gate answers 403 `analysis_disabled` (fail-closed), an
+		*   agents-less composition answers 501 `analysis_unavailable`, and a
+		*   pre-analysis host answers 400 `unknown_action` (mapped to the same
+		*   honest "unavailable" terminal);
+		* - a request timeout DISPOSES the engine session (terminal), a followup
+		*   timeout KEEPS it (non-terminal notice; analysis.ts contract).
+		*
+		* Token honesty: this store dials analysis turns only on explicit user
+		* intent (start / followup / stop) — never automatically. The one
+		* automatic call is dispose()'s fire-and-forget cancel, which spends no
+		* tokens and only releases the engine session slot (F2).
+		*
+		* @module
+		*/
+		function analysisRequestEnvelope(target) {
+			return {
+				type: "analysis.request",
+				targetKind: target.targetKind,
+				...target.targetId !== void 0 ? { targetId: target.targetId } : {},
+				...target.question !== void 0 && target.question.trim() !== "" ? { question: target.question } : {}
+			};
+		}
+		function analysisFollowupEnvelope(analysisSessionId, question) {
+			return {
+				type: "analysis.followup",
+				analysisSessionId,
+				question
+			};
+		}
+		function analysisCancelEnvelope(analysisSessionId) {
+			return {
+				type: "analysis.cancel",
+				analysisSessionId
+			};
+		}
+		const INITIAL_STATE$1 = {
+			phase: "idle",
+			analysisSessionId: null,
+			exchanges: [],
+			disclaimer: null,
+			errorCode: null,
+			noticeCode: null
+		};
+		/** ApiError reason codes that keep a live followup session usable. */
+		const RETRYABLE_FOLLOWUP_CODES = /* @__PURE__ */ new Set([
+			"timeout",
+			"request_timeout",
+			"network_error"
+		]);
+		function failureCode(err) {
+			if (isApiError(err)) return err.reason === "unknown_action" ? "analysis_unavailable" : err.reason;
+			return "network_error";
+		}
+		var AnalysisStore = class {
+			state = INITIAL_STATE$1;
+			listeners = /* @__PURE__ */ new Set();
+			postActionFn;
+			timeoutMs;
+			disposed = false;
+			constructor(options = {}) {
+				this.postActionFn = options.postActionFn ?? postAction;
+				this.timeoutMs = options.timeoutMs ?? 75e3;
+			}
+			subscribe = (fn) => {
+				this.listeners.add(fn);
+				return () => {
+					this.listeners.delete(fn);
+				};
+			};
+			getState = () => this.state;
+			setState(patch) {
+				if (this.disposed) return;
+				this.state = {
+					...this.state,
+					...patch
+				};
+				for (const fn of [...this.listeners]) fn();
+			}
+			post(body) {
+				const opts = { timeoutMs: this.timeoutMs };
+				return this.postActionFn(body, opts);
+			}
+			/** Start one analysis (allowed from idle and from the terminal phases). */
+			async start(target) {
+				const { phase } = this.state;
+				if (this.disposed || phase === "requesting" || phase === "ready" || phase === "answering") return;
+				this.setState({
+					...INITIAL_STATE$1,
+					phase: "requesting"
+				});
+				try {
+					const result = await this.post(analysisRequestEnvelope(target));
+					if (this.disposed) {
+						const id = result?.analysisSessionId;
+						if (result?.outcome === "completed" && typeof id === "string" && id !== "") this.fireCancel(id);
+						return;
+					}
+					if (this.state.phase !== "requesting") return;
+					this.adoptResult(null, result);
+				} catch (err) {
+					if (this.disposed || this.state.phase !== "requesting") return;
+					this.setState({
+						phase: "failed",
+						errorCode: failureCode(err)
+					});
+				}
+			}
+			/** Ask a follow-up in the live analysis session. */
+			async followup(question) {
+				const id = this.state.analysisSessionId;
+				const q = question.trim();
+				if (this.disposed || this.state.phase !== "ready" || id === null || q === "") return;
+				this.setState({
+					phase: "answering",
+					noticeCode: null
+				});
+				const phaseNow = () => this.state.phase;
+				try {
+					const result = await this.post(analysisFollowupEnvelope(id, q));
+					if (this.disposed || phaseNow() !== "answering") return;
+					this.adoptResult(q, result);
+				} catch (err) {
+					if (this.disposed || phaseNow() !== "answering") return;
+					const code = failureCode(err);
+					if (RETRYABLE_FOLLOWUP_CODES.has(code)) this.setState({
+						phase: "ready",
+						noticeCode: code
+					});
+					else this.setState({
+						phase: "failed",
+						errorCode: code
+					});
+				}
+			}
+			/** Release the analysis session (idempotent on the engine side). */
+			async stop() {
+				const id = this.state.analysisSessionId;
+				const { phase } = this.state;
+				if (this.disposed || id === null || phase !== "ready" && phase !== "answering") return;
+				try {
+					await this.post(analysisCancelEnvelope(id));
+					if (this.disposed) return;
+					this.setState({
+						phase: "stopped",
+						noticeCode: null
+					});
+				} catch {
+					if (this.disposed) return;
+					this.setState({ noticeCode: "cancel_failed" });
+				}
+			}
+			/** Fold one settled 200 result into the conversation. */
+			adoptResult(question, result) {
+				if (result.outcome === "completed") {
+					this.setState({
+						phase: "ready",
+						analysisSessionId: result.analysisSessionId ?? this.state.analysisSessionId,
+						exchanges: [...this.state.exchanges, {
+							question,
+							summary: result.summary ?? "",
+							truncated: result.truncated,
+							tokensHint: result.tokensHint ?? null
+						}],
+						disclaimer: result.disclaimer,
+						errorCode: null,
+						noticeCode: null
+					});
+					return;
+				}
+				this.setState({
+					phase: result.errorCode === "cancelled" || result.outcome === "cancelled" ? "stopped" : "failed",
+					errorCode: result.errorCode ?? result.outcome,
+					disclaimer: result.disclaimer
+				});
+			}
+			/**
+			* Late settlements become no-ops; subscribers are dropped. Idempotent.
+			* A live engine session is released with a fire-and-forget cancel so
+			* unmount / session-switch remounts cannot strand `maxActiveSessions`
+			* slots until plugin unload (F2). Cancel is idempotent on the engine
+			* side; a transport failure is silently ignored (nothing to surface —
+			* the store is gone).
+			*/
+			dispose() {
+				if (this.disposed) return;
+				const { analysisSessionId, phase } = this.state;
+				this.disposed = true;
+				this.listeners.clear();
+				if (analysisSessionId !== null && (phase === "ready" || phase === "answering")) this.fireCancel(analysisSessionId);
+			}
+			/** Fire-and-forget analysis.cancel (failures are deliberately silent). */
+			fireCancel(analysisSessionId) {
+				this.post(analysisCancelEnvelope(analysisSessionId)).catch(() => {});
+			}
+		};
+		//#endregion
+		//#region src/client/search-glue.ts
+		/**
+		* Cross-agent search data glue (T5.10b): a framework-free store feeding
+		* the controlled SearchPanel. Normalization (matchedBy vocabulary, snippet
+		* highlighting) stays in dsh-tools/logic.ts — this store owns the query
+		* box state and transport orchestration only.
+		*
+		* Submit model: explicit user submit (no as-you-type dialing). A blank
+		* query with no project filter clears the results locally — the host
+		* answers 400 `invalid_request` for it, so the store never dials that.
+		* Stale results are replaced per settle; a failed submit keeps the last
+		* results visible with an error banner (SearchPanel renders error-first).
+		*
+		* Same store discipline as controller.ts: subscribe/getState for
+		* `useSyncExternalStore`, immutable snapshots, dispose() = late no-ops.
+		* Out-of-order settles are ignored via a submit ticket.
+		*
+		* @module
+		*/
+		const INITIAL_STATE = {
+			query: "",
+			submittedQuery: "",
+			mode: "full-text",
+			items: [],
+			loading: false,
+			error: null,
+			project: null
+		};
+		var SearchStore = class {
+			state;
+			listeners = /* @__PURE__ */ new Set();
+			fetchSearchFn;
+			limit;
+			disposed = false;
+			ticket = 0;
+			constructor(options = {}) {
+				this.fetchSearchFn = options.fetchSearchFn ?? fetchSearch;
+				this.limit = options.limit;
+				this.state = {
+					...INITIAL_STATE,
+					project: options.project ?? null
+				};
+			}
+			subscribe = (fn) => {
+				this.listeners.add(fn);
+				return () => {
+					this.listeners.delete(fn);
+				};
+			};
+			getState = () => this.state;
+			setState(patch) {
+				if (this.disposed) return;
+				this.state = {
+					...this.state,
+					...patch
+				};
+				for (const fn of [...this.listeners]) fn();
+			}
+			/** Controlled input change (no dialing). */
+			setQuery(query) {
+				this.setState({ query });
+			}
+			/** Submit the current query; blank + no project filter clears locally. */
+			async submit() {
+				if (this.disposed) return;
+				const q = this.state.query.trim();
+				const project = this.state.project;
+				if (q === "" && (project === null || project.trim() === "")) {
+					this.ticket += 1;
+					this.setState({
+						items: [],
+						submittedQuery: "",
+						loading: false,
+						error: null
+					});
+					return;
+				}
+				const ticket = this.ticket += 1;
+				this.setState({
+					loading: true,
+					error: null
+				});
+				try {
+					const response = await this.fetchSearchFn({
+						q,
+						project,
+						...this.limit !== void 0 ? { limit: this.limit } : {}
+					});
+					if (this.disposed || ticket !== this.ticket) return;
+					this.adoptResponse(response);
+				} catch (err) {
+					if (this.disposed || ticket !== this.ticket) return;
+					this.setState({
+						loading: false,
+						error: isApiError(err) ? err.reason : "network_error"
+					});
+				}
+			}
+			/** Apply one settled wire response (public seam for tests/materialize). */
+			adoptResponse(response) {
+				this.setState({
+					items: normalizeSearchItems(response),
+					mode: response.mode,
+					submittedQuery: response.query,
+					project: response.project,
+					loading: false,
+					error: null
+				});
+			}
+			dispose() {
+				this.disposed = true;
+				this.listeners.clear();
+			}
+		};
+		//#endregion
+		//#region src/client/ui-integration.ts
+		/**
+		* UI composition ports for the board and session-detail surfaces.
+		*
+		* Views depend on these narrow factory seams instead of owning the
+		* application assembly contract. The default factory binds the existing
+		* stores; callers can provide alternate port implementations in tests or
+		* other materializations.
+		*
+		* @module
+		*/
+		/** Bind the production store implementations at the client composition root. */
+		function createDefaultIntegration(base) {
+			return {
+				detail: {
+					...base,
+					createDetailStore: (sessionId, hint) => new DetailStore(sessionId, { hint }),
+					createSearchStore: () => new SearchStore(),
+					createAnalysisStore: () => new AnalysisStore()
+				},
+				createProjectsStore: () => new ProjectsStore()
+			};
 		}
 		//#endregion
 		//#region src/client/index.ts
 		const name = "agent-sidecar";
-		/** The slot registry is the only hard dependency; settingsScope is lazy. */
+		/** The slot registry is the only hard dependency; settingsScope and locale are lazy. */
 		const inject = ["slots"];
 		/** Entry id (list slots) and cell key (settings keyed slot) in one. */
 		const ENTRY_ID = "agent-sidecar";
+		/** Distinct list-seat id for the frame-wide Agent Center surface. */
+		const CENTER_ENTRY_ID = "agent-sidecar-center";
 		/** Host-side settings namespace (host half registers it via ctx.settings). */
 		const SETTINGS_NAMESPACE = "agent-sidecar";
 		/**
 		* Apply-guard: whether the slot ledger already holds this plugin's entry
-		* (list slots match by `id`, the keyed settings slot by `key`; both use
-		* the same 'agent-sidecar' token). `entries()` answers [] for undeclared
-		* slots, and the check runs inside the deferred `slots.inject` callback —
-		* i.e. at actual registration time, when the ledger is authoritative.
+		* (list slots match their seat-specific `id`, the keyed settings slot by
+		* namespace `key`). `entries()` answers [] for undeclared slots, and the
+		* check runs inside the deferred `slots.inject` callback — i.e. at actual
+		* registration time, when the ledger is authoritative.
 		*/
 		function hasOwnEntry(ctx, slot) {
-			return ctx.slots.entries(slot).some((entry) => entry.options.id === ENTRY_ID || entry.options.key === SETTINGS_NAMESPACE);
+			const entryId = slot === "shell.overlay" ? CENTER_ENTRY_ID : ENTRY_ID;
+			return ctx.slots.entries(slot).some((entry) => entry.options.id === entryId || slot === "settings.plugin.item" && entry.options.key === SETTINGS_NAMESPACE);
 		}
 		/**
-		* Style text per data-plugin-css tag id, cached at module scope so it
-		* survives unload → re-apply cycles of one materialized module (the CSS
-		* factory body only runs once per materialization).
+		* Lease the optional Host locale service for this injected child fiber.
+		* The locale core arbitrates overlapping fibers that share one service.
 		*/
-		const styleTextCache = /* @__PURE__ */ new Map();
+		function mountHostLocale(ctx) {
+			ctx.inject(["locale"], (injected) => {
+				const lctx = injected;
+				lctx.effect(() => attachHostLocale(lctx), "agent-sidecar: host locale bridge");
+			});
+		}
+		const STYLE_OWNER = Symbol.for("@shendeguize/dsh-agent-sidecar/style-owner");
+		const STYLE_MANIFEST = Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest");
+		const STYLE_GENERATION = Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation");
 		/**
-		* Keeper effect for the tsdown-injected `<style data-plugin>` tags: cache
-		* their text, restore any tag a previous unload removed, and remove all of
-		* this plugin's tags on dispose.
+		* A fallback only for a sequential re-apply of this exact materialization.
+		* A new intro installs a new generation object, so it can never inherit an
+		* earlier materialization's cached CSS.
 		*/
-		function keepStylesAlive() {
-			if (typeof document === "undefined") return () => {};
-			const ownTags = `style[data-plugin=${JSON.stringify(PLUGIN_ID)}]`;
-			for (const el of Array.from(document.querySelectorAll(ownTags))) {
-				const key = el.dataset["pluginCss"];
-				if (key !== void 0) styleTextCache.set(key, el.textContent ?? "");
+		let cachedStyleManifest;
+		function setStyleOwner(tag, owner) {
+			const sharedTag = tag;
+			sharedTag[STYLE_OWNER] = owner;
+		}
+		function isStyleOwner(tag, owner) {
+			return tag[STYLE_OWNER] === owner;
+		}
+		/**
+		* Freeze the current materialization's CSS before another bundle can reset
+		* it. A present Map is authoritative, including when it is empty.
+		*/
+		function snapshotStyleManifest(globals) {
+			const generation = globals[STYLE_GENERATION];
+			const manifest = globals[STYLE_MANIFEST];
+			if (manifest instanceof Map) {
+				const styles = /* @__PURE__ */ new Map();
+				for (const [tagId, cssText] of manifest) if (typeof tagId === "string" && typeof cssText === "string") styles.set(tagId, cssText);
+				if (typeof generation === "object" && generation !== null) cachedStyleManifest = {
+					generation,
+					styles
+				};
+				return styles;
 			}
-			for (const [key, cssText] of styleTextCache) if (document.querySelector(`style[data-plugin-css=${JSON.stringify(key)}]`) === null) {
-				const tag = document.createElement("style");
-				tag.dataset["plugin"] = PLUGIN_ID;
-				tag.dataset["pluginCss"] = key;
+			if (typeof generation === "object" && generation !== null && cachedStyleManifest?.generation === generation) return new Map(cachedStyleManifest.styles);
+			return /* @__PURE__ */ new Map();
+		}
+		/**
+		* Keeper effect for the tsdown-injected `<style data-plugin>` tags. Ownership
+		* lives on the DOM node through Symbol.for so the latest HMR fiber wins. The
+		* current bundle manifest is authoritative: plugin tags for CSS modules
+		* absent from it are stale and removed.
+		*/
+		function keepStylesAlive(documentRef = typeof document === "undefined" ? void 0 : document, globals = globalThis) {
+			if (documentRef === void 0) return () => {};
+			const manifest = snapshotStyleManifest(globals);
+			const owner = {};
+			const ownTags = `style[data-plugin=${JSON.stringify(PLUGIN_ID)}]`;
+			for (const el of Array.from(documentRef.querySelectorAll(ownTags))) {
+				const tag = el;
+				const key = tag.dataset["pluginCss"];
+				const cssText = key === void 0 ? void 0 : manifest.get(key);
+				if (cssText === void 0) {
+					tag.remove();
+					continue;
+				}
 				tag.textContent = cssText;
-				document.head.appendChild(tag);
+				setStyleOwner(tag, owner);
+			}
+			for (const [key, cssText] of manifest) {
+				const selector = `${ownTags}[data-plugin-css=${JSON.stringify(key)}]`;
+				if (documentRef.querySelector(selector) === null) {
+					const tag = documentRef.createElement("style");
+					tag.dataset["plugin"] = PLUGIN_ID;
+					tag.dataset["pluginCss"] = key;
+					tag.textContent = cssText;
+					setStyleOwner(tag, owner);
+					documentRef.head.appendChild(tag);
+				}
 			}
 			return () => {
-				for (const el of Array.from(document.querySelectorAll(ownTags))) el.remove();
+				for (const el of Array.from(documentRef.querySelectorAll(ownTags))) if (isStyleOwner(el, owner)) el.remove();
 			};
 		}
 		/**
@@ -8646,6 +9679,20 @@ window.__ModuleLoader__.load({
 		*/
 		function apply(ctx) {
 			const controller = new SidecarController();
+			const navigation = createCenterNavigation();
+			const openAgentCenter = navigation.open;
+			const sidebarEntryCopy = {
+				get label() {
+					return t("sidebar.centerEntryLabel");
+				},
+				get accessibilityLabel() {
+					return t("sidebar.centerEntryAria");
+				},
+				subscribe: subscribeLocale
+			};
+			try {
+				mountHostLocale(ctx);
+			} catch {}
 			const injectPrefs = { defaultMode: "queue" };
 			const analysisPrefs = { enabled: false };
 			const uiIntegration = createDefaultIntegration({
@@ -8677,39 +9724,62 @@ window.__ModuleLoader__.load({
 			}, "agent-sidecar: client data feed");
 			ctx.effect(keepStylesAlive, "agent-sidecar: injected styles");
 			try {
-				const SidecarBoardTab = createBoardTab(controller, uiIntegration);
-				ctx.slots.inject("conversation.view", () => {
-					if (hasOwnEntry(ctx, "conversation.view")) return () => {};
-					try {
-						return ctx.slots.register({
-							name: "conversation.view",
-							id: ENTRY_ID,
-							order: 30,
-							label: "Sidecar"
-						}, SidecarBoardTab);
-					} catch (err) {
-						console.error("agent-sidecar: board tab registration failed", err);
-						return () => {};
+				const SidecarCenterOverlay = createCenterOverlay(controller, uiIntegration, navigation);
+				ctx.slots.inject("shell.overlay", () => acquireWithHandoff(() => hasOwnEntry(ctx, "shell.overlay") ? void 0 : ctx.slots.register({
+					name: "shell.overlay",
+					id: CENTER_ENTRY_ID,
+					order: 30
+				}, SidecarCenterOverlay), {
+					isCollision: isRegistrationCollision,
+					onError: (error) => {
+						console.error("agent-sidecar: center overlay registration failed", error);
+					},
+					onTimeout: () => {
+						console.error("agent-sidecar: center overlay handoff timed out");
 					}
-				});
+				}));
+			} catch (err) {
+				console.error("agent-sidecar: center overlay mount failed", err);
+			}
+			try {
+				ctx.effect(() => mountSidebarEntry(openAgentCenter, sidebarEntryCopy), "agent-sidecar: sidebar entry");
+			} catch (err) {
+				console.error("agent-sidecar: sidebar entry mount failed", err);
+			}
+			try {
+				const SidecarBoardTab = createBoardTab(controller, uiIntegration);
+				ctx.slots.inject("conversation.view", () => acquireWithHandoff(() => hasOwnEntry(ctx, "conversation.view") ? void 0 : ctx.slots.register({
+					name: "conversation.view",
+					id: ENTRY_ID,
+					order: 30,
+					label: "Sidecar"
+				}, SidecarBoardTab), {
+					isCollision: isRegistrationCollision,
+					onError: (error) => {
+						console.error("agent-sidecar: board tab registration failed", error);
+					},
+					onTimeout: () => {
+						console.error("agent-sidecar: board tab handoff timed out");
+					}
+				}));
 			} catch (err) {
 				console.error("agent-sidecar: board tab mount failed", err);
 			}
 			try {
-				const SidecarFooterWidget = createFooterWidget(controller);
-				ctx.slots.inject("sidebar.footer.action", () => {
-					if (hasOwnEntry(ctx, "sidebar.footer.action")) return () => {};
-					try {
-						return ctx.slots.register({
-							name: "sidebar.footer.action",
-							id: ENTRY_ID,
-							order: 30
-						}, SidecarFooterWidget);
-					} catch (err) {
-						console.error("agent-sidecar: footer widget registration failed", err);
-						return () => {};
+				const SidecarFooterWidget = createFooterWidget(controller, openAgentCenter);
+				ctx.slots.inject("sidebar.footer.action", () => acquireWithHandoff(() => hasOwnEntry(ctx, "sidebar.footer.action") ? void 0 : ctx.slots.register({
+					name: "sidebar.footer.action",
+					id: ENTRY_ID,
+					order: 30
+				}, SidecarFooterWidget), {
+					isCollision: isRegistrationCollision,
+					onError: (error) => {
+						console.error("agent-sidecar: footer widget registration failed", error);
+					},
+					onTimeout: () => {
+						console.error("agent-sidecar: footer widget handoff timed out");
 					}
-				});
+				}));
 			} catch (err) {
 				console.error("agent-sidecar: footer widget mount failed", err);
 			}
@@ -8727,18 +9797,18 @@ window.__ModuleLoader__.load({
 						sctx.effect(() => scope.subscribe(adoptDefaults), "agent-sidecar: settings→filter defaults");
 						adoptDefaults();
 						const SidecarSettingsCardEntry = createSettingsCardEntry(controller, scope);
-						sctx.slots.inject("settings.plugin.item", () => {
-							if (hasOwnEntry(sctx, "settings.plugin.item")) return () => {};
-							try {
-								return sctx.slots.register({
-									name: "settings.plugin.item",
-									key: SETTINGS_NAMESPACE
-								}, SidecarSettingsCardEntry);
-							} catch (err) {
-								console.error("agent-sidecar: settings card registration failed", err);
-								return () => {};
+						sctx.slots.inject("settings.plugin.item", () => acquireWithHandoff(() => hasOwnEntry(sctx, "settings.plugin.item") ? void 0 : sctx.slots.register({
+							name: "settings.plugin.item",
+							key: SETTINGS_NAMESPACE
+						}, SidecarSettingsCardEntry), {
+							isCollision: isRegistrationCollision,
+							onError: (error) => {
+								console.error("agent-sidecar: settings card registration failed", error);
+							},
+							onTimeout: () => {
+								console.error("agent-sidecar: settings card handoff timed out");
 							}
-						});
+						}));
 					} catch (err) {
 						console.error("agent-sidecar: settings card mount failed", err);
 					}
@@ -8747,7 +9817,7 @@ window.__ModuleLoader__.load({
 				console.error("agent-sidecar: settings scope injection failed", err);
 			}
 			try {
-				registerSidecarCommand(ctx);
+				registerSidecarCommand(ctx, { openCenter: openAgentCenter });
 			} catch (err) {
 				console.error("agent-sidecar: /sidecar command mount failed", err);
 			}

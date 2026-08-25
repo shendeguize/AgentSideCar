@@ -1,21 +1,9 @@
-/**
- * AI bypass-analysis panel (T5.10b, design §4.e.3 / §5.1 view 2): fully
- * controlled presentation over an {@link AnalysisGlueState} — the owner
- * (detail view) holds the AnalysisStore and passes state + intents down.
- *
- * Honesty posture (§5.3): the engine disclaimer (fallback copy when a
- * settle never happened) renders with every result, truncation is called
- * out per exchange, terminal errors carry the vocabulary code, and the
- * capability-off state explains where to enable analysis instead of
- * hiding the entry. Strings ride the main locale table (`analysis.*`).
- *
- * @module
- */
-
+import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useState } from 'react'
 import type { ReactElement } from 'react'
 import { t } from '../locales/index.ts'
 import type { AnalysisExchange, AnalysisGlueState } from '../analysis-glue.ts'
+import { surfaceProps } from '../theme/parts.ts'
 import css from './analysis.module.css'
 
 export interface AnalysisPanelProps {
@@ -87,24 +75,25 @@ export function AnalysisPanel(props: AnalysisPanelProps): ReactElement {
   }
 
   return (
-    <section className={css['panel']} data-testid="agent-sidecar-analysis">
+    <section {...surfaceProps('analysis-panel', css['panel'])} data-testid="agent-sidecar-analysis">
       <div className={css['head']}>
         <span className={css['title']}>{t('analysis.title')}</span>
         <span className={css['spacer']} />
         {conversationLive && (
-          <button
+          <Button
             type="button"
-            className={css['textButton']}
+            size="sm"
+            variant="ghost"
             disabled={!enabled}
             onClick={props.onStop}
             data-testid="agent-sidecar-analysis-stop"
           >
             {t('analysis.stop')}
-          </button>
+          </Button>
         )}
-        <button type="button" className={css['closeButton']} onClick={props.onClose}>
+        <Button type="button" size="sm" variant="ghost" onClick={props.onClose}>
           {t('analysis.close')}
-        </button>
+        </Button>
       </div>
 
       {!enabled && (
@@ -136,14 +125,16 @@ export function AnalysisPanel(props: AnalysisPanelProps): ReactElement {
           {state.phase === 'idle' && (
             <div className={css['mutedLine']}>{t('analysis.idleHint')}</div>
           )}
-          <button
+          <Button
             type="button"
-            className={css['primaryButton']}
+            size="sm"
+            variant="primary"
+            className={css['startButton']}
             onClick={props.onStart}
             data-testid="agent-sidecar-analysis-start"
           >
             {state.phase === 'idle' ? t('analysis.start') : t('analysis.restart')}
-          </button>
+          </Button>
         </>
       )}
 
@@ -156,7 +147,7 @@ export function AnalysisPanel(props: AnalysisPanelProps): ReactElement {
 
       {conversationLive && (
         <div className={css['followupForm']}>
-          <input
+          <Input
             className={css['followupInput']}
             value={question}
             placeholder={t('analysis.followupPlaceholder')}
@@ -169,15 +160,16 @@ export function AnalysisPanel(props: AnalysisPanelProps): ReactElement {
             }}
             data-testid="agent-sidecar-analysis-question"
           />
-          <button
+          <Button
             type="button"
-            className={css['textButton']}
+            size="sm"
+            variant="ghost"
             disabled={!enabled || state.phase !== 'ready' || question.trim() === ''}
             onClick={submitFollowup}
             data-testid="agent-sidecar-analysis-followup"
           >
             {t('analysis.followupSubmit')}
-          </button>
+          </Button>
         </div>
       )}
 

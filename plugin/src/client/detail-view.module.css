@@ -1,11 +1,3 @@
-/*
- * Detail-view container + board-tab view-switcher chrome (T5.10b, design
- * §5.1): every color rides a --dsw-alias-* design token with a neutral
- * fallback. Same posture as board.module.css / dsh-tools.module.css.
- */
-
-/* ------------------------------------------------ board-tab view switcher */
-
 .switcherBar {
   display: flex;
   align-items: center;
@@ -19,31 +11,26 @@
   border-radius: 999px;
   border: 1px solid transparent;
   background: transparent;
-  color: var(--dsw-alias-label-secondary, #57606a);
+  color: var(--dsw-alias-label-secondary);
   cursor: pointer;
 }
 
 .switcherButton:hover {
-  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
+  background: var(--dsw-alias-bg-layer-1);
 }
 
 .switcherButton[data-active='true'] {
   font-weight: 600;
-  color: var(--dsw-alias-label-primary, #1f2328);
-  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
-  border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  border-color: var(--dsw-alias-border-l2);
 }
-
-/* --------------------------------------------------- detail-view chrome */
 
 .detailRoot {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
-  /* Own the scroll like the board/project roots do (UX-12): without a
-   * bounded height the inner timeline's overflow-y can never engage, and
-   * the UX-04 landing / listen-mode tail pinning would silently no-op. */
   height: 100%;
   overflow-y: auto;
   box-sizing: border-box;
@@ -54,59 +41,47 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
-.actionButton {
-  font-size: 12px;
-  padding: 3px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
-  color: var(--dsw-alias-label-primary, #1f2328);
-  cursor: pointer;
+.analysisDisabledReason {
+  max-width: 360px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--agsc-fg-secondary);
 }
 
-.actionButton:hover {
-  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
-}
-
-.actionButton:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* dsh deep-query tools: collapsible segment between the actions row and
- * the timeline (UX-09 — previously buried below a possibly very long
- * list, outside the viewport on long sessions). */
 .toolsSection {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
-  border-radius: 8px;
+  border: 1px solid var(--agsc-border);
+  border-radius: var(--agsc-radius-control);
   padding: 8px 12px;
 }
 
 .toolsToggle {
   align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-family: inherit;
-  color: var(--dsw-alias-label-secondary, #57606a);
-  background: transparent;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-}
-
-.toolsToggle:hover {
-  color: var(--dsw-alias-label-primary, #1f2328);
 }
 
 .toolsToggleGlyph {
   flex: none;
   font-size: 10px;
-  color: var(--dsw-alias-label-tertiary, #6e7781);
+  color: var(--agsc-fg-dimmed);
+}
+
+.injectDialog {
+  gap: 0;
+  width: min(560px, 100%);
+  max-height: min(85vh, 720px);
+  padding: 0;
+  overflow: auto;
+}
+
+.injectDialog > [data-dsh-part='inject-panel'] {
+  width: 100%;
+  max-width: none;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
 }

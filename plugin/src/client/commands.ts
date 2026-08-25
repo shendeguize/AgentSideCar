@@ -18,8 +18,8 @@
  *   `dsh-agent-teams/src/command.ts`).
  * - The only `ui.kind` this dsh version supports is `popupSelect`:
  *   an async `options(session, signal)` provider plus `onSelect`. The
- *   `/sidecar` overview therefore presents as a popup card of rows — a
- *   read-only glance; every row's onSelect is a no-op.
+ *   `/sidecar` overview therefore presents as a popup card of rows; its
+ *   board row opens Agent Center while informational rows remain inert.
  *
  * The `commandUi` service type is NOT part of the published plugin SDK
  * (same situation as `settingsScope` in ./index.ts), so this module keeps
@@ -55,7 +55,12 @@ import type {
   SessionStatusToken,
   WidgetConnection,
 } from './board/logic.ts'
+import {
+  acquireWithHandoff,
+  isRegistrationCollision,
+} from './lifecycle/handoff.ts'
 import { tCommand } from './locales/command.ts'
+import type { CenterNavigation } from './navigation/center.ts'
 
 /** The slash command name (without the leading slash). */
 export const SIDECAR_COMMAND_NAME = 'sidecar'
@@ -399,6 +404,8 @@ export interface SidecarCommandDeps {
   now?: () => number
   /** Session-row cap; defaults to {@link DEFAULT_OVERVIEW_TOP_N}. */
   topN?: number
+  /** Opens Agent Center when the board option is selected. */
+  openCenter?: CenterNavigation
 }
 
 /**
@@ -435,8 +442,8 @@ export function createSidecarCommandContribution(
         if (deps.topN !== undefined) overviewOpts.topN = deps.topN
         return overviewToOptions(buildOverview(snapshot, overviewOpts))
       },
-      onSelect: () => {
-        // Read-only glance: rows are informational, selection is a no-op.
+      onSelect: (option) => {
+        if (option.id === 'board') deps.openCenter?.()
       },
     },
   }
@@ -451,7 +458,10 @@ export function createSidecarCommandContribution(
  * `ClientContext` satisfies it structurally (cordis `ctx.inject`).
  */
 export interface CommandMountContext {
-  inject(deps: readonly string[], callback: (ctx: unknown) => void): unknown
+  inject(
+    deps: readonly string[],
+    callback: (ctx: unknown) => (() => void) | void,
+  ): unknown
 }
 
 /**
@@ -459,11 +469,9 @@ export interface CommandMountContext {
  * the design's `ctx.commands` consumption row — a composition without the
  * slash-menu runtime simply never gains the command).
  *
- * Idempotency: the ui-commands registry throws on a duplicate contribution
- * name; that throw is caught and logged, so a double apply (HMR re-apply
- * before the old fiber unloads) degrades to a no-op instead of taking the
- * client half down. Disposal is owned by the registry's effect on the
- * injected fiber — unloading the plugin unregisters the command.
+ * HMR handoff: a duplicate contribution means the old fiber still owns the
+ * name. The new injected fiber retries briefly, then registers its own fresh
+ * contribution after the old disposer runs. Foreign squatters time out.
  */
 export function registerSidecarCommand(
   ctx: CommandMountContext,
@@ -472,11 +480,18 @@ export function registerSidecarCommand(
   try {
     ctx.inject(['commandUi'], (injected) => {
       const { commandUi } = injected as { commandUi: CommandRegistryFace }
-      try {
-        commandUi.register(createSidecarCommandContribution(deps))
-      } catch (err) {
-        console.error('agent-sidecar: /sidecar command registration skipped', err)
-      }
+      return acquireWithHandoff(
+        () => commandUi.register(createSidecarCommandContribution(deps)),
+        {
+          isCollision: isRegistrationCollision,
+          onError: (error) => {
+            console.error('agent-sidecar: /sidecar command registration failed', error)
+          },
+          onTimeout: () => {
+            console.error('agent-sidecar: /sidecar command handoff timed out')
+          },
+        },
+      )
     })
   } catch (err) {
     console.error('agent-sidecar: commandUi injection failed', err)

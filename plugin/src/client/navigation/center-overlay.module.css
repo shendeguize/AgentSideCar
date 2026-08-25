@@ -1,0 +1,51 @@
+.dialog {
+  gap: 0;
+  width: min(1180px, calc(100vw - 48px));
+  height: min(860px, calc(100vh - 48px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  border-color: var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-card);
+  background: var(--agsc-bg);
+  box-shadow: var(--agsc-shadow-card);
+}
+
+.content {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.content > :last-child {
+  flex: 1;
+  min-height: 0;
+  margin-top: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.surface {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  color: var(--agsc-fg);
+  background: var(--agsc-bg);
+  overflow: hidden;
+}
+
+.surface > :last-child {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+@media (max-width: 720px) {
+  .dialog {
+    width: calc(100vw - 16px);
+    height: calc(100dvh - 16px);
+    max-height: calc(100dvh - 16px);
+    border-radius: var(--agsc-radius-control);
+  }
+}

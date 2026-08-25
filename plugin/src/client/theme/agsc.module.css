@@ -1,0 +1,31 @@
+/*
+ * L3 of the theming interface (design agent_center_native_ui.md §4).
+ * `surfaceProps()` applies this root class together with stable L2 anchors.
+ *
+ * Every color and shadow delegates to an official --dsw-* token, so the
+ * plugin follows the host theme and Skin Center without owning a parallel
+ * palette. Users, skins, or other plugins can override one surface:
+ *
+ *   [data-dsh-plugin='agent-sidecar'] { --agsc-accent: var(--skin-accent); }
+ */
+
+.root {
+  --agsc-accent: var(--dsw-alias-brand-primary);
+  --agsc-bg: var(--dsw-alias-bg-layer-1);
+  --agsc-bg-raised: var(--dsw-alias-bg-layer-3);
+  --agsc-fg: var(--dsw-alias-label-primary);
+  --agsc-fg-secondary: var(--dsw-alias-label-secondary);
+  --agsc-fg-dimmed: var(--dsw-alias-label-dimmed);
+  --agsc-border: var(--dsw-alias-border-l1);
+  --agsc-border-strong: var(--dsw-alias-border-l2);
+  --agsc-ok: var(--dsw-alias-state-success-primary);
+  --agsc-warn: var(--dsw-alias-state-warn-primary);
+  --agsc-err: var(--dsw-alias-state-error-primary);
+  --agsc-radius-card: 12px;
+  --agsc-radius-control: 8px;
+  --agsc-shadow-card: var(--dsw-shadow-lv2);
+  --agsc-font-mono: var(--ds-font-family-code);
+
+  color: var(--agsc-fg);
+  font-family: inherit;
+}

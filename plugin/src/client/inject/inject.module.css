@@ -1,40 +1,29 @@
-/* Inject panel (design §5.1 view 3). Every color rides a dsh --dsw-alias-*
- * design token WITH a neutral fallback (UX-16: same token+fallback
- * discipline as every other CSS module), and error tones ride the
- * state-error-* family the board uses. The confirm-injection button is
- * the one danger affordance: eye-catching (error-toned border/text,
- * filled on hover) but restrained (no permanent solid red block). */
-
 .panel {
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  border-radius: 12px;
-  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
-  max-width: 560px;
   display: flex;
   flex-direction: column;
+  max-width: 560px;
+  border: 1px solid var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-card);
+  background: var(--agsc-bg);
 }
-
-/* ── header ────────────────────────────────────────────────────────────── */
 
 .header {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 14px 16px 10px;
-  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
+  border-bottom: 1px solid var(--agsc-border-strong);
 }
 
 .title {
   flex: 1;
   min-width: 0;
   margin: 0;
+  color: var(--agsc-fg);
   font-size: 15px;
   font-weight: 600;
   line-height: 1.4;
-  color: var(--dsw-alias-label-primary, #1f2328);
 }
-
-/* ── body ──────────────────────────────────────────────────────────────── */
 
 .body {
   display: flex;
@@ -43,117 +32,120 @@
   padding: 12px 16px 14px;
 }
 
-.capabilityOff {
-  margin: 0;
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-size: 13px;
-  line-height: 1.6;
-  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
-  color: var(--dsw-alias-label-secondary, #57606a);
-}
-
-/* ── notices (editor banners after a failed/expired attempt) ───────────── */
-
+.capabilityOff,
 .noticeWarn,
-.noticeError {
+.noticeError,
+.warnBar,
+.auditNote,
+.resultOk,
+.resultFail,
+.resultUnknown {
   margin: 0;
-  border-radius: 8px;
   padding: 8px 10px;
+  border-radius: var(--agsc-radius-control);
+  background: var(--agsc-bg-raised);
+  color: var(--agsc-fg-secondary);
   font-size: 12px;
   line-height: 1.6;
-  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
-  color: var(--dsw-alias-label-secondary, #57606a);
 }
 
-.noticeError {
-  border: 1px solid var(--dsw-alias-state-error-primary, #cf222e);
-  color: var(--dsw-alias-state-error-primary, #cf222e);
+.noticeWarn,
+.warnBar {
+  border: 1px solid var(--agsc-warn);
+  color: var(--agsc-warn);
 }
 
-.noticeDetail {
-  color: var(--dsw-alias-label-tertiary, #6e7781);
+.noticeError,
+.resultFail {
+  border: 1px solid var(--agsc-err);
+  color: var(--agsc-err);
 }
 
-/* ── target row ────────────────────────────────────────────────────────── */
+.noticeDetail,
+.noTarget,
+.modeHint,
+.planKey,
+.observedNote,
+.resultDetail {
+  color: var(--agsc-fg-dimmed);
+}
 
-.targetRow {
+.targetRow,
+.planRow {
   display: flex;
   align-items: baseline;
   gap: 10px;
   min-width: 0;
 }
 
-.noTarget {
+.noTarget,
+.planKey,
+.modeHint,
+.resultDetail {
   font-size: 12px;
   line-height: 1.5;
-  color: var(--dsw-alias-label-tertiary, #6e7781);
 }
 
 .agentTag {
   flex: none;
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: 11px;
-  line-height: 17px;
-  font-weight: 500;
-  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
-  color: var(--dsw-alias-label-secondary, #57606a);
 }
 
 .planTitle {
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--agsc-fg);
   font-size: 13px;
   line-height: 1.5;
-  color: var(--dsw-alias-label-primary, #1f2328);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* ── editor field ──────────────────────────────────────────────────────── */
-
-.field {
+.field,
+.modeText,
+.planPreview {
   display: flex;
   flex-direction: column;
+}
+
+.field {
   gap: 6px;
 }
 
-.label {
+.label,
+.modeLabel {
+  color: var(--agsc-fg);
   font-size: 13px;
   line-height: 1.5;
-  color: var(--dsw-alias-label-primary, #1f2328);
 }
 
 .textarea {
   appearance: none;
-  resize: vertical;
   min-height: 96px;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-3, #ffffff);
+  resize: vertical;
   padding: 8px 10px;
+  border: 1px solid var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-control);
+  background: var(--agsc-bg-raised);
+  color: var(--agsc-fg);
   font: inherit;
   font-size: 13px;
   line-height: 1.6;
-  color: var(--dsw-alias-label-primary, #1f2328);
 }
 
 .textarea:focus-visible {
+  border-color: var(--agsc-accent);
   outline: none;
-  border-color: var(--dsw-alias-brand-primary, #4d6bfe);
 }
 
 .textarea::placeholder {
-  color: var(--dsw-alias-label-tertiary, #6e7781);
+  color: var(--agsc-fg-dimmed);
 }
 
 .textarea:disabled {
-  opacity: 0.5;
   cursor: default;
+  opacity: 0.5;
 }
 
-/* Byte counter: thin progress track + numeric readout. */
 .byteRow {
   display: flex;
   align-items: center;
@@ -163,52 +155,49 @@
 .byteBar {
   flex: 1;
   height: 3px;
-  border-radius: 2px;
-  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
   overflow: hidden;
+  border-radius: 2px;
+  background: var(--agsc-border);
 }
 
 .byteFill {
   height: 100%;
   border-radius: 2px;
-  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  background: var(--agsc-accent);
   transition: width .12s;
 }
 
-/* Modifier applied ALONGSIDE .byteFill (no `composes`; see settings card). */
 .byteFillOver {
-  background: var(--dsw-alias-state-error-primary, #cf222e);
+  background: var(--agsc-err);
 }
 
 .byteText,
 .byteTextOver {
   flex: none;
+  color: var(--agsc-fg-dimmed);
   font-size: 11px;
-  line-height: 1.5;
   font-variant-numeric: tabular-nums;
-  color: var(--dsw-alias-label-tertiary, #6e7781);
+  line-height: 1.5;
 }
 
-.byteTextOver {
-  color: var(--dsw-alias-state-error-primary, #cf222e);
+.byteTextOver,
+.invalid {
+  color: var(--agsc-err);
 }
 
 .invalid {
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--dsw-alias-state-error-primary, #cf222e);
 }
 
-/* ── mode radios ───────────────────────────────────────────────────────── */
-
 .modes {
-  margin: 0;
-  border: 0;
-  padding: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
 .modeOption {
@@ -219,10 +208,10 @@
 }
 
 .modeOption input {
-  accent-color: var(--dsw-alias-brand-primary, #4d6bfe);
   width: 14px;
   height: 14px;
   margin: 3px 0 0;
+  accent-color: var(--agsc-accent);
   cursor: pointer;
 }
 
@@ -231,71 +220,26 @@
 }
 
 .modeText {
-  display: flex;
-  flex-direction: column;
   gap: 2px;
   min-width: 0;
 }
 
-.modeLabel {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--dsw-alias-label-primary, #1f2328);
-}
-
-.modeHint {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--dsw-alias-label-tertiary, #6e7781);
-}
-
-/* ── warnings & audit note ─────────────────────────────────────────────── */
-
-.warnBar {
-  margin: 0;
-  border: 1px solid var(--dsw-alias-state-error-primary, #cf222e);
-  border-radius: 8px;
-  padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.6;
-  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
-  color: var(--dsw-alias-state-error-primary, #cf222e);
-}
-
 .auditNote {
-  margin: 0;
-  border-radius: 8px;
   padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.6;
-  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
-  color: var(--dsw-alias-label-secondary, #57606a);
 }
-
-/* ── confirm plan ──────────────────────────────────────────────────────── */
 
 .planBox {
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-3, #ffffff);
-  padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-
-.planRow {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-control);
+  background: var(--agsc-bg-raised);
 }
 
 .planKey {
   flex: none;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--dsw-alias-label-tertiary, #6e7781);
 }
 
 .planValue {
@@ -303,84 +247,66 @@
   align-items: baseline;
   gap: 8px;
   min-width: 0;
+  color: var(--agsc-fg);
   font-size: 13px;
   line-height: 1.5;
-  color: var(--dsw-alias-label-primary, #1f2328);
 }
 
 .observedNote {
   margin: 0;
   font-size: 11px;
   line-height: 1.5;
-  color: var(--dsw-alias-label-tertiary, #6e7781);
 }
 
 .planPreview {
-  display: flex;
-  flex-direction: column;
   gap: 4px;
   min-width: 0;
 }
 
 .preview {
-  margin: 0;
-  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  border-radius: 6px;
-  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
-  padding: 8px 10px;
   max-height: 120px;
   overflow: auto;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--agsc-border-strong);
+  border-radius: 6px;
+  background: var(--agsc-bg);
+  color: var(--agsc-fg-secondary);
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--dsw-alias-label-secondary, #57606a);
 }
 
 .countdown {
   margin: 0;
+  color: var(--agsc-fg-secondary);
   font-size: 12px;
-  line-height: 1.5;
   font-variant-numeric: tabular-nums;
-  color: var(--dsw-alias-label-secondary, #57606a);
+  line-height: 1.5;
 }
-
-/* ── results ───────────────────────────────────────────────────────────── */
 
 .resultOk,
 .resultFail,
 .resultUnknown {
-  margin: 0;
-  border-radius: 8px;
   padding: 10px 12px;
+  color: var(--agsc-fg);
   font-size: 13px;
-  line-height: 1.6;
-  background: var(--dsw-alias-bg-module-platform, rgba(0, 0, 0, 0.03));
-  color: var(--dsw-alias-label-primary, #1f2328);
 }
 
 .resultOk {
-  border: 1px solid var(--dsw-alias-brand-primary, #4d6bfe);
-}
-
-.resultFail {
-  border: 1px solid var(--dsw-alias-state-error-primary, #cf222e);
-  color: var(--dsw-alias-state-error-primary, #cf222e);
+  border: 1px solid var(--agsc-ok);
 }
 
 .resultUnknown {
-  border: 1px solid var(--dsw-alias-label-dimmed, #8c959f);
-  color: var(--dsw-alias-label-secondary, #57606a);
+  border: 1px solid var(--agsc-fg-dimmed);
+  color: var(--agsc-fg-secondary);
 }
 
 .resultDetail {
   margin: 0;
-  font-size: 12px;
   line-height: 1.6;
-  color: var(--dsw-alias-label-tertiary, #6e7781);
 }
-
-/* ── footer buttons ────────────────────────────────────────────────────── */
 
 .footer {
   display: flex;
@@ -390,58 +316,31 @@
   padding-top: 4px;
 }
 
-.btn,
-.btnPrimary,
 .btnDanger {
   appearance: none;
-  border: 1px solid transparent;
-  border-radius: 8px;
   padding: 5px 14px;
+  border: 1px solid var(--agsc-err);
+  border-radius: var(--agsc-radius-control);
+  background: transparent;
+  color: var(--agsc-err);
   font: inherit;
   font-size: 13px;
+  font-weight: 600;
   line-height: 1.5;
   cursor: pointer;
 }
 
-.btn {
-  border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  background: none;
-  color: var(--dsw-alias-label-secondary, #57606a);
-}
-
-.btn:hover:not(:disabled) {
-  color: var(--dsw-alias-label-primary, #1f2328);
-  border-color: var(--dsw-alias-label-dimmed, #8c959f);
-}
-
-.btnPrimary {
-  background: var(--dsw-alias-label-primary, #1f2328);
-  color: var(--dsw-alias-bg-layer-3, #ffffff);
-}
-
-/* The danger action: outlined error tone at rest, fills on hover. */
-.btnDanger {
-  border-color: var(--dsw-alias-state-error-primary, #cf222e);
-  background: none;
-  color: var(--dsw-alias-state-error-primary, #cf222e);
-  font-weight: 600;
-}
-
 .btnDanger:hover:not(:disabled) {
-  background: var(--dsw-alias-state-error-primary, #cf222e);
-  color: var(--dsw-alias-bg-layer-3, #ffffff);
+  background: var(--agsc-err);
+  color: var(--agsc-bg-raised);
 }
 
-.btn:disabled,
-.btnPrimary:disabled,
 .btnDanger:disabled {
-  opacity: 0.4;
   cursor: default;
+  opacity: 0.4;
 }
 
-.btn:focus-visible,
-.btnPrimary:focus-visible,
 .btnDanger:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline: 2px solid var(--agsc-accent);
   outline-offset: 1px;
 }

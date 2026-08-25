@@ -7,7 +7,9 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { describe, expect, it } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { describe, expect, it, vi } from 'vitest'
 import type { StateSnapshot } from '../src/client/api.ts'
 import type { StreamStatus } from '../src/client/sse.ts'
 import {
@@ -32,6 +34,35 @@ import {
   splitCommand,
   valuesToConfigView,
 } from '../src/client/settings-glue.ts'
+import { SettingsCard } from '../src/client/settings-card.tsx'
+import {
+  createDefaultIntegration,
+  type AnalysisStorePort,
+  type BoardUiPort,
+  type DetailStorePort,
+  type ProjectsStorePort,
+  type SearchStorePort,
+} from '../src/client/ui-integration.ts'
+
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
+  Button: 'button',
+  IconChevronDownOutline14: 'svg',
+  Input: 'input',
+  Pill: 'span',
+}))
+
+const MOUNT_SOURCE = readFileSync(
+  new URL('../src/client/mount.tsx', import.meta.url),
+  'utf8',
+)
+const BOARD_SOURCE = readFileSync(
+  new URL('../src/client/board/Board.tsx', import.meta.url),
+  'utf8',
+)
+const DETAIL_SOURCE = readFileSync(
+  new URL('../src/client/detail/SessionDetail.tsx', import.meta.url),
+  'utf8',
+)
 
 // ---------------------------------------------------------------------------
 // Fakes and fixtures.
@@ -138,6 +169,139 @@ describe('PLUGIN_ID', () => {
     ) as { name: string }
     expect(PLUGIN_ID).toBe(pkg.name)
     expect(FILTERS_STORAGE_KEY.startsWith(`${pkg.name}:`)).toBe(true)
+  })
+})
+
+describe('locale root composition', () => {
+  it('keeps one locale subscription in each board root wrapper', () => {
+    const contentStart = MOUNT_SOURCE.indexOf('function createBoardContent(')
+    const boardRootStart = MOUNT_SOURCE.indexOf('export function createBoardTab(')
+    const overlayRootStart = MOUNT_SOURCE.indexOf('export function createCenterOverlay(')
+    const footerRootStart = MOUNT_SOURCE.indexOf('export function createFooterWidget(')
+
+    expect([contentStart, boardRootStart, overlayRootStart, footerRootStart])
+      .not.toContain(-1)
+
+    const content = MOUNT_SOURCE.slice(contentStart, boardRootStart)
+    const boardRoot = MOUNT_SOURCE.slice(boardRootStart, overlayRootStart)
+    const overlayRoot = MOUNT_SOURCE.slice(overlayRootStart, footerRootStart)
+
+    expect(content).not.toContain('useActiveLocale()')
+    expect(boardRoot.match(/useActiveLocale\(\)/g)).toHaveLength(1)
+    expect(overlayRoot.match(/useActiveLocale\(\)/g)).toHaveLength(1)
+    expect(boardRoot).toContain('createBoardContent(controller, integration)')
+    expect(overlayRoot).toContain('createBoardContent(controller, integration)')
+    expect(overlayRoot).not.toContain('createBoardTab(')
+  })
+})
+
+describe('copy feedback timer lifecycle', () => {
+  it.each([
+    ['board session card', BOARD_SOURCE],
+    ['session detail', DETAIL_SOURCE],
+  ])('%s ignores late clipboard work and clears every timer', (_label, source) => {
+    expect(source).toMatch(
+      /useEffect\(\(\) => \{\s*copyAliveRef\.current = true\s*return \(\) => \{\s*copyAliveRef\.current = false\s*if \(copyTimerRef\.current !== null\) \{\s*clearTimeout\(copyTimerRef\.current\)\s*copyTimerRef\.current = null/,
+    )
+    expect(source).toContain('if (!copyAliveRef.current) return')
+    expect(source).toMatch(
+      /if \(copyTimerRef\.current !== null\) clearTimeout\(copyTimerRef\.current\)\s*setCopied\(true\)\s*copyTimerRef\.current = setTimeout\(\(\) => \{\s*copyTimerRef\.current = null\s*setCopied\(false\)/,
+    )
+  })
+})
+
+describe('SettingsCard', () => {
+  it('exposes the themed settings surface contract on its root', () => {
+    const html = renderToStaticMarkup(createElement(SettingsCard, {
+      values: configToValues(DEFAULT_CONFIG_VIEW),
+      onChange: () => {},
+      onSave: () => {},
+      onDiscard: () => {},
+      writable: true,
+      dirty: false,
+      saving: false,
+    }))
+
+    expect(html).toContain('data-dsh-plugin="agent-sidecar"')
+    expect(html).toContain('data-dsh-part="settings-card"')
+    expect(html).toContain('aria-expanded="false"')
+  })
+})
+
+describe('createDefaultIntegration', () => {
+  it('accepts plain structural stores through the factory ports', () => {
+    const unusedState = (): never => { throw new Error('state not read by this test') }
+    const detailStore = {
+      subscribe: () => () => {},
+      getState: unusedState,
+      open: () => Promise.resolve(),
+      loadMore: () => Promise.resolve(),
+      toggleListen: () => {},
+      refreshNewest: () => Promise.resolve(),
+      notifySnapshot: () => {},
+      dispose: () => {},
+    } satisfies DetailStorePort
+    const searchStore = {
+      subscribe: () => () => {},
+      getState: unusedState,
+      setQuery: () => {},
+      submit: () => Promise.resolve(),
+      dispose: () => {},
+    } satisfies SearchStorePort
+    const analysisStore = {
+      subscribe: () => () => {},
+      getState: unusedState,
+      start: () => Promise.resolve(),
+      followup: () => Promise.resolve(),
+      stop: () => Promise.resolve(),
+      dispose: () => {},
+    } satisfies AnalysisStorePort
+    const projectsStore = {
+      subscribe: () => () => {},
+      getState: unusedState,
+      refresh: () => Promise.resolve(),
+      notifySnapshot: () => {},
+      dispose: () => {},
+    } satisfies ProjectsStorePort
+    const integration: BoardUiPort = {
+      detail: {
+        getAnalysisEnabled: () => true,
+        createDetailStore: () => detailStore,
+        createSearchStore: () => searchStore,
+        createAnalysisStore: () => analysisStore,
+      },
+      createProjectsStore: () => projectsStore,
+    }
+
+    expect(integration.createProjectsStore()).toBe(projectsStore)
+    expect(integration.detail.createDetailStore('sess-structural', null)).toBe(detailStore)
+    expect(integration.detail.createSearchStore()).toBe(searchStore)
+    expect(integration.detail.createAnalysisStore()).toBe(analysisStore)
+  })
+
+  it('assembles narrow board and detail ports over the production stores', () => {
+    let analysisEnabled = false
+    const integration = createDefaultIntegration({
+      getAnalysisEnabled: () => analysisEnabled,
+    })
+    const projects = integration.createProjectsStore()
+    const detail = integration.detail.createDetailStore('sess-alpha', null)
+    const search = integration.detail.createSearchStore()
+    const analysis = integration.detail.createAnalysisStore()
+
+    expect(projects.getState()).toMatchObject({ groups: [], loading: false })
+    expect(detail.getState()).toMatchObject({ sessionId: 'sess-alpha', ready: false })
+    expect(search.getState()).toMatchObject({ query: '', items: [] })
+    expect(analysis.getState()).toMatchObject({ phase: 'idle', exchanges: [] })
+    expect(integration.detail.inject).toBeUndefined()
+    expect(integration.detail.getAnalysisEnabled()).toBe(false)
+    analysisEnabled = true
+    expect(integration.detail.getAnalysisEnabled()).toBe(true)
+
+    projects.dispose()
+    detail.dispose()
+    search.dispose()
+    analysis.dispose()
   })
 })
 

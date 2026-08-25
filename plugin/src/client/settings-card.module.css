@@ -1,12 +1,13 @@
-/* Agent Sidecar settings card. Design language follows the shipped
- * ui-settings-plugins PluginCard/fields chrome (disclosure header over a
- * sectioned form body); every color rides a dsh --dsw-alias-* design token,
- * no literal colors. */
+/* Layout specific to the Agent Sidecar settings composition. Control chrome
+ * comes from dsh primitives; native select/checkbox styles stay token-backed. */
 
 .card {
+  width: 100%;
+  max-width: 760px;
+  box-sizing: border-box;
   list-style: none;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
+  border-radius: var(--agsc-radius-card);
   background: var(--dsw-alias-bg-layer-3);
   transition: border-color .16s, background .16s;
 }
@@ -19,8 +20,6 @@
   background: var(--dsw-alias-bg-layer-2);
   border-color: var(--dsw-alias-label-dimmed);
 }
-
-/* ── disclosure header ─────────────────────────────────────────────────── */
 
 .header {
   width: 100%;
@@ -35,7 +34,7 @@
   align-items: center;
   gap: 12px;
   padding: 14px 16px;
-  border-radius: 12px;
+  border-radius: var(--agsc-radius-card);
 }
 
 .header:focus-visible {
@@ -64,36 +63,20 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* Carried on the header so a collapsed card still says it holds edits. */
 .pending {
   flex: none;
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: 11px;
-  line-height: 17px;
-  font-weight: 500;
   white-space: nowrap;
-  background: var(--dsw-alias-bg-module-platform);
-  color: var(--dsw-alias-label-secondary);
 }
 
-/* CSS-drawn caret (ui-primitives icons are not on this package's dependency
- * surface, so the chevron is a rotated border square). */
 .chevron {
   flex: none;
-  width: 8px;
-  height: 8px;
-  border-right: 1.5px solid var(--dsw-alias-label-tertiary);
-  border-bottom: 1.5px solid var(--dsw-alias-label-tertiary);
-  transform: rotate(45deg) translateY(-2px);
+  color: var(--dsw-alias-label-tertiary);
   transition: transform .16s;
 }
 
 .chevronOpen {
-  transform: rotate(225deg) translateY(-2px);
+  transform: rotate(180deg);
 }
-
-/* ── body ──────────────────────────────────────────────────────────────── */
 
 .body {
   border-top: 1px solid var(--dsw-alias-border-l2);
@@ -124,8 +107,6 @@
   color: var(--dsw-alias-label-primary);
 }
 
-/* ── fields ────────────────────────────────────────────────────────────── */
-
 .field {
   padding: 8px 0;
   display: flex;
@@ -150,46 +131,47 @@
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--dsw-alias-label-error);
+  color: var(--dsw-alias-state-error-primary);
 }
 
-.input,
-.select {
-  appearance: none;
+.input {
+  width: 100%;
   max-width: 420px;
+  box-sizing: border-box;
+}
+
+.inputInvalid {
+  border-color: var(--dsw-alias-state-error-primary);
+}
+
+.input:has(input:disabled) {
+  opacity: .5;
+}
+
+.select {
+  width: 100%;
+  max-width: 420px;
+  height: 32px;
+  box-sizing: border-box;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-3);
-  padding: 6px 10px;
+  border-radius: var(--agsc-radius-control);
+  background: var(--dsw-alias-bg-layer-1);
+  padding: 0 8px;
   font: inherit;
   font-size: 13px;
   line-height: 1.5;
   color: var(--dsw-alias-label-primary);
 }
 
-.input:focus-visible,
 .select:focus-visible {
   outline: none;
   border-color: var(--dsw-alias-brand-primary);
 }
 
-.input::placeholder {
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.input:disabled,
 .select:disabled {
   opacity: 0.5;
   cursor: default;
 }
-
-/* Modifier applied ALONGSIDE .input (no `composes`: the tsdown class-map
- * emitter keeps only the local hashed name and would drop composed bases). */
-.inputInvalid {
-  border-color: var(--dsw-alias-label-error);
-}
-
-/* Toggle row: label text left, native checkbox right-aligned with it. */
 .toggleRow {
   display: flex;
   align-items: center;
@@ -209,8 +191,6 @@
   cursor: default;
 }
 
-/* ── notes (safety / daemon guidance) ──────────────────────────────────── */
-
 .note {
   margin: 6px 0 2px;
   border-radius: 8px;
@@ -220,8 +200,6 @@
   background: var(--dsw-alias-bg-module-platform);
   color: var(--dsw-alias-label-secondary);
 }
-
-/* ── daemon status row ─────────────────────────────────────────────────── */
 
 .statusRow {
   display: flex;
@@ -235,16 +213,15 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--dsw-alias-label-tertiary);
+  background: var(--agsc-fg-dimmed);
 }
 
-/* Modifiers applied alongside .statusDot (same no-`composes` rationale). */
 .statusOk {
-  background: var(--dsw-alias-brand-primary);
+  background: var(--agsc-ok);
 }
 
 .statusError {
-  background: var(--dsw-alias-label-error);
+  background: var(--agsc-err);
 }
 
 .statusText {
@@ -260,29 +237,8 @@
 }
 
 .retry {
-  appearance: none;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
-  background: none;
-  padding: 3px 12px;
-  font: inherit;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
+  margin-left: auto;
 }
-
-.retry:hover:not(:disabled) {
-  color: var(--dsw-alias-label-primary);
-  border-color: var(--dsw-alias-label-dimmed);
-}
-
-.retry:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 1px;
-}
-
-/* ── footer ────────────────────────────────────────────────────────────── */
 
 .footer {
   display: flex;
@@ -311,49 +267,9 @@
   text-align: right;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--dsw-alias-label-error);
+  color: var(--dsw-alias-state-error-primary);
 }
 
 .spacer {
   flex: 1;
-}
-
-.discard,
-.save {
-  appearance: none;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 5px 14px;
-  font: inherit;
-  font-size: 13px;
-  line-height: 1.5;
-  cursor: pointer;
-}
-
-.discard {
-  border-color: var(--dsw-alias-border-l2);
-  background: none;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.discard:hover:not(:disabled) {
-  color: var(--dsw-alias-label-primary);
-  border-color: var(--dsw-alias-label-dimmed);
-}
-
-.save {
-  background: var(--dsw-alias-label-primary);
-  color: var(--dsw-alias-bg-layer-3);
-}
-
-.discard:disabled,
-.save:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.discard:focus-visible,
-.save:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 1px;
 }
