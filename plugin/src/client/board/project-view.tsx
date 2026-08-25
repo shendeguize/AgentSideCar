@@ -14,6 +14,7 @@
  * blanking data the user already has.
  */
 
+import { Button, Pill, StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useState } from 'react'
 import type { ReactElement } from 'react'
 import {
@@ -26,6 +27,7 @@ import {
   type ProjectGroupVM,
 } from './project-view-logic.ts'
 import { formatTemplate, sliceCardsForDisplay } from './logic.ts'
+import { surfaceProps } from '../theme/parts.ts'
 import styles from './project-view.module.css'
 
 export interface ProjectViewProps {
@@ -39,11 +41,18 @@ export interface ProjectViewProps {
   nowMs?: number
 }
 
+function sessionDotState(status: DerivedProjectSessionVM['badge']['status']): StateDotState | null {
+  if (status === 'working') return 'ongoing'
+  if (status === 'waiting') return 'warning'
+  return null
+}
+
 function SessionRow(props: {
   session: DerivedProjectSessionVM
   onSelect: (sessionId: string) => void
 }): ReactElement {
   const { session, onSelect } = props
+  const dotState = sessionDotState(session.badge.status)
   return (
     <button
       type="button"
@@ -51,19 +60,21 @@ function SessionRow(props: {
       onClick={() => onSelect(session.sessionId)}
       data-testid="agent-sidecar-project-session"
     >
-      <span className={styles['badge']} data-tone={session.badge.tone}>
-        <span className={styles['dot']} data-tone={session.badge.tone} />
+      <Pill className={styles['statusPill']}>
+        {dotState === null
+          ? <span className={styles['dot']} data-tone={session.badge.tone} />
+          : <StateDot state={dotState} size={8} />}
         {session.badge.label}
         {session.badge.attention !== null && (
           <span className={styles['attention']} data-kind={session.badge.attention}>
             {session.badge.attentionLabel}
           </span>
         )}
-      </span>
+      </Pill>
       <span className={styles['sessionTitle']} title={session.title}>
         {session.displayTitle}
       </span>
-      {session.live && <span className={styles['liveChip']}>{PROJECT_VIEW_STRINGS.liveChip}</span>}
+      {session.live && <Pill className={styles['liveChip']}>{PROJECT_VIEW_STRINGS.liveChip}</Pill>}
       <span className={styles['sessionId']} title={session.sessionId}>
         {session.shortId}
       </span>
@@ -100,22 +111,24 @@ function AgentLane(props: {
         ))}
       </div>
       {hiddenCount > 0 && (
-        <button
-          type="button"
+        <Button
+          size="sm"
+          variant="outline"
           className={styles['showMore']}
           onClick={() => { setExpanded(true) }}
         >
           {formatTemplate(PROJECT_VIEW_STRINGS.showAllSessions, { n: lane.sessions.length })}
-        </button>
+        </Button>
       )}
       {expanded && lane.sessions.length > LANE_SESSION_LIMIT && (
-        <button
-          type="button"
+        <Button
+          size="sm"
+          variant="outline"
           className={styles['showMore']}
           onClick={() => { setExpanded(false) }}
         >
           {formatTemplate(PROJECT_VIEW_STRINGS.showLessSessions, { n: LANE_SESSION_LIMIT })}
-        </button>
+        </Button>
       )}
     </div>
   )
@@ -168,13 +181,16 @@ export function ProjectView(props: ProjectViewProps): ReactElement {
   const hasContent = vm.groups.length > 0
 
   return (
-    <div className={styles['root']} data-testid="agent-sidecar-project-view">
+    <div
+      {...surfaceProps('project-view', styles['root'])}
+      data-testid="agent-sidecar-project-view"
+    >
       <header className={styles['topbar']}>
         <span className={styles['title']}>{PROJECT_VIEW_STRINGS.title}</span>
         <span className={styles['summary']}>{vm.summaryLabel}</span>
         {props.loading && (
-          <span className={styles['loadingChip']} role="status">
-            {PROJECT_VIEW_STRINGS.loading}
+          <span role="status">
+            <Pill>{PROJECT_VIEW_STRINGS.loading}</Pill>
           </span>
         )}
       </header>

@@ -1,0 +1,118 @@
+/* Compact native sidebar layout over the shared Agent Sidecar token surface. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  font-size: 12px;
+  color: var(--agsc-fg);
+  background: var(--agsc-bg);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.counts {
+  max-width: 100%;
+  font-variant-numeric: tabular-nums;
+  color: var(--agsc-fg-secondary);
+}
+
+.counts > span {
+  color: inherit;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  color: var(--agsc-fg-secondary);
+}
+
+.sessionList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sessionItem {
+  min-width: 0;
+  list-style: none;
+}
+
+.sessionButton {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  width: 100%;
+  height: auto;
+  min-width: 0;
+  padding: 4px 6px;
+  color: var(--agsc-fg);
+  text-align: left;
+}
+
+.glyph {
+  flex: none;
+  color: var(--agsc-accent);
+}
+
+.sessionTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--agsc-fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionMeta {
+  flex: none;
+  font-size: 11px;
+  color: var(--agsc-fg-dimmed);
+  white-space: nowrap;
+}
+
+.detail {
+  margin: 0 6px 4px 20px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--agsc-fg-secondary);
+}
+
+.muted {
+  margin: 0;
+  color: var(--agsc-fg-dimmed);
+}
+
+.hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--agsc-fg-dimmed);
+}
+
+.icon {
+  display: block;
+  flex: none;
+  color: var(--agsc-fg-secondary);
+}
+
+.icon path,
+.icon circle {
+  fill: currentColor;
+}

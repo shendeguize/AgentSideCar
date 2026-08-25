@@ -1,27 +1,16 @@
 /**
- * Session-detail container (T5.10b, design §5.1 view 2): the full-tab
- * detail surface opened by clicking a session card on the board or in the
- * project view. Composes the M3 presentational components over their glue
- * stores:
+ * Session-detail React container. It composes the timeline, lineage,
+ * search, analysis, and optional injection surfaces over stores supplied
+ * by {@link DetailUiPort}.
  *
- * - SessionDetail (timeline) ← DetailStore (fetchSessionDetail +
- *   fetchTimelinePage pagination + SSE-triggered listen refetch);
- * - action row: 注入 (M2 InjectPanel as a modal, reused verbatim) and
- *   AI 分析 (AnalysisPanel over AnalysisStore; disabled with an honest
- *   hint while `analysis.enabled` is off);
- * - dsh 会话专属区: LineageTree ← the DetailStore lineage slice (non-dsh
- *   sessions degrade client-side, no dialing) and SearchPanel ←
- *   SearchStore (full-text or filter-only degradation; a result click
- *   navigates the detail view to that session).
- *
- * The stores live in component state (one set per opened session id — the
- * owner keys this component by session id) and are disposed on unmount.
- * SSE coupling: the controller's subscribe seam notifies the DetailStore
- * on every state frame (header refresh + listen-mode refetch trigger).
+ * Stores are scoped to one opened session and disposed on unmount. Each
+ * controller state frame refreshes the header hint and drives the
+ * detail store's bounded listen-mode refetch.
  *
  * @module
  */
 
+import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
 import { SessionDetail } from './detail/SessionDetail.tsx'
@@ -29,58 +18,28 @@ import { LineageTree } from './dsh-tools/LineageTree.tsx'
 import { SearchPanel } from './dsh-tools/SearchPanel.tsx'
 import { AnalysisPanel } from './analysis/AnalysisPanel.tsx'
 import { InjectPanel } from './inject/InjectPanel.tsx'
-import { DetailStore, findCardHint, type DetailHeaderHint } from './detail-glue.ts'
-import { SearchStore } from './search-glue.ts'
-import { AnalysisStore } from './analysis-glue.ts'
-import { ProjectsStore } from './project-glue.ts'
+import { findCardHint, type DetailHeaderHint } from './detail-glue.ts'
 import type { SidecarController } from './controller.ts'
-import { isDeliveredResult, type InjectMode } from './inject/logic.ts'
+import { isDeliveredResult } from './inject/logic.ts'
 import type { InjectActions } from './inject-glue.ts'
+import type {
+  AnalysisStorePort,
+  DetailStorePort,
+  DetailUiPort,
+  SearchStorePort,
+} from './ui-integration.ts'
 import { t } from './locales/index.ts'
+import { surfaceProps } from './theme/parts.ts'
 import css from './detail-view.module.css'
-import overlay from './inject/overlay.module.css'
 
-/**
- * Everything the integrated M3 surfaces need from the entry (index.ts
- * builds one; mount.tsx and this container share it). Store factories are
- * seams so tests/materialization can substitute injected transports.
- */
-export interface SidecarUiIntegration {
-  /** M2 injection wiring; absent = injection not assembled (entry hidden). */
-  inject?: {
-    actions: InjectActions
-    getDefaultMode: () => InjectMode
-  }
-  /** Live `analysis.enabled` reader (settings scope box; default false). */
-  getAnalysisEnabled: () => boolean
-  createDetailStore: (sessionId: string, hint: DetailHeaderHint | null) => DetailStore
-  createSearchStore: () => SearchStore
-  createAnalysisStore: () => AnalysisStore
-  createProjectsStore: () => ProjectsStore
-}
-
-/** Default integration over the real transports (analysis off until read). */
-export function createDefaultIntegration(
-  base: Omit<
-    SidecarUiIntegration,
-    'createDetailStore' | 'createSearchStore' | 'createAnalysisStore' | 'createProjectsStore'
-  >,
-): SidecarUiIntegration {
-  return {
-    ...base,
-    createDetailStore: (sessionId, hint) => new DetailStore(sessionId, { hint }),
-    createSearchStore: () => new SearchStore(),
-    createAnalysisStore: () => new AnalysisStore(),
-    createProjectsStore: () => new ProjectsStore(),
-  }
-}
+const ANALYSIS_DISABLED_REASON_ID = 'agent-sidecar-analysis-disabled-reason'
 
 export interface SidecarDetailViewProps {
   sessionId: string
   /** Header seed from the opening surface (board card / project row). */
   hint: DetailHeaderHint | null
   controller: SidecarController
-  integration: SidecarUiIntegration
+  integration: DetailUiPort
   onClose: () => void
   /** Provenance/search jump: navigate the detail view to another session. */
   onSelectSession: (sessionId: string) => void
@@ -92,9 +51,11 @@ export interface SidecarDetailViewProps {
  */
 export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
   const { controller, integration, sessionId } = props
-  const [detailStore] = useState(() => integration.createDetailStore(sessionId, props.hint))
-  const [searchStore] = useState(() => integration.createSearchStore())
-  const [analysisStore] = useState(() => integration.createAnalysisStore())
+  const [detailStore] = useState<DetailStorePort>(
+    () => integration.createDetailStore(sessionId, props.hint),
+  )
+  const [searchStore] = useState<SearchStorePort>(() => integration.createSearchStore())
+  const [analysisStore] = useState<AnalysisStorePort>(() => integration.createAnalysisStore())
   const [injectOpen, setInjectOpen] = useState(false)
   const [analysisOpen, setAnalysisOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
@@ -127,15 +88,14 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
   )
 
   const analysisEnabled = integration.getAnalysisEnabled()
+  const analysisDisabledHint =
+    analysisEnabled ? undefined : t('detail.actions.analyzeDisabledHint')
   const injectIntegration = props.integration.inject
   const closeInject = (): void => { setInjectOpen(false) }
   const title = detail.header.title.trim()
 
-  // UX-05 observation loop, part 1: a delivered execute refetches the
-  // newest timeline window at once, so closing the panel never lands on a
-  // stale pre-injection timeline. Wraps (not replaces) the integration
-  // callback — the two-phase flow and the owner's onDelivered hook (board
-  // snapshot refresh) stay untouched.
+  // A delivered execute refreshes the newest timeline while preserving
+  // the integration-owned two-phase flow and delivery callback.
   const injectActions: InjectActions | undefined =
     injectIntegration === undefined
       ? undefined
@@ -148,43 +108,55 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
           },
         }
 
-  // UX-05 part 2: the delivered result page offers「开启监听观察反应」—
-  // flip listen mode on (if off) and hand the view back to the timeline.
   const observeReaction = (): void => {
     if (!detailStore.getState().listening) detailStore.toggleListen()
     closeInject()
   }
 
   return (
-    <div className={css['detailRoot']} data-testid="agent-sidecar-detail-view">
+    <div
+      {...surfaceProps('detail', css['detailRoot'])}
+      data-testid="agent-sidecar-detail-view"
+    >
       <div className={css['actionsRow']}>
         {injectIntegration !== undefined && (
-          <button
-            type="button"
-            className={css['actionButton']}
+          <Button
+            size="sm"
+            variant="outline"
             onClick={() => { setInjectOpen(true) }}
             data-testid="agent-sidecar-detail-inject"
           >
             {t('detail.actions.inject')}
-          </button>
+          </Button>
         )}
-        <button
-          type="button"
-          className={css['actionButton']}
+        <Button
+          size="sm"
+          variant="outline"
           disabled={!analysisEnabled}
-          title={analysisEnabled ? undefined : t('detail.actions.analyzeDisabledHint')}
+          title={analysisDisabledHint}
+          aria-describedby={analysisEnabled ? undefined : ANALYSIS_DISABLED_REASON_ID}
           onClick={() => { setAnalysisOpen(true) }}
           data-testid="agent-sidecar-detail-analyze"
         >
           {t('detail.actions.analyze')}
-        </button>
+        </Button>
+        {!analysisEnabled && (
+          <span
+            id={ANALYSIS_DISABLED_REASON_ID}
+            className={css['analysisDisabledReason']}
+          >
+            {analysisDisabledHint}
+          </span>
+        )}
       </div>
 
-      {/* Collapsible dsh deep-query tools ABOVE the timeline (UX-09):
-          discoverable without scrolling past a long event list. */}
-      <div className={css['toolsSection']} data-testid="agent-sidecar-detail-tools">
-        <button
-          type="button"
+      <div
+        {...surfaceProps('dsh-tools', css['toolsSection'])}
+        data-testid="agent-sidecar-detail-tools"
+      >
+        <Button
+          size="sm"
+          variant="ghost"
           className={css['toolsToggle']}
           aria-expanded={toolsOpen}
           onClick={() => { setToolsOpen((open) => !open) }}
@@ -196,7 +168,7 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
           <span className={css['toolsToggleGlyph']}>
             {toolsOpen ? t('detail.tools.hide') : t('detail.tools.show')}
           </span>
-        </button>
+        </Button>
         {toolsOpen && (
           <>
             <LineageTree
@@ -252,29 +224,29 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
         />
       )}
 
-      {injectIntegration !== undefined && injectActions !== undefined && injectOpen && (
-        <div className={overlay['backdrop']} role="presentation" onClick={closeInject}>
-          <div
-            className={overlay['dialog']}
-            role="dialog"
-            aria-modal="true"
-            onClick={(event) => { event.stopPropagation() }}
-          >
-            <InjectPanel
-              capability={{ inject: view.injectCapability }}
-              target={{
-                agent: detail.header.agent,
-                sessionId,
-                ...(title !== '' ? { title } : {}),
-              }}
-              defaultMode={injectIntegration.getDefaultMode()}
-              onPrepare={injectActions.onPrepare}
-              onExecute={injectActions.onExecute}
-              onClose={closeInject}
-              onObserve={observeReaction}
-            />
-          </div>
-        </div>
+      {injectIntegration !== undefined && injectActions !== undefined && (
+        <Modal
+          open={injectOpen}
+          onClose={closeInject}
+          title={t('inject.title')}
+          closeLabel={t('inject.close')}
+          className={css['injectDialog']}
+          headless
+        >
+          <InjectPanel
+            capability={{ inject: view.injectCapability }}
+            target={{
+              agent: detail.header.agent,
+              sessionId,
+              ...(title !== '' ? { title } : {}),
+            }}
+            defaultMode={injectIntegration.getDefaultMode()}
+            onPrepare={injectActions.onPrepare}
+            onExecute={injectActions.onExecute}
+            onClose={closeInject}
+            onObserve={observeReaction}
+          />
+        </Modal>
       )}
     </div>
   )

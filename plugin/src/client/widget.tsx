@@ -13,6 +13,7 @@
 
 import type { CSSProperties, ReactElement } from 'react'
 import { widgetTitle, type WidgetConnection } from './board/logic.ts'
+import { surfaceProps } from './theme/parts.ts'
 
 export interface SidecarWidgetProps {
   connection: WidgetConnection
@@ -22,9 +23,9 @@ export interface SidecarWidgetProps {
 }
 
 const DOT_COLORS: Record<WidgetConnection, string> = {
-  ok: 'var(--dsw-alias-state-success-primary, #1a7f37)',
-  degraded: 'var(--dsw-alias-state-warn-primary, #9a6700)',
-  off: 'var(--dsw-alias-label-dimmed, #8c959f)',
+  ok: 'var(--agsc-ok)',
+  degraded: 'var(--agsc-warn)',
+  off: 'var(--agsc-fg-dimmed)',
 }
 
 const rootStyle: CSSProperties = {
@@ -36,7 +37,7 @@ const rootStyle: CSSProperties = {
   borderRadius: 6,
   background: 'transparent',
   font: 'inherit',
-  color: 'var(--dsw-alias-label-secondary, #57606a)',
+  color: 'var(--agsc-fg-secondary)',
 }
 
 const countStyle: CSSProperties = {
@@ -49,10 +50,8 @@ const countStyle: CSSProperties = {
 /**
  * Connection dot + working-session counter (e.g. `▸2`) for the footer.
  *
- * Without a wired `onOpen` the widget renders as an inert status `<span>`
- * (UX-06): button semantics + pointer cursor on a control that does
- * nothing would be a lie. The button form returns as soon as the
- * integration layer supplies the callback.
+ * Without `onOpen` the widget remains an inert status `<span>` so button
+ * semantics are only emitted for an actual control.
  */
 export function SidecarWidget(props: SidecarWidgetProps): ReactElement {
   const title = widgetTitle(props.connection, props.workingCount)
@@ -78,6 +77,7 @@ export function SidecarWidget(props: SidecarWidgetProps): ReactElement {
   if (props.onOpen === undefined) {
     return (
       <span
+        {...surfaceProps('footer-widget')}
         style={rootStyle}
         title={title}
         aria-label={title}
@@ -91,6 +91,7 @@ export function SidecarWidget(props: SidecarWidgetProps): ReactElement {
   }
   return (
     <button
+      {...surfaceProps('footer-widget')}
       type="button"
       style={{ ...rootStyle, cursor: 'pointer' }}
       title={title}

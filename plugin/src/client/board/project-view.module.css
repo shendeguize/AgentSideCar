@@ -1,9 +1,4 @@
-/*
- * Project correlation view styles (T5.5): same visual language as
- * board.module.css — every color rides a --dsw-alias-* design token with
- * a neutral fallback, flex top bar, grouped sections. Sessions render as
- * compact rows inside per-agent lanes instead of the board's card grid.
- */
+/* Project correlation layout consumes the shared Agent Sidecar theme. */
 
 .root {
   display: flex;
@@ -14,8 +9,8 @@
   padding: 16px 20px;
   box-sizing: border-box;
   overflow-y: auto;
-  color: var(--dsw-alias-label-primary, #1f2328);
-  background: var(--dsw-alias-bg-base, transparent);
+  color: var(--agsc-fg);
+  background: var(--agsc-bg);
 }
 
 /* ------------------------------------------------------------- top bar */
@@ -30,21 +25,12 @@
 .title {
   font-size: 15px;
   font-weight: 650;
-  color: var(--dsw-alias-label-primary, #1f2328);
+  color: var(--agsc-fg);
 }
 
 .summary {
   font-size: 12px;
-  color: var(--dsw-alias-label-secondary, #57606a);
-}
-
-.loadingChip {
-  font-size: 11px;
-  line-height: 18px;
-  padding: 0 8px;
-  border-radius: 999px;
-  color: var(--dsw-alias-label-secondary, #57606a);
-  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
+  color: var(--agsc-fg-secondary);
 }
 
 /* -------------------------------------------------------------- banner */
@@ -53,14 +39,14 @@
   font-size: 12px;
   line-height: 18px;
   padding: 6px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
+  border-radius: var(--agsc-radius-control);
+  border: 1px solid var(--agsc-border);
 }
 
 .banner[data-tone='danger'] {
-  color: var(--dsw-alias-state-error-primary, #cf222e);
-  background: var(--dsw-alias-state-error-secondary, rgba(207, 34, 46, 0.08));
-  border-color: var(--dsw-alias-state-error-secondary, rgba(207, 34, 46, 0.24));
+  color: var(--agsc-err);
+  background: var(--dsw-alias-state-error-secondary);
+  border-color: var(--dsw-alias-state-error-secondary);
 }
 
 /* -------------------------------------------------------- empty states */
@@ -80,14 +66,14 @@
 .emptyTitle {
   font-size: 14px;
   font-weight: 600;
-  color: var(--dsw-alias-label-primary, #1f2328);
+  color: var(--agsc-fg);
 }
 
 .emptyHint {
   font-size: 12px;
   max-width: 420px;
   line-height: 20px;
-  color: var(--dsw-alias-label-secondary, #57606a);
+  color: var(--agsc-fg-secondary);
 }
 
 /* -------------------------------------------------------- group blocks */
@@ -97,9 +83,9 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
-  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.02));
+  border-radius: var(--agsc-radius-card);
+  border: 1px solid var(--agsc-border-strong);
+  background: var(--agsc-bg-raised);
 }
 
 .groupHead {
@@ -113,7 +99,7 @@
 .groupName {
   font-size: 13px;
   font-weight: 600;
-  color: var(--dsw-alias-label-primary, #1f2328);
+  color: var(--agsc-fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -134,9 +120,9 @@
   line-height: 18px;
   padding: 0 7px;
   border-radius: 999px;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
-  background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04));
-  color: var(--dsw-alias-label-secondary, #57606a);
+  border: 1px solid var(--agsc-border);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--agsc-fg-secondary);
   white-space: nowrap;
 }
 
@@ -145,8 +131,8 @@
   line-height: 18px;
   padding: 0 7px;
   border-radius: 999px;
-  color: var(--dsw-alias-static-white, #fff);
-  background: var(--dsw-alias-brand-primary, #4d6bfe);
+  color: var(--dsw-alias-label-primary-foreground);
+  background: var(--agsc-accent);
   white-space: nowrap;
 }
 
@@ -157,7 +143,7 @@
 .groupMeta {
   font-size: 11px;
   flex: none;
-  color: var(--dsw-alias-label-tertiary, #6e7781);
+  color: var(--agsc-fg-dimmed);
   white-space: nowrap;
 }
 
@@ -181,12 +167,12 @@
   gap: 5px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--dsw-alias-label-primary, #1f2328);
+  color: var(--agsc-fg);
 }
 
 .glyph {
   flex: none;
-  color: var(--dsw-alias-brand-primary, #4d6bfe);
+  color: var(--agsc-accent);
 }
 
 .laneSessions {
@@ -198,19 +184,6 @@
 /* UX-20: lane truncation fold (same look as the board's group fold). */
 .showMore {
   align-self: flex-start;
-  font-size: 12px;
-  font-family: inherit;
-  color: var(--dsw-alias-label-secondary, #57606a);
-  background: transparent;
-  border: 1px dashed var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  border-radius: 6px;
-  padding: 2px 10px;
-  cursor: pointer;
-}
-
-.showMore:hover {
-  color: var(--dsw-alias-label-primary, #1f2328);
-  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04));
 }
 
 /* -------------------------------------------------------- session rows */
@@ -224,36 +197,25 @@
   font-family: inherit;
   font-size: 12px;
   padding: 5px 8px;
-  border-radius: 7px;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
-  background: var(--dsw-alias-bg-base, transparent);
-  color: var(--dsw-alias-label-primary, #1f2328);
+  border-radius: var(--agsc-radius-control);
+  border: 1px solid var(--agsc-border);
+  background: var(--dsw-alias-bg-base);
+  color: var(--agsc-fg);
   cursor: pointer;
 }
 
 .session:hover {
-  border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.12));
-  background: var(--dsw-alias-interactive-bg-hover, rgba(0, 0, 0, 0.04));
+  border-color: var(--agsc-border-strong);
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .session:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary, #4d6bfe);
+  outline: 2px solid var(--agsc-accent);
   outline-offset: 1px;
 }
 
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+.statusPill {
   flex: none;
-  font-size: 11px;
-  line-height: 18px;
-  padding: 0 7px;
-  border-radius: 999px;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
-  background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.03));
-  color: var(--dsw-alias-label-secondary, #57606a);
-  white-space: nowrap;
 }
 
 .dot {
@@ -261,36 +223,24 @@
   height: 7px;
   border-radius: 50%;
   flex: none;
-  background: var(--dsw-alias-label-tertiary, #6e7781);
-}
-
-.dot[data-tone='success'] {
-  background: var(--dsw-alias-state-success-primary, #1a7f37);
-}
-
-.dot[data-tone='warn'] {
-  background: var(--dsw-alias-state-warn-primary, #9a6700);
-}
-
-.dot[data-tone='danger'] {
-  background: var(--dsw-alias-state-error-primary, #cf222e);
+  background: var(--dsw-alias-label-tertiary);
 }
 
 .dot[data-tone='neutral'] {
-  background: var(--dsw-alias-label-tertiary, #6e7781);
+  background: var(--dsw-alias-label-tertiary);
 }
 
 .dot[data-tone='muted'] {
-  background: var(--dsw-alias-label-dimmed, #8c959f);
+  background: var(--agsc-fg-dimmed);
 }
 
 .attention {
   font-size: 11px;
-  color: var(--dsw-alias-state-warn-primary, #9a6700);
+  color: var(--agsc-warn);
 }
 
 .attention[data-kind='gap'] {
-  color: var(--dsw-alias-state-error-primary, #cf222e);
+  color: var(--agsc-err);
 }
 
 .sessionTitle {
@@ -302,24 +252,19 @@
 
 .liveChip {
   flex: none;
-  font-size: 10px;
-  line-height: 16px;
-  padding: 0 6px;
-  border-radius: 999px;
-  color: var(--dsw-alias-state-success-primary, #1a7f37);
-  border: 1px solid var(--dsw-alias-state-success-primary, rgba(26, 127, 55, 0.4));
+  color: var(--agsc-ok);
 }
 
 .sessionId {
   flex: none;
   font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--dsw-alias-label-tertiary, #6e7781);
+  font-family: var(--agsc-font-mono);
+  color: var(--agsc-fg-dimmed);
 }
 
 .sessionTime {
   flex: none;
   margin-left: auto;
   font-size: 11px;
-  color: var(--dsw-alias-label-caption, var(--dsw-alias-label-tertiary, #6e7781));
+  color: var(--agsc-fg-dimmed);
 }

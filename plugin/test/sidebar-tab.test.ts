@@ -15,21 +15,33 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { SessionCardVM } from '../src/client/board/logic.ts'
 import type { SidecarViewState } from '../src/client/controller.ts'
 import { zh } from '../src/client/locales/zh.ts'
+import { SidebarTab } from '../src/client/sidebar/SidebarTab.tsx'
 import {
-  MAX_RECENT_SESSIONS,
   SIDEBAR_TAB_ID,
   SIDEBAR_TAB_ORDER,
   VisibleGatedStore,
-  countWaiting,
   createSidebarTabComponent,
-  deriveMiniVM,
   mountSidebarTab,
   probeBetterSidebar,
-  recentActiveSessions,
   type SidebarTabDescriptor,
 } from '../src/client/sidebar-tab.tsx'
+import {
+  MAX_RECENT_SESSIONS,
+  countWaiting,
+  deriveMiniVM,
+  recentActiveSessions,
+} from '../src/client/sidebar/model.ts'
+
+// The primitive package ships raw CSS imports that Node SSR cannot load.
+// Match the existing client-integration test boundary with semantic host fakes.
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({
+  Button: 'button',
+  Pill: 'span',
+  StateDot: 'i',
+}))
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
 })
 
@@ -188,6 +200,8 @@ describe('mountSidebarTab', () => {
     expect(descriptor?.order).toBe(SIDEBAR_TAB_ORDER)
     expect(descriptor?.single).toBe(true)
     expect(typeof descriptor?.component).toBe('function')
+    expect(renderToStaticMarkup(descriptor?.icon?.(20) ?? null))
+      .toContain('<svg')
     // i18n-friendly title thunk resolving through the locale table:
     expect(typeof descriptor?.title).toBe('function')
     expect((descriptor?.title as () => string)()).toBe(zh['sidebar.tabTitle'])
@@ -205,7 +219,26 @@ describe('mountSidebarTab', () => {
     expect(registry.tabs.has(SIDEBAR_TAB_ID)).toBe(false)
   })
 
-  it('degrades a duplicate registration to a logged no-op', () => {
+  it('hands a double mount to the new controller component', () => {
+    vi.useFakeTimers()
+    const registry = new FakeSidebarRegistry()
+    const first = fakeCtx(registry)
+    const second = fakeCtx(registry)
+    mountSidebarTab(first.ctx, new FakeSource(viewState({ daemonState: 'adopted' })))
+    const oldComponent = registry.tabs.get(SIDEBAR_TAB_ID)?.component
+    mountSidebarTab(second.ctx, new FakeSource(viewState({ daemonState: 'failed' })))
+
+    expect(registry.tabs.get(SIDEBAR_TAB_ID)?.component).toBe(oldComponent)
+    first.disposers[0]!()
+    vi.advanceTimersByTime(8)
+    expect(registry.tabs.get(SIDEBAR_TAB_ID)?.component).not.toBe(oldComponent)
+
+    second.disposers[0]!()
+    expect(registry.tabs.has(SIDEBAR_TAB_ID)).toBe(false)
+  })
+
+  it('leaves a foreign duplicate and logs once after the deadline', () => {
+    vi.useFakeTimers()
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     const registry = new FakeSidebarRegistry()
     registry.registerTab({
@@ -217,8 +250,10 @@ describe('mountSidebarTab', () => {
     expect(() => {
       mountSidebarTab(ctx, new FakeSource())
     }).not.toThrow()
+    expect(errorSpy).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1_000)
     expect(errorSpy).toHaveBeenCalledTimes(1)
-    // The squatter entry stays; disposing our noop disposer changes nothing.
+    // The squatter entry stays; disposing our timed-out lease changes nothing.
     for (const dispose of disposers) dispose()
     expect(registry.tabs.get(SIDEBAR_TAB_ID)?.title).toBe('squatter')
   })
@@ -410,8 +445,11 @@ describe('deriveMiniVM', () => {
 
 describe('sidebar tab component', () => {
   function render(source: FakeSource, visible = true): string {
-    const Component = createSidebarTabComponent(source)
-    return renderToStaticMarkup(createElement(Component, { visible }))
+    return renderToStaticMarkup(createElement(SidebarTab, {
+      vm: deriveMiniVM(source.getState()),
+      visible,
+      nowMs: 1_700_000_000_000,
+    }))
   }
 
   it('renders the counts row, recent sessions, and the board hint', () => {
@@ -423,6 +461,13 @@ describe('sidebar tab component', () => {
     }))
     const html = render(source)
     expect(html).toContain('data-testid="agent-sidecar-sidebar-tab"')
+    expect(html).toContain('data-dsh-plugin="agent-sidecar"')
+    expect(html).toContain('data-dsh-part="sidebar-tab"')
+    expect(html).toContain(`aria-label="${zh['sidebar.tabTitle']}"`)
+    expect(html).toContain('data-visible="true"')
+    expect(html).toContain('data-testid="agent-sidecar-sidebar-counts"')
+    expect(html).toContain('aria-expanded="false"')
+    expect(html).toContain('aria-controls="agent-sidecar-sidebar-detail-0"')
     expect(html).toContain('1 工作中 · 1 等待中')
     expect(html).toContain('Alpha task')
     expect(html).toContain('Beta task')
@@ -461,8 +506,9 @@ describe('sidebar tab component', () => {
 
   it('holds no upstream subscription from rendering alone', () => {
     const source = new FakeSource(viewState({ sessions: [card()] }))
-    render(source, true)
-    render(source, false)
+    const Component = createSidebarTabComponent(source)
+    renderToStaticMarkup(createElement(Component, { visible: true }))
+    renderToStaticMarkup(createElement(Component, { visible: false }))
     expect(source.listenerCount).toBe(0)
   })
 })

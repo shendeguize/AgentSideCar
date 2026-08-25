@@ -30,10 +30,22 @@
  * the sidecar card reads native next to first-party ones.
  */
 
-import { useEffect, useId, useState } from 'react'
+import {
+  Button,
+  IconChevronDownOutline14,
+  Pill,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { t as defaultT } from './locales/index.ts'
 import type { SidecarLocaleKey } from './locales/index.ts'
+import {
+  NumberField,
+  SelectField,
+  TextField,
+  ToggleField,
+} from './settings-fields.tsx'
+import { surfaceProps } from './theme/parts.ts'
 import css from './settings-card.module.css'
 
 /**
@@ -176,147 +188,6 @@ function Section(props: SectionProps): ReactNode {
   )
 }
 
-interface SelectFieldProps {
-  label: string
-  hint: string
-  value: string
-  options: readonly { value: string, label: string }[]
-  disabled: boolean
-  onCommit: (value: string) => void
-}
-
-function SelectField(props: SelectFieldProps): ReactNode {
-  const id = useId()
-  return (
-    <div className={css['field']}>
-      <label className={css['label']} htmlFor={id}>{props.label}</label>
-      <select
-        id={id}
-        className={css['select']}
-        value={props.value}
-        disabled={props.disabled}
-        onChange={(event) => { props.onCommit(event.target.value) }}
-      >
-        {props.options.map(option => (
-          <option key={option.value} value={option.value}>{option.label}</option>
-        ))}
-      </select>
-      <p className={css['hint']}>{props.hint}</p>
-    </div>
-  )
-}
-
-interface ToggleFieldProps {
-  label: string
-  hint: string
-  checked: boolean
-  disabled: boolean
-  onCommit: (checked: boolean) => void
-}
-
-function ToggleField(props: ToggleFieldProps): ReactNode {
-  return (
-    <div className={css['field']}>
-      <label className={css['toggleRow']}>
-        <input
-          type="checkbox"
-          checked={props.checked}
-          disabled={props.disabled}
-          onChange={(event) => { props.onCommit(event.target.checked) }}
-        />
-        <span className={css['label']}>{props.label}</span>
-      </label>
-      <p className={css['hint']}>{props.hint}</p>
-    </div>
-  )
-}
-
-interface TextFieldProps {
-  label: string
-  hint: string
-  value: string
-  placeholder?: string
-  disabled: boolean
-  onCommit: (value: string) => void
-}
-
-/** Text field with a local draft so typing survives a non-echoing beat. */
-function TextField(props: TextFieldProps): ReactNode {
-  const id = useId()
-  const [draft, setDraft] = useState(props.value)
-  useEffect(() => { setDraft(props.value) }, [props.value])
-  return (
-    <div className={css['field']}>
-      <label className={css['label']} htmlFor={id}>{props.label}</label>
-      <input
-        id={id}
-        className={css['input']}
-        type="text"
-        value={draft}
-        placeholder={props.placeholder ?? ''}
-        disabled={props.disabled}
-        onChange={(event) => {
-          setDraft(event.target.value)
-          props.onCommit(event.target.value)
-        }}
-      />
-      <p className={css['hint']}>{props.hint}</p>
-    </div>
-  )
-}
-
-interface NumberFieldProps {
-  label: string
-  hint: string
-  /** Copy shown while the draft is not an acceptable integer. */
-  invalidHint: string
-  /** Schema lower bound (host Config schemastery `.min()`). */
-  min: number
-  value: number
-  disabled: boolean
-  onCommit: (value: number) => void
-}
-
-/**
- * Integer field with a local draft: invalid intermediate text (empty,
- * non-numeric, below the schema minimum) shows the invalid hint and commits
- * nothing, so the staged value can never leave the schema's domain.
- */
-function NumberField(props: NumberFieldProps): ReactNode {
-  const id = useId()
-  const [draft, setDraft] = useState(String(props.value))
-  const [invalid, setInvalid] = useState(false)
-  useEffect(() => {
-    setDraft(String(props.value))
-    setInvalid(false)
-  }, [props.value])
-  return (
-    <div className={css['field']}>
-      <label className={css['label']} htmlFor={id}>{props.label}</label>
-      <input
-        id={id}
-        className={invalid ? `${css['input']} ${css['inputInvalid']}` : css['input']}
-        type="text"
-        inputMode="numeric"
-        value={draft}
-        disabled={props.disabled}
-        {...invalid ? { 'aria-invalid': true } : {}}
-        onChange={(event) => {
-          const text = event.target.value
-          setDraft(text)
-          const parsed = Number(text)
-          const acceptable = text.trim() !== '' && Number.isInteger(parsed) && parsed >= props.min
-          setInvalid(!acceptable)
-          if (acceptable && parsed !== props.value) props.onCommit(parsed)
-        }}
-      />
-      {invalid
-        ? <p className={css['invalidHint']} role="alert">{props.invalidHint}</p>
-        : <p className={css['hint']}>{props.hint}</p>}
-    </div>
-  )
-}
-
 /**
  * Render the Agent Sidecar settings card.
  * @param props - staged values, form state, and the wiring callbacks.
@@ -334,9 +205,10 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
     : props.daemon?.state === 'failed'
       ? t('settings.daemonFailedNote')
       : undefined
+  const cardClassName = `${css['card']} ${open ? css['cardOpen'] : ''}`
 
   return (
-    <li className={`${css['card']} ${open ? css['cardOpen'] : ''}`}>
+    <li {...surfaceProps('settings-card', cardClassName)}>
       <button
         type="button"
         className={css['header']}
@@ -348,8 +220,10 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
           <span className={css['name']}>{title}</span>
           <span className={css['description']}>{t('settings.cardDescription')}</span>
         </span>
-        {props.dirty ? <span className={css['pending']}>{t('settings.unsaved')}</span> : null}
-        <span className={`${css['chevron']} ${open ? css['chevronOpen'] : ''}`} aria-hidden />
+        {props.dirty ? <Pill className={css['pending']}>{t('settings.unsaved')}</Pill> : null}
+        <IconChevronDownOutline14
+          className={`${css['chevron']} ${open ? css['chevronOpen'] : ''}`}
+        />
       </button>
       {open
         ? (
@@ -380,13 +254,15 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
                         : null}
                       {props.daemon.state === 'failed' && props.onDaemonRetry !== undefined
                         ? (
-                          <button
+                          <Button
                             type="button"
+                            size="sm"
+                            variant="outline"
                             className={css['retry']}
                             onClick={props.onDaemonRetry}
                           >
                             {t('settings.daemonRetry')}
-                          </button>
+                          </Button>
                         )
                         : null}
                     </div>
@@ -540,22 +416,24 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
               {props.saveFailed === true
                 ? <p className={css['failed']} role="status">{t('settings.saveFailed')}</p>
                 : <span className={css['spacer']} />}
-              <button
+              <Button
                 type="button"
-                className={css['discard']}
+                size="sm"
+                variant="outline"
                 disabled={!props.dirty || props.saving}
                 onClick={props.onDiscard}
               >
                 {t('settings.discard')}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                className={css['save']}
+                size="sm"
+                variant="primary"
                 disabled={!props.dirty || props.saving || !props.writable}
                 onClick={props.onSave}
               >
                 {t(props.saving ? 'settings.saving' : 'settings.save')}
-              </button>
+              </Button>
             </div>
           </div>
         )

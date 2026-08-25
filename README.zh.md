@@ -666,6 +666,13 @@ Agent Sidecar 带进 dsh Web 界面：跨 agent 监控看板、带 dsh 谱系与
 agent-sidecar Skill 提供器。插件通过 Unix 套接字消费 sidecar 守护进程，并以
 「探测—领养—否则托管」策略管理守护进程生命周期；它绝不代装 sidecar CLI。
 
+一等 Agent Center 使用 DSH 官方 `shell.overlay` 注册表与宿主 Modal。主侧栏
+入口、footer 小件和 `/sidecar` 看板动作共享可观察导航状态，因此空白会话和窄屏
+布局也能打开大尺寸中心；会话区 `Sidecar` Tab 保留为第二入口。该接线已经实现并
+有自动化测试覆盖。真实 `dsh_web` 浏览器验收也已通过亮色、暗色与响应式布局，
+通过主侧栏和 footer 打开共享 shell overlay、嵌套焦点约束与恢复、背景 inert
+隔离，以及无 console 与网络错误检查。
+
 将其安装到 dsh profile；该命令把包解析委托给 pnpm：
 
 ```sh
@@ -694,6 +701,11 @@ dsh plugin --profile web add @shendeguize/dsh-agent-sidecar
   未设置时复用宿主的默认模型选择。
 - `skill.provide`（默认开启）经 dsh Skill 注册表内嵌提供 agent-sidecar
   Skill；文件系统已安装的同名 Skill 自动优先。
+
+浏览器界面默认跟随宿主 DSH 的 `--dsw-*` token 与 Skin Center。皮肤和插件可通过
+稳定的 `data-dsh-plugin="agent-sidecar"` / `data-dsh-part` 锚点以及文档列出的
+`--agsc-*` 变量做定制；生成的 class 名称仅属于内部实现细节。公共 part、变量、
+默认值与最小覆盖示例见插件手册的[主题契约](plugin/README.md#theming)。
 
 完整配置表、守护进程托管语义、守卫细节与开发流程见
 [插件手册](plugin/README.md)。

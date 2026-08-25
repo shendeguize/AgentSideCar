@@ -789,6 +789,16 @@ embedded agent-sidecar skill provider. The plugin consumes the sidecar daemon
 over its Unix socket and manages the daemon lifecycle with a
 probe-adopt-else-host strategy; it never installs the sidecar CLI itself.
 
+Its first-class Agent Center uses DSH's official `shell.overlay` registry and
+host Modal. The main-sidebar entry, footer widget, and `/sidecar` board action
+share an observable navigation store, so the large center opens from blank
+conversations and narrow layouts as well; the conversation `Sidecar` tab
+remains a second entry. This wiring is implemented and covered by automated
+tests. Real `dsh_web` browser acceptance also passed for light, dark, and
+responsive layouts; the shared shell overlay from the sidebar and footer;
+nested focus trapping, restoration, and inert background isolation; and clean
+operation without console or network errors.
+
 Install it into a dsh profile; the command delegates package resolution to
 pnpm:
 
@@ -823,6 +833,13 @@ Key configuration, summarized:
 - `skill.provide` (default on) embeds the agent-sidecar skill through the dsh
   skill registry; a filesystem-installed skill of the same name automatically
   takes precedence.
+
+The browser UI follows the host's DSH `--dsw-*` tokens and Skin Center by
+default. Skins and plugins can customize it through stable
+`data-dsh-plugin="agent-sidecar"` / `data-dsh-part` anchors and the documented
+`--agsc-*` variables; generated class names are internal implementation
+details. See the plugin manual's [theming contract](plugin/README.md#theming)
+for the public parts, variables, defaults, and a minimal override.
 
 The full configuration table, daemon supervision semantics, guard details,
 and development workflow live in the [plugin manual](plugin/README.md).

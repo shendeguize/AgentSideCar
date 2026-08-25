@@ -18,8 +18,9 @@
  * concerns — useState here, reset on tab remount.
  */
 
-import { useState } from 'react'
-import type { MouseEvent, ReactElement } from 'react'
+import { Button, Pill, StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 import {
   buildBoardViewModel,
   formatTemplate,
@@ -35,6 +36,7 @@ import {
   type StreamHealthToken,
 } from './logic.ts'
 import { BOARD_STRINGS } from './strings.ts'
+import { surfaceProps } from '../theme/parts.ts'
 import styles from './board.module.css'
 
 /** Time-window choices offered by the top bar (hours). */
@@ -62,24 +64,47 @@ export interface BoardProps {
   nowMs?: number
 }
 
+function sessionDotState(status: DerivedSessionCardVM['badge']['status']): StateDotState | null {
+  if (status === 'working') return 'ongoing'
+  if (status === 'waiting') return 'warning'
+  return null
+}
+
 function SessionCard(props: {
   card: DerivedSessionCardVM
   onSelect: (sessionId: string) => void
 }): ReactElement {
   const { card, onSelect } = props
   const [copied, setCopied] = useState(false)
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const copyAliveRef = useRef(true)
+  const dotState = sessionDotState(card.badge.status)
 
-  // UX-17: click the id row to copy the full session id. stopPropagation
-  // keeps the card's open-detail click intact; the row stays a non-focusable
-  // span because the card itself is already a <button> (no nested controls).
-  const onCopyId = (ev: MouseEvent): void => {
-    ev.stopPropagation()
+  useEffect(() => {
+    copyAliveRef.current = true
+    return () => {
+      copyAliveRef.current = false
+      if (copyTimerRef.current !== null) {
+        clearTimeout(copyTimerRef.current)
+        copyTimerRef.current = null
+      }
+    }
+  }, [])
+
+  // UX-17: opening and copying are sibling buttons inside a semantic card,
+  // so both actions are independently keyboard reachable.
+  const onCopyId = (): void => {
     const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard
     if (clipboard === undefined) return
     clipboard.writeText(card.sessionId).then(
       () => {
+        if (!copyAliveRef.current) return
+        if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current)
         setCopied(true)
-        setTimeout(() => { setCopied(false) }, 2000)
+        copyTimerRef.current = setTimeout(() => {
+          copyTimerRef.current = null
+          setCopied(false)
+        }, 2000)
       },
       () => {
         // Clipboard permission denied: the hover title still carries the id.
@@ -88,33 +113,43 @@ function SessionCard(props: {
   }
 
   return (
-    <button
-      type="button"
-      className={styles['card']}
-      onClick={() => onSelect(card.sessionId)}
+    <article
+      {...surfaceProps('board-card', styles['card'])}
       data-testid="agent-sidecar-card"
     >
-      <div className={styles['cardHead']}>
-        <span className={styles['agent']}>
-          <span className={styles['glyph']} aria-hidden>
-            {card.glyph}
-          </span>
-          {card.agent}
-        </span>
-        <span className={styles['badge']} data-tone={card.badge.tone} title={card.hoverTitle}>
-          <span className={styles['dot']} data-tone={card.badge.tone} />
-          {card.badge.label}
-          {card.badge.attention !== null && (
-            <span className={styles['attention']} data-kind={card.badge.attention}>
-              {card.badge.attentionLabel}
+      <button
+        type="button"
+        className={styles['cardOpen']}
+        onClick={() => onSelect(card.sessionId)}
+      >
+        <span className={styles['cardHead']}>
+          <span className={styles['agent']}>
+            <span className={styles['glyph']} aria-hidden>
+              {card.glyph}
             </span>
-          )}
+            {card.agent}
+          </span>
+          <span title={card.hoverTitle}>
+            <Pill className={styles['statusPill']}>
+              {dotState === null
+                ? <span className={styles['dot']} data-tone={card.badge.tone} />
+                : <StateDot state={dotState} size={8} />}
+              {card.badge.label}
+              {card.badge.attention !== null && (
+                <span className={styles['attention']} data-kind={card.badge.attention}>
+                  {card.badge.attentionLabel}
+                </span>
+              )}
+            </Pill>
+          </span>
         </span>
-      </div>
-      <div className={styles['cardTitle']} title={card.title}>
-        {card.title.trim() === '' ? BOARD_STRINGS.card.untitled : card.title}
-      </div>
-      <div
+        <span className={styles['cardTitle']} title={card.title}>
+          {card.title.trim() === '' ? BOARD_STRINGS.card.untitled : card.title}
+        </span>
+      </button>
+      <Button
+        size="sm"
+        variant="ghost"
         className={styles['cardId']}
         title={`${card.sessionId}\n${BOARD_STRINGS.card.copyId}`}
         onClick={onCopyId}
@@ -122,14 +157,14 @@ function SessionCard(props: {
       >
         {card.shortId}
         {copied && <span className={styles['copied']} role="status">{BOARD_STRINGS.card.copied}</span>}
-      </div>
+      </Button>
       <div className={styles['cardEvent']}>
         {card.lastEvent === null
           ? BOARD_STRINGS.card.noEvent
           : `${card.lastEvent.kind} · ${card.lastEvent.text}`}
       </div>
       <div className={styles['cardTime']}>{card.relativeTime}</div>
-    </button>
+    </article>
   )
 }
 
@@ -180,22 +215,24 @@ function ProjectGroup(props: {
             ))}
           </div>
           {hiddenCount > 0 && (
-            <button
-              type="button"
+            <Button
+              size="sm"
+              variant="outline"
               className={styles['showMore']}
               onClick={() => { setExpanded(true) }}
             >
               {formatTemplate(BOARD_STRINGS.group.showAll, { n: group.cards.length })}
-            </button>
+            </Button>
           )}
           {expanded && group.cards.length > GROUP_CARD_LIMIT && (
-            <button
-              type="button"
+            <Button
+              size="sm"
+              variant="outline"
               className={styles['showMore']}
               onClick={() => { setExpanded(false) }}
             >
               {formatTemplate(BOARD_STRINGS.group.showLess, { n: GROUP_CARD_LIMIT })}
-            </button>
+            </Button>
           )}
         </>
       )}
@@ -249,41 +286,57 @@ export function Board(props: BoardProps): ReactElement {
       : formatTemplate(BOARD_STRINGS.topbar.filterByStatusTitle, {
           label: BOARD_STRINGS.status[status],
         })
+  const daemonDotState: StateDotState =
+    props.daemonState === 'failed'
+      ? 'error'
+      : props.daemonState === 'defer' || props.daemonState === 'backoff'
+        ? 'warning'
+        : props.daemonState === 'adopted' || props.daemonState === 'hosted'
+          ? 'done'
+          : 'ongoing'
+  const streamDotState: StateDotState =
+    props.streamHealth === 'ok' ? 'done' : props.streamHealth === 'degraded' ? 'warning' : 'ongoing'
 
   return (
-    <div className={styles['root']} data-testid="agent-sidecar-board">
-      <header className={styles['topbar']}>
+    <div {...surfaceProps('board', styles['root'])} data-testid="agent-sidecar-board">
+      <header {...surfaceProps('board-toolbar', styles['topbar'])}>
         <span className={styles['title']}>{BOARD_STRINGS.topbar.title}</span>
-        <span className={styles['badge']} data-tone={vm.daemonBadge.tone} title={props.daemonDetail}>
-          <span className={styles['dot']} data-tone={vm.daemonBadge.tone} />
-          {vm.daemonBadge.label}
+        <span title={props.daemonDetail}>
+          <Pill>
+            <StateDot state={daemonDotState} size={8} />
+            {vm.daemonBadge.label}
+          </Pill>
         </span>
-        <span className={styles['badge']} data-tone={vm.streamTone}>
-          <span className={styles['dot']} data-tone={vm.streamTone} />
+        <Pill>
+          <StateDot state={streamDotState} size={8} />
           {vm.streamLabel}
-        </span>
-        <button
-          type="button"
+        </Pill>
+        <Pill
           className={styles['countBadge']}
+          active={props.filters.statusFilter === 'working'}
           aria-pressed={props.filters.statusFilter === 'working'}
           title={statusBadgeTitle('working')}
           onClick={() => { toggleStatusFilter('working') }}
           data-testid="agent-sidecar-count-working"
         >
-          <span className={styles['dot']} data-tone={vm.workingCount > 0 ? 'success' : 'neutral'} />
+          {vm.workingCount > 0
+            ? <StateDot state="ongoing" size={8} />
+            : <span className={styles['dot']} data-tone="neutral" />}
           {formatTemplate(BOARD_STRINGS.topbar.countWorking, { n: vm.workingCount })}
-        </button>
-        <button
-          type="button"
+        </Pill>
+        <Pill
           className={styles['countBadge']}
+          active={props.filters.statusFilter === 'waiting'}
           aria-pressed={props.filters.statusFilter === 'waiting'}
           title={statusBadgeTitle('waiting')}
           onClick={() => { toggleStatusFilter('waiting') }}
           data-testid="agent-sidecar-count-waiting"
         >
-          <span className={styles['dot']} data-tone={vm.waitingCount > 0 ? 'warn' : 'neutral'} />
+          {vm.waitingCount > 0
+            ? <StateDot state="warning" size={8} />
+            : <span className={styles['dot']} data-tone="neutral" />}
           {formatTemplate(BOARD_STRINGS.topbar.countWaiting, { n: vm.waitingCount })}
-        </button>
+        </Pill>
         <span className={styles['countTotal']} data-testid="agent-sidecar-count-total">
           {formatTemplate(BOARD_STRINGS.topbar.countTotal, { n: vm.totalCount })}
         </span>
@@ -318,27 +371,28 @@ export function Board(props: BoardProps): ReactElement {
           />
           {BOARD_STRINGS.topbar.showDead}
         </label>
-        <button
-          type="button"
-          className={styles['refresh']}
+        <Button
+          size="sm"
+          variant="toolbar"
           title={BOARD_STRINGS.topbar.refreshTitle}
           disabled={refreshing}
           onClick={onRefreshClick}
         >
           {refreshing ? BOARD_STRINGS.topbar.refreshing : BOARD_STRINGS.topbar.refresh}
-        </button>
+        </Button>
       </header>
 
       {refreshFailed && (
         <div className={styles['banner']} data-tone="warn" role="status">
           {BOARD_STRINGS.topbar.refreshFailed}
-          <button
-            type="button"
+          <Button
+            size="sm"
+            variant="ghost"
             className={styles['bannerDismiss']}
             onClick={() => { setRefreshFailed(false) }}
           >
             {BOARD_STRINGS.topbar.dismiss}
-          </button>
+          </Button>
         </div>
       )}
 

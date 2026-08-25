@@ -14,7 +14,10 @@
  * injection); full-text hits carry them, filter hits render without.
  */
 
+import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ReactElement } from 'react'
+import { StaticPill } from '../primitives/StaticPill.tsx'
+import { surfaceProps } from '../theme/parts.ts'
 import css from './dsh-tools.module.css'
 import {
   deriveSearchView,
@@ -50,8 +53,10 @@ function ResultItem(props: {
 }): ReactElement {
   const { item } = props
   return (
-    <button
+    <Button
       type="button"
+      size="sm"
+      variant="ghost"
       className={css['resultItem']}
       onClick={() => props.onSelectSession(item.sessionId)}
       data-testid="agent-sidecar-search-item"
@@ -61,9 +66,9 @@ function ResultItem(props: {
         <span className={css['resultTitle']} title={item.title}>
           {item.titleLabel}
         </span>
-        <span className={css['matchTag']} data-kind={item.matchedBy}>
+        <StaticPill className={css['matchTag']} data-kind={item.matchedBy}>
           {item.matchedByLabel}
-        </span>
+        </StaticPill>
       </span>
       <span className={css['resultMeta']}>
         <span className={css['resultProject']} title={item.project}>
@@ -86,7 +91,7 @@ function ResultItem(props: {
           )}
         </span>
       )}
-    </button>
+    </Button>
   )
 }
 
@@ -102,7 +107,7 @@ export function SearchPanel(props: SearchPanelProps): ReactElement {
   const project = props.project ?? null
 
   return (
-    <section className={css['panel']} data-testid="agent-sidecar-search">
+    <section {...surfaceProps('dsh-tools', css['panel'])} data-testid="agent-sidecar-search">
       <div className={css['panelHead']}>
         <span className={css['panelTitle']}>{S.title}</span>
       </div>
@@ -114,22 +119,22 @@ export function SearchPanel(props: SearchPanelProps): ReactElement {
           props.onSubmit()
         }}
       >
-        <input
+        <Input
           type="search"
           className={css['searchInput']}
           value={props.query}
           placeholder={S.placeholder}
           onChange={(ev) => props.onQueryChange(ev.target.value)}
         />
-        <button type="submit" className={css['searchSubmit']}>
+        <Button type="submit" size="sm" variant="outline">
           {S.submit}
-        </button>
+        </Button>
       </form>
 
       {project !== null && project !== '' && (
-        <span className={css['projectChip']} title={project}>
+        <StaticPill className={css['projectChip']} title={project}>
           {formatTemplate(S.projectFilter, { project })}
-        </span>
+        </StaticPill>
       )}
 
       {view.notice !== null && (
@@ -142,7 +147,9 @@ export function SearchPanel(props: SearchPanelProps): ReactElement {
         </div>
       )}
 
-      {view.body === 'loading' && <div className={css['mutedLine']}>{view.text}</div>}
+      {view.body === 'loading' && (
+        <div className={css['mutedLine']} role="status">{view.text}</div>
+      )}
 
       {view.body === 'error' && (
         <div className={css['errorCard']} role="alert">

@@ -1,111 +1,87 @@
-/**
- * Centralized user-facing strings for the session-detail view (design §5.1
- * view 2, §5.3 honesty wording). Deliberately a module-local table — NOT
- * part of the main locale registry (locales/zh.ts / locales/en.ts): the
- * locale tables are owned by parallel tasks and the S7 integration wave
- * folds this table in centrally. Same posture as board/strings.ts.
- *
- * Chinese is the primary UI language. Templates use `{name}` placeholders
- * resolved by `formatTemplate` in `logic.ts`.
- *
- * Pure data module: no imports, no logic.
- *
- * @module
- */
+import { createLocaleView } from '../locales/view.ts'
 
-export const DETAIL_STRINGS = {
-  /** Header block (session meta + controls). */
+/** Dynamic session-detail vocabulary; templates are interpolated by `formatTemplate`. */
+export const DETAIL_STRINGS = createLocaleView({
   header: {
-    close: '返回看板',
-    listenOn: '监听中',
-    listenOff: '监听',
-    listenHint: '开启后新事件将实时追加并高亮',
-    refresh: '刷新',
-    refreshing: '刷新中…',
-    refreshHint: '手动拉取最新时间线窗口',
-    copyIdTitle: '点击复制会话 ID',
-    copied: '已复制',
-    untitled: '(无标题)',
-    unknownProject: '未知项目',
-    /** Design §5.3 / SKILL.md wording: statuses are inferred observations. */
-    observedDisclaimer: '状态为从持久化数据推断的观察值,可能滞后',
+    close: 'detail.header.close',
+    listenOn: 'detail.header.listenOn',
+    listenOff: 'detail.header.listenOff',
+    listenHint: 'detail.header.listenHint',
+    refresh: 'detail.header.refresh',
+    refreshing: 'detail.header.refreshing',
+    refreshHint: 'detail.header.refreshHint',
+    copyIdTitle: 'detail.header.copyIdTitle',
+    copied: 'detail.header.copied',
+    untitled: 'detail.header.untitled',
+    unknownProject: 'detail.header.unknownProject',
+    observedDisclaimer: 'detail.header.observedDisclaimer',
   },
-  /** Session status badge labels (observed values, see disclaimer). */
   status: {
-    working: '工作中',
-    waiting: '等待中',
-    idle: '空闲',
-    dead: '已结束',
-    unknown: '未知',
+    working: 'detail.status.working',
+    waiting: 'detail.status.waiting',
+    idle: 'detail.status.idle',
+    dead: 'detail.status.dead',
+    unknown: 'detail.status.unknown',
   },
-  /** Timeline source badges (provenance of the merged page, honest labels). */
   sources: {
-    title: '数据来源',
-    dshLive: 'dsh 实时',
-    dshCold: 'dsh 冷读',
-    sidecarReplay: 'sidecar 重放',
-    sidecarBuffer: 'sidecar 缓冲',
-    none: '来源未知',
+    title: 'detail.sources.title',
+    dshLive: 'detail.sources.dshLive',
+    dshCold: 'detail.sources.dshCold',
+    sidecarReplay: 'detail.sources.sidecarReplay',
+    sidecarBuffer: 'detail.sources.sidecarBuffer',
+    none: 'detail.sources.none',
   },
-  /** Normalized event-kind labels; unknown kinds keep their raw text. */
   kind: {
-    user: '用户消息',
-    assistant: '助手回复',
-    thinking: '思考',
-    toolCall: '工具调用',
-    toolResult: '工具结果',
-    turn: '回合',
-    step: '步骤',
-    error: '错误',
-    other: '事件',
+    user: 'detail.kind.user',
+    assistant: 'detail.kind.assistant',
+    thinking: 'detail.kind.thinking',
+    toolCall: 'detail.kind.toolCall',
+    toolResult: 'detail.kind.toolResult',
+    turn: 'detail.kind.turn',
+    step: 'detail.kind.step',
+    error: 'detail.kind.error',
+    other: 'detail.kind.other',
   },
-  /** Seq-discontinuity marker row (design §4.b.3 honest presentation). */
   gap: {
-    label: '缺口:可能有 {n} 条事件未捕获(256 队列上限或未持久化)',
+    label: 'detail.gap.label',
   },
-  /** Kind filter chips (UX-03): protocol noise hidden by default, honestly counted. */
   filter: {
-    conversation: '只看对话',
-    all: '全部事件',
-    hiddenNotice: '已隐藏 {n} 条协议事件',
+    conversation: 'detail.filter.conversation',
+    all: 'detail.filter.all',
+    hiddenNotice: 'detail.filter.hiddenNotice',
   },
-  /** Timeline list chrome. */
   timeline: {
-    loadMore: '加载更多历史',
-    loadingMore: '加载中…',
-    noMore: '已到时间线起点',
-    expand: '展开',
-    collapse: '收起',
-    newBadge: '新',
-    seq: 'seq {n}',
-    hiddenNotice: '为保持流畅,较早的 {n} 条已折叠',
-    showAll: '全部显示',
-    /** Aggregated row for an adjacent run of empty streaming chunks (UX-03). */
-    chunkRun: '{n} 个流式分块',
+    loadMore: 'detail.timeline.loadMore',
+    loadingMore: 'detail.timeline.loadingMore',
+    noMore: 'detail.timeline.noMore',
+    expand: 'detail.timeline.expand',
+    collapse: 'detail.timeline.collapse',
+    newBadge: 'detail.timeline.newBadge',
+    seq: 'detail.timeline.seq',
+    hiddenNotice: 'detail.timeline.hiddenNotice',
+    showAll: 'detail.timeline.showAll',
+    chunkRun: 'detail.timeline.chunkRun',
   },
-  /** Loading / empty / error body states. */
   states: {
-    loadingTitle: '正在加载时间线…',
-    emptyTitle: '暂无事件',
-    emptyHint: '该会话还没有可展示的规范化事件。',
-    errorTitle: '时间线加载失败',
-    /** Fallback template when the reason code has no friendly mapping. */
-    errorFallback: '错误码:{reason}',
+    loadingTitle: 'detail.states.loadingTitle',
+    emptyTitle: 'detail.states.emptyTitle',
+    emptyHint: 'detail.states.emptyHint',
+    errorTitle: 'detail.states.errorTitle',
+    errorFallback: 'detail.states.errorFallback',
     errors: {
-      session_not_found: '会话不存在或已不可见',
-      invalid_cursor: '分页游标无效,请重新打开详情',
-      fusion_not_wired: '当前 host 未启用时间线能力',
-      network_error: '网络错误,无法联系 dsh host',
-      request_timeout: '请求超时',
+      session_not_found: 'detail.states.errors.session_not_found',
+      invalid_cursor: 'detail.states.errors.invalid_cursor',
+      fusion_not_wired: 'detail.states.errors.fusion_not_wired',
+      network_error: 'detail.states.errors.network_error',
+      request_timeout: 'detail.states.errors.request_timeout',
     },
   },
-  /** Relative time templates (coarse buckets, matches the board wording). */
   time: {
-    justNow: '刚刚',
-    minutesAgo: '{n} 分钟前',
-    hoursAgo: '{n} 小时前',
-    daysAgo: '{n} 天前',
+    justNow: 'detail.time.justNow',
+    minutesAgo: 'detail.time.minutesAgo',
+    hoursAgo: 'detail.time.hoursAgo',
+    daysAgo: 'detail.time.daysAgo',
   },
-} as const
+} as const)
 
 export type DetailStrings = typeof DETAIL_STRINGS

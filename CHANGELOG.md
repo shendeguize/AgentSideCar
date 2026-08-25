@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A first-class dsh Agent Center through the official `shell.overlay`
+  registry, shared by the main sidebar, footer widget, and `/sidecar`, plus a
+  public theming contract for host tokens, stable parts, and `--agsc-*`
+  overrides. The conversation tab and optional better-sidebar summary remain
+  secondary surfaces.
+
+### Changed
+
+- Reworked the browser surfaces around DSH UI primitives, semantic host theme
+  tokens, and the host English/Chinese locale service. Real `dsh_web`
+  acceptance passed light, dark, and responsive layouts, shared sidebar/footer
+  overlay access, and nested focus and inert behavior, with no console or
+  network errors; locale switching remains covered by automated tests rather
+  than this browser pass.
+
 ## [0.5.0] - 2026-08-25
 
 ### Changed

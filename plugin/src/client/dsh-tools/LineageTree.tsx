@@ -13,8 +13,11 @@
  * ./logic.ts and is unit-tested there.
  */
 
+import { Button, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useState } from 'react'
 import type { ReactElement } from 'react'
+import { StaticPill } from '../primitives/StaticPill.tsx'
+import { surfaceProps } from '../theme/parts.ts'
 import css from './dsh-tools.module.css'
 import {
   deriveLineageView,
@@ -64,20 +67,24 @@ function TreeRow(props: {
       data-role={node.role}
     >
       {node.hasChildren ? (
-        <button
+        <Button
           type="button"
+          size="sm"
+          variant="ghost"
           className={css['toggle']}
           aria-expanded={!collapsed}
           aria-label={collapsed ? S.expand : S.collapse}
           onClick={() => props.onToggle(node.id)}
         >
           {collapsed ? '▸' : '▾'}
-        </button>
+        </Button>
       ) : (
         <span className={css['toggleSpacer']} aria-hidden />
       )}
-      <button
+      <Button
         type="button"
+        size="sm"
+        variant="ghost"
         className={css['node']}
         data-current={node.isCurrent ? 'true' : 'false'}
         aria-current={node.isCurrent ? 'true' : undefined}
@@ -91,17 +98,17 @@ function TreeRow(props: {
           {node.shortId}
         </span>
         {node.isCurrent && (
-          <span className={css['nodeBadge']} data-kind="current">
+          <StaticPill className={css['nodeBadge']} data-kind="current">
             {S.currentBadge}
-          </span>
+          </StaticPill>
         )}
         {node.live && (
-          <span className={css['nodeBadge']} data-kind="live">
+          <StaticPill className={css['nodeBadge']} data-kind="live">
             {S.liveBadge}
-          </span>
+          </StaticPill>
         )}
-        {!node.persisted && <span className={css['nodeBadge']}>{S.notPersistedBadge}</span>}
-      </button>
+        {!node.persisted && <Pill className={css['nodeBadge']}>{S.notPersistedBadge}</Pill>}
+      </Button>
     </div>
   )
 }
@@ -163,17 +170,19 @@ export function LineageTree(props: LineageTreeProps): ReactElement {
   })
 
   return (
-    <section className={css['panel']} data-testid="agent-sidecar-lineage">
+    <section {...surfaceProps('dsh-tools', css['panel'])} data-testid="agent-sidecar-lineage">
       <div className={css['panelHead']}>
         <span className={css['panelTitle']}>{S.title}</span>
         {view.kind === 'tree' && (
-          <span className={css['panelCount']}>
+          <Pill className={css['panelCount']}>
             {formatTemplate(S.nodeCount, { n: view.tree.nodeCount })}
-          </span>
+          </Pill>
         )}
       </div>
 
-      {view.kind === 'loading' && <div className={css['mutedLine']}>{view.text}</div>}
+      {view.kind === 'loading' && (
+        <div className={css['mutedLine']} role="status">{view.text}</div>
+      )}
 
       {view.kind === 'error' && (
         <div className={css['errorCard']} role="alert">

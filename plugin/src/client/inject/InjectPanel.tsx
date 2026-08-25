@@ -1,31 +1,9 @@
-/**
- * Inject panel (design §5.1 view 3): the two-phase confirmation UI for
- * message injection. Fully controlled and presentational — the component
- * does NO data fetching; the integration layer supplies `onPrepare` /
- * `onExecute` callbacks that speak to `POST <prefix>/action` and resolve
- * with either the wire success shape or the data layer's normalized
- * ApiError (matched structurally, never imported).
- *
- * Three zones, driven by the pure reducer in ./logic.ts:
- *
- * 1. editor  — message textarea + live UTF-8 byte counter, queue/steer mode
- *    radios, target row, cursor-cli process-list warning (§4.d/S7) and the
- *    audit-fingerprint note (§5.3);
- * 2. confirm — the prepare plan (live target-status snapshot + message
- *    digest), the 60s confirmToken countdown, and the deliberately
- *    restrained danger button;
- * 3. result  — delivered / failed (re-prepare offered) / unknown (terminal:
- *    the reducer itself refuses a reset, so no retry affordance can exist —
- *    S6 — and the copy points at the session to verify).
- *
- * `capability.inject === false` disables the whole panel with the
- * "enable injection in Settings" note.
- */
-
+import { Button, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useId, useReducer, useState } from 'react'
 import type { ReactNode } from 'react'
 import { t as defaultT } from '../locales/index.ts'
 import type { SidecarLocaleKey } from '../locales/index.ts'
+import { surfaceProps } from '../theme/parts.ts'
 import css from './inject.module.css'
 import {
   byteUsage,
@@ -103,10 +81,6 @@ function renderCopy(t: InjectTranslate, copy: CopyRef): string {
   return t(copy.key, copy.params)
 }
 
-// ---------------------------------------------------------------------------
-// Zone building blocks.
-// ---------------------------------------------------------------------------
-
 interface WarningsProps {
   t: InjectTranslate
   agent: string | null
@@ -141,7 +115,7 @@ function PlanBox(props: PlanBoxProps): ReactNode {
       <div className={css['planRow']}>
         <span className={css['planKey']}>{t('inject.planTargetLabel')}</span>
         <span className={css['planValue']}>
-          <span className={css['agentTag']}>{plan.target.agent}</span>
+          <Pill className={css['agentTag']}>{plan.target.agent}</Pill>
           <span className={css['planTitle']} title={plan.target.sessionId}>{targetName}</span>
         </span>
       </div>
@@ -165,15 +139,6 @@ function PlanBox(props: PlanBoxProps): ReactNode {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Panel.
-// ---------------------------------------------------------------------------
-
-/**
- * Render the two-phase inject panel.
- * @param props - capability, target, and the integration callbacks.
- * @returns the panel.
- */
 export function InjectPanel(props: InjectPanelProps): ReactNode {
   const t = props.t ?? defaultT
   const now = props.nowMs ?? Date.now
@@ -274,18 +239,18 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
     }
   }
 
+  const panelSurface = surfaceProps('inject-panel', css['panel'])
   const closeButton = props.onClose !== undefined
     ? (
-      <button type="button" className={css['btn']} onClick={props.onClose}>
+      <Button type="button" size="sm" variant="outline" onClick={props.onClose}>
         {t('inject.close')}
-      </button>
+      </Button>
     )
     : null
 
-  // ── whole-panel gate: injection capability off ─────────────────────────
   if (!props.capability.inject) {
     return (
-      <section className={css['panel']} aria-label={t('inject.title')} onKeyDown={handleKeyDown}>
+      <section {...panelSurface} aria-label={t('inject.title')} onKeyDown={handleKeyDown}>
         <header className={css['header']}>
           <h3 className={css['title']}>{t('inject.title')}</h3>
         </header>
@@ -299,7 +264,6 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
     )
   }
 
-  // ── zone 3: result ──────────────────────────────────────────────────────
   if (state.phase === 'result') {
     const { result } = state
     const actions = resultActions(result.outcome)
@@ -309,7 +273,7 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
         ? css['resultFail']
         : css['resultUnknown']
     return (
-      <section className={css['panel']} aria-label={t('inject.title')} onKeyDown={handleKeyDown}>
+      <section {...panelSurface} aria-label={t('inject.title')} onKeyDown={handleKeyDown}>
         <header className={css['header']}>
           <h3 className={css['title']}>{t('inject.title')}</h3>
         </header>
@@ -329,36 +293,39 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
             {closeButton}
             {isDeliveredResult(result) && props.onObserve !== undefined
               ? (
-                <button
+                <Button
                   type="button"
-                  className={css['btnPrimary']}
+                  size="sm"
+                  variant="primary"
                   onClick={props.onObserve}
                   data-testid="agent-sidecar-inject-observe"
                 >
                   {t('inject.observeListen')}
-                </button>
+                </Button>
               )
               : null}
             {actions.canReprepare
               ? (
-                <button
+                <Button
                   type="button"
-                  className={css['btnPrimary']}
+                  size="sm"
+                  variant="primary"
                   onClick={() => { dispatch({ type: 'RESET' }) }}
                 >
                   {t('inject.reprepare')}
-                </button>
+                </Button>
               )
               : null}
             {result.outcome === 'delivered' && props.onClose === undefined
               ? (
-                <button
+                <Button
                   type="button"
-                  className={css['btnPrimary']}
+                  size="sm"
+                  variant="primary"
                   onClick={() => { dispatch({ type: 'RESET' }) }}
                 >
                   {t('inject.done')}
-                </button>
+                </Button>
               )
               : null}
           </div>
@@ -367,7 +334,6 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
     )
   }
 
-  // ── zone 2: confirm / executing ─────────────────────────────────────────
   if (state.phase === 'confirm' || state.phase === 'executing') {
     const executing = state.phase === 'executing'
     const countdown = state.phase === 'confirm'
@@ -375,7 +341,7 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
       : null
     return (
       <section
-        className={css['panel']}
+        {...panelSurface}
         aria-label={t('inject.confirmTitle')}
         onKeyDown={handleKeyDown}
       >
@@ -393,14 +359,15 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
             )
             : null}
           <div className={css['footer']}>
-            <button
+            <Button
               type="button"
-              className={css['btn']}
+              size="sm"
+              variant="outline"
               disabled={executing}
               onClick={() => { dispatch({ type: 'CANCEL' }) }}
             >
               {t('inject.cancel')}
-            </button>
+            </Button>
             <button
               type="button"
               className={css['btnDanger']}
@@ -415,7 +382,6 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
     )
   }
 
-  // ── zone 1: editor (idle / preparing) ───────────────────────────────────
   const preparing = state.phase === 'preparing'
   const canEdit = props.target !== null && !preparing
   const usage = byteUsage(validation.bytes)
@@ -423,7 +389,7 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
   const showInvalid = !validation.ok && validation.code !== 'empty'
 
   return (
-    <section className={css['panel']} aria-label={t('inject.title')} onKeyDown={handleKeyDown}>
+    <section {...panelSurface} aria-label={t('inject.title')} onKeyDown={handleKeyDown}>
       <header className={css['header']}>
         <h3 className={css['title']}>{t('inject.title')}</h3>
       </header>
@@ -447,7 +413,7 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
           {props.target !== null
             ? (
               <span className={css['planValue']}>
-                <span className={css['agentTag']}>{props.target.agent}</span>
+                <Pill className={css['agentTag']}>{props.target.agent}</Pill>
                 <span className={css['planTitle']} title={props.target.sessionId}>
                   {props.target.title !== undefined && props.target.title !== ''
                     ? props.target.title
@@ -520,14 +486,15 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
 
         <div className={css['footer']}>
           {closeButton}
-          <button
+          <Button
             type="button"
-            className={css['btnPrimary']}
+            size="sm"
+            variant="primary"
             disabled={!gate.canPrepare}
             onClick={() => { void handlePrepare() }}
           >
             {t(preparing ? 'inject.preparing' : 'inject.prepare')}
-          </button>
+          </Button>
         </div>
       </div>
     </section>

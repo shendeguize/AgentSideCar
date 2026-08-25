@@ -1,21 +1,22 @@
 # @shendeguize/dsh-agent-sidecar
 
-[Agent Sidecar](../README.md) 的原生 dsh 插件:在 dsh Web 里跨 agent 监控本机 AI agent 会话——看板、会话详情时间线、消息注入(默认关)、AI 旁路分析(默认关)、skill 内嵌提供,以及对 sidecar daemon 的自动托管。
+[Agent Sidecar](../README.md) 的原生 dsh 插件:在 dsh Web 的 Agent Center 中跨 agent 监控本机 AI agent 会话——看板、会话详情时间线、消息注入(默认关)、AI 旁路分析(默认关)、skill 内嵌提供,以及对 sidecar daemon 的自动托管。
 
 ## 能力(当前已交付,M1-M3 + skill/sidebar)
 
-- **跨 agent 会话看板**:会话页新增「Sidecar」Tab,展示本机受支持 agent(cursor IDE/CLI、claude、codex、copilot、dsh、kimi)的会话卡片与状态徽标(`working` / `waiting` / `idle` / `dead`;状态为从持久化数据推断的观察值,可能滞后)。
+- **一等 Agent Center overlay**:通过 dsh 官方 `shell.overlay` 注册 `agent-sidecar-center`(`order: 30`),由可观察导航状态驱动官方 Modal 内的大尺寸中心。dsh 主侧栏入口、footer 状态小件与 `/sidecar` 看板项共享此入口,空白会话和窄屏下也可打开;会话区「Sidecar」Tab 保留为第二入口。
+- **跨 agent 会话看板**:Agent Center overlay 与会话区「Sidecar」Tab 展示本机受支持 agent(cursor IDE/CLI、claude、codex、copilot、dsh、kimi)的会话卡片与状态徽标(`working` / `waiting` / `idle` / `dead`;状态为从持久化数据推断的观察值,可能滞后)。
 - **会话详情视图**:统一时间线(融合 sidecar 规范化事件与 dsh 进程内实时事件,分页回溯历史,事件缺口如实标注);dsh 会话专属谱系树与全文检索(经 `sessionQuery`,该服务缺席时优雅降级——检索退化为标题/项目过滤,谱系显示不可用提示);项目分组视图(同一项目下跨 agent 会话并排呈现)。
 - **消息注入(默认关)**:`inject.enabled` 开启后,对 waiting/idle 目标经两阶段确认(服务端签发一次性 confirmToken)注入消息——dsh 会话走进程内 queue/steer(`ctx.agents` followup/steer),外部 agent(claude/codex/cursor-cli)经 `agent-sidecar send --message-stdin --allow-write --json` 子进程执行(消息经 stdin 传输,绝不进 sidecar argv)。`delivery: unknown` 回执不提供重试按钮;copilot/kimi/cursor-ide 无注入通道,入口置灰。
 - **AI 旁路分析(默认关)**:`analysis.enabled` 开启后,可对被观测会话/项目拉起专用 dsh 分析会话(有界摘要注入 + 增量追问 + 随时停止);模型路由见配置表 `analysis.provider` / `analysis.model`。分析正文绝不写入插件日志。
-- **footer 状态小件**:侧边栏底部常驻连接状态点(sidecar 连接态 + 速览)。
-- **`/sidecar` 斜杠命令**:会话输入框内的只读状态速览(daemon 状态、连接健康度、working/waiting 计数、按项目分组的活跃会话)。
+- **footer 状态小件**:侧边栏底部常驻连接状态点(sidecar 连接态 + 速览),点击打开 Agent Center。
+- **`/sidecar` 斜杠命令**:会话输入框内的只读状态速览(daemon 状态、连接健康度、working/waiting 计数、按项目分组的活跃会话);选择末尾的看板项可打开 Agent Center。
 - **设置卡**:dsh 设置页出现「Agent Sidecar」卡片(设置命名空间 `agent-sidecar`)。
 - **daemon 托管**:探测-领养-否则托管(probe-adopt-else-host)策略管理 sidecar daemon 生命周期,详见[下文](#daemon-托管策略)。
 - **实时数据面**:host 半区经 Unix socket 消费 daemon(`status` 快照对账 + `subscribe` 事件触发),浏览器经同源 SSE 实时刷新。
 - **skill 内嵌提供**:`skill.provide`(默认开)经 dsh skill 注册表提供 agent-sidecar skill,装插件即得、无需运行安装脚本;文件系统已安装的同名 skill 自动优先(dsh 注册表按名合并,文件系统层胜出,无需探测)。
-- **better-sidebar 可选 Tab**(软依赖):装有 `dsh-better-sidebar` 时注册紧凑「Sidecar」侧边 Tab(连接点 + 计数 + 最近会话);未装静默跳过;Tab 不可见时释放订阅,不额外轮询、不另建 SSE。
-- **中英双语界面**(默认中文)。
+- **better-sidebar 可选摘要 Tab**(软依赖):装有 `dsh-better-sidebar` 时注册紧凑「Sidecar」侧边 Tab(连接点 + 计数 + 最近会话摘要);未装静默跳过;Tab 不可见时释放订阅,不额外轮询、不另建 SSE。
+- **跟随宿主 locale 的中英双语界面**:向 dsh locale 服务注册中英文词典,采用宿主当前语言并跟随 `locale/change`;仅在宿主 locale 服务缺席时回退到插件内置中文,不会在正常 dsh Web 中形成默认中文孤岛。
 
 ## 前置条件
 
@@ -46,11 +47,15 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 - **profile 用法**:对不存在的 profile,`dsh plugin --profile <name> add …` 会先初始化它;自定义 profile 需在其 manifest 的 bundles 中包含 `@deepseek-ai/dsh-web-app` 才有 Web 界面(`dsh web` 等价于 `dsh --profile web`)。启动:`dsh --profile <name> [--port N]`。
 - **卸载**:`dsh plugin --profile <name> remove @shendeguize/dsh-agent-sidecar`,幂等、可重装。
 
-装好后在三处出现:
+装好后的主要入口与表面:
 
-1. 会话页顶部 Tab 环 →「Sidecar」看板;
-2. 侧边栏 footer → 状态小件;
-3. 设置页插件区 →「Agent Sidecar」设置卡。
+1. dsh 主侧栏 → 一等「Agent Center」入口,打开官方 Modal 承载的 Agent Center overlay;
+2. 侧边栏 footer → 可点击的状态小件,打开同一 overlay;
+3. 会话输入框 `/sidecar` → 只读摘要及打开同一 overlay 的看板项;
+4. 会话页顶部 Tab 环 → 保留的「Sidecar」第二入口;
+5. 设置页插件区 →「Agent Sidecar」设置卡。
+
+安装 `dsh-better-sidebar` 后还会出现可选「Sidecar」摘要 Tab;它是软依赖,不影响以上原生入口。
 
 命令行验证:`curl http://127.0.0.1:<port>/plugins/agent-sidecar/api/state` 应返回含 `daemon` / `board` / `capabilities` 的 JSON 快照;`GET …/api/stream` 为 SSE 流;`GET …/api/session/<id>` 为单会话详情(含融合时间线首页),`GET …/api/session/<id>/timeline?cursor=&limit=` 分页回溯历史;`GET …/api/lineage/<id>`、`GET …/api/search?q=`、`GET …/api/projects` 为 M3 读面;`POST …/api/action` 为幂等动作信封(`inject.prepare` / `inject.execute` / `analysis.*` / `daemon.retry`)。
 
@@ -97,6 +102,55 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 - `skill.provide`:**装配时读取**(重启语义)——改动需重载插件生效。
 - `daemon.*` / `stream.*` / `sidecar.*`:当前**以组合配置(patch 的 `config:` 块)为准**,在插件装配时烘焙定型;设置卡内对这三组的修改暂不驱动运行时(完整的重启重读接线属后续里程碑)。要改这三组,请改 profile patch 后重启 dsh。
 
+<a id="theming"></a>
+
+## Theming / 自定义风格
+
+插件公开三层样式契约,既跟随 dsh Skin Center,又允许皮肤或其他插件做有界覆盖:
+
+1. **L1——宿主主题继承**:所有插件级颜色与阴影默认值都委托给 dsh 的 `--dsw-*` 语义 token,字体代码栈委托给 `--ds-font-family-code`。因此 dsh 主题或 Skin Center 改变这些 token 时,Agent Sidecar 会自动跟随,无需维护平行色板。
+2. **L2——稳定 surface selector**:使用 `[data-dsh-plugin='agent-sidecar'][data-dsh-part='...']` 定位一个公开 surface。当前公开 part 以 `src/client/theme/parts.ts` 为唯一事实来源:
+   - `board`:会话看板根;`board-toolbar`:看板工具栏;`board-card`:会话卡片。
+   - `project-view`:项目分组视图;`detail`:会话详情根;`timeline`:统一时间线。
+   - `inject-panel`:注入面板;`analysis-panel`:AI 分析面板;`dsh-tools`:dsh 谱系/搜索工具。
+   - `footer-widget`:footer 状态入口;`sidebar-entry`:主侧栏 Agent Center 入口;`sidebar-tab`:可选 better-sidebar 摘要。
+   - `settings-card`:设置卡;`overlay`:Agent Center overlay 根,由官方 `shell.overlay` Modal consumer 实际渲染。
+3. **L3——`--agsc-*` 覆盖变量**:变量可设在全部插件 surface 上,也可设在某个 L2 selector 上做局部覆盖。默认语义如下:
+
+| 变量 | 默认值 | 语义 |
+|---|---|---|
+| `--agsc-accent` | `var(--dsw-alias-brand-primary)` | 品牌强调、选中态与焦点 |
+| `--agsc-bg` | `var(--dsw-alias-bg-layer-1)` | 基础 surface 背景 |
+| `--agsc-bg-raised` | `var(--dsw-alias-bg-layer-3)` | 卡片、输入等抬升背景 |
+| `--agsc-fg` | `var(--dsw-alias-label-primary)` | 主文字 |
+| `--agsc-fg-secondary` | `var(--dsw-alias-label-secondary)` | 次级文字 |
+| `--agsc-fg-dimmed` | `var(--dsw-alias-label-dimmed)` | 弱化文字与关闭态 |
+| `--agsc-border` | `var(--dsw-alias-border-l1)` | 普通边界 |
+| `--agsc-border-strong` | `var(--dsw-alias-border-l2)` | 强调边界 |
+| `--agsc-ok` | `var(--dsw-alias-state-success-primary)` | 成功/健康状态 |
+| `--agsc-warn` | `var(--dsw-alias-state-warn-primary)` | 警告/降级状态 |
+| `--agsc-err` | `var(--dsw-alias-state-error-primary)` | 错误状态 |
+| `--agsc-radius-card` | `12px` | 卡片与大容器圆角 |
+| `--agsc-radius-control` | `8px` | 按钮、输入与小控件圆角 |
+| `--agsc-shadow-card` | `var(--dsw-shadow-lv2)` | 卡片阴影 |
+| `--agsc-font-mono` | `var(--ds-font-family-code)` | 会话 ID、代码与等宽内容 |
+
+最小覆盖示例:
+
+```css
+/* 全局调整 Agent Sidecar 卡片圆角。 */
+[data-dsh-plugin='agent-sidecar'] {
+  --agsc-radius-card: 16px;
+}
+
+/* 只让看板 surface 使用较浅的宿主背景层。 */
+[data-dsh-plugin='agent-sidecar'][data-dsh-part='board'] {
+  --agsc-bg-raised: var(--dsw-alias-bg-layer-2);
+}
+```
+
+**兼容性契约**:CSS Module 生成的 class 名称属于实现细节,不得依赖。`data-dsh-plugin` + `data-dsh-part` 与文档列出的 `--agsc-*` 变量才是公共稳定接口;新增、重命名或移除 part/变量属于公共契约变更,必须同步测试、本文档与 CHANGELOG。
+
 ## daemon 托管策略
 
 - **`adopt-or-host`(默认)**:启动先经 Unix socket `ping` 探测——有活 daemon 即**领养**(只连接、周期健康检查,不掌握生死);没有则(仅 macOS)经 `agent-sidecar service status` **只读**检测 LaunchAgent,已安装则**让位**(DEFER:launchd 负责拉活,插件周期重探、绝不 spawn,避免双托管);两者皆无才自行 spawn `<sidecar.command> daemon run` 作为受监督前台子进程托管。
@@ -127,6 +181,18 @@ pnpm build       # tsdown 双构建 → lib/index.js(host)+ lib/client.js(browse
 pnpm test        # vitest
 ```
 
+### 浏览器验收
+
+最近一次真实 `dsh_web` 浏览器验收已通过以下检查:
+
+- 亮色、暗色与窄屏响应式布局;
+- 主侧栏与 footer 打开同一个 `shell.overlay` 宿主 Modal;
+- 外层及嵌套对话框的初始焦点、焦点约束与恢复,以及背景 `inert` 隔离;
+- 无 console error/warning、页面错误、失败请求或非 2xx 响应。
+
+宿主 locale 桥及语言变更订阅有自动化测试覆盖;此次真实浏览器验收未操作可靠的宿主
+locale 控件,因此不把浏览器语言切换列为已验证项。
+
 主仓治理:任何入库变更前在仓库根运行 `python3 scripts/check.py`(见主仓 [CONTRIBUTING.md](../CONTRIBUTING.md))。
 
 目录一览:
@@ -153,7 +219,8 @@ plugin/
 │   ├── board/ · widget.tsx · settings-card.tsx · mount.tsx   # 看板 / 小件 / 设置卡
 │   ├── detail/ · dsh-tools/ · inject/ · analysis/   # 详情时间线 / 谱系与检索 / 注入面板 / 分析面板
 │   ├── commands.ts · sidebar-tab.tsx   # /sidecar 斜杠命令 / better-sidebar 可选 Tab
-│   └── locales/            #   中英双语文案(默认 zh)
+│   ├── navigation/ · theme/             #   Agent Center 入口 / 稳定 part 与 --agsc-* 契约
+│   └── locales/            #   中英双语文案 + 宿主 locale 桥(缺席时回退 zh)
 ├── test/                   # vitest 单测与集成测试
 ├── lib/                    # 预构建产物(随 npm 发布,安装免构建)
 ├── tsconfig.host.json / tsconfig.client.json
