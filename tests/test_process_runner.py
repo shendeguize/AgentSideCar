@@ -68,6 +68,27 @@ def process_exists(pid):
     return True
 
 
+def read_pid_when_ready(path, deadline):
+    candidate = None
+    while time.monotonic() < deadline:
+        try:
+            payload = path.read_text(encoding="ascii")
+        except FileNotFoundError:
+            payload = ""
+        if payload.isascii() and payload.isdecimal():
+            value = int(payload)
+            if value > 0 and str(value) == payload:
+                if value == candidate:
+                    return value
+                candidate = value
+            else:
+                candidate = None
+        else:
+            candidate = None
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    raise AssertionError("PID file was not ready before deadline")
+
+
 class ProcessRunnerTests(unittest.TestCase):
     def test_process_exists_distinguishes_linux_live_and_zombie_states(self):
         with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
@@ -88,6 +109,20 @@ class ProcessRunnerTests(unittest.TestCase):
         ) as kill:
             self.assertTrue(process_exists(125))
         kill.assert_called_once_with(125, 0)
+
+    def test_read_pid_when_ready_retries_missing_empty_and_partial_files(self):
+        path = mock.Mock(spec=Path)
+        path.read_text.side_effect = (
+            FileNotFoundError(),
+            "",
+            "12",
+            "123",
+            "123",
+        )
+
+        self.assertEqual(123, read_pid_when_ready(path, time.monotonic() + 1))
+        with self.assertRaises(AssertionError):
+            read_pid_when_ready(path, time.monotonic())
 
     def test_result_is_frozen_and_run_supports_input_env_and_path_cwd(self):
         code = (
@@ -1773,10 +1808,10 @@ class ProcessRunnerTests(unittest.TestCase):
                     b"ready",
                     process.read_line(deadline=time.monotonic() + 2),
                 )
-                deadline = time.monotonic() + 2
-                while not child_pid_path.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                child_pid = int(child_pid_path.read_text(encoding="ascii"))
+                child_pid = read_pid_when_ready(
+                    child_pid_path,
+                    time.monotonic() + 2,
+                )
                 observed = process.wait_clean(deadline=time.monotonic() + 0.05)
                 self.assertFalse(observed.cleanup_complete)
                 result = process.terminate_tree(
@@ -1837,10 +1872,10 @@ class ProcessRunnerTests(unittest.TestCase):
                     b"ready",
                     process.read_line(deadline=time.monotonic() + 2),
                 )
-                deadline = time.monotonic() + 2
-                while not pid_path.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                fork_pid = int(pid_path.read_text(encoding="ascii"))
+                fork_pid = read_pid_when_ready(
+                    pid_path,
+                    time.monotonic() + 2,
+                )
                 result = process.terminate_tree(
                     deadline=time.monotonic() + 2
                 )

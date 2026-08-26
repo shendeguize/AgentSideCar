@@ -2301,10 +2301,30 @@ class KimiSendIntegrationTests(unittest.TestCase):
         self.assertFalse(captured_paths[0].exists())
 
     def test_kimi_private_node_snapshot_versions_and_initializes_acp(self):
-        resolved_node = shutil.which("node")
-        if resolved_node is None:
-            self.skipTest("Node is unavailable")
-        real_node = Path(resolved_node).resolve(strict=True)
+        candidates = (shutil.which("node"), "/usr/bin/node", "/usr/local/bin/node")
+        seen = set()
+        real_node = None
+        for value in candidates:
+            if not value:
+                continue
+            try:
+                candidate = Path(value).resolve(strict=True)
+                details = candidate.stat()
+            except (OSError, RuntimeError):
+                continue
+            identity = (int(details.st_dev), int(details.st_ino))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if (
+                stat.S_ISREG(details.st_mode)
+                and os.access(str(candidate), os.X_OK)
+                and details.st_size <= inject_module.KIMI_RUNTIME_FILE_BYTES
+            ):
+                real_node = candidate
+                break
+        if real_node is None:
+            self.skipTest("No bounded executable Node candidate is available")
         private_node_directory = tempfile.TemporaryDirectory(
             prefix="private-node-",
             dir=str(self.root),
