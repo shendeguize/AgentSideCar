@@ -39,6 +39,7 @@ from sidecar.kimi_acp import (
     KimiAcpRequest,
     KimiAcpResult,
     PromptWriteBoundary,
+    build_kimi_child_env,
     run_kimi_acp,
 )
 from sidecar.kimi_identity import (
@@ -1383,7 +1384,7 @@ def _bind_kimi_executable(
                 "#!/bin/sh\n"
                 "unset NODE_OPTIONS NODE_PATH DYLD_INSERT_LIBRARIES "
                 "DYLD_FRAMEWORK_PATH DYLD_FALLBACK_FRAMEWORK_PATH "
-                "DYLD_FALLBACK_LIBRARY_PATH\n"
+                "DYLD_FALLBACK_LIBRARY_PATH DYLD_LIBRARY_PATH\n"
                 "DYLD_LIBRARY_PATH={} exec {} {} \"$@\"\n".format(
                     shlex.quote(str(root / "lib")),
                     shlex.quote(str(node_path)),
@@ -1441,7 +1442,7 @@ def _probe_bound_kimi_version(
             stdout_limit=KIMI_VERSION_STDOUT_BYTES,
             stderr_limit=KIMI_VERSION_STDOUT_BYTES,
             timeout=KIMI_VERSION_TIMEOUT_SECONDS,
-            env=None,
+            env=build_kimi_child_env(),
             cwd=None,
             require_descendant_containment=False,
         )
@@ -1478,6 +1479,7 @@ def _probe_bound_kimi_initialize(bound: _BoundKimiExecutable) -> None:
             line_limit=256 * 1024,
             stdout_limit=1024 * 1024,
             stderr_limit=64 * 1024,
+            env=build_kimi_child_env(),
             require_descendant_containment=False,
         )
         deadline = time.monotonic() + 30.0
