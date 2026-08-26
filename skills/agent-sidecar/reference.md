@@ -2,9 +2,10 @@
 
 ## Installation and release artifact
 
-Agent Sidecar 0.4.1 requires Python 3.9+ and declares no runtime Python
-dependencies. It is not documented as published on PyPI. Install the console
-script from a checkout or Git source:
+Agent Sidecar 0.6.0 requires Python 3.9+ for local installation and tooling and
+declares no runtime Python dependencies. Its remote observation payload accepts
+Python 3.8+ on SSH targets. It is not documented as published on PyPI. Install
+the console script from a checkout or Git source:
 
 ```text
 pipx install .
@@ -309,9 +310,10 @@ files under `DSHC_HOME` or `~/.dsh_center` when that command is unavailable.
 The query uses a bounded deterministic zipapp built from the active installed
 `sidecar` package and streamed over strict, noninteractive SSH. This means
 checkout source, installed site-packages, or an embedded zipapp package as
-applicable, not an assumed current checkout. Remote hosts need Python 3.9+ but
-do not need Agent Sidecar or third-party Python packages installed. Host keys
-must already be trusted and noninteractive authentication must already work.
+applicable, not an assumed current checkout. Before transfer, the target's
+`python3` is probed and must be Python 3.8 or newer. Remote hosts do not need
+Agent Sidecar or third-party Python packages installed. Host keys must already
+be trusted and noninteractive authentication must already work.
 
 Host failures are isolated and reported on stderr using one of `host_key`,
 `auth`, `timeout`, `unreachable`, `python_too_old`, `resource_limit`,
@@ -344,12 +346,13 @@ session prefix is unsupported.
 
 Inventory and eligibility match remote snapshots: DSH Center hosts must be
 enabled, nonlocal, non-orphaned, and in the `ready` or `no_dsh` phase. Each
-selected host must provide Python 3.9 or newer. Agent Sidecar uses strict,
-noninteractive SSH, streams a bounded deterministic zipapp built from the
-active installed `sidecar` package, writes it to a private temporary remote
-file, preflights and runs it in isolated Python mode, then removes it during
-cleanup. The active package is checkout source, installed site-packages, or an
-embedded zipapp package as applicable; nothing is installed remotely.
+selected host's `python3` is probed and must provide Python 3.8 or newer. Agent
+Sidecar uses strict, noninteractive SSH, streams a bounded deterministic zipapp
+built from the active installed `sidecar` package, writes it to a private
+temporary remote file, preflights and runs it in isolated Python mode, then
+removes it during cleanup. The active package is checkout source, installed
+site-packages, or an embedded zipapp package as applicable; nothing is
+installed remotely.
 
 Local and remote producers run concurrently. Their handoff queues and the
 fleet's per-host/global event buffer are bounded; full queues backpressure

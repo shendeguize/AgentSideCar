@@ -31,8 +31,10 @@ edit transcripts or agent configuration; a resumed native agent can do so as
 described above. The release installer writes only the selected executable and
 optional skill bundle; the checkout installer creates integration symlinks.
 
-Version 0.6.0 requires Python 3.9+ and has no runtime Python dependencies. DSH
-event watching additionally requires an external `zstd` executable.
+Local installation and tooling for version 0.6.0 require Python 3.9+ and have
+no runtime Python dependencies. The remote observation payload accepts Python
+3.8+ on SSH targets. DSH event watching additionally requires an external
+`zstd` executable.
 
 ## Version 0.6.0
 
@@ -58,7 +60,7 @@ timeline observability, and accessible modal navigation.
 | macOS | Primary platform and full quality-gate target. Local observation, remote monitoring, the daemon and HTTP panel, deterministic zipapps, experimental local `send`, and the user LaunchAgent are supported. |
 | Linux | Portable observation, remote monitoring, daemon/HTTP, TUI, and packaging paths are exercised in CI. The macOS LaunchAgent is unavailable, and experimental `send` fails closed before execution because its required Darwin `kqueue` descendant containment is unavailable. Linux support is best-effort where agent-owned persistence formats or desktop integrations differ. |
 | Windows | Unsupported. The current runtime and security contracts require POSIX permissions, file locking, process groups, Unix sockets, and related primitives. |
-| Python | Python 3.9 or newer is required locally and on SSH targets. CI exercises Python 3.9 and 3.13; Agent Sidecar has zero runtime Python dependencies. |
+| Python | Local installation and tooling require Python 3.9 or newer; the remote observation payload accepts Python 3.8 or newer on SSH targets. CI exercises the local product on Python 3.9 and 3.13; Agent Sidecar has zero runtime Python dependencies. |
 
 Support for an operating system does not imply support for every observed
 agent on that system. The source-specific boundaries below and the mutating
@@ -363,7 +365,8 @@ The sidecar builds a bounded zipapp from its active installed `sidecar` package
 and streams it over noninteractive SSH. That source is the checkout when run
 there, installed site-packages under pipx or a wheel, or the embedded package
 under a zipapp. No remote installation or third-party Python package is
-required. Remote Python must be 3.9 or newer.
+required. Before transfer, the target's `python3` is probed and must be Python
+3.8 or newer.
 
 SSH requires an already trusted host key and working noninteractive
 authentication. It does not enroll host keys or fall back to an interactive
@@ -412,12 +415,12 @@ human output prepends a fixed-width host column. Local watch commands without
 
 Remote watch uses the same DSH Center inventory and eligibility rules as remote
 snapshots: hosts must be enabled, nonlocal, non-orphaned, and in the `ready` or
-`no_dsh` phase. Each host is probed for Python 3.9+ before transfer. The sidecar
-then streams a bounded zipapp built deterministically from the active installed
-`sidecar` package over strict, noninteractive SSH. The zipapp is written to a
-private temporary file on the host, preflighted, run in isolated Python mode,
-and removed during cleanup; no remote Agent Sidecar installation or
-third-party Python package is required.
+`no_dsh` phase. Each host's `python3` is probed for Python 3.8+ before transfer.
+The sidecar then streams a bounded zipapp built deterministically from the
+active installed `sidecar` package over strict, noninteractive SSH. The zipapp
+is written to a private temporary file on the host, preflighted, run in
+isolated Python mode, and removed during cleanup; no remote Agent Sidecar
+installation or third-party Python package is required.
 
 Local, remote, and per-host queues are bounded. Producers apply backpressure
 rather than dropping queued events, and fair draining prevents a busy host

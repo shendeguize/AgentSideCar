@@ -115,8 +115,8 @@ Remote `list` keeps the 48-hour default; add `--all` only when full history is
 requested. Remote watch always requires `--all`, follows local and remote
 sources concurrently, and applies `--from-start` to both sides when requested.
 It cannot watch a remote session prefix. It uses eligible DSH Center hosts with
-Python 3.9+, strict noninteractive SSH, an ephemeral zipapp, and bounded queues
-that backpressure producers.
+`python3` preflighted at Python 3.8+, strict noninteractive SSH, an ephemeral
+zipapp, and bounded queues that backpressure producers.
 
 Do not use remote mode by default. Never hide a remote failure or
 `events may be missed`/transition-gap warning. Remote watch does not reconnect

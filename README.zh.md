@@ -26,8 +26,9 @@ HTTP 面板和 API 会在本机 IPv4 回环地址上公开只读的守护进程�
 Agent 配置；但恢复后的原生 Agent 可以按上述方式进行修改。Release 安装程序只
 写入所选可执行文件和可选 Skill Bundle；检出版本安装程序则创建集成用符号链接。
 
-0.6.0 版本要求 Python 3.9+，且没有 Python 运行时依赖。监视 DSH 事件还需要外部
-`zstd` 可执行文件。
+0.6.0 版本的本地安装与工具要求 Python 3.9+，且没有 Python 运行时依赖。SSH
+目标接受使用 Python 3.8+ 的远程观察载荷。监视 DSH 事件还需要外部 `zstd`
+可执行文件。
 
 ## 版本 0.6.0
 
@@ -50,7 +51,7 @@ Release 安装。0.6.0 新增精确 Kimi Code 0.38.0 受保护 ACP 恢复、复�
 | macOS | 主要平台和完整质量门禁的目标平台。支持本地观察、远程监控、守护进程和 HTTP 面板、确定性 zipapp、实验性本地 `send`，以及用户 LaunchAgent。 |
 | Linux | CI 会验证可移植的观察、远程监控、守护进程/HTTP、TUI 和打包路径。macOS LaunchAgent 不可用；实验性 `send` 所要求的 Darwin `kqueue` 后代进程遏制能力不可用，因此会在执行前关闭失败。在 Agent 自有持久化格式或桌面集成存在平台差异的地方，Linux 支持属于尽力支持。 |
 | Windows | 不支持。当前运行时和安全契约依赖 POSIX 权限、文件锁、进程组、Unix 套接字及相关原语。 |
-| Python | 本地和 SSH 目标均要求 Python 3.9 或更高版本。CI 验证 Python 3.9 和 3.13；Agent Sidecar 没有 Python 运行时依赖。 |
+| Python | 本地安装与工具要求 Python 3.9 或更高版本；SSH 目标上的远程观察载荷接受 Python 3.8 或更高版本。CI 使用 Python 3.9 和 3.13 验证本地产品；Agent Sidecar 没有 Python 运行时依赖。 |
 
 操作系统受支持并不代表该系统上的每一种被观察 Agent 都受支持。下文针对各数据源
 的边界以及可变更 `send` 的限制仍然是权威说明。
@@ -324,7 +325,8 @@ agent-sidecar status --remote --host <host-alias> --json
 Sidecar 会从当前生效、已安装的 `sidecar` 包构建有界 zipapp，并通过非交互 SSH
 进行流式传输：从检出版本运行时来源为检出版本；从 pipx 或 wheel 运行时来源为
 site-packages；从 zipapp 运行时来源为内嵌包。远程无需安装 Agent Sidecar 或任何
-第三方 Python 包。远程 Python 必须为 3.9 或更高版本。
+第三方 Python 包。传输前会探测目标的 `python3`，其版本必须为 Python 3.8 或
+更高版本。
 
 SSH 要求主机密钥已经受信任，并且非交互认证可用。它不会登记主机密钥，也不会
 回退到交互提示。临时 zipapp 由远程 Python 解释器执行，并在快照完成后删除。
@@ -365,10 +367,10 @@ agent-sidecar watch --all --remote --from-start --json
 
 远程监视使用与远程快照相同的 DSH Center 清单和资格规则：主机必须已启用、非
 本地、非孤立，并处于 `ready` 或 `no_dsh` 阶段。每台主机都会在传输前探测
-Python 3.9+。之后 Sidecar 从当前生效、已安装的 `sidecar` 包确定性构建有界
-zipapp，并通过严格的非交互 SSH 进行流式传输。zipapp 被写入远程私有临时文件，
-经过预检后以隔离 Python 模式运行，并在清理时删除；远程不需要安装 Agent Sidecar
-或第三方 Python 包。
+`python3` 是否为 Python 3.8+。之后 Sidecar 从当前生效、已安装的 `sidecar` 包
+确定性构建有界 zipapp，并通过严格的非交互 SSH 进行流式传输。zipapp 被写入远程
+私有临时文件，经过预检后以隔离 Python 模式运行，并在清理时删除；远程不需要安装
+Agent Sidecar 或第三方 Python 包。
 
 本地、远程和每主机队列都有界。生产者通过背压等待，而不是丢弃已入队事件；公平
 排空可防止繁忙主机饿死其他主机。远程版本预检之后，子监视进程生成一个有效事件

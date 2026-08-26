@@ -66,6 +66,20 @@ def completed(argv, version=(3, 11, 0), returncode=0, stderr=b""):
 
 
 def process_exists(pid):
+    if sys.platform.startswith("linux"):
+        try:
+            payload = Path("/proc/{}/stat".format(pid)).read_text(encoding="ascii")
+        except FileNotFoundError:
+            return False
+        except OSError:
+            pass
+        else:
+            suffix = payload.rsplit(")", 1)
+            fields = suffix[1].split() if len(suffix) == 2 else ()
+            if fields:
+                # A killed non-child can remain a zombie under non-reaping PID 1.
+                # It is terminated even though kill(pid, 0) still reports existence.
+                return fields[0] != "Z"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -73,6 +87,28 @@ def process_exists(pid):
     except PermissionError:
         return True
     return True
+
+
+class ProcessLivenessTests(unittest.TestCase):
+    def test_process_exists_distinguishes_linux_live_and_zombie_states(self):
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=(
+                "123 (live child) S 1 2 3\n",
+                "124 (zombie child) Z 1 2 3\n",
+            ),
+        ), mock.patch.object(os, "kill") as kill:
+            self.assertTrue(process_exists(123))
+            self.assertFalse(process_exists(124))
+        kill.assert_not_called()
+
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            os,
+            "kill",
+        ) as kill:
+            self.assertTrue(process_exists(125))
+        kill.assert_called_once_with(125, 0)
 
 
 class FakeLineStream:
@@ -272,19 +308,38 @@ class RemoteWatchTransportTests(unittest.TestCase):
             before_ready.read_ready()
         self.assertEqual("protocol", raised.exception.code)
 
-    def test_probe_old_python_stops_before_stream_artifact_transfer(self):
-        stream_calls = []
-
-        stream, failure = open_remote_watch_host(
-            remote.RemoteHost("old", "ready"),
-            b"zipapp",
-            runner=lambda argv, **kwargs: completed(argv, (3, 8, 19)),
-            stream_factory=lambda *args, **kwargs: stream_calls.append((args, kwargs)),
+    def test_probe_floor_accepts_38_and_rejects_37_before_stream_transfer(self):
+        cases = (
+            ((3, 8, 19), True),
+            ((3, 7, 19), False),
         )
+        for version, accepted in cases:
+            with self.subTest(version=version):
+                stream_calls = []
 
-        self.assertIsNone(stream)
-        self.assertEqual("python_too_old", failure.code)
-        self.assertEqual([], stream_calls)
+                def stream_factory(*args, **kwargs):
+                    stream_calls.append((args, kwargs))
+                    return FakeLineStream([READY_FRAME, END_FRAME])
+
+                stream, failure = open_remote_watch_host(
+                    remote.RemoteHost("edge", "ready"),
+                    b"zipapp",
+                    runner=lambda argv, version=version, **kwargs: completed(
+                        argv,
+                        version,
+                    ),
+                    stream_factory=stream_factory,
+                )
+
+                if accepted:
+                    self.assertIsNotNone(stream)
+                    self.assertIsNone(failure)
+                    self.assertEqual(1, len(stream_calls))
+                    stream.close()
+                else:
+                    self.assertIsNone(stream)
+                    self.assertEqual("python_too_old", failure.code)
+                    self.assertEqual([], stream_calls)
 
     def test_fragmented_local_process_lines_use_bounded_line_stream(self):
         code = (
@@ -461,7 +516,7 @@ class RemoteWatchFleetTests(unittest.TestCase):
 
         def runner(argv, **kwargs):
             del kwargs
-            version = (3, 8, 19) if argv[-2] == "old" else (3, 11, 0)
+            version = (3, 7, 19) if argv[-2] == "old" else (3, 11, 0)
             return completed(argv, version)
 
         def stream_factory(argv, artifact, **kwargs):

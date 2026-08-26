@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Remote observation now accepts Python 3.8+ on SSH targets instead of 3.9+;
+  local installation and tooling continue to require Python 3.9+.
+
 ## [0.6.0] - 2026-08-26
 
 ### Added
