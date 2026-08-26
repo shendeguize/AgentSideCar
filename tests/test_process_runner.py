@@ -47,6 +47,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def process_exists(pid):
+    if sys.platform.startswith("linux"):
+        try:
+            payload = Path("/proc/{}/stat".format(pid)).read_text(encoding="ascii")
+        except FileNotFoundError:
+            return False
+        except OSError:
+            pass
+        else:
+            suffix = payload.rsplit(")", 1)
+            fields = suffix[1].split() if len(suffix) == 2 else ()
+            if fields:
+                return fields[0] != "Z"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -57,6 +69,26 @@ def process_exists(pid):
 
 
 class ProcessRunnerTests(unittest.TestCase):
+    def test_process_exists_distinguishes_linux_live_and_zombie_states(self):
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=(
+                "123 (live child) S 1 2 3\n",
+                "124 (zombie child) Z 1 2 3\n",
+            ),
+        ), mock.patch.object(os, "kill") as kill:
+            self.assertTrue(process_exists(123))
+            self.assertFalse(process_exists(124))
+        kill.assert_not_called()
+
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            os,
+            "kill",
+        ) as kill:
+            self.assertTrue(process_exists(125))
+        kill.assert_called_once_with(125, 0)
+
     def test_result_is_frozen_and_run_supports_input_env_and_path_cwd(self):
         code = (
             "import os,sys;"

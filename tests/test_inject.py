@@ -58,6 +58,55 @@ def honoring_runner(runner):
     return wrapped
 
 
+def copy_private_executable(source, destination):
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        raise unittest.SkipTest("O_NOFOLLOW is unavailable")
+    source_fd = -1
+    destination_fd = -1
+    try:
+        source_fd = os.open(
+            str(source),
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow,
+        )
+        destination_fd = os.open(
+            str(destination),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | nofollow,
+            0o700,
+        )
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            offset = 0
+            while offset < len(chunk):
+                written = os.write(destination_fd, chunk[offset:])
+                if written <= 0:
+                    raise OSError("short private executable write")
+                offset += written
+        os.fchmod(destination_fd, 0o700)
+        os.fsync(destination_fd)
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        if source_fd >= 0:
+            os.close(source_fd)
+    details = destination.lstat()
+    effective_uid = (
+        os.geteuid() if callable(getattr(os, "geteuid", None)) else details.st_uid
+    )
+    if (
+        not stat.S_ISREG(details.st_mode)
+        or details.st_uid != effective_uid
+        or stat.S_IMODE(details.st_mode) != 0o700
+    ):
+        raise AssertionError("private executable copy is unsafe")
+
+
 class InjectionTestCase(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -2252,8 +2301,16 @@ class KimiSendIntegrationTests(unittest.TestCase):
         self.assertFalse(captured_paths[0].exists())
 
     def test_kimi_private_node_snapshot_versions_and_initializes_acp(self):
-        if shutil.which("node") is None:
+        resolved_node = shutil.which("node")
+        if resolved_node is None:
             self.skipTest("Node is unavailable")
+        real_node = Path(resolved_node).resolve(strict=True)
+        private_node_directory = tempfile.TemporaryDirectory(
+            prefix="private-node-",
+            dir=str(self.root),
+        )
+        private_node = Path(private_node_directory.name) / "node"
+        copy_private_executable(real_node, private_node)
         package_root = self.root / "kimi-package"
         dist = package_root / "dist"
         dist.mkdir(parents=True, mode=0o700)
@@ -2284,12 +2341,37 @@ class KimiSendIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
         main.chmod(0o700)
-        identity = inject_module._executable_identity(str(main))
-        manifest = inject_module._capture_kimi_runtime_manifest(str(main), identity)
-        bound = inject_module._bind_kimi_executable(manifest)
-        bound_path = Path(bound.executable)
+        bound = None
+        bound_path = None
         process = None
+        cleanup_complete = None
         try:
+            identity = inject_module._executable_identity(str(main))
+            capture_runtime = inject_module._capture_macho_closure
+
+            def capture_private_runtime(node):
+                if sys.platform != "darwin":
+                    return capture_runtime(node)
+                self.assertEqual(str(private_node), node)
+                _node_asset, dylibs, systems = capture_runtime(str(real_node))
+                return inject_module._runtime_asset(node, "bin/node"), dylibs, systems
+
+            with mock.patch.object(
+                inject_module,
+                "_capture_macho_closure",
+                side_effect=capture_private_runtime,
+            ), mock.patch.dict(
+                os.environ,
+                {"PATH": private_node_directory.name},
+                clear=False,
+            ):
+                manifest = inject_module._capture_kimi_runtime_manifest(
+                    str(main),
+                    identity,
+                )
+            self.assertEqual(str(private_node), manifest.node.identity[0])
+            bound = inject_module._bind_kimi_executable(manifest)
+            bound_path = Path(bound.executable)
             with mock.patch.dict(
                 os.environ,
                 {
@@ -2335,11 +2417,21 @@ class KimiSendIntegrationTests(unittest.TestCase):
                 response["result"]["agentCapabilities"]["loadSession"]
             )
         finally:
-            if process is not None:
-                observed = process.terminate_tree(deadline=time.monotonic() + 5)
-                process.close()
-                self.assertTrue(observed.cleanup_complete)
-            bound.close()
+            try:
+                if process is not None:
+                    observed = process.terminate_tree(deadline=time.monotonic() + 5)
+                    process.close()
+                    cleanup_complete = observed.cleanup_complete
+            finally:
+                try:
+                    if bound is not None:
+                        bound.close()
+                finally:
+                    private_node_directory.cleanup()
+        if cleanup_complete is not None:
+            self.assertTrue(cleanup_complete)
+        self.assertFalse(private_node.exists())
+        self.assertIsNotNone(bound_path)
         self.assertFalse(bound_path.exists())
 
     def test_kimi_snapshot_failures_are_pre_audit_and_sanitized(self):
