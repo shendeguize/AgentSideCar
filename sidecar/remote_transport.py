@@ -49,6 +49,7 @@ _ROOT_MAIN = (
 _MAX_ARCHIVE_MEMBERS = 2048
 _MAX_SOURCE_MEMBERS = 512
 _MAX_SOURCE_NAME_BYTES = 1024
+REMOTE_MIN_PYTHON = (3, 8, 0)
 _FILESYSTEM_REQUIRED_MEMBERS = frozenset(
     (
         "sidecar/__init__.py",
@@ -629,7 +630,7 @@ def probe_remote_python(
     timeout: float = PROBE_TIMEOUT_SECONDS,
     cancel_event: Optional[threading.Event] = None,
 ) -> Tuple[Optional[Tuple[int, int, int]], Optional[RemoteFailure]]:
-    """Probe one host for bounded Python 3.9+ capability."""
+    """Probe one host for bounded Python 3.8+ capability."""
 
     if not isinstance(host, RemoteHost):
         raise TypeError("host must be a RemoteHost")
@@ -678,7 +679,7 @@ def probe_remote_python(
         return None, RemoteFailure(host.alias, "resource_limit")
     except (TypeError, UnicodeError, ValueError):
         return None, RemoteFailure(host.alias, "protocol")
-    if version < (3, 9, 0):
+    if version < REMOTE_MIN_PYTHON:
         return None, RemoteFailure(host.alias, "python_too_old")
     return version, None
 
@@ -780,6 +781,7 @@ def execute_remote_host(
 
 __all__ = [
     "REMOTE_BOOTSTRAP",
+    "REMOTE_MIN_PYTHON",
     "build_zipapp_bytes",
     "execute_remote_host",
     "probe_remote_python",

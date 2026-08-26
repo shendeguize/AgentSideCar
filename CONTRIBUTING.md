@@ -149,7 +149,7 @@ Record evidence for each applicable item before merge:
 | RV-1 | Public CLI, JSON, exit-code, configuration, and local protocol contracts remain compatible or the intentional change is documented. |
 | RV-2 | Zero runtime dependencies remain intact; new tooling is development-only and justified. |
 | RV-3 | Security boundaries remain explicit: loopback-only HTTP, private tokens and sockets, conservative process containment, and opt-in write actions. |
-| RV-4 | Remote behavior stays bounded and temporary: noninteractive SSH, Python 3.9+ preflight, cleanup, no required remote install, and isolated host failures. |
+| RV-4 | Remote behavior stays bounded and temporary: noninteractive SSH, a Python 3.8+ remote observation payload on SSH targets, cleanup, no required remote install, and isolated host failures; the locally installed product and public tooling require Python 3.9+. |
 | RV-5 | Concurrency, queues, timeouts, output sizes, retries, and cleanup paths remain bounded and deterministic. |
 | RV-6 | New paths have tests, fixes have regression coverage, and `python3 scripts/check.py` passes. |
 | RV-7 | User-visible changes update `[Unreleased]` plus affected README, skill, reference, or security documentation. |

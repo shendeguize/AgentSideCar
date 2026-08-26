@@ -33,7 +33,10 @@ EXPECTED_RULESETS = {
     "tags.json": ("version-tags", "tag", "refs/tags/v*"),
 }
 EXPECTED_REQUIRED_CONTEXTS = {
-    "main": {"check (ubuntu-latest, Python 3.9)"},
+    "main": {
+        "check (ubuntu-latest, Python 3.9)",
+        "Remote payload (Python 3.8)",
+    },
     "release": {"check (macos-latest, Python 3.9)"},
     "version-tags": set(),
 }
@@ -160,6 +163,18 @@ def _workflow_job_display_names(document):
     )
 
 
+def _workflow_job_block(document, job_id):
+    match = re.search(
+        r"(?ms)^  {}:\s*$\n(?P<body>.*?)(?=^  \S[^:\n]*:\s*$|\Z)".format(
+            re.escape(job_id)
+        ),
+        document,
+    )
+    if match is None:
+        raise AssertionError("CI has no {!r} job".format(job_id))
+    return match.group("body")
+
+
 def _stable_ci_contexts(document):
     job_names = _workflow_job_display_names(document)
     template = next(
@@ -177,13 +192,15 @@ def _stable_ci_contexts(document):
     )
     if not operating_systems:
         raise AssertionError("CI has no stable runner labels")
-    return {
+    matrix_contexts = {
         template.replace("${{ matrix.os }}", operating_system).replace(
             "${{ matrix.python-version }}", version
         )
         for operating_system in operating_systems
         for version in versions
     }
+    static_contexts = {name for name in job_names if "${{" not in name}
+    return matrix_contexts | static_contexts
 
 
 def _required_contexts(ruleset):
@@ -302,6 +319,25 @@ class GovernanceContractTests(unittest.TestCase):
         for name, contexts in contexts_by_ruleset.items():
             with self.subTest(ruleset=name):
                 self.assertLessEqual(contexts, stable_contexts)
+
+    def test_remote_python_3_8_job_contract(self):
+        document = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        job = _workflow_job_block(document, "remote-python-3-8")
+
+        self.assertRegex(job, r"(?m)^    name: Remote payload \(Python 3\.8\)$")
+        self.assertRegex(job, r"(?m)^    runs-on: ubuntu-latest$")
+        self.assertRegex(job, r"(?m)^    container: python:3\.8-slim$")
+        self.assertRegex(
+            job,
+            r"(?m)^\s+uses: actions/checkout@[0-9a-fA-F]{40}(?:\s+#.*)?$",
+        )
+        self.assertRegex(
+            job,
+            r"(?m)^\s+run: python -m unittest "
+            r"tests/test_remote\.py tests/test_remote_watch\.py$",
+        )
+        self.assertNotIn("actions/setup-python", job)
+        self.assertNotIn("pip install", job)
 
     def test_all_workflow_action_references_are_full_commit_shas(self):
         for path in sorted(WORKFLOWS.glob("*.yml")):

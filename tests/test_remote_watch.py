@@ -272,19 +272,38 @@ class RemoteWatchTransportTests(unittest.TestCase):
             before_ready.read_ready()
         self.assertEqual("protocol", raised.exception.code)
 
-    def test_probe_old_python_stops_before_stream_artifact_transfer(self):
-        stream_calls = []
-
-        stream, failure = open_remote_watch_host(
-            remote.RemoteHost("old", "ready"),
-            b"zipapp",
-            runner=lambda argv, **kwargs: completed(argv, (3, 8, 19)),
-            stream_factory=lambda *args, **kwargs: stream_calls.append((args, kwargs)),
+    def test_probe_floor_accepts_38_and_rejects_37_before_stream_transfer(self):
+        cases = (
+            ((3, 8, 19), True),
+            ((3, 7, 19), False),
         )
+        for version, accepted in cases:
+            with self.subTest(version=version):
+                stream_calls = []
 
-        self.assertIsNone(stream)
-        self.assertEqual("python_too_old", failure.code)
-        self.assertEqual([], stream_calls)
+                def stream_factory(*args, **kwargs):
+                    stream_calls.append((args, kwargs))
+                    return FakeLineStream([READY_FRAME, END_FRAME])
+
+                stream, failure = open_remote_watch_host(
+                    remote.RemoteHost("edge", "ready"),
+                    b"zipapp",
+                    runner=lambda argv, version=version, **kwargs: completed(
+                        argv,
+                        version,
+                    ),
+                    stream_factory=stream_factory,
+                )
+
+                if accepted:
+                    self.assertIsNotNone(stream)
+                    self.assertIsNone(failure)
+                    self.assertEqual(1, len(stream_calls))
+                    stream.close()
+                else:
+                    self.assertIsNone(stream)
+                    self.assertEqual("python_too_old", failure.code)
+                    self.assertEqual([], stream_calls)
 
     def test_fragmented_local_process_lines_use_bounded_line_stream(self):
         code = (
@@ -461,7 +480,7 @@ class RemoteWatchFleetTests(unittest.TestCase):
 
         def runner(argv, **kwargs):
             del kwargs
-            version = (3, 8, 19) if argv[-2] == "old" else (3, 11, 0)
+            version = (3, 7, 19) if argv[-2] == "old" else (3, 11, 0)
             return completed(argv, version)
 
         def stream_factory(argv, artifact, **kwargs):

@@ -201,3 +201,16 @@ jobs:
             --only pack \
             --only cli \
             --only skill
+
+  remote-python-3-8:
+    name: Remote payload (Python 3.8)
+    runs-on: ubuntu-latest
+    container: python:3.8-slim
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run remote payload suites
+        run: python -m unittest tests/test_remote.py tests/test_remote_watch.py

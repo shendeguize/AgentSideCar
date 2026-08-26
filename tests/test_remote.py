@@ -944,12 +944,55 @@ class SSHExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             remote.remote_shell_command("status", recent_seconds=1)
 
-    def test_old_python_is_gated_before_artifact_transfer(self):
+    def test_remote_python_floor_constant_and_probe_boundary(self):
+        self.assertEqual((3, 8, 0), remote_transport.REMOTE_MIN_PYTHON)
+        cases = (
+            ((3, 8, 0), (3, 8, 0), None),
+            ((3, 7, 999), None, "python_too_old"),
+        )
+        for version, expected_version, expected_failure in cases:
+            with self.subTest(version=version):
+                result, failure = remote.probe_remote_python(
+                    remote.RemoteHost("edge", "ready"),
+                    runner=lambda argv, version=version, **kwargs: probe_completed(
+                        argv,
+                        version,
+                    ),
+                )
+                self.assertEqual(expected_version, result)
+                self.assertEqual(
+                    expected_failure,
+                    None if failure is None else failure.code,
+                )
+
+    def test_python_38_snapshot_transfers_artifact(self):
+        calls = []
+        artifact = b"zipapp"
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if len(calls) == 1:
+                return probe_completed(argv, (3, 8, 19))
+            return execution_completed(argv, [])
+
+        rows, failure = remote.execute_remote_host(
+            remote.RemoteHost("edge", "ready"),
+            "status",
+            artifact,
+            runner=runner,
+        )
+
+        self.assertEqual((), rows)
+        self.assertIsNone(failure)
+        self.assertEqual(2, len(calls))
+        self.assertEqual(artifact, calls[1][1]["input"])
+
+    def test_python_37_is_gated_before_artifact_transfer(self):
         calls = []
 
         def runner(argv, **kwargs):
             calls.append((argv, kwargs))
-            return probe_completed(argv, (3, 8, 19))
+            return probe_completed(argv, (3, 7, 19))
 
         rows, failure = remote.execute_remote_host(
             remote.RemoteHost("old", "ready"),
