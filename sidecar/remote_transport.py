@@ -25,6 +25,7 @@ from sidecar.remote_types import (
     MAX_PROTOCOL_BYTES,
     MAX_STDERR_BYTES,
     PROBE_TIMEOUT_SECONDS,
+    ProbeResult,
     ProtocolResourceLimitError,
     RemoteFailure,
     RemoteHost,
@@ -49,7 +50,18 @@ _ROOT_MAIN = (
 _MAX_ARCHIVE_MEMBERS = 2048
 _MAX_SOURCE_MEMBERS = 512
 _MAX_SOURCE_NAME_BYTES = 1024
+_MAX_PROBE_STDOUT_BYTES = 4096
 REMOTE_MIN_PYTHON = (3, 8, 0)
+REMOTE_PYTHON_CANDIDATES = (
+    "python3",
+    "python3.14",
+    "python3.13",
+    "python3.12",
+    "python3.11",
+    "python3.10",
+    "python3.9",
+    "python3.8",
+)
 _FILESYSTEM_REQUIRED_MEMBERS = frozenset(
     (
         "sidecar/__init__.py",
@@ -281,11 +293,40 @@ def build_zipapp_bytes(*, source_root: Optional[Path] = None) -> bytes:
 
 
 _PROBE_CODE = (
-    "import json,sys;"
-    "v=sys.version_info;"
-    'print(json.dumps({"python":[v.major,v.minor,v.micro]},'
-    'separators=(",",":")))'
-)
+    "import json,os,sys;"
+    "v=sys.version_info[:3];"
+    "sys.exit(1) if v<%r else None;"
+    "stream=os.fdopen(3,'w');"
+    'stream.write(json.dumps({"python":list(v),"executable":sys.executable},'
+    'separators=(",",":"))+"\\n");'
+    "stream.close()"
+) % (REMOTE_MIN_PYTHON,)
+_PROBE_SCRIPT = (
+    'for candidate in "$@"; do command -v "$candidate" >/dev/null 2>&1 || continue; '
+    'if "$candidate" -c %s 3>&1 1>/dev/null 2>/dev/null; then exit 0; fi; '
+    "done; printf '%%s\\n' '{\"python\":null}'"
+) % shlex.quote(_PROBE_CODE)
+
+
+def _probe_shell_command() -> str:
+    """Build the fixed one-round-trip bounded interpreter probe command."""
+
+    return shlex.join(
+        ("sh", "-c", _PROBE_SCRIPT, "sh") + REMOTE_PYTHON_CANDIDATES
+    )
+
+
+_PROBE_REMOTE_COMMAND = _probe_shell_command()
+
+
+def _validated_command_executable(python_executable: object) -> str:
+    if (
+        not isinstance(python_executable, str)
+        or not python_executable
+        or "\x00" in python_executable
+    ):
+        raise ValueError("invalid Python executable")
+    return python_executable
 
 REMOTE_BOOTSTRAP = r"""
 import json
@@ -496,18 +537,16 @@ finally:
             pass
 """.strip()
 
-_PROBE_REMOTE_COMMAND = shlex.join(("python3", "-c", _PROBE_CODE))
-
-
 def remote_shell_command(
     command: str,
     *,
     recent_seconds: Optional[float] = None,
+    python_executable: str = "python3",
 ) -> str:
     """Return the fixed, shell-quoted bootstrap command for an allowlisted op."""
 
     return shlex.join(
-        ("python3", "-c", REMOTE_BOOTSTRAP)
+        (_validated_command_executable(python_executable), "-c", REMOTE_BOOTSTRAP)
         + _command_arguments(command, recent_seconds)
     )
 
@@ -517,6 +556,7 @@ def ssh_argv(
     *,
     command: Optional[str] = None,
     recent_seconds: Optional[float] = None,
+    python_executable: str = "python3",
 ) -> Tuple[str, ...]:
     """Build direct OpenSSH argv for a probe or allowlisted sidecar command."""
 
@@ -525,7 +565,11 @@ def ssh_argv(
     remote_command = (
         _PROBE_REMOTE_COMMAND
         if command is None
-        else remote_shell_command(command, recent_seconds=recent_seconds)
+        else remote_shell_command(
+            command,
+            recent_seconds=recent_seconds,
+            python_executable=python_executable,
+        )
     )
     return _ssh_command_argv(alias, remote_command)
 
@@ -609,9 +653,15 @@ def _failure_code(completed: object) -> str:
     return "remote"
 
 
-def _probe_version(payload: object) -> Tuple[int, int, int]:
-    value = _parse_one_line_json(payload, max_bytes=1024)
-    if not isinstance(value, dict) or set(value) != {"python"}:
+def _probe_result(payload: object) -> Optional[ProbeResult]:
+    value = _parse_one_line_json(payload, max_bytes=_MAX_PROBE_STDOUT_BYTES)
+    if not isinstance(value, dict):
+        raise ValueError("invalid capability response")
+    if set(value) == {"python"}:
+        if value["python"] is not None:
+            raise ValueError("invalid capability response")
+        return None
+    if set(value) != {"python", "executable"}:
         raise ValueError("invalid capability response")
     version = value["python"]
     if (
@@ -620,7 +670,13 @@ def _probe_version(payload: object) -> Tuple[int, int, int]:
         or any(type(item) is not int or item < 0 or item > 999 for item in version)
     ):
         raise ValueError("invalid capability response")
-    return version[0], version[1], version[2]
+    version_tuple = (version[0], version[1], version[2])
+    if version_tuple < REMOTE_MIN_PYTHON:
+        raise ValueError("invalid capability response")
+    return ProbeResult(
+        version=version_tuple,
+        executable=value["executable"],
+    )
 
 
 def probe_remote_python(
@@ -629,7 +685,7 @@ def probe_remote_python(
     runner: Optional[Callable[..., object]] = None,
     timeout: float = PROBE_TIMEOUT_SECONDS,
     cancel_event: Optional[threading.Event] = None,
-) -> Tuple[Optional[Tuple[int, int, int]], Optional[RemoteFailure]]:
+) -> Tuple[Optional[ProbeResult], Optional[RemoteFailure]]:
     """Probe one host for bounded Python 3.8+ capability."""
 
     if not isinstance(host, RemoteHost):
@@ -642,18 +698,19 @@ def probe_remote_python(
         raise ValueError("probe timeout is out of bounds")
     if cancel_event is not None and cancel_event.is_set():
         return None, RemoteFailure(host.alias, "timeout")
+    probe_argv = ssh_argv(host.alias)
     try:
         if runner is None:
             completed = _bounded_popen(
-                ssh_argv(host.alias),
-                stdout_limit=1024,
+                probe_argv,
+                stdout_limit=_MAX_PROBE_STDOUT_BYTES,
                 stderr_limit=MAX_STDERR_BYTES,
                 timeout=bounded_timeout,
                 cancel_event=cancel_event,
             )
         else:
             completed = runner(
-                list(ssh_argv(host.alias)),
+                list(probe_argv),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -674,14 +731,14 @@ def probe_remote_python(
     if _completed_returncode(completed) != 0:
         return None, RemoteFailure(host.alias, _failure_code(completed))
     try:
-        version = _probe_version(_completed_stdout(completed))
+        result = _probe_result(_completed_stdout(completed))
     except ProtocolResourceLimitError:
         return None, RemoteFailure(host.alias, "resource_limit")
     except (TypeError, UnicodeError, ValueError):
         return None, RemoteFailure(host.alias, "protocol")
-    if version < REMOTE_MIN_PYTHON:
+    if result is None:
         return None, RemoteFailure(host.alias, "python_too_old")
-    return version, None
+    return result, None
 
 
 def execute_remote_host(
@@ -713,7 +770,7 @@ def execute_remote_host(
     remaining = deadline - monotonic()
     if remaining <= 0 or (cancel_event is not None and cancel_event.is_set()):
         return None, RemoteFailure(host.alias, "timeout")
-    _version, failure = probe_remote_python(
+    hit, failure = probe_remote_python(
         host,
         runner=runner,
         timeout=min(PROBE_TIMEOUT_SECONDS, remaining),
@@ -721,6 +778,8 @@ def execute_remote_host(
     )
     if failure is not None:
         return None, failure
+    if hit is None:
+        return None, RemoteFailure(host.alias, "protocol")
 
     remaining = deadline - monotonic()
     if remaining <= 0 or (cancel_event is not None and cancel_event.is_set()):
@@ -732,6 +791,7 @@ def execute_remote_host(
                     host.alias,
                     command=command,
                     recent_seconds=recent_seconds,
+                    python_executable=hit.executable,
                 ),
                 input_data=artifact,
                 input_limit=MAX_ARTIFACT_BYTES,
@@ -747,6 +807,7 @@ def execute_remote_host(
                         host.alias,
                         command=command,
                         recent_seconds=recent_seconds,
+                        python_executable=hit.executable,
                     )
                 ),
                 input=artifact,
@@ -782,6 +843,8 @@ def execute_remote_host(
 __all__ = [
     "REMOTE_BOOTSTRAP",
     "REMOTE_MIN_PYTHON",
+    "REMOTE_PYTHON_CANDIDATES",
+    "ProbeResult",
     "build_zipapp_bytes",
     "execute_remote_host",
     "probe_remote_python",

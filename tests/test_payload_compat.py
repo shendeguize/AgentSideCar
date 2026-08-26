@@ -17,6 +17,7 @@ SIDECAR_ROOT = REPO_ROOT / "sidecar"
 PYTHON_38_FEATURE_VERSION = (3, 8)
 EXPECTED_REMOTE_PAYLOADS = frozenset(
     (
+        ("sidecar/process_runner.py", "_SUPERVISOR_SOURCE"),
         ("sidecar/remote_transport.py", "_PROBE_CODE"),
         ("sidecar/remote_transport.py", "_ROOT_MAIN"),
         ("sidecar/remote_transport.py", "REMOTE_BOOTSTRAP"),
@@ -57,6 +58,7 @@ _PYTHON_39_METHODS = frozenset(
 _PYTHON_39_POPEN_KEYWORDS = frozenset(
     ("extra_groups", "group", "umask", "user")
 )
+_POSIX_SHELL_COMMANDS = frozenset(("sh", "/bin/sh", "dash", "bash", "ksh", "zsh"))
 
 
 def _relative(path):
@@ -71,23 +73,37 @@ def _parse(source, filename):
     )
 
 
-def _static_python_source(expression):
+def _static_value(expression, names=None):
+    names = {} if names is None else names
     if isinstance(expression, ast.Constant) and isinstance(
         expression.value,
-        (bytes, str),
+        (bytes, str, int),
     ):
-        value = expression.value
-        return value.decode("utf-8") if isinstance(value, bytes) else value
+        return expression.value
+    if isinstance(expression, ast.Name):
+        return names.get(expression.id)
+    if isinstance(expression, ast.Tuple):
+        values = tuple(_static_value(element, names) for element in expression.elts)
+        return None if any(value is None for value in values) else values
     if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
-        left = _static_python_source(expression.left)
-        right = _static_python_source(expression.right)
+        left = _static_value(expression.left, names)
+        right = _static_value(expression.right, names)
         return None if left is None or right is None else left + right
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Mod):
+        left = _static_value(expression.left, names)
+        right = _static_value(expression.right, names)
+        if not isinstance(left, (bytes, str)) or right is None:
+            return None
+        try:
+            return left % right
+        except (TypeError, ValueError):
+            return None
     if (
         isinstance(expression, ast.Call)
         and isinstance(expression.func, ast.Attribute)
         and not expression.keywords
     ):
-        value = _static_python_source(expression.func.value)
+        value = _static_value(expression.func.value, names)
         if value is None:
             return None
         if expression.func.attr == "strip" and not expression.args:
@@ -100,12 +116,20 @@ def _static_python_source(expression):
                 isinstance(encoding, ast.Constant)
                 and encoding.value in ("utf-8", "UTF-8")
             ):
-                return value
+                return value.encode(encoding.value)
     return None
+
+
+def _static_python_source(expression, names=None):
+    value = _static_value(expression, names)
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return value if isinstance(value, str) else None
 
 
 def _module_payload_assignments(tree):
     assignments = {}
+    names = {}
     for statement in tree.body:
         if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
             continue
@@ -116,9 +140,13 @@ def _module_payload_assignments(tree):
         )
         if len(targets) != 1 or not isinstance(targets[0], ast.Name):
             continue
-        value = _static_python_source(statement.value)
+        name = targets[0].id
+        value = _static_value(statement.value, names)
         if value is not None:
-            assignments[targets[0].id] = value
+            names[name] = value
+        source = _static_python_source(statement.value, names)
+        if source is not None:
+            assignments[name] = source
     return assignments
 
 
@@ -128,6 +156,13 @@ def _payload_reference_expressions(tree):
         if isinstance(node, (ast.List, ast.Tuple)):
             for index, element in enumerate(node.elts[:-1]):
                 if isinstance(element, ast.Constant) and element.value == "-c":
+                    command = (
+                        _static_python_source(node.elts[index - 1])
+                        if index
+                        else None
+                    )
+                    if command in _POSIX_SHELL_COMMANDS:
+                        continue
                     references.append(node.elts[index + 1])
         elif isinstance(node, ast.Dict):
             for key, value in zip(node.keys, node.values):
@@ -145,6 +180,10 @@ def _discover_python_payloads(source_units):
     unsupported = []
     for path, source, tree in source_units:
         assignments = _module_payload_assignments(tree)
+        for name, payload in assignments.items():
+            if name.endswith("_PROBE_CODE"):
+                discovered_names.add((_relative(path), name))
+                payloads["{}:{}".format(_relative(path), name)] = payload
         for expression in _payload_reference_expressions(tree):
             if isinstance(expression, ast.Name):
                 name = expression.id
@@ -407,11 +446,14 @@ class RemotePayloadCompatibilityTests(unittest.TestCase):
 
     def test_payload_discovery_is_complete_and_payloads_parse_as_python_38(self):
         self.assertEqual([], self.unsupported_payloads)
-        self.assertTrue(
-            EXPECTED_REMOTE_PAYLOADS.issubset(self.discovered_payload_names),
-            "missing expected remote payload(s): {}".format(
-                sorted(EXPECTED_REMOTE_PAYLOADS - self.discovered_payload_names)
-            ),
+        self.assertEqual(
+            EXPECTED_REMOTE_PAYLOADS,
+            self.discovered_payload_names,
+            "remote Python payload discovery drift",
+        )
+        self.assertNotIn(
+            ("sidecar/remote_transport.py", "_PROBE_SCRIPT"),
+            self.discovered_payload_names,
         )
         self.assertTrue(self.payloads)
         for label, payload in sorted(self.payloads.items()):

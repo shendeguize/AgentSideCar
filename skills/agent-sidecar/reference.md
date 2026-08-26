@@ -310,10 +310,23 @@ files under `DSHC_HOME` or `~/.dsh_center` when that command is unavailable.
 The query uses a bounded deterministic zipapp built from the active installed
 `sidecar` package and streamed over strict, noninteractive SSH. This means
 checkout source, installed site-packages, or an embedded zipapp package as
-applicable, not an assumed current checkout. Before transfer, the target's
-`python3` is probed and must be Python 3.8 or newer. Remote hosts do not need
-Agent Sidecar or third-party Python packages installed. Host keys must already
-be trusted and noninteractive authentication must already work.
+applicable, not an assumed current checkout. Before transfer, the probe tries
+exactly `python3`, `python3.14`, `python3.13`, `python3.12`, `python3.11`,
+`python3.10`, `python3.9`, and `python3.8`, in that order. It selects the first
+available candidate running Python 3.8 or newer. Candidate names resolve with
+the `PATH` visible to the remote noninteractive SSH shell; that `PATH` may
+differ from an interactive login's.
+
+The probe uses `sh -c` only to give its inner candidate loop fixed POSIX
+syntax. The outer command string remains subject to parsing by the remote login
+shell. The existing multiline bootstrap already establishes this boundary, so
+this is not a shell-independence guarantee. The resolved executable path is
+passed to the bootstrap only within that same host session. Every invocation
+probes afresh; no result or path is cached or persisted locally or remotely.
+If the bounded candidates are exhausted, the host reports the existing
+`python_too_old` code. The error-code set is unchanged. Remote hosts do not
+need Agent Sidecar or third-party Python packages installed. Host keys must
+already be trusted and noninteractive authentication must already work.
 
 Host failures are isolated and reported on stderr using one of `host_key`,
 `auth`, `timeout`, `unreachable`, `python_too_old`, `resource_limit`,
@@ -346,13 +359,19 @@ session prefix is unsupported.
 
 Inventory and eligibility match remote snapshots: DSH Center hosts must be
 enabled, nonlocal, non-orphaned, and in the `ready` or `no_dsh` phase. Each
-selected host's `python3` is probed and must provide Python 3.8 or newer. Agent
-Sidecar uses strict, noninteractive SSH, streams a bounded deterministic zipapp
-built from the active installed `sidecar` package, writes it to a private
-temporary remote file, preflights and runs it in isolated Python mode, then
-removes it during cleanup. The active package is checkout source, installed
-site-packages, or an embedded zipapp package as applicable; nothing is
-installed remotely.
+selected host uses the remote-snapshot probe contract: `python3` first, then
+`python3.14` down through `python3.8`, selecting the first available Python
+3.8+ interpreter from the noninteractive SSH shell's `PATH`. The selected
+executable path is bound only to the bootstrap in that host session; each
+invocation probes again without a local or remote cache. `sh -c` fixes only the
+inner POSIX syntax, while the remote login shell still parses the outer command
+and the existing multiline bootstrap. Candidate exhaustion remains
+`python_too_old`. Agent Sidecar uses strict, noninteractive SSH, streams a
+bounded deterministic zipapp built from the active installed `sidecar`
+package, writes it to a private temporary remote file, preflights and runs it
+in isolated Python mode, then removes it during cleanup. The active package is
+checkout source, installed site-packages, or an embedded zipapp package as
+applicable; nothing is installed remotely.
 
 Local and remote producers run concurrently. Their handoff queues and the
 fleet's per-host/global event buffer are bounded; full queues backpressure

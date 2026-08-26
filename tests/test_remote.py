@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -71,8 +72,15 @@ def json_completed(argv, value):
     )
 
 
-def probe_completed(argv, version=(3, 11, 0)):
-    return json_completed(argv, {"python": list(version)})
+def probe_completed(argv, version=(3, 11, 0), executable="/usr/bin/python3"):
+    return json_completed(
+        argv,
+        {"python": list(version), "executable": executable},
+    )
+
+
+def probe_exhausted(argv):
+    return json_completed(argv, {"python": None})
 
 
 def execution_completed(argv, rows):
@@ -184,6 +192,7 @@ class RemoteDataModelTests(unittest.TestCase):
     def test_models_are_frozen_and_failure_contains_only_code(self):
         host = remote.RemoteHost("edge-1", "ready")
         failure = remote.RemoteFailure("edge-1", "auth")
+        probe = remote_types.ProbeResult((3, 11, 4), "/opt/python3.11")
         aggregate = remote.RemoteAggregate(
             "status",
             failures=(failure,),
@@ -194,6 +203,11 @@ class RemoteDataModelTests(unittest.TestCase):
             host.alias = "changed"
         with self.assertRaises(dataclasses.FrozenInstanceError):
             failure.code = "remote"
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            probe.executable = "/opt/other"
+        self.assertEqual((3, 11, 4), probe.version)
+        self.assertEqual("/opt/python3.11", probe.executable)
+        self.assertEqual(("version", "executable"), tuple(probe.__dataclass_fields__))
         self.assertFalse(hasattr(host, "host"))
         self.assertFalse(hasattr(host, "label"))
         self.assertEqual({"host": "edge-1", "code": "auth"}, failure.to_dict())
@@ -992,6 +1006,26 @@ class SSHExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             remote.remote_shell_command("watch")
 
+    def test_snapshot_builders_default_to_python3_and_shell_quote_custom_executable(self):
+        default_command = remote.remote_shell_command("status")
+        default_argv = remote.ssh_argv("edge", command="status")
+        custom = "/opt/Python Builds/python3"
+        custom_command = remote.remote_shell_command(
+            "status",
+            python_executable=custom,
+        )
+        custom_argv = remote.ssh_argv(
+            "edge",
+            command="status",
+            python_executable=custom,
+        )
+
+        self.assertEqual("python3", shlex.split(default_command)[0])
+        self.assertEqual("python3", shlex.split(default_argv[-1])[0])
+        self.assertEqual(custom, shlex.split(custom_command)[0])
+        self.assertEqual(custom, shlex.split(custom_argv[-1])[0])
+        self.assertIn(shlex.quote(custom), custom_command)
+
     def test_recency_api_rejects_nonfinite_nonpositive_and_overbound_values(self):
         invalid = (
             0,
@@ -1008,26 +1042,217 @@ class SSHExecutionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             remote.remote_shell_command("status", recent_seconds=1)
 
-    def test_remote_python_floor_constant_and_probe_boundary(self):
-        self.assertEqual((3, 8, 0), remote_transport.REMOTE_MIN_PYTHON)
-        cases = (
-            ((3, 8, 0), (3, 8, 0), None),
-            ((3, 7, 999), None, "python_too_old"),
+    def test_probe_candidates_and_shell_contract_are_frozen(self):
+        expected_candidates = (
+            "python3",
+            "python3.14",
+            "python3.13",
+            "python3.12",
+            "python3.11",
+            "python3.10",
+            "python3.9",
+            "python3.8",
         )
-        for version, expected_version, expected_failure in cases:
-            with self.subTest(version=version):
-                result, failure = remote.probe_remote_python(
+        self.assertEqual((3, 8, 0), remote_transport.REMOTE_MIN_PYTHON)
+        self.assertEqual(expected_candidates, remote_transport.REMOTE_PYTHON_CANDIDATES)
+        self.assertNotIn("\n", remote_transport._PROBE_SCRIPT)
+        self.assertIn("command -v", remote_transport._PROBE_SCRIPT)
+        self.assertIn('"$@"', remote_transport._PROBE_SCRIPT)
+        self.assertNotIn("output=$(", remote_transport._PROBE_SCRIPT)
+        self.assertNotIn("$(", remote_transport._PROBE_SCRIPT)
+        self.assertIn('"$candidate" -c', remote_transport._PROBE_SCRIPT)
+        self.assertIn(
+            "3>&1 1>/dev/null 2>/dev/null",
+            remote_transport._PROBE_SCRIPT,
+        )
+        self.assertTrue(
+            all(
+                candidate not in remote_transport._PROBE_SCRIPT
+                for candidate in expected_candidates
+            )
+        )
+        self.assertNotIn("glob", remote_transport._PROBE_SCRIPT)
+        self.assertNotIn("*", remote_transport._PROBE_SCRIPT)
+        self.assertIn(
+            repr(remote_transport.REMOTE_MIN_PYTHON),
+            remote_transport._PROBE_CODE,
+        )
+        self.assertEqual(
+            ("sh", "-c", remote_transport._PROBE_SCRIPT, "sh")
+            + expected_candidates,
+            tuple(shlex.split(remote_transport._PROBE_REMOTE_COMMAND)),
+        )
+
+    @unittest.skipUnless(os.name == "posix", "probe shell requires POSIX")
+    def test_probe_shell_skips_missing_broken_and_old_then_stops_at_first_hit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            log = root / "calls"
+
+            def write_candidate(name, body):
+                path = root / name
+                path.write_text(
+                    "#!/bin/sh\n"
+                    'printf "%s\\n" "$0" >> "$PROBE_CALLS"\n'
+                    + body,
+                    encoding="utf-8",
+                )
+                path.chmod(0o755)
+
+            write_candidate(
+                "python3",
+                "printf 'noisy stdout\\n'\n"
+                "printf 'noisy stderr\\n' >&2\n"
+                "exit 1\n",
+            )
+            write_candidate("python3.14", "exit 127\n")
+            write_candidate("python3.13", "exit 1\n")
+            write_candidate(
+                "python3.12",
+                "printf '%s\\n' "
+                '\'{"python":[3,12,1],"executable":"/opt/python3.12"}\' >&3\n',
+            )
+            write_candidate(
+                "python3.11",
+                "printf '%s\\n' "
+                '\'{"python":[3,11,9],"executable":"/opt/python3.11"}\' >&3\n',
+            )
+            environment = {"PATH": str(root), "PROBE_CALLS": str(log)}
+
+            result = subprocess.run(
+                [
+                    "/bin/sh",
+                    "-c",
+                    remote_transport._PROBE_SCRIPT,
+                    "sh",
+                    *remote_transport.REMOTE_PYTHON_CANDIDATES,
+                ],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=3,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                b'{"python":[3,12,1],"executable":"/opt/python3.12"}\n',
+                result.stdout,
+            )
+            self.assertEqual(b"", result.stderr)
+            self.assertEqual(
+                ["python3", "python3.14", "python3.13", "python3.12"],
+                [
+                    Path(line).name
+                    for line in log.read_text(encoding="utf-8").splitlines()
+                ],
+            )
+
+            exhausted = subprocess.run(
+                ["/bin/sh", "-c", remote_transport._PROBE_SCRIPT, "sh", "missing"],
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=3,
+            )
+            self.assertEqual(b'{"python":null}\n', exhausted.stdout)
+
+    def test_probe_success_and_exhaustion_have_named_results_and_one_ssh_call(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return probe_completed(argv, (3, 8, 0), "/opt/python3.8")
+
+        hit, failure = remote.probe_remote_python(
+            remote.RemoteHost("edge", "ready"),
+            runner=runner,
+        )
+
+        self.assertEqual(
+            remote_types.ProbeResult(
+                version=(3, 8, 0),
+                executable="/opt/python3.8",
+            ),
+            hit,
+        )
+        self.assertIsNone(failure)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("ssh", calls[0][0][0])
+
+        calls.clear()
+        hit, failure = remote.probe_remote_python(
+            remote.RemoteHost("edge", "ready"),
+            runner=lambda argv, **kwargs: (
+                calls.append((argv, kwargs)) or probe_exhausted(argv)
+            ),
+        )
+        self.assertIsNone(hit)
+        self.assertEqual("python_too_old", failure.code)
+        self.assertEqual(1, len(calls))
+
+    def test_probe_response_validation_fails_closed(self):
+        malformed = [
+            {},
+            {"python": None, "executable": "/usr/bin/python3"},
+            {"python": [3, 8, 0]},
+            {"python": [3, 8, 0], "executable": "/usr/bin/python3", "extra": 1},
+            {"python": [3, 8], "executable": "/usr/bin/python3"},
+            {"python": [3, 8, 0, 0], "executable": "/usr/bin/python3"},
+            {"python": [True, 8, 0], "executable": "/usr/bin/python3"},
+            {"python": [-1, 8, 0], "executable": "/usr/bin/python3"},
+            {"python": [1000, 8, 0], "executable": "/usr/bin/python3"},
+            {"python": [3, 7, 999], "executable": "/usr/bin/python3"},
+            {"python": [3, 8, 0], "executable": ""},
+            {"python": [3, 8, 0], "executable": "python3"},
+            {"python": [3, 8, 0], "executable": "/" + "p" * 1024},
+            {"python": [3, 8, 0], "executable": "/usr/bin/python 3"},
+            {"python": [3, 8, 0], "executable": "/usr/../bin/python3"},
+        ]
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                hit, failure = remote.probe_remote_python(
                     remote.RemoteHost("edge", "ready"),
-                    runner=lambda argv, version=version, **kwargs: probe_completed(
+                    runner=lambda argv, payload=payload, **kwargs: json_completed(
                         argv,
-                        version,
+                        payload,
                     ),
                 )
-                self.assertEqual(expected_version, result)
-                self.assertEqual(
-                    expected_failure,
-                    None if failure is None else failure.code,
+                self.assertIsNone(hit)
+                self.assertEqual("protocol", failure.code)
+
+        boundary = {
+            "python": [999, 999, 999],
+            "executable": "/" + "p" * 1023,
+        }
+        hit, failure = remote.probe_remote_python(
+            remote.RemoteHost("edge", "ready"),
+            runner=lambda argv, **kwargs: json_completed(argv, boundary),
+        )
+        self.assertIsNone(failure)
+        self.assertEqual(tuple(boundary["python"]), hit.version)
+        self.assertEqual(boundary["executable"], hit.executable)
+
+    def test_probe_response_size_and_overflow_are_resource_limits(self):
+        cases = (
+            completed(("ssh",), stdout=b"x" * 4097),
+            BoundedProcessResult(
+                args=("ssh",),
+                returncode=0,
+                stdout=b"",
+                stderr=b"",
+                overflow="stdout",
+            ),
+        )
+        for response in cases:
+            with self.subTest(overflow=getattr(response, "overflow", None)):
+                hit, failure = remote.probe_remote_python(
+                    remote.RemoteHost("edge", "ready"),
+                    runner=lambda argv, response=response, **kwargs: response,
                 )
+                self.assertIsNone(hit)
+                self.assertEqual("resource_limit", failure.code)
 
     def test_python_38_snapshot_transfers_artifact(self):
         calls = []
@@ -1056,7 +1281,7 @@ class SSHExecutionTests(unittest.TestCase):
 
         def runner(argv, **kwargs):
             calls.append((argv, kwargs))
-            return probe_completed(argv, (3, 7, 19))
+            return probe_exhausted(argv)
 
         rows, failure = remote.execute_remote_host(
             remote.RemoteHost("old", "ready"),
@@ -1069,6 +1294,41 @@ class SSHExecutionTests(unittest.TestCase):
         self.assertEqual("python_too_old", failure.code)
         self.assertEqual(1, len(calls))
         self.assertNotIn("input", calls[0][1])
+
+    def test_snapshot_uses_discovered_executable_and_probes_each_call(self):
+        calls = []
+        executables = {
+            "first": "/opt/first+python",
+            "second": "/srv/second-python",
+        }
+
+        def runner(argv, **kwargs):
+            alias = argv[-2]
+            calls.append((alias, argv[-1], kwargs))
+            host_calls = [call for call in calls if call[0] == alias]
+            if len(host_calls) % 2 == 1:
+                return probe_completed(argv, executable=executables[alias])
+            return execution_completed(argv, [])
+
+        for alias in ("first", "second", "first"):
+            rows, failure = remote.execute_remote_host(
+                remote.RemoteHost(alias, "ready"),
+                "status",
+                b"zipapp",
+                runner=runner,
+            )
+            self.assertEqual((), rows)
+            self.assertIsNone(failure)
+
+        self.assertEqual(6, len(calls))
+        for index, alias in enumerate(("first", "second", "first")):
+            probe_call, execution_call = calls[index * 2 : index * 2 + 2]
+            self.assertEqual(alias, probe_call[0])
+            self.assertEqual(alias, execution_call[0])
+            self.assertEqual(
+                executables[alias],
+                shlex.split(execution_call[1])[0],
+            )
 
     def test_auth_and_host_key_errors_are_codes_without_stderr(self):
         cases = (
@@ -1164,7 +1424,7 @@ class SSHExecutionTests(unittest.TestCase):
         payloads = (
             (b'Welcome\n{"python":[3,11,0]}\n', "protocol"),
             (b'{"python":[3,11,0]}\n\n', "protocol"),
-            (b"x" * 1025, "resource_limit"),
+            (b"x" * 4097, "resource_limit"),
             (b'{"python":["\\ud800",11,0]}', "protocol"),
             (
                 ("[" * 500 + "0" + "]" * 500).encode("ascii"),

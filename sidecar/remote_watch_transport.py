@@ -18,6 +18,7 @@ from sidecar.process_runner import (
 from sidecar.remote_transport import (
     _failure_code,
     _ssh_command_argv,
+    _validated_command_executable,
     probe_remote_python,
 )
 from sidecar.remote_types import (
@@ -391,12 +392,22 @@ if not exit_requested:
 """.strip()
 
 
-def remote_watch_shell_command(*, from_start: bool = False) -> str:
+def remote_watch_shell_command(
+    *,
+    from_start: bool = False,
+    python_executable: str = "python3",
+) -> str:
     """Return the fixed remote bootstrap command for watch-all streaming."""
 
     if type(from_start) is not bool:
         raise TypeError("from_start must be bool")
-    arguments = ["python3", "-c", REMOTE_WATCH_BOOTSTRAP, "watch", "--all"]
+    arguments = [
+        _validated_command_executable(python_executable),
+        "-c",
+        REMOTE_WATCH_BOOTSTRAP,
+        "watch",
+        "--all",
+    ]
     if from_start:
         arguments.append("--from-start")
     arguments.append("--json")
@@ -407,12 +418,16 @@ def remote_watch_ssh_argv(
     alias: str,
     *,
     from_start: bool = False,
+    python_executable: str = "python3",
 ) -> Tuple[str, ...]:
     """Build strict direct OpenSSH argv for the watch bootstrap."""
 
     return _ssh_command_argv(
         alias,
-        remote_watch_shell_command(from_start=from_start),
+        remote_watch_shell_command(
+            from_start=from_start,
+            python_executable=python_executable,
+        ),
     )
 
 
@@ -621,7 +636,7 @@ def open_remote_watch_host(
         raise ValueError("invalid zipapp artifact")
     if type(from_start) is not bool:
         raise TypeError("from_start must be bool")
-    _version, failure = probe_remote_python(
+    hit, failure = probe_remote_python(
         host,
         runner=runner,
         timeout=PROBE_TIMEOUT_SECONDS,
@@ -629,13 +644,19 @@ def open_remote_watch_host(
     )
     if failure is not None:
         return None, failure
+    if hit is None:
+        return None, RemoteFailure(host.alias, "protocol")
     if cancel_event is not None and cancel_event.is_set():
         return None, RemoteFailure(host.alias, "timeout")
 
     factory = BoundedLineStream if stream_factory is None else stream_factory
     try:
         stream = factory(
-            remote_watch_ssh_argv(host.alias, from_start=from_start),
+            remote_watch_ssh_argv(
+                host.alias,
+                from_start=from_start,
+                python_executable=hit.executable,
+            ),
             artifact,
             line_limit=MAX_WATCH_LINE_BYTES,
             stderr_limit=MAX_WATCH_STDERR_BYTES,
