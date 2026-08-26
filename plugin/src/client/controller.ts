@@ -31,6 +31,7 @@ import {
 import { StateStream, STREAM_PATH, type StreamMode, type StreamStatus } from './sse.ts'
 import {
   DEFAULT_TIME_WINDOW_HOURS,
+  normalizeAgentFilter,
   type BoardFilterState,
   type DaemonStateToken,
   type SessionCardVM,
@@ -66,8 +67,13 @@ export interface SidecarViewState {
   sessions: SessionCardVM[]
   /** Host capabilities.inject (M2 write surface; informational in M1). */
   injectCapability: boolean
-  /** False until the first snapshot arrives in this page life. */
+  /**
+   * False only while the first load is pending. A first transport failure
+   * settles this to true as well, with initialLoadFailed distinguishing it.
+   */
   hasSnapshot: boolean
+  /** True only when the initial load settled through a transport failure. */
+  initialLoadFailed: boolean
 }
 
 /** Pre-first-snapshot state: probing daemon, unknown health, empty board. */
@@ -82,6 +88,7 @@ export function initialViewState(): SidecarViewState {
     sessions: [],
     injectCapability: false,
     hasSnapshot: false,
+    initialLoadFailed: false,
   }
 }
 
@@ -146,6 +153,7 @@ export function mapSnapshot(
     sessions: mapSessions(snapshot.board.sessions),
     injectCapability: snapshot.capabilities.inject,
     hasSnapshot: true,
+    initialLoadFailed: false,
   }
 }
 
@@ -185,6 +193,7 @@ export function readStoredFilters(storage: StorageLike | null): BoardFilterState
       timeWindowHours?: unknown
       showDead?: unknown
       statusFilter?: unknown
+      agentFilter?: unknown
     }
     if (
       typeof candidate.timeWindowHours !== 'number'
@@ -201,6 +210,10 @@ export function readStoredFilters(storage: StorageLike | null): BoardFilterState
     if (candidate.statusFilter === 'working' || candidate.statusFilter === 'waiting') {
       filters.statusFilter = candidate.statusFilter
     }
+    const agentFilter = typeof candidate.agentFilter === 'string'
+      ? normalizeAgentFilter(candidate.agentFilter)
+      : null
+    if (agentFilter !== null) filters.agentFilter = agentFilter
     return filters
   } catch {
     return null
@@ -253,6 +266,10 @@ export class SidecarController {
   private filtersTouched: boolean
   private lastHostHealth: StreamHealth | null = null
   private started = false
+  private disposed = false
+  private generation = 0
+  private unsubscribeSnapshot: (() => void) | null = null
+  private unsubscribeStatus: (() => void) | null = null
 
   constructor(opts: SidecarControllerOptions = {}) {
     this.storage = opts.storage === undefined ? defaultStorage() : opts.storage
@@ -271,20 +288,28 @@ export class SidecarController {
 
   /** Wire stream listeners and begin streaming (idempotent). */
   start(): void {
-    if (this.started) return
+    if (this.started || this.disposed) return
     this.started = true
-    this.stream.onSnapshot((snapshot) => {
-      this.applySnapshot(snapshot)
+    this.unsubscribeSnapshot = this.stream.onSnapshot((snapshot) => {
+      this.applySnapshot(snapshot, this.beginGeneration())
     })
-    this.stream.onStatus((status) => {
-      this.applyStatus(status)
+    this.unsubscribeStatus = this.stream.onStatus((status) => {
+      this.applyStatus(status, this.beginGeneration())
     })
     this.stream.start()
   }
 
   /** Terminal teardown of the live feed. */
   stop(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.beginGeneration()
+    this.unsubscribeSnapshot?.()
+    this.unsubscribeSnapshot = null
+    this.unsubscribeStatus?.()
+    this.unsubscribeStatus = null
     this.stream.stop()
+    this.listeners.clear()
   }
 
   /** Forward the visibility resume to the stream (poll-mode immediate fetch). */
@@ -294,6 +319,7 @@ export class SidecarController {
 
   /** Change notifications for BOTH stores (state and filters). */
   subscribe(listener: () => void): () => void {
+    if (this.disposed) return () => {}
     this.listeners.add(listener)
     return () => {
       this.listeners.delete(listener)
@@ -313,6 +339,9 @@ export class SidecarController {
   /** User filter change: persist (package-prefixed key) and notify. */
   setFilters(next: BoardFilterState): void {
     this.filters = { ...next }
+    const agentFilter = normalizeAgentFilter(next.agentFilter)
+    if (agentFilter === null) delete this.filters.agentFilter
+    else this.filters.agentFilter = agentFilter
     this.filtersTouched = true
     if (this.storage !== null) {
       try {
@@ -344,28 +373,56 @@ export class SidecarController {
   /**
    * Manual refresh (board's refresh button): one out-of-band snapshot
    * pull. Resolves true when the snapshot applied, false on failure so
-   * the button can surface honest feedback (UX-07) — never rejects; the
-   * stream (and its status surface) remains the health authority.
+   * the button can surface honest feedback (UX-07) — never rejects. A
+   * first failure also settles startup as degraded; later failures keep
+   * the last successful snapshot and stream verdict intact.
    */
   async refresh(): Promise<boolean> {
+    if (this.disposed) return false
+    const generation = this.beginGeneration()
     try {
       const snapshot = await this.fetchFn({})
-      this.applySnapshot(snapshot)
+      if (!this.isCurrentGeneration(generation)) return false
+      this.applySnapshot(snapshot, generation)
       return true
     } catch (err) {
+      if (!this.isCurrentGeneration(generation)) return false
       console.error('agent-sidecar: manual refresh failed', err)
+      this.settleInitialFailure(generation)
       return false
     }
   }
 
-  private applySnapshot(snapshot: StateSnapshot): void {
+  private beginGeneration(): number {
+    this.generation += 1
+    return this.generation
+  }
+
+  private isCurrentGeneration(generation: number): boolean {
+    return !this.disposed && generation === this.generation
+  }
+
+  private applySnapshot(snapshot: StateSnapshot, generation: number): void {
+    if (!this.isCurrentGeneration(generation)) return
     this.lastHostHealth = snapshot.board.streamHealth
     this.state = mapSnapshot(snapshot, this.stream.status)
     this.notify()
   }
 
-  private applyStatus(status: StreamStatus): void {
+  private applyStatus(status: StreamStatus, generation: number): void {
+    if (!this.isCurrentGeneration(generation)) return
     if (status === this.state.streamStatus) return
+    if (status === 'degraded' && !this.state.hasSnapshot) {
+      this.state = {
+        ...this.state,
+        streamStatus: status,
+        streamHealth: 'degraded',
+        hasSnapshot: true,
+        initialLoadFailed: true,
+      }
+      this.notify()
+      return
+    }
     this.state = {
       ...this.state,
       streamStatus: status,
@@ -374,7 +431,21 @@ export class SidecarController {
     this.notify()
   }
 
+  /** Settle initial loading after a failed state pull without hiding stale data later. */
+  private settleInitialFailure(generation: number): void {
+    if (!this.isCurrentGeneration(generation)) return
+    if (this.state.hasSnapshot) return
+    this.state = {
+      ...this.state,
+      streamHealth: 'degraded',
+      hasSnapshot: true,
+      initialLoadFailed: true,
+    }
+    this.notify()
+  }
+
   private notify(): void {
+    if (this.disposed) return
     for (const listener of [...this.listeners]) listener()
   }
 }

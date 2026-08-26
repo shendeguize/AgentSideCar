@@ -70,8 +70,19 @@ Release 安装。0.5.0 新增分页的守护进程 `replay` 操作、守护进�
 - `codex`：Codex CLI rollout JSONL，以及可用时的只读原生状态 SQLite。
 - `copilot`：仅支持 GitHub Copilot CLI 的 `workspace.yaml` 元数据。0.5.0 版本
   没有对应事件源，因此状态报告为 `idle`。
-- `dsh`：支持通过 DeepSeek DSH 投影缓存元数据进行列表和状态查询，也支持从压缩
-  会话记录中监视事件。列表和状态查询无需 `zstd`，监视则需要。
+- `dsh`：优先通过 DeepSeek DSH 投影缓存元数据进行列表和状态查询，并以有界的
+  持久会话扫描补充发现缓存缺失的 headless 运行，也支持从压缩会话记录中监视
+  事件。`DSH_HOME` 可指定独立的绝对 DSH 存储根目录。基于缓存的列表和状态查询
+  无需 `zstd`；持久存储回退发现和监视则需要。持久存储回退会先绑定普通转录
+  文件再解码，只接受带非空绝对 `cwd` 的规范顶层元数据；4096 个条目的扫描未
+  完整结束或出现重复会话身份时关闭失败。它最多解码 256 个候选，拒绝超过
+  64 MiB 的压缩输入；每个解码候选有 3.5 秒硬上限，且完整扫描始终受同一个
+  5 秒总硬截止时间约束。每个 adapter 实例只解析并绑定一次 `zstd`，后续扫描
+  复用该资源：Linux 从固定的 no-follow 可执行文件描述符启动，macOS 则执行来自
+  该描述符的私有快照，因此替换原路径不会改变实际运行的程序。绑定支持显式关闭，
+  并有 finalizer 兜底清理；若初始化绑定失败，投影缓存发现仍然可用。有界的
+  device/inode/size/mtime/ctime 头缓存只保存成功或确定无效的解码结果，瞬态失败
+  会在后续扫描中重试。
 - `kimi`：Kimi Code 会话索引、状态和 wire JSONL，包括发现到的子 Agent。优先
   使用 `KIMI_CODE_HOME`，否则使用 `~/.kimi-code`。
 
@@ -393,11 +404,18 @@ agent-sidecar send <session-prefix> "Please review the latest test failure." --a
 agent-sidecar send <session-prefix> "Summarize your result." --allow-write --timeout 120 --json
 agent-sidecar send <session-prefix> "Retry-safe request." --allow-write --request-id <stable-unique-id> --json
 agent-sidecar send <session-prefix> --allow-write -- "-message beginning with a hyphen"
+agent-sidecar send <full-session-id> "Use this exact target." --agent claude --exact-session --allow-write
 printf '%s' "Keep this out of the agent-sidecar argv." | agent-sidecar send <session-prefix> --message-stdin --allow-write
+printf '%s' '<exact-message>' | agent-sidecar send '<full-kimi-session-id>' --agent kimi --exact-session --message-stdin --allow-write --request-id '<stable-unique-id>' --json
 ```
 
 只能在用户明确要求该消息或操作时使用。`--allow-write` 是强制参数，因为原生
 Agent 可以联系其服务提供方、运行工具并修改会话或工作区状态。
+
+`--agent NAME` 把解析范围限制到大小写不敏感的精确 Agent 名称；
+`--exact-session` 要求完整会话 ID，并禁用前缀匹配。两者都可独立省略；调用方
+已经持有 Agent 与完整会话 ID 时，可同时使用它们形成精确的复合身份绑定。DSH
+插件向外部 Agent 注入时总会同时使用这两个参数。
 
 `--message-stdin` 从标准输入读取消息以替代位置参数，因此消息不会出现在
 `agent-sidecar` 的 argv、Shell 历史或进程列表中。两种消息来源互斥：必须恰好
@@ -416,6 +434,8 @@ Agent 可以联系其服务提供方、运行工具并修改会话或工作区�
 失败。仍为 pending 的保留项（包括崩溃遗留项）会作为 `request_pending` 回放，
 此时投递状态未知，绝不能自动重试。人类可读输出和 JSON 都会报告 `request_id`
 与 `replayed`。
+在展示结果前，`send` 还会校验回执中的 Agent、完整会话 ID 与 request ID 是否
+与所选请求一致；身份不匹配会关闭失败为投递未知的 `executor_error`。
 
 每次新发送都会被持久化审计预留以关闭失败方式保护。启动进程前，Sidecar 会在
 私有运行时目录中写入并同步一个 pending 记录到权限模式为 `0600` 的私有
@@ -431,6 +451,13 @@ stderr。请求 ID 幂等性只在相关记录仍位于当前日志或轮转日�
 都会关闭失败。因此 `send` 需要 POSIX 的基于描述符的相对操作、no-follow 和文件
 锁支持；这些原语不可用时，该功能不受支持并关闭失败。
 
+该绑定属于持久安全状态。不得为绕过 `unsafe_lock` 而删除、移动、重建或替换
+`AGENT_SIDECAR_RUNTIME_DIR`、其中的审计文件或 home 锚点 marker。该错误表示既有
+历史或命名空间身份无法证明；删除 marker 不会让重试变安全。默认行为是关闭失败并
+保留证据。只有操作者明确开始一条真正新的 request lineage 时，才可以使用新的
+owner-private runtime 路径和新 request ID；此后必须保留该新命名空间及其审计历史。
+这不是旧请求的恢复或重试。
+
 启动前，`send` 还会在保留的运行时命名空间内获取一个非阻塞、按会话哈希的 POSIX
 锁，在锁内重复直接扫描，并重新验证目标身份、资格和数据源新鲜度。它会拒绝并发的
 Sidecar 发送，以及已经改变或消失的目标，并持锁直到原生进程退出。启动前的审计
@@ -442,6 +469,8 @@ Sidecar 发送，以及已经改变或消失的目标，并持锁直到原生进
 然后才允许原生目标执行。干净的无 fork 完成可以报告为已投递。任何观察到的 fork
 都会保守地报告为 `error_code: "cleanup_incomplete"`，投递状态未知；即使子工作
 是同步的、原生根进程以零退出且已捕获响应，也同样如此。绝不能自动重试该结果。
+Kimi 会保留该 fork 诊断，但使用下述更严格的持久证据结果规则，且永不报告
+delivered。
 
 如果所需遏制原语不受支持，原生目标执行前 `send` 会报告
 `containment_unsupported`，投递状态未知。不会进行全进程扫描，也不会杀死未验证
@@ -454,23 +483,58 @@ Sidecar 发送，以及已经改变或消失的目标，并持锁直到原生进
 可能滞后，因此即使会话报告为 `waiting`，只要它可能仍处于打开或活跃状态，就
 不要发送。
 
-符合条件的目标是本地、顶层、处于 `waiting` 或 `idle` 的 `claude`、`codex`
-或 `cursor-cli` 会话。`working`、`dead`、子会话、sidechain 和远程会话都会被
-拒绝；`cursor-ide`、`copilot`、`kimi` 和 `dsh` 也会被拒绝。Claude 和 Codex
-通过 stdin 接收原生提示词；Cursor CLI 必然通过子进程 argv 接收。
+符合条件的目标是本地、顶层、处于 `waiting` 或 `idle` 的 `claude`、`codex`、
+`cursor-cli` 或 `kimi` 会话。`working`、`dead`、子会话、sidechain 和远程会话
+都会被拒绝；`cursor-ide`、`copilot` 和 `dsh` 也会被拒绝。Claude 和 Codex 通过
+stdin 接收原生提示词；Cursor CLI 必然通过子进程 argv 接收；Kimi 使用下述受保护
+ACP 路径。Claude、Codex 与 Cursor 保持原有的恢复和结果语义。CLI 直接发送仍不
+支持 DSH；DSH 注入只存在于 DSH 插件内。
 
-兼容性已于 2026-08-23 复查，未依赖机器特定路径。Kimi Code 0.38 的恢复打印模式
-会自动批准权限并在 argv 中暴露提示词，因此仍不支持发送。DSH 0.1.1-rc.2 既不
-提供会话恢复，也不提供 stdin 提示词传输，因此仍不支持。
+**Kimi Code 0.38.0 受保护恢复。**
+
+Kimi 支持刻意限定为精确版本与手动操作：只接受 Kimi Code `0.38.0`，每条命令只
+启动一个独立的 `kimi acp` 进程来恢复持久化根会话。它不是 live inbox，不会附着
+既有终端，也不能向进行中的 turn queue 或 steer；因此观察为 `working` 的 Kimi
+会话会被拒绝。
+
+写入提示词前，Sidecar 会绑定所选会话、Kimi home、索引行、state 文档、会话目录、
+项目来源、主 Agent home 与根 `wire.jsonl` 的原生根身份。ID 和项目文件系统身份
+必须一致；所需目录与文件必须满足 owner 安全并由描述符锚定。发送 plan 还会绑定
+Kimi package 资产，以及 Node 发行版的 Node 可执行文件和非系统 dylib 闭包。这些
+已验证字节会复制到私有、绑定该 plan 的快照；版本与 ACP 初始化从该快照重新探测；
+同一项目中另一个 Kimi 或匹配 Node owner 进程会被 owner-process guard 拒绝。
+该有界守卫解析规范的 Node 文件参数，包括受支持的 preload/import/loader 形式及
+后续脚本参数，而不会把每条很长的普通 Node 命令都归类为 Kimi。在所要求的
+owner-safe single-link 可执行文件绑定下，cwd 已消失的普通相对 Node 命令会被忽略；
+Kimi argv hint、直接可执行身份匹配、携带此类证据的畸形或超预算输入，以及不安全
+或变化后的可执行身份仍会关闭失败。这些是竞态和所有权守卫，不代表请求与模型 turn
+之间存在加密绑定。
+
+有界 ACP 序列以空 client capabilities 初始化，列出并精确匹配会话与项目，使用
+`mcpServers: []` 恢复，再在发送唯一一条文本 prompt 前选择 Kimi `default` 模式。
+Sidecar 不声明 MCP、文件系统或终端 capability。permission 反向请求会收到
+`cancelled`；任何 question/approval 路径也通过关闭失败取消，不支持的反向方法会
+终止本次运行。消息只存在于 ACP `session/prompt` NDJSON 帧中，绝不会出现在
+Sidecar 或原生 Kimi argv。
+
+Kimi 的公开结果边界严于 Claude、Codex 和 Cursor。Darwin fork 可以继续诊断为
+`cleanup_incomplete`。若 ACP 仍以 rc `0` 返回、在 `end_turn` settle，且严格持久
+root-wire 与 state 证据精确证明匹配 turn 已完成，公开结果是
+`outcome: "completed"`、`delivery: "unknown"`，CLI 退出码为 `1`，绝不会是
+delivered。没有该证据时，结果仍是 `failed`（或相应的有界 timeout/overflow
+outcome）且投递未知。不得使用新 request ID 自动或手动盲目重试同一内容。复用
+同一个仍留存的 request ID 最多只会以 `replayed: true` 重放审计结果，绝不会再
+启动 Kimi ACP 进程。
 
 消息必须是非空、无 NUL 的 UTF-8，且不超过 16 KiB。超时时间范围为 1–900 秒，
 默认 300 秒。执行有界，Agent Sidecar 只尝试一次恢复。超时、原生失败或输出溢出
 表示投递状态未知；未知投递绝不能重试，因为 Agent 可能已经收到消息或执行操作。
 
 成功时，人类可读输出是原生最终响应；没有响应时则为投递回执。`--json` 输出一个
-结果对象。退出码 `0` 表示原生恢复成功完成且投递报告为 `delivered`；退出码 `1`
-表示运行时失败、超时或溢出，且 `delivery: "unknown"`；退出码 `2` 表示有效恢复
-结果产生前的预检或用法拒绝；中断时退出码为 `130`，投递状态未知。
+结果对象。对于 Claude、Codex 和 Cursor，退出码 `0` 表示原生恢复成功完成且投递
+报告为 `delivered`。退出码 `1` 覆盖运行时失败、超时、溢出，以及所有 Kimi
+已完成但投递未知的结果；退出码 `2` 表示有效恢复结果产生前的预检或用法拒绝；
+中断时退出码为 `130`，投递状态未知。
 
 位置参数消息会出现在 `agent-sidecar` 命令 argv 中，可能被 Shell 历史记录保存，
 也可能在进程列表中可见；`--message-stdin` 可以让消息不出现在 Sidecar 命令行
@@ -667,11 +731,83 @@ agent-sidecar Skill 提供器。插件通过 Unix 套接字消费 sidecar 守护
 「探测—领养—否则托管」策略管理守护进程生命周期；它绝不代装 sidecar CLI。
 
 一等 Agent Center 使用 DSH 官方 `shell.overlay` 注册表与宿主 Modal。主侧栏
-入口、footer 小件和 `/sidecar` 看板动作共享可观察导航状态，因此空白会话和窄屏
-布局也能打开大尺寸中心；会话区 `Sidecar` Tab 保留为第二入口。该接线已经实现并
-有自动化测试覆盖。真实 `dsh_web` 浏览器验收也已通过亮色、暗色与响应式布局，
-通过主侧栏和 footer 打开共享 shell overlay、嵌套焦点约束与恢复、背景 inert
-隔离，以及无 console 与网络错误检查。
+入口、footer 小件和 `/sidecar` 的 Agent Center 动作共享可观察导航状态，因此空白
+会话和窄屏布局也能打开大尺寸中心；会话区 `Sidecar` Tab 保留为第二入口。该接线
+已经实现并有自动化测试覆盖。真实 `dsh_web` 浏览器验收也已通过亮色、暗色与响应式
+布局，通过主侧栏和 footer 打开共享 shell overlay、嵌套焦点约束与恢复、下层
+dialog 的 `inert` + `aria-hidden` 隔离及宿主属性精确恢复、可访问对比度，以及
+无 console 与网络错误检查。Modal 隔离只拥有自身写入的属性，在 HMR 交接时先排空
+已排队的生命周期记录，并能处理嵌套层 remove 后 reinsert 的竞态而不恢复过期
+opener；关闭重新插入的层时会恢复其精确的当前 opener。
+
+会话看板在既有状态、时间窗和 dead 会话过滤之外新增按 agent 类型选择。首个快照
+到达前显示本地化 loading 文案并公开 `aria-busy`；首载失败会结束 busy 状态且可
+重试，而已经成功取得快照后的刷新或事件流失败会保留陈旧卡片，并如实显示降级或
+刷新失败提示。
+
+从看板或项目视图打开详情时，焦点会进入详情控件，并以 agent/session 组合身份记住
+来源。返回时会恢复该视图经边界收敛后的滚动位置，并聚焦精确来源卡片或行；若来源
+已消失或被过滤，则回退聚焦来源视图标题。详情内跳转到另一会话后返回时会有意采用
+同一标题回退，而不会重新聚焦最初会话。
+
+时间线页面在 DSH live 事件、按次晚绑定的 `sessionQuery`、sidecar replay 与有界
+事件缓冲之间使用同一个规范合并合同。带 seq 的条目按 seq、kind、text 去重，因此
+同一原生 seq 的多个内容块都会保留；无 seq 条目按时间戳、kind、text 去重。同 seq
+兄弟组不会被分页边界拆开，重叠页面也会收敛，不会在条目后来补到规范文本时重复
+显示。响应通过不含内容的 `sourceOutcomes` 以及 `degraded`、`reason` 报告各来源
+状态。部分来源失败时保留可用条目并显示警告；全部可用来源失败时，界面会明确说明
+未加载到新事件并提供刷新，而不会把空结果伪装成权威事实。
+
+详情元数据、历史分页、最新窗口刷新与 listen 重取采用独立请求代际。新的刷新会
+取代旧的时间线任务，晚到响应不能回滚元数据、条目、健康状态或游标，listen 更新
+也不会重置历史分页游标。可选 DSH 查询服务在每次使用时重新解析，因此插件挂载后
+才上线的服务无需重挂浏览器 surface 即可生效。
+
+注入有两个彼此独立的门：全局 `inject.enabled` 开关，以及 host 为当前会话派生的
+资格判定。不支持的 Agent 会置灰，并通过本地化可访问原因说明。外部投递只允许本机、
+顶层且状态为 `waiting` 或 `idle` 的 `claude`、`codex`、`cursor-cli`、`kimi`
+会话；外部 `working`、子会话/sidechain，以及所有远程、dead 或结构无效目标都会
+被拒绝。Kimi 使用上述一次性受保护 ACP 恢复，而不是 DSH queue/steer；完成后的
+投递状态仍为未知。本机 DSH `working` 会话支持进程内 steer；DSH
+`waiting`/`idle` 会话进入 DSH live/cold 预检。开启全局开关不会覆盖某个会话的
+不合格判定。
+
+DSH 注入区分 live 与 cold 两条路径。已经加载的 Agent 保持其既有路由和 preset，
+直接接收进程内 queue/steer 消息，不经过 cold resume 检查。若会话尚未加载，插件
+使用宿主当前默认的 provider 与 model 恢复会话。持久化 `waiting`、`idle` 或
+cold/无状态会话无需会话 preset，但宿主必须解析出完整的当前 provider/model pair；
+否则 `inject.prepare` 返回 HTTP 409 `dsh_model_unconfigured`，且不签发 confirm
+token。
+
+当前安全策略不支持带 preset 的 cold resume。若持久化会话存在有效 preset，或宿主
+存在会施加隐式默认 preset 的 `agentPresets` 服务，`inject.prepare` 会返回 HTTP
+409 `dsh_preset_unsupported`，且不签发 confirm token。若陈旧看板行指向的会话
+已被权威持久化服务证明不存在，则 prepare 返回 HTTP 404 `target_not_found`；
+若 cold 服务缺席、失败、重载，或无法证明任一状态，则返回 HTTP 502
+`executor_error`。超时及宿主服务/HMR 代际变化同样关闭失败；响应和日志不会暴露
+路由或 preset 值。这些 cold 限制不影响已处于 live 状态的 Agent 注入。
+
+对 DSH 进程内注入而言，`delivered` 只表示 DSH inbox 已同步接受消息或将其排队，
+并不证明模型 turn 已开始或成功；必须观察目标会话的 timeline 或终端 turn 才能
+确认实际结果。
+
+插件是唯一 DSH 注入界面：直接 `agent-sidecar send` 不支持 `dsh` 目标。带 preset
+的 DSH cold 目标仍返回 `409` 冲突；inbox accepted 的结果仍需观察 timeline。
+Kimi 在插件中也没有 live inbox 或 steer 例外；其受保护恢复使用外部 send 路径，
+且永不返回 delivered 回执。
+
+最终真实验收记录刻意不含内容：Kimi protected resume **PASS**，DSH live steer 与
+nested-modal/UI 行为 **PASS**。记录中不包含私有路径、会话标识、转录、prompt 或
+hash。
+
+插件路由守卫作用于当前明文回环 HTTP 载体：请求必须只有一个合法回环 `Host`，
+并继续允许任意合法端口。若携带 `Origin`，则必须恰好一个，且为与 `Host` 匹配的
+HTTP 主机/端口元组。HTTPS Origin 以及重复的 `Host` 或 `Origin` 均关闭失败，
+即使重复值完全相同也不例外。
+
+面向本机 owner 的界面可以显示完整项目路径，以便区分本地工作区。该路径属于敏感
+证据而不是公开标识；对外分享截图、复制的 JSON、日志或支持材料前，必须连同会话
+ID 与内容一起脱敏。
 
 将其安装到 dsh profile；该命令把包解析委托给 pnpm：
 
@@ -697,10 +833,15 @@ dsh plugin --profile web add @shendeguize/dsh-agent-sidecar
 - `inject.enabled`（默认**关闭**）是写路径总开关。关闭时注入入口全部隐藏，
   写动作在服务端被拒绝。多用户主机不要开启；参见[安全策略](SECURITY.md)。
 - `analysis.enabled`（默认**关闭**）控制 AI 旁路分析，该功能消耗模型 token。
-  `analysis.provider` 与 `analysis.model` 可选地把分析会话路由到指定模型；
-  未设置时复用宿主的默认模型选择。
+  `analysis.provider` 与 `analysis.model` 构成一对：两者都留空时复用宿主默认
+  模型，两者都非空时选择显式路由。设置卡会显示解析后的路由，并阻止保存不完整
+  的 pair。
 - `skill.provide`（默认开启）经 dsh Skill 注册表内嵌提供 agent-sidecar
   Skill；文件系统已安装的同名 Skill 自动优先。
+
+设置卡允许暂存编辑即时生效的 inject、analysis 和 UI 组。daemon 生命周期、
+sidecar 调用与 stream 对账周期在设置卡中只读；如需修改，请编辑 profile 插件行
+的 `cordis.patch` `config` 块并重启 DSH。
 
 浏览器界面默认跟随宿主 DSH 的 `--dsw-*` token 与 Skin Center。皮肤和插件可通过
 稳定的 `data-dsh-plugin="agent-sidecar"` / `data-dsh-part` 锚点以及文档列出的
@@ -751,12 +892,13 @@ Changelog 和发布治理请参见[贡献指南](CONTRIBUTING.md)。
 ## 当前范围与后续工作
 
 0.5.0 版本为受支持数据源提供本地观察、Cursor CLI 事件监视、远程 `list`/`status`
-快照、并发本地和远程 `watch --all --remote`，并为 Claude、Codex 和 Cursor CLI
-提供实验性本地发送。它可以为 pipx 和确定性 zipapp 使用场景打包 CLI，并加入显式
-macOS LaunchAgent 管理和私有轮转守护进程诊断。远程前缀监视和远程发送仍不受
-支持。Kimi 注入仍为后续工作；`send` 不支持 dsh 会话，dsh 会话注入仅能通过 dsh
-插件完成；Cursor IDE 与 Copilot 发送不受支持。可选 HTTP 面板和只读 API 仍严格
-限制在数值 IPv4 回环地址，既不扩展远程监控，也不提供控制平面。
+快照、并发本地和远程 `watch --all --remote`，并为 Claude、Codex、Cursor CLI
+以及精确 Kimi Code 0.38.0 受保护 ACP 路径提供实验性本地发送。它可以为 pipx 和
+确定性 zipapp 使用场景打包 CLI，并加入显式 macOS LaunchAgent 管理和私有轮转
+守护进程诊断。远程前缀监视和远程发送仍不受支持。`send` 不支持 dsh 会话，dsh
+会话注入仅能通过 dsh 插件完成；Cursor IDE 与 Copilot 发送不受支持。可选 HTTP
+面板和只读 API 仍严格限制在数值 IPv4 回环地址，既不扩展远程监控，也不提供控制
+平面。
 
 ## 常见问题
 

@@ -6,6 +6,9 @@
  *
  * - initial load via detail/transport.ts `fetchSessionDetail` (header +
  *   newest timeline page in one round-trip);
+ * - every SSE snapshot invalidates any older detail request immediately,
+ *   then runs at most one latest queued detail refresh; only that generation
+ *   may publish authoritative header metadata;
  * - older-history pagination via `fetchTimelinePage(cursor)`;
  * - listen mode: the controller's SSE `state` frames carry no per-session
  *   events (ADR-2/ADR-3), so the integration calls {@link
@@ -17,13 +20,20 @@
  *   (dsh-tools/logic.ts `externalLineageFallback`).
  *
  * Same store discipline as controller.ts: subscribe/getState for
- * `useSyncExternalStore`, immutable state snapshots, `dispose()` makes
- * late settlements no-ops. All transport is injectable for node tests.
+ * `useSyncExternalStore`, immutable state snapshots, generation-scoped
+ * requests, and `dispose()` cancellation plus late-settlement no-ops. All
+ * transport is injectable for node tests.
  *
  * @module
  */
 
-import { isApiError, type RequestOptions } from './api.ts'
+import {
+  isApiError,
+  LEGACY_TIMELINE_HEALTH,
+  normalizeTimelineHealth,
+  type RequestOptions,
+  type TimelineHealth,
+} from './api.ts'
 import {
   fetchSessionDetail,
   fetchTimelinePage,
@@ -77,6 +87,8 @@ export interface DetailGlueState {
   sessionId: string
   header: DetailHeaderHint
   timeline: TimelineVM
+  /** Sanitized availability aggregated across accepted pages in the view. */
+  timelineHealth: TimelineHealth
   /** True while the initial load or an older-page fetch is in flight. */
   loading: boolean
   /** Machine reason code of the last failure, or null. */
@@ -104,6 +116,36 @@ const INITIAL_LINEAGE: LineageSliceState = {
 /** Map any settlement failure to a stable machine reason code. */
 function reasonOf(err: unknown): string {
   return isApiError(err) ? err.reason : 'network_error'
+}
+
+/** A degraded page remains visible until a fresh generation proves healthy. */
+function isDegradedHealth(
+  health: TimelineHealth,
+): health is Extract<TimelineHealth, { kind: 'partial' | 'failed' }> {
+  return health.kind === 'partial' || health.kind === 'failed'
+}
+
+/**
+ * Accumulate health across accepted pages. A healthy pagination/listen page
+ * cannot erase an earlier degraded page. Starting a new newest-window
+ * generation can clear that warning only with an explicit (non-legacy)
+ * healthy verdict; legacy or unverified hosts retain the prior warning.
+ */
+function aggregateTimelineHealth(
+  current: TimelineHealth,
+  incoming: TimelineHealth,
+  initialOfGeneration: boolean,
+): TimelineHealth {
+  if (initialOfGeneration && incoming.kind === 'healthy' && !incoming.legacy) {
+    return incoming
+  }
+  if (current.kind === 'failed' || incoming.kind === 'failed') {
+    return current.kind === 'failed' ? current : incoming
+  }
+  if (isDegradedHealth(current) || isDegradedHealth(incoming)) {
+    return isDegradedHealth(current) ? current : incoming
+  }
+  return incoming
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +178,15 @@ export class DetailStore {
   private readonly listenLimit: number | undefined
   private disposed = false
   private opened = false
+  private detailGeneration = 0
+  private detailInFlight: {
+    generation: number
+    request: AbortController
+  } | null = null
+  private detailQueued = false
+  private timelineGeneration = 0
+  private readonly pendingRequests = new Set<AbortController>()
+  private readonly timelineRequests = new Set<AbortController>()
   private paging = false
   private listenInFlight = false
   private listenQueued = false
@@ -151,6 +202,7 @@ export class DetailStore {
       sessionId,
       header: options.hint ?? EMPTY_HEADER,
       timeline: createTimelineVM(sessionId),
+      timelineHealth: LEGACY_TIMELINE_HEALTH,
       loading: false,
       error: null,
       hasMore: false,
@@ -174,67 +226,193 @@ export class DetailStore {
     for (const fn of [...this.listeners]) fn()
   }
 
+  /** Allocate one cancellable transport request owned by this store. */
+  private startRequest(timeline: boolean): AbortController {
+    const request = new AbortController()
+    this.pendingRequests.add(request)
+    if (timeline) this.timelineRequests.add(request)
+    return request
+  }
+
+  private finishRequest(request: AbortController): void {
+    this.pendingRequests.delete(request)
+    this.timelineRequests.delete(request)
+  }
+
+  private isCurrentTimelineRequest(
+    generation: number,
+    request: AbortController,
+  ): boolean {
+    return (
+      !this.disposed &&
+      !request.signal.aborted &&
+      generation === this.timelineGeneration
+    )
+  }
+
+  private isCurrentDetailRequest(
+    generation: number,
+    request: AbortController,
+  ): boolean {
+    return (
+      !this.disposed &&
+      !request.signal.aborted &&
+      generation === this.detailGeneration &&
+      this.detailInFlight?.request === request
+    )
+  }
+
+  /**
+   * A newest-window request starts a new timeline generation. Abort pending
+   * page/listen/refresh transports and reset their local ownership flags so
+   * late settlements cannot mutate entries, health, cursors, or busy state.
+   */
+  private beginTimelineGeneration(): number {
+    this.timelineGeneration += 1
+    for (const request of this.timelineRequests) request.abort()
+    this.timelineRequests.clear()
+    this.paging = false
+    this.listenInFlight = false
+    this.listenQueued = false
+    this.refreshInFlight = false
+    return this.timelineGeneration
+  }
+
+  /**
+   * Start the current detail generation. Once the timeline is ready, a detail
+   * refresh commits header metadata only; its nested newest page must not
+   * compete with the independent timeline generation/cursor state.
+   */
+  private startDetailRefresh(): Promise<void> {
+    const generation = this.detailGeneration
+    const timelineGeneration = this.timelineGeneration
+    const request = this.startRequest(false)
+    this.detailInFlight = { generation, request }
+    const sessionId = this.state.sessionId
+    const run = async (): Promise<void> => {
+      try {
+        const wire = await this.fetchDetailFn(sessionId, { signal: request.signal })
+        if (!this.isCurrentDetailRequest(generation, request)) return
+        const header = headerFromDetailWire(wire) ?? this.state.header
+        if (this.state.ready) {
+          // Detail refresh is independent after initialization: only metadata
+          // commits here. Timeline entries/health/cursor belong to its own
+          // generation and cannot be rolled back by a late detail body.
+          this.setState({ header })
+        } else if (
+          wire.timeline === null ||
+          timelineGeneration !== this.timelineGeneration
+        ) {
+          // Pre-M3 host placeholder contract: card data only, no timeline.
+          this.setState({ header, loading: false, error: 'fusion_not_wired' })
+        } else {
+          const timeline = applyTimelinePage(
+            createTimelineVM(sessionId),
+            wire.timeline,
+          )
+          this.setState({
+            header,
+            timeline,
+            timelineHealth: aggregateTimelineHealth(
+              this.state.timelineHealth,
+              normalizeTimelineHealth(wire.timeline),
+              true,
+            ),
+            loading: false,
+            error: null,
+            hasMore: timeline.nextCursor !== null,
+            ready: true,
+          })
+        }
+        void this.loadLineage(header.agent)
+      } catch (err) {
+        if (!this.isCurrentDetailRequest(generation, request)) return
+        if (!this.state.ready) {
+          this.setState({ loading: false, error: reasonOf(err) })
+          // The board hint still tells the agent kind; resolve the lineage
+          // slice anyway so the panel degrades instead of spinning forever.
+          void this.loadLineage(this.state.header.agent)
+        }
+      } finally {
+        this.finishRequest(request)
+        if (this.detailInFlight?.request !== request) return
+        this.detailInFlight = null
+        if (this.detailQueued && !this.disposed) {
+          this.detailQueued = false
+          void this.startDetailRefresh()
+        }
+      }
+    }
+    return run()
+  }
+
+  /**
+   * Invalidate the pending detail response synchronously. Bursts retain only
+   * one queued refresh carrying the latest generation; real fetch observes
+   * Abort immediately, while injected transports remain protected by the
+   * generation check even if they ignore cancellation.
+   */
+  private scheduleDetailRefresh(): void {
+    if (this.disposed || !this.opened) return
+    this.detailGeneration += 1
+    if (this.detailInFlight !== null) {
+      this.detailInFlight.request.abort()
+      this.detailQueued = true
+      return
+    }
+    void this.startDetailRefresh()
+  }
+
   /** Initial load: header + newest timeline page, then lineage. Idempotent. */
   async open(): Promise<void> {
     if (this.opened || this.disposed) return
     this.opened = true
+    this.beginTimelineGeneration()
+    this.detailGeneration += 1
     this.setState({ loading: true, error: null })
-    try {
-      const wire = await this.fetchDetailFn(this.state.sessionId)
-      if (this.disposed) return
-      const header = headerFromDetailWire(wire) ?? this.state.header
-      if (wire.timeline === null) {
-        // Pre-M3 host placeholder contract: card data only, no timeline.
-        this.setState({ header, loading: false, error: 'fusion_not_wired' })
-      } else {
-        const timeline = applyTimelinePage(
-          createTimelineVM(this.state.sessionId),
-          wire.timeline,
-        )
-        this.setState({
-          header,
-          timeline,
-          loading: false,
-          error: null,
-          hasMore: timeline.nextCursor !== null,
-          ready: true,
-        })
-      }
-      void this.loadLineage(header.agent)
-    } catch (err) {
-      if (this.disposed) return
-      this.setState({ loading: false, error: reasonOf(err) })
-      // The board hint still tells the agent kind; resolve the lineage
-      // slice anyway so the panel degrades instead of spinning forever.
-      void this.loadLineage(this.state.header.agent)
-    }
+    await this.startDetailRefresh()
   }
 
   /** Fetch one older history page via the accumulated cursor. */
   async loadMore(): Promise<void> {
     const { timeline } = this.state
-    if (this.disposed || this.paging || !this.state.ready) return
+    if (
+      this.disposed ||
+      this.paging ||
+      this.refreshInFlight ||
+      !this.state.ready
+    ) return
     if (timeline.nextCursor === null) return
+    const generation = this.timelineGeneration
+    const request = this.startRequest(true)
+    const sessionId = this.state.sessionId
     this.paging = true
     this.setState({ loading: true, error: null })
     try {
-      const page = await this.fetchPageFn(this.state.sessionId, {
+      const page = await this.fetchPageFn(sessionId, {
         cursor: timeline.nextCursor,
+        signal: request.signal,
       })
-      if (this.disposed) return
+      if (!this.isCurrentTimelineRequest(generation, request)) return
       const next = applyTimelinePage(this.state.timeline, page)
       this.setState({
         timeline: next,
+        timelineHealth: aggregateTimelineHealth(
+          this.state.timelineHealth,
+          normalizeTimelineHealth(page),
+          false,
+        ),
         loading: false,
         hasMore: next.nextCursor !== null,
       })
     } catch (err) {
-      if (this.disposed) return
+      if (!this.isCurrentTimelineRequest(generation, request)) return
       // Entries already shown stay visible; the view renders the reason
       // as an inline banner (deriveDetailBodyState 'list' arm).
       this.setState({ loading: false, error: reasonOf(err) })
     } finally {
-      this.paging = false
+      this.finishRequest(request)
+      if (generation === this.timelineGeneration) this.paging = false
     }
   }
 
@@ -250,34 +428,45 @@ export class DetailStore {
    * once after a delivered injection (UX-05 observation loop). Unlike the
    * silent best-effort listen refetch, it reports in-flight state and
    * surfaces a failure reason (rendered as the inline banner). Appended
-   * entries get the listen-merge highlight. Coalesced: at most one manual
-   * refresh in flight, extra calls are dropped.
+   * entries get the listen-merge highlight. Every call starts a generation:
+   * a newer refresh supersedes pending paging/listen/refresh requests.
    */
   async refreshNewest(): Promise<void> {
-    if (this.disposed || !this.state.ready || this.refreshInFlight) return
+    if (this.disposed || !this.state.ready) return
+    const generation = this.beginTimelineGeneration()
+    const request = this.startRequest(true)
+    const sessionId = this.state.sessionId
     this.refreshInFlight = true
-    this.setState({ refreshing: true, error: null })
+    this.setState({ loading: false, refreshing: true, error: null })
     try {
-      const page = await this.fetchPageFn(this.state.sessionId, {
+      const page = await this.fetchPageFn(sessionId, {
         ...(this.listenLimit !== undefined ? { limit: this.listenLimit } : {}),
+        signal: request.signal,
       })
-      if (this.disposed) return
+      if (!this.isCurrentTimelineRequest(generation, request)) return
       this.setState({
         timeline: applyListenPage(this.state.timeline, page),
+        timelineHealth: aggregateTimelineHealth(
+          this.state.timelineHealth,
+          normalizeTimelineHealth(page),
+          true,
+        ),
         refreshing: false,
       })
     } catch (err) {
-      if (this.disposed) return
+      if (!this.isCurrentTimelineRequest(generation, request)) return
       this.setState({ refreshing: false, error: reasonOf(err) })
     } finally {
-      this.refreshInFlight = false
+      this.finishRequest(request)
+      if (generation === this.timelineGeneration) this.refreshInFlight = false
     }
   }
 
   /**
-   * SSE `state` frame hook (one call per controller notification). Refreshes
-   * the header from the live board card when given, and in listen mode
-   * triggers a coalesced newest-window refetch.
+   * SSE `state` frame hook (one call per controller notification). The card
+   * hint paints immediately, then a generation-safe detail refresh resolves
+   * authoritative metadata. Listen mode independently refetches the newest
+   * timeline window.
    */
   notifySnapshot(card: DetailHeaderHint | null): void {
     if (this.disposed) return
@@ -292,33 +481,50 @@ export class DetailStore {
         this.setState({ header: card })
       }
     }
+    this.scheduleDetailRefresh()
     if (this.state.listening && this.state.ready) this.scheduleListenRefetch()
   }
 
   /** At most one refetch in flight; at most one more queued (idempotence). */
   private scheduleListenRefetch(): void {
-    if (this.disposed || !this.state.ready) return
+    if (this.disposed || !this.state.ready || this.refreshInFlight) return
     if (this.listenInFlight) {
       this.listenQueued = true
       return
     }
+    const generation = this.timelineGeneration
+    const request = this.startRequest(true)
     this.listenInFlight = true
-    void this.runListenRefetch()
+    void this.runListenRefetch(generation, request)
   }
 
-  private async runListenRefetch(): Promise<void> {
+  private async runListenRefetch(
+    generation: number,
+    request: AbortController,
+  ): Promise<void> {
+    const sessionId = this.state.sessionId
     try {
-      const page = await this.fetchPageFn(this.state.sessionId, {
+      const page = await this.fetchPageFn(sessionId, {
         ...(this.listenLimit !== undefined ? { limit: this.listenLimit } : {}),
+        signal: request.signal,
       })
-      if (this.disposed) return
-      this.setState({ timeline: applyListenPage(this.state.timeline, page) })
+      if (!this.isCurrentTimelineRequest(generation, request)) return
+      this.setState({
+        timeline: applyListenPage(this.state.timeline, page),
+        timelineHealth: aggregateTimelineHealth(
+          this.state.timelineHealth,
+          normalizeTimelineHealth(page),
+          false,
+        ),
+      })
     } catch {
       // Listen refetch is best-effort: the next SSE frame retries; the
       // already-rendered timeline must not degrade into an error state.
     } finally {
+      this.finishRequest(request)
+      if (generation !== this.timelineGeneration || this.disposed) return
       this.listenInFlight = false
-      if (this.listenQueued && !this.disposed) {
+      if (this.listenQueued) {
         this.listenQueued = false
         this.scheduleListenRefetch()
       }
@@ -356,8 +562,16 @@ export class DetailStore {
       return
     }
     try {
-      const body = await this.fetchLineageFn(this.state.sessionId)
-      if (this.disposed) return
+      const request = this.startRequest(false)
+      let body: LineageResponseVM
+      try {
+        body = await this.fetchLineageFn(this.state.sessionId, {
+          signal: request.signal,
+        })
+      } finally {
+        this.finishRequest(request)
+      }
+      if (this.disposed || request.signal.aborted) return
       this.setState({
         lineage: {
           loading: false,
@@ -376,7 +590,16 @@ export class DetailStore {
 
   /** Late settlements become no-ops; subscribers are dropped. Idempotent. */
   dispose(): void {
+    if (this.disposed) return
     this.disposed = true
+    this.detailGeneration += 1
+    this.timelineGeneration += 1
+    for (const request of this.pendingRequests) request.abort()
+    this.pendingRequests.clear()
+    this.timelineRequests.clear()
+    this.detailInFlight = null
+    this.detailQueued = false
+    this.listenQueued = false
     this.listeners.clear()
   }
 }

@@ -19,6 +19,10 @@
  */
 
 import type { SessionRow, SidecarEvent, StreamHealth } from './bridge.ts'
+import {
+  deriveInjectEligibility,
+  type InjectEligibility,
+} from './inject-eligibility.ts'
 
 /** Compact summary of the most recent event seen for a session. */
 export interface SessionEventSummary {
@@ -38,6 +42,8 @@ export interface SessionView {
   last_event: SessionEventSummary | null
   /** True when a dsh seq discontinuity was observed since the last snapshot. */
   gap: boolean
+  /** Host-derived verdict only; raw topology/remote markers are never exposed. */
+  inject_eligibility: InjectEligibility
 }
 
 /** Full board state handed to routes/UI. */
@@ -54,6 +60,70 @@ interface EventSideState {
   lastEvent: SessionEventSummary | null
   lastSeq: number | null
   gap: boolean
+}
+
+/** Snapshot projection retained after eligibility consumes the full raw row. */
+interface StoredSession {
+  agent: string
+  session_id: string
+  status: string
+  title: string
+  project: string
+  updated_at: number
+  inject_eligibility: InjectEligibility
+}
+
+const INVALID_PROPERTY = Symbol('invalid-property')
+
+function ownValue(record: object, key: string): unknown | typeof INVALID_PROPERTY {
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(record, key)
+    return descriptor !== undefined && 'value' in descriptor
+      ? descriptor.value
+      : INVALID_PROPERTY
+  } catch {
+    return INVALID_PROPERTY
+  }
+}
+
+/**
+ * Copy only accessor-free board fields. Runtime callers are not allowed to
+ * smuggle a forged prototype/getter into the long-lived board cache.
+ */
+function snapshotProjection(row: SessionRow): Omit<StoredSession, 'inject_eligibility'> | null {
+  try {
+    const prototype = Object.getPrototypeOf(row)
+    if (prototype !== Object.prototype && prototype !== null) return null
+  } catch {
+    return null
+  }
+  const agent = ownValue(row, 'agent')
+  const sessionId = ownValue(row, 'session_id')
+  const status = ownValue(row, 'status')
+  const title = ownValue(row, 'title')
+  const project = ownValue(row, 'project')
+  const updatedAt = ownValue(row, 'updated_at')
+  if (
+    typeof agent !== 'string' ||
+    agent === '' ||
+    typeof sessionId !== 'string' ||
+    sessionId === '' ||
+    typeof status !== 'string' ||
+    typeof title !== 'string' ||
+    typeof project !== 'string' ||
+    typeof updatedAt !== 'number' ||
+    !Number.isFinite(updatedAt)
+  ) {
+    return null
+  }
+  return {
+    agent,
+    session_id: sessionId,
+    status,
+    title,
+    project,
+    updated_at: updatedAt,
+  }
 }
 
 function sessionKey(agent: string, sessionId: string): string {
@@ -77,7 +147,7 @@ function extractSeq(extra: Record<string, unknown>): number | null {
 
 /** In-memory session cache reconciled by snapshots, hinted by events. */
 export class SessionStore {
-  private rows = new Map<string, SessionRow>()
+  private rows = new Map<string, StoredSession>()
   private eventState = new Map<string, EventSideState>()
   private streamHealth: StreamHealth = 'unknown'
   private lastReconcileAt: number | null = null
@@ -85,10 +155,17 @@ export class SessionStore {
 
   /** Replace the full session set with an authoritative snapshot. */
   applySnapshot(rows: SessionRow[]): void {
-    const next = new Map<string, SessionRow>()
+    const next = new Map<string, StoredSession>()
     for (const row of rows) {
-      if (typeof row.session_id !== 'string' || row.session_id === '') continue
-      next.set(sessionKey(row.agent, row.session_id), row)
+      const projection = snapshotProjection(row)
+      if (projection === null) continue
+      // Derive while the full row is still present, then discard raw
+      // `extra`, topology, host provenance, and transcript data from cache.
+      const injectEligibility = deriveInjectEligibility(row)
+      next.set(sessionKey(projection.agent, projection.session_id), {
+        ...projection,
+        inject_eligibility: injectEligibility,
+      })
     }
     this.rows = next
     const staleKeys: string[] = []
@@ -145,20 +222,18 @@ export class SessionStore {
     return false
   }
 
+  /** Return one sanitized live target projection, or null when absent. */
+  getSession(agent: string, sessionId: string): SessionView | null {
+    const key = sessionKey(agent, sessionId)
+    const row = this.rows.get(key)
+    if (row === undefined) return null
+    return this.toView(key, row)
+  }
+
   getBoardState(): BoardState {
     const sessions: SessionView[] = []
     for (const [key, row] of this.rows) {
-      const state = this.eventState.get(key)
-      sessions.push({
-        agent: row.agent,
-        session_id: row.session_id,
-        status: row.status,
-        title: row.title,
-        project: row.project,
-        updated_at: row.updated_at,
-        last_event: state?.lastEvent ?? null,
-        gap: state?.gap ?? false,
-      })
+      sessions.push(this.toView(key, row))
     }
     sessions.sort(
       (a, b) => b.updated_at - a.updated_at || a.session_id.localeCompare(b.session_id),
@@ -175,6 +250,21 @@ export class SessionStore {
     this.listeners.add(cb)
     return () => {
       this.listeners.delete(cb)
+    }
+  }
+
+  private toView(key: string, row: StoredSession): SessionView {
+    const state = this.eventState.get(key)
+    return {
+      agent: row.agent,
+      session_id: row.session_id,
+      status: row.status,
+      title: row.title,
+      project: row.project,
+      updated_at: row.updated_at,
+      last_event: state?.lastEvent ?? null,
+      gap: state?.gap ?? false,
+      inject_eligibility: row.inject_eligibility,
     }
   }
 

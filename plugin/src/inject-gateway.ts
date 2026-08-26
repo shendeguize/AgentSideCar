@@ -16,10 +16,11 @@
  *   (5 min TTL) and replayed on repeats. `outcome: 'unknown'` is terminal:
  *   a repeated execute returns the cached unknown and NEVER re-fires the
  *   executor (S6 — no retry through the gateway).
- * - **Logging**: exactly one entry per prepare/execute carrying ts /
- *   requestId / target / mode / phase / result / errorCode / message byte
- *   size and sha256 prefix — never the message body or head plaintext
- *   (the head preview only travels in the prepare response for the UI).
+ * - **Logging**: exactly one entry per prepare/execute carrying phase/result
+ *   plus message byte size and sha256 prefix. Ordinary audit entries also carry
+ *   request/target/mode; rejected dsh lifecycle checks redact those identities.
+ *   Message bodies, previews, native Error text, paths, presets, and model
+ *   values never enter the log.
  *
  * The token gate defends against browser-mediated attackers only; it does
  * not claim to stop a local process that can drive both phases itself
@@ -33,6 +34,10 @@
  */
 
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import type {
+  InjectEligibility,
+  InjectIneligibilityReason,
+} from './inject-eligibility.ts'
 
 // ---------------------------------------------------------------------------
 // Public types (kept local to this module by design).
@@ -55,7 +60,11 @@ export type InjectErrorCode =
   | 'inject_disabled'
   | 'invalid_message'
   | 'target_not_found'
+  | 'target_changed'
   | 'target_dead'
+  | InjectIneligibilityReason
+  | 'dsh_model_unconfigured'
+  | 'dsh_preset_unsupported'
   | 'too_many_pending'
   | 'token_missing'
   | 'token_expired'
@@ -85,7 +94,16 @@ export interface TargetStatus {
   status: string
   title?: string
   project?: string
+  /**
+   * Host verdict projected by SessionStore. Optional only so the legacy
+   * composition seam can be rebound by routes without editing index.ts;
+   * the gateway fails closed when a verifier omits it.
+   */
+  inject_eligibility?: InjectEligibility
 }
+
+/** Live target verifier used at both prepare and execute. */
+export type InjectTargetVerifier = (target: InjectTarget) => Promise<TargetStatus | null>
 
 /** Confirmation plan shown to the user; the message body is never retained. */
 export interface InjectPlan {
@@ -105,9 +123,20 @@ export interface InjectExecutionRequest {
   requestId: string
 }
 
+/** Body-free executor readiness result used before a confirm token is issued. */
+export type InjectPreflightResult =
+  | { ok: true }
+  | { ok: false; errorCode: InjectErrorCode; detail?: string }
+
 /** One injection path (dsh in-process API, or the sidecar send CLI). */
 export interface InjectExecutor {
   kind: 'dsh' | 'send-cli'
+  /**
+   * Optional path-specific readiness check. It receives no message body and
+   * must not perform delivery; executors without one retain their old prepare
+   * behavior.
+   */
+  preflight?(target: InjectTarget): Promise<InjectPreflightResult>
   execute(req: InjectExecutionRequest): Promise<InjectResult>
 }
 
@@ -165,7 +194,7 @@ export interface ExecuteRequest {
 export interface InjectGatewayDeps {
   executors: { dsh: InjectExecutor; sendCli: InjectExecutor }
   /** Live target re-check (store/bridge outside); null = target unknown. */
-  verifyTarget(target: InjectTarget): Promise<TargetStatus | null>
+  verifyTarget: InjectTargetVerifier
   /** Reads the `inject.enabled` gate at call time (live setting). */
   allowWrite(): boolean
   /** Sink for every audit entry (also kept in the internal ring). */
@@ -200,7 +229,12 @@ const DEFAULT_LOG_QUERY_LIMIT = 50
 const SHA_LOG_CHARS = 12
 
 /** External agents reachable through the sidecar `send` CLI path (§4.d). */
-const SEND_CLI_AGENTS: ReadonlySet<string> = new Set(['claude', 'codex', 'cursor-cli'])
+const SEND_CLI_AGENTS: ReadonlySet<string> = new Set([
+  'claude',
+  'codex',
+  'cursor-cli',
+  'kimi',
+])
 
 // ---------------------------------------------------------------------------
 // Internals.
@@ -254,6 +288,10 @@ interface CachedResult {
   expiresAt: number
 }
 
+type TargetVerification =
+  | { ok: true; status: TargetStatus }
+  | { ok: false; errorCode: InjectErrorCode }
+
 // ---------------------------------------------------------------------------
 // Gateway.
 // ---------------------------------------------------------------------------
@@ -263,6 +301,7 @@ export class InjectGateway {
   private readonly deps: InjectGatewayDeps
   private readonly now: () => number
   private readonly randomId: () => string
+  private verifyTarget: InjectTargetVerifier
   private readonly pending = new Map<string, PendingToken>()
   private readonly results = new Map<string, CachedResult>()
   private readonly logRing: InjectLogEntry[] = []
@@ -271,6 +310,16 @@ export class InjectGateway {
     this.deps = deps
     this.now = deps.now ?? Date.now
     this.randomId = deps.randomId ?? randomUUID
+    this.verifyTarget = deps.verifyTarget
+  }
+
+  /**
+   * Bind the authoritative SessionStore-backed verifier during route
+   * assembly. This replaces the legacy status-only projection without
+   * widening index.ts or exposing raw SessionRow topology.
+   */
+  bindTargetVerifier(verifyTarget: InjectTargetVerifier): void {
+    this.verifyTarget = verifyTarget
   }
 
   /**
@@ -278,8 +327,8 @@ export class InjectGateway {
    * confirmation bound to this exact target + mode + message.
    *
    * Pipeline (order per spec): allowWrite gate → message pre-validation
-   * (≤16 KiB by bytes, non-empty, no NUL) → live target re-check →
-   * injectable-agent whitelist → capacity check → token issuance.
+   * (≤16 KiB by bytes, non-empty, no NUL) → live eligibility re-check →
+   * path preflight → capacity check → token issuance.
    */
   async prepare(req: PrepareRequest): Promise<PrepareResult> {
     this.prune(this.now())
@@ -295,25 +344,43 @@ export class InjectGateway {
     }
 
     const target: InjectTarget = { agent: req.target.agent, sessionId: req.target.sessionId }
-    const status = await this.deps.verifyTarget(target)
-    if (status === null) {
-      return this.rejectPrepare(req, digest, 'target_not_found')
+    const verification = await this.revalidateTarget(target)
+    if (!verification.ok) {
+      return this.rejectPrepare(req, digest, verification.errorCode)
     }
-    if (status.status === 'dead') {
-      return this.rejectPrepare(req, digest, 'target_dead')
-    }
+    const status = verification.status
 
-    // Agents with no injection path (copilot / kimi / cursor-ide / …) are
-    // refused HERE, before a token is issued: a prepare that can only ever
-    // fail at execute would waste a confirm dialog and in-flight capacity
-    // on a caller that gets its unsupported_agent verdict one phase late
-    // (M2 review F-6). The execute-side check stays as defense in depth.
-    if (this.executorFor(target.agent) === null) {
+    // The verdict already rejected unsupported agents before token issuance.
+    // Keep the path lookup as defense in depth against a malformed verifier.
+    const executor = this.executorFor(target.agent)
+    if (executor === null) {
       return this.rejectPrepare(req, digest, 'unsupported_agent')
     }
 
+    // Only paths with a deterministic readiness check opt in. In particular,
+    // the dsh executor uses this to reject a cold, modelless resume before a
+    // confirmation token exists; send-cli executors remain byte-for-byte on
+    // the prior prepare path.
+    if (executor.preflight !== undefined) {
+      let preflight: InjectPreflightResult
+      try {
+        preflight = await executor.preflight({ ...target })
+      } catch {
+        return this.rejectPrepare(req, digest, 'executor_error')
+      }
+      if (!preflight.ok) {
+        return this.rejectPrepare(
+          req,
+          digest,
+          preflight.errorCode,
+          preflight.detail,
+          true,
+        )
+      }
+    }
+
     // Re-read the clock after the async re-check so capacity and TTL are
-    // decided at actual issuance time.
+    // decided at actual issuance time (including any executor preflight).
     const issuedAt = this.now()
     if (this.inFlightCount(issuedAt) >= MAX_PENDING_TOKENS) {
       return this.rejectPrepare(req, digest, 'too_many_pending')
@@ -364,9 +431,9 @@ export class InjectGateway {
    * and cache the first result per requestId.
    *
    * Rejection order: cached replay (idempotency wins) → token missing →
-   * token reused → token expired → token/message binding mismatch →
-   * unsupported agent. Every attempt against a live token consumes it,
-   * whatever happens afterwards.
+   * token reused → token expired → token/message binding mismatch → live
+   * write/eligibility revalidation → executor. Every attempt against a live
+   * token consumes it, whatever happens afterwards.
    */
   async execute(req: ExecuteRequest): Promise<InjectResult> {
     const now = this.now()
@@ -427,6 +494,15 @@ export class InjectGateway {
       return this.rejectExecute(req.requestId, record, digest, 'token_mismatch')
     }
 
+    if (!this.deps.allowWrite()) {
+      return this.rejectExecute(req.requestId, record, digest, 'inject_disabled')
+    }
+
+    const verification = await this.revalidateTarget(record.target)
+    if (!verification.ok) {
+      return this.rejectExecute(req.requestId, record, digest, verification.errorCode)
+    }
+
     const executor = this.executorFor(record.target.agent)
     if (executor === null) {
       return this.rejectExecute(req.requestId, record, digest, 'unsupported_agent')
@@ -440,11 +516,10 @@ export class InjectGateway {
         message: req.message,
         requestId: req.requestId,
       })
-    } catch (err) {
+    } catch {
       result = {
         outcome: 'failed',
         errorCode: 'executor_error',
-        detail: err instanceof Error ? err.message : String(err),
       }
     }
 
@@ -471,6 +546,34 @@ export class InjectGateway {
     if (agent === 'dsh') return this.deps.executors.dsh
     if (SEND_CLI_AGENTS.has(agent)) return this.deps.executors.sendCli
     return null
+  }
+
+  /**
+   * Resolve one authoritative, already-derived verdict. Missing/malformed
+   * projections fail closed with static vocabulary and no raw row details.
+   */
+  private async revalidateTarget(target: InjectTarget): Promise<TargetVerification> {
+    let status: TargetStatus | null
+    try {
+      status = await this.verifyTarget({ ...target })
+    } catch {
+      return { ok: false, errorCode: 'invalid_session' }
+    }
+    if (status === null) return { ok: false, errorCode: 'target_not_found' }
+    if (status.agent !== target.agent || status.sessionId !== target.sessionId) {
+      return { ok: false, errorCode: 'invalid_session' }
+    }
+    const eligibility = status.inject_eligibility
+    if (eligibility === undefined) {
+      return { ok: false, errorCode: 'invalid_session' }
+    }
+    if (!eligibility.allowed) {
+      return { ok: false, errorCode: eligibility.reason }
+    }
+    if (eligibility.reason !== 'eligible') {
+      return { ok: false, errorCode: 'invalid_session' }
+    }
+    return { ok: true, status }
   }
 
   /** Issued-but-unconsumed-and-unexpired tokens count toward the cap. */
@@ -501,13 +604,16 @@ export class InjectGateway {
     digest: MessageDigest,
     errorCode: InjectErrorCode,
     detail?: string,
+    redactIdentity = false,
   ): PrepareResult {
     this.record({
       ts: this.now(),
       phase: 'prepare',
       requestId: null,
-      target: { agent: req.target.agent, sessionId: req.target.sessionId },
-      mode: req.mode,
+      target: redactIdentity
+        ? null
+        : { agent: req.target.agent, sessionId: req.target.sessionId },
+      mode: redactIdentity ? null : req.mode,
       ok: false,
       errorCode,
       messageBytes: digest.bytes,
@@ -524,12 +630,13 @@ export class InjectGateway {
     digest: MessageDigest,
     errorCode: InjectErrorCode,
   ): InjectResult {
+    const redactIdentity = record?.target.agent === 'dsh'
     this.record({
       ts: this.now(),
       phase: 'execute',
-      requestId,
-      target: record === null ? null : { ...record.target },
-      mode: record === null ? null : record.mode,
+      requestId: redactIdentity ? null : requestId,
+      target: record === null || redactIdentity ? null : { ...record.target },
+      mode: record === null || redactIdentity ? null : record.mode,
       ok: false,
       outcome: 'failed',
       errorCode,
@@ -545,12 +652,14 @@ export class InjectGateway {
     digest: MessageDigest,
     result: InjectResult,
   ): void {
+    const redactIdentity =
+      record?.target.agent === 'dsh' && result.outcome === 'failed'
     this.record({
       ts: this.now(),
       phase: 'execute',
-      requestId,
-      target: record === null ? null : { ...record.target },
-      mode: record === null ? null : record.mode,
+      requestId: redactIdentity ? null : requestId,
+      target: record === null || redactIdentity ? null : { ...record.target },
+      mode: record === null || redactIdentity ? null : record.mode,
       ok: result.outcome === 'delivered',
       outcome: result.outcome,
       ...(result.errorCode !== undefined ? { errorCode: result.errorCode } : {}),

@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from numbers import Real
 from typing import BinaryIO, Callable, Dict, Iterator, Mapping, Optional, Sequence, Set, Tuple, Union
@@ -24,8 +24,10 @@ MAX_TIMEOUT_SECONDS = 3600.0
 MAX_STREAM_INPUT_BYTES = 4 * 1024 * 1024
 MAX_STREAM_LINE_BYTES = 4 * 1024 * 1024
 MAX_STREAM_STDERR_BYTES = 64 * 1024
+MAX_DUPLEX_STDOUT_BYTES = 4 * 1024 * 1024
 _CHUNK_SIZE = 65536
 _POLL_INTERVAL_SECONDS = 0.05
+_DUPLEX_CLEANUP_SECONDS = 2.0
 _SUPERVISOR_CONFIG_LIMIT = 8 * 1024 * 1024
 _POSIX_EXIT_SIGNALS = tuple(
     value
@@ -156,6 +158,26 @@ class _ProcessGroupOwnership:
             tracker = self._descendant_tracker
         if tracker is not None:
             tracker.terminate()
+
+    def terminate(self, process: subprocess.Popen) -> None:
+        """Send TERM without releasing the group needed for later KILL."""
+
+        signaled_group = False
+        with self._lock:
+            if os.name == "posix" and self._process_group_id is not None:
+                try:
+                    os.killpg(self._process_group_id, signal.SIGTERM)
+                except ProcessLookupError:
+                    self._process_group_id = None
+                except OSError:
+                    pass
+                else:
+                    signaled_group = True
+            if not signaled_group and process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
 
     def poll(self, process: subprocess.Popen) -> Optional[int]:
         with self._lock:
@@ -352,6 +374,85 @@ class BoundedLineStreamProcessError(BoundedLineStreamError):
     """The streamed process reached EOF with a nonzero return code."""
 
 
+class DuplexWriteBoundary(str, Enum):
+    """How much of one newline-delimited frame reached child stdin."""
+
+    NONE = "none"
+    PARTIAL = "partial"
+    COMPLETE = "complete"
+
+
+@dataclass(frozen=True)
+class DuplexWriteResult:
+    """Byte-level write boundary without retaining the written frame."""
+
+    boundary: DuplexWriteBoundary
+    bytes_written: int
+    bytes_total: int
+
+
+WriteResult = DuplexWriteResult
+
+
+@dataclass(frozen=True)
+class DuplexProcessIdentity:
+    """Stable identity of the process tree owned by one duplex instance."""
+
+    pid: int
+    process_group_id: Optional[int]
+
+
+AcpProcessIdentity = DuplexProcessIdentity
+
+
+@dataclass(frozen=True)
+class DuplexProcessResult:
+    """Bounded terminal or observed state of a duplex process."""
+
+    args: Tuple[str, ...] = field(repr=False)
+    returncode: Optional[int]
+    stderr: bytes = field(repr=False)
+    stdout_bytes_read: int
+    cleanup_complete: bool
+    clean_exit: bool
+    overflow: Optional[str] = None
+
+    @property
+    def cleanup_incomplete(self) -> bool:
+        return not self.cleanup_complete
+
+
+class BoundedDuplexLineProcessError(RuntimeError):
+    """Base class for redacted duplex process failures."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: Optional[DuplexProcessResult] = None,
+        write_result: Optional[DuplexWriteResult] = None,
+    ) -> None:
+        super().__init__(message)
+        self.result = result
+        self.write_result = write_result
+
+
+class BoundedDuplexLineProcessTimeoutError(BoundedDuplexLineProcessError):
+    """An absolute operation deadline expired."""
+
+
+class BoundedDuplexLineProcessOverflowError(BoundedDuplexLineProcessError):
+    """A stdout line, aggregate stdout, or stderr bound was exceeded."""
+
+
+class BoundedDuplexLineProcessCancelledError(BoundedDuplexLineProcessError):
+    """The caller cancellation event was set."""
+
+
+class BoundedDuplexLineProcessEOFError(BoundedDuplexLineProcessError):
+    """Stdout ended with an unterminated line."""
+
+
 def _validated_argv(argv: Sequence[str]) -> Tuple[str, ...]:
     if isinstance(argv, (str, bytes)):
         raise ValueError("argv must be a nonempty sequence of strings")
@@ -383,6 +484,23 @@ def _bounded_timeout(value: float) -> float:
     if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_TIMEOUT_SECONDS:
         raise ValueError("timeout must be finite and positive")
     return timeout
+
+
+def _absolute_deadline(
+    value: float,
+    monotonic: Callable[[], float],
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError("deadline must be finite")
+    try:
+        deadline = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("deadline must be finite") from error
+    if not math.isfinite(deadline):
+        raise ValueError("deadline must be finite")
+    if deadline - monotonic() > MAX_TIMEOUT_SECONDS:
+        raise ValueError("deadline exceeds the maximum operation interval")
+    return deadline
 
 
 def _working_directory(
@@ -1656,7 +1774,688 @@ class BoundedLineStream(Iterator[bytes]):
             pass
 
 
+class BoundedDuplexLineProcess:
+    """Interactive, bounded newline transport over one owned subprocess."""
+
+    def __init__(
+        self,
+        argv: Sequence[str],
+        *,
+        line_limit: int,
+        stdout_limit: int = MAX_DUPLEX_STDOUT_BYTES,
+        stderr_limit: int = MAX_STREAM_STDERR_BYTES,
+        env: Optional[Mapping[str, str]] = None,
+        cwd: Optional[Union[str, os.PathLike]] = None,
+        cancel_event: Optional[threading.Event] = None,
+        pre_spawn: Optional[Callable[[], None]] = None,
+        pre_exec: Optional[Callable[[], None]] = None,
+        require_descendant_containment: bool = False,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        arguments = _validated_argv(argv)
+        line_limit = _positive_limit(line_limit, "line_limit")
+        stdout_limit = _positive_limit(stdout_limit, "stdout_limit")
+        stderr_limit = _positive_limit(stderr_limit, "stderr_limit")
+        if line_limit > MAX_STREAM_LINE_BYTES:
+            raise ValueError(
+                "line_limit must not exceed {}".format(MAX_STREAM_LINE_BYTES)
+            )
+        if stdout_limit > MAX_DUPLEX_STDOUT_BYTES:
+            raise ValueError(
+                "stdout_limit must not exceed {}".format(
+                    MAX_DUPLEX_STDOUT_BYTES
+                )
+            )
+        if stderr_limit > MAX_STREAM_STDERR_BYTES:
+            raise ValueError(
+                "stderr_limit must not exceed {}".format(MAX_STREAM_STDERR_BYTES)
+            )
+        if pre_spawn is not None and not callable(pre_spawn):
+            raise TypeError("pre_spawn must be callable")
+        if pre_exec is not None and not callable(pre_exec):
+            raise TypeError("pre_exec must be callable")
+        if type(require_descendant_containment) is not bool:
+            raise TypeError("require_descendant_containment must be bool")
+        if pre_exec is not None and not require_descendant_containment:
+            raise ValueError("pre_exec requires descendant containment")
+        if (
+            require_descendant_containment
+            and not _DarwinKqueueDescendantTracker.supported()
+        ):
+            raise DescendantContainmentUnsupportedError(
+                "deterministic descendant containment is unsupported"
+            )
+
+        self._arguments = arguments
+        self._line_limit = line_limit
+        self._stdout_limit = stdout_limit
+        self._stderr_limit = stderr_limit
+        self._cancel_event = cancel_event
+        self._monotonic = monotonic
+        self._stdout_buffer = bytearray()
+        self._stderr_buffer = bytearray()
+        self._stdout_bytes_read = 0
+        self._stdout_eof = False
+        self._stderr_eof = False
+        self._lease_eof = False
+        self._stdin_closed = False
+        self._overflow: Optional[str] = None
+        self._last_write_result: Optional[DuplexWriteResult] = None
+        self._closed = False
+        self._result: Optional[DuplexProcessResult] = None
+        self._selector: Optional[selectors.BaseSelector] = None
+        self._started: Optional[_StartedProcess] = None
+
+        working_directory = _working_directory(cwd)
+        environment = None if env is None else dict(env)
+        started = _start_bounded_process(
+            arguments,
+            b"",
+            environment=environment,
+            working_directory=working_directory,
+            pre_spawn=pre_spawn,
+            pre_exec=pre_exec,
+            require_descendant_containment=require_descendant_containment,
+        )
+        self._started = started
+        self._lease_eof = started.lease is None
+        try:
+            self._selector = selectors.DefaultSelector()
+            self._configure_streams()
+            started.signal_scope.unblock_after_spawn()
+        except BaseException:
+            started.signal_scope.block_for_cleanup()
+            _force_cleanup_process(started.process, started.ownership)
+            if self._selector is not None:
+                self._selector.close()
+            started.release()
+            self._started = None
+            raise
+
+    def _configure_streams(self) -> None:
+        assert self._started is not None
+        assert self._selector is not None
+        process = self._started.process
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            raise OSError("bounded duplex process pipes are unavailable")
+        for stream in (process.stdin, process.stdout, process.stderr):
+            os.set_blocking(stream.fileno(), False)
+        self._selector.register(
+            process.stdout,
+            selectors.EVENT_READ,
+            ("stdout", process.stdout),
+        )
+        self._selector.register(
+            process.stderr,
+            selectors.EVENT_READ,
+            ("stderr", process.stderr),
+        )
+        if self._started.lease is not None:
+            self._selector.register(
+                self._started.lease,
+                selectors.EVENT_READ,
+                ("lease", self._started.lease),
+            )
+
+    @property
+    def identity(self) -> DuplexProcessIdentity:
+        if self._started is None:
+            raise RuntimeError("duplex process was not started")
+        return DuplexProcessIdentity(
+            pid=self._started.process.pid,
+            process_group_id=(
+                self._started.process.pid if os.name == "posix" else None
+            ),
+        )
+
+    @property
+    def result(self) -> Optional[DuplexProcessResult]:
+        return self._result
+
+    @property
+    def returncode(self) -> Optional[int]:
+        if self._result is not None:
+            return self._result.returncode
+        if self._started is None:
+            return None
+        return self._started.process.poll()
+
+    @property
+    def stderr(self) -> bytes:
+        if self._result is not None:
+            return self._result.stderr
+        return bytes(self._stderr_buffer)
+
+    @property
+    def write_result(self) -> Optional[DuplexWriteResult]:
+        return self._last_write_result
+
+    def __enter__(self) -> "BoundedDuplexLineProcess":
+        return self
+
+    def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
+        self.close()
+
+    def _close_stream(self, stream: object) -> None:
+        if self._selector is not None:
+            try:
+                self._selector.unregister(stream)
+            except (KeyError, OSError, ValueError):
+                pass
+        try:
+            stream.close()  # type: ignore[attr-defined]
+        except (OSError, ValueError):
+            pass
+
+    def _close_output_streams(self) -> None:
+        if self._started is None:
+            return
+        process = self._started.process
+        if process.stdout is not None:
+            self._close_stream(process.stdout)
+        if process.stderr is not None:
+            self._close_stream(process.stderr)
+        self._stdout_eof = True
+        self._stderr_eof = True
+
+    def _close_all_streams(self) -> None:
+        if self._selector is not None:
+            for key in list(self._selector.get_map().values()):
+                self._close_stream(key.fileobj)
+        if self._started is not None:
+            process = self._started.process
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+
+    def _raise_overflow(self, kind: str) -> None:
+        self._overflow = kind
+        raise BoundedDuplexLineProcessOverflowError(
+            "bounded duplex output limit exceeded"
+        )
+
+    def _validate_stdout_lines(self) -> None:
+        start = 0
+        while True:
+            newline = self._stdout_buffer.find(b"\n", start)
+            if newline < 0:
+                break
+            if newline - start > self._line_limit:
+                self._raise_overflow("stdout_line")
+            start = newline + 1
+        if len(self._stdout_buffer) - start > self._line_limit:
+            self._raise_overflow("stdout_line")
+
+    def _read_stdout(self, stream: object) -> None:
+        available = self._stdout_limit - self._stdout_bytes_read
+        try:
+            chunk = os.read(
+                stream.fileno(),  # type: ignore[attr-defined]
+                max(1, min(_CHUNK_SIZE, available + 1)),
+            )
+        except BlockingIOError:
+            return
+        except OSError:
+            chunk = b""
+        if not chunk:
+            self._stdout_eof = True
+            self._close_stream(stream)
+            return
+        retained = chunk[: max(0, available)]
+        self._stdout_bytes_read += len(chunk)
+        self._stdout_buffer.extend(retained)
+        if len(chunk) > available:
+            self._raise_overflow("stdout")
+        self._validate_stdout_lines()
+
+    def _read_stderr(self, stream: object) -> None:
+        available = self._stderr_limit - len(self._stderr_buffer)
+        try:
+            chunk = os.read(
+                stream.fileno(),  # type: ignore[attr-defined]
+                max(1, min(_CHUNK_SIZE, available + 1)),
+            )
+        except BlockingIOError:
+            return
+        except OSError:
+            chunk = b""
+        if not chunk:
+            self._stderr_eof = True
+            self._close_stream(stream)
+            return
+        self._stderr_buffer.extend(chunk[: max(0, available)])
+        if len(chunk) > available:
+            self._raise_overflow("stderr")
+
+    def _read_lease(self, stream: object) -> None:
+        try:
+            chunk = os.read(
+                stream.fileno(),  # type: ignore[attr-defined]
+                _CHUNK_SIZE,
+            )
+        except BlockingIOError:
+            return
+        except OSError:
+            chunk = b""
+        if not chunk:
+            self._lease_eof = True
+            self._close_stream(stream)
+
+    def _dispatch_read_event(self, kind: str, stream: object) -> None:
+        if kind == "stdout":
+            self._read_stdout(stream)
+        elif kind == "stderr":
+            self._read_stderr(stream)
+        elif kind == "lease":
+            self._read_lease(stream)
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_event is None or not self._cancel_event.is_set():
+            return
+        result = self.terminate_tree(
+            deadline=self._monotonic() + _DUPLEX_CLEANUP_SECONDS
+        )
+        raise BoundedDuplexLineProcessCancelledError(
+            "bounded duplex process was cancelled",
+            result=result,
+        )
+
+    def _select(self, deadline: float) -> Tuple[Tuple[object, int], ...]:
+        assert self._selector is not None
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            return ()
+        wait_for = min(_POLL_INTERVAL_SECONDS, remaining)
+        if not self._selector.get_map():
+            time.sleep(wait_for)
+            return ()
+        return tuple(
+            (key, mask) for key, mask in self._selector.select(wait_for)
+        )
+
+    def _take_stdout_line(self) -> Optional[bytes]:
+        newline = self._stdout_buffer.find(b"\n")
+        if newline < 0:
+            return None
+        line = bytes(self._stdout_buffer[:newline])
+        del self._stdout_buffer[: newline + 1]
+        return line
+
+    @staticmethod
+    def _write_result(
+        bytes_written: int,
+        bytes_total: int,
+    ) -> DuplexWriteResult:
+        if bytes_written <= 0:
+            boundary = DuplexWriteBoundary.NONE
+        elif bytes_written >= bytes_total:
+            boundary = DuplexWriteBoundary.COMPLETE
+        else:
+            boundary = DuplexWriteBoundary.PARTIAL
+        return DuplexWriteResult(
+            boundary=boundary,
+            bytes_written=bytes_written,
+            bytes_total=bytes_total,
+        )
+
+    def _record_write_result(
+        self,
+        bytes_written: int,
+        bytes_total: int,
+    ) -> DuplexWriteResult:
+        result = self._write_result(bytes_written, bytes_total)
+        self._last_write_result = result
+        return result
+
+    def write_line(
+        self,
+        payload_without_newline: bytes,
+        *,
+        deadline: float,
+    ) -> DuplexWriteResult:
+        """Write one frame, reporting whether its final newline crossed."""
+
+        if not isinstance(payload_without_newline, bytes):
+            raise TypeError("payload_without_newline must be bytes")
+        if b"\n" in payload_without_newline:
+            raise ValueError("payload_without_newline must not contain a newline")
+        if self._closed or self._started is None or self._stdin_closed:
+            raise RuntimeError("duplex process stdin is closed")
+        deadline = _absolute_deadline(deadline, self._monotonic)
+        self._check_cancelled()
+        assert self._selector is not None
+        process = self._started.process
+        assert process.stdin is not None
+        stream = process.stdin
+        total = len(payload_without_newline) + 1
+        written = 0
+        self._record_write_result(written, total)
+        try:
+            self._selector.register(
+                stream,
+                selectors.EVENT_WRITE,
+                ("stdin", stream),
+            )
+        except KeyError as error:
+            raise RuntimeError("duplex process write is already active") from error
+        try:
+            while written < total:
+                self._check_cancelled()
+                if self._monotonic() >= deadline:
+                    return self._record_write_result(written, total)
+                events = self._select(deadline)
+                for key, _mask in events:
+                    if self._monotonic() >= deadline:
+                        return self._record_write_result(written, total)
+                    kind, selected_stream = key.data
+                    if kind != "stdin":
+                        if self._monotonic() >= deadline:
+                            return self._record_write_result(written, total)
+                        self._dispatch_read_event(kind, selected_stream)
+                        continue
+                    if self._monotonic() >= deadline:
+                        return self._record_write_result(written, total)
+                    if written < len(payload_without_newline):
+                        segment = memoryview(payload_without_newline)[
+                            written : min(
+                                len(payload_without_newline),
+                                written + _CHUNK_SIZE,
+                            )
+                        ]
+                    else:
+                        segment = b"\n"
+                    if self._monotonic() >= deadline:
+                        return self._record_write_result(written, total)
+                    try:
+                        count = os.write(selected_stream.fileno(), segment)
+                    except BlockingIOError:
+                        continue
+                    except (BrokenPipeError, OSError):
+                        self.close_stdin()
+                        return self._record_write_result(written, total)
+                    if count <= 0:
+                        self.close_stdin()
+                        return self._record_write_result(written, total)
+                    written += count
+                    self._record_write_result(written, total)
+            return self._record_write_result(written, total)
+        except BoundedDuplexLineProcessError as error:
+            error.write_result = self._record_write_result(written, total)
+            raise
+        except Exception as error:
+            boundary = self._record_write_result(written, total)
+            raise BoundedDuplexLineProcessError(
+                "bounded duplex write failed",
+                write_result=boundary,
+            ) from error
+        finally:
+            if self._selector is not None:
+                try:
+                    self._selector.unregister(stream)
+                except (KeyError, OSError, ValueError):
+                    pass
+
+    def read_line(self, *, deadline: float) -> Optional[bytes]:
+        """Read one complete line, returning ``None`` only for clean stdout EOF."""
+
+        if self._closed:
+            return None
+        deadline = _absolute_deadline(deadline, self._monotonic)
+        while True:
+            self._check_cancelled()
+            if self._monotonic() >= deadline:
+                raise BoundedDuplexLineProcessTimeoutError(
+                    "bounded duplex read deadline expired"
+                )
+            if self._overflow is not None:
+                raise BoundedDuplexLineProcessOverflowError(
+                    "bounded duplex output limit exceeded"
+                )
+            line = self._take_stdout_line()
+            if line is not None:
+                return line
+            if self._stdout_eof:
+                if self._stdout_buffer:
+                    raise BoundedDuplexLineProcessEOFError(
+                        "bounded duplex stdout ended mid-line"
+                    )
+                return None
+            for key, _mask in self._select(deadline):
+                if self._monotonic() >= deadline:
+                    raise BoundedDuplexLineProcessTimeoutError(
+                        "bounded duplex read deadline expired"
+                    )
+                kind, stream = key.data
+                if kind != "stdin":
+                    if self._monotonic() >= deadline:
+                        raise BoundedDuplexLineProcessTimeoutError(
+                            "bounded duplex read deadline expired"
+                        )
+                    self._dispatch_read_event(kind, stream)
+
+    def close_stdin(self) -> None:
+        """Close child stdin exactly once without affecting output drains."""
+
+        if self._stdin_closed:
+            return
+        self._stdin_closed = True
+        if self._started is None:
+            return
+        stream = self._started.process.stdin
+        if stream is not None:
+            self._close_stream(stream)
+
+    def _completion_observed(self) -> bool:
+        if self._started is None:
+            return True
+        process = self._started.process
+        returncode = process.poll()
+        tracker = self._started.descendant_tracker
+        live_descendants = tracker.sample() if tracker is not None else ()
+        return (
+            returncode is not None
+            and self._stdout_eof
+            and self._stderr_eof
+            and self._lease_eof
+            and not live_descendants
+        )
+
+    def _cleanup_complete(self) -> bool:
+        if self._started is None:
+            return False
+        tracker = self._started.descendant_tracker
+        return (
+            os.name == "posix"
+            and self._lease_eof
+            and (
+                tracker is None
+                or (
+                    tracker.reliable
+                    and not tracker.cleanup_incomplete
+                    and not tracker.sample(force=True)
+                )
+            )
+        )
+
+    def _snapshot_result(self, cleanup_complete: bool) -> DuplexProcessResult:
+        returncode = (
+            None if self._started is None else self._started.process.returncode
+        )
+        return DuplexProcessResult(
+            args=self._arguments,
+            returncode=returncode,
+            stderr=bytes(self._stderr_buffer),
+            stdout_bytes_read=self._stdout_bytes_read,
+            cleanup_complete=cleanup_complete,
+            clean_exit=returncode == 0 and cleanup_complete,
+            overflow=self._overflow,
+        )
+
+    def _finalize(self) -> DuplexProcessResult:
+        if self._result is not None:
+            return self._result
+        assert self._started is not None
+        started = self._started
+        started.signal_scope.block_for_cleanup()
+        returncode = started.process.poll()
+        if returncode is not None:
+            started.ownership.wait(started.process, timeout=0)
+        cleanup_complete = self._cleanup_complete()
+        if not cleanup_complete:
+            started.signal_scope.unblock_after_spawn()
+            return self._snapshot_result(False)
+        try:
+            self._close_all_streams()
+        finally:
+            if self._selector is not None:
+                self._selector.close()
+                self._selector = None
+            started.release()
+            self._closed = True
+        self._result = DuplexProcessResult(
+            args=self._arguments,
+            returncode=returncode,
+            stderr=bytes(self._stderr_buffer),
+            stdout_bytes_read=self._stdout_bytes_read,
+            cleanup_complete=cleanup_complete,
+            clean_exit=returncode == 0 and cleanup_complete,
+            overflow=self._overflow,
+        )
+        return self._result
+
+    def _wait_until(
+        self,
+        deadline: float,
+        *,
+        suppress_output_errors: bool,
+    ) -> bool:
+        while True:
+            if self._completion_observed():
+                return True
+            if self._monotonic() >= deadline:
+                return False
+            try:
+                events = self._select(deadline)
+                for key, _mask in events:
+                    if self._monotonic() >= deadline:
+                        return False
+                    kind, stream = key.data
+                    if kind != "stdin":
+                        if self._monotonic() >= deadline:
+                            return False
+                        self._dispatch_read_event(kind, stream)
+            except (
+                BoundedDuplexLineProcessOverflowError,
+                BoundedDuplexLineProcessEOFError,
+            ):
+                if not suppress_output_errors:
+                    raise
+                self._close_output_streams()
+
+    def wait_clean(self, *, deadline: float) -> DuplexProcessResult:
+        """Wait for normal exit and complete pipe/descendant containment."""
+
+        if self._result is not None:
+            return self._result
+        if self._closed or self._started is None:
+            return self._snapshot_result(False)
+        deadline = _absolute_deadline(deadline, self._monotonic)
+        self._check_cancelled()
+        if self._wait_until(deadline, suppress_output_errors=False):
+            if self._stdout_buffer and b"\n" not in self._stdout_buffer:
+                raise BoundedDuplexLineProcessEOFError(
+                    "bounded duplex stdout ended mid-line"
+                )
+            if self._cleanup_complete():
+                return self._finalize()
+        return self._snapshot_result(False)
+
+    def terminate_tree(self, *, deadline: float) -> DuplexProcessResult:
+        """Close stdin, TERM then KILL the owned group, and reap within deadline."""
+
+        if self._result is not None:
+            return self._result
+        if self._closed or self._started is None:
+            return self._snapshot_result(False)
+        deadline = _absolute_deadline(deadline, self._monotonic)
+        started = self._started
+        started.signal_scope.block_for_cleanup()
+        try:
+            self.close_stdin()
+            remaining = max(0.0, deadline - self._monotonic())
+            term_deadline = min(
+                deadline,
+                self._monotonic() + min(1.0, remaining / 2.0),
+            )
+            started.ownership.terminate(started.process)
+            if (
+                self._wait_until(term_deadline, suppress_output_errors=True)
+                and self._cleanup_complete()
+            ):
+                return self._finalize()
+
+            _kill_process_group(started.process, started.ownership)
+            if (
+                self._wait_until(deadline, suppress_output_errors=True)
+                and self._cleanup_complete()
+            ):
+                return self._finalize()
+
+            if started.process.poll() is not None:
+                self._close_output_streams()
+                self._lease_eof = self._lease_eof or _lease_is_at_eof(
+                    started.lease
+                )
+            return self._snapshot_result(False)
+        finally:
+            if not self._closed:
+                started.signal_scope.unblock_after_spawn()
+
+    def cancel(self, *, deadline: float) -> DuplexProcessResult:
+        """Cancel process ownership without adding protocol-specific frames."""
+
+        return self.terminate_tree(deadline=deadline)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        try:
+            self.terminate_tree(
+                deadline=self._monotonic() + _DUPLEX_CLEANUP_SECONDS
+            )
+        finally:
+            if not self._closed and self._started is not None:
+                self._started.signal_scope.block_for_cleanup()
+                _force_cleanup_process(
+                    self._started.process,
+                    self._started.ownership,
+                )
+                self._close_all_streams()
+                if self._selector is not None:
+                    self._selector.close()
+                    self._selector = None
+                self._started.release()
+                self._closed = True
+                self._result = self._snapshot_result(False)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            pass
+
+
 __all__ = [
+    "AcpProcessIdentity",
+    "BoundedDuplexLineProcess",
+    "BoundedDuplexLineProcessCancelledError",
+    "BoundedDuplexLineProcessEOFError",
+    "BoundedDuplexLineProcessError",
+    "BoundedDuplexLineProcessOverflowError",
+    "BoundedDuplexLineProcessTimeoutError",
     "BoundedLineStream",
     "BoundedLineStreamCancelledError",
     "BoundedLineStreamEndReason",
@@ -1667,10 +2466,16 @@ __all__ = [
     "BoundedLineStreamTimeoutError",
     "BoundedProcessResult",
     "DescendantContainmentUnsupportedError",
+    "DuplexProcessIdentity",
+    "DuplexProcessResult",
+    "DuplexWriteBoundary",
+    "DuplexWriteResult",
+    "MAX_DUPLEX_STDOUT_BYTES",
     "MAX_STREAM_INPUT_BYTES",
     "MAX_STREAM_LINE_BYTES",
     "MAX_STREAM_STDERR_BYTES",
     "MAX_TIMEOUT_SECONDS",
+    "WriteResult",
     "bounded_execution_signal_guard",
     "run_bounded",
 ]

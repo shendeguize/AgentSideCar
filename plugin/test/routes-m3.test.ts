@@ -62,6 +62,8 @@ function sidecarEv(sessionId: string, seq: number, over: Partial<SidecarEventFac
 /** Capturing in-process dsh feed: tests emit through it after start(). */
 class FakeDshFeed implements DshEventFace {
   private readonly handlers = new Map<string, Set<(...args: unknown[]) => void>>()
+  private readonly resident = new Map<string, DshSessionFace>()
+  readonly getCalls: string[] = []
 
   on(event: string, handler: (...args: never[]) => void): () => void {
     let set = this.handlers.get(event)
@@ -76,8 +78,27 @@ class FakeDshFeed implements DshEventFace {
   }
 
   emit(event: string, ...args: unknown[]): void {
+    const session = args[0]
+    if (event === 'session/created' && isDshSession(session)) {
+      this.resident.set(session.id, session)
+    } else if (event === 'session/disposed' && isDshSession(session)) {
+      this.resident.delete(session.id)
+    }
     for (const handler of this.handlers.get(event) ?? []) handler(...args)
   }
+
+  seed(session: DshSessionFace): void {
+    this.resident.set(session.id, session)
+  }
+
+  get(sessionId: string): DshSessionFace | undefined {
+    this.getCalls.push(sessionId)
+    return this.resident.get(sessionId)
+  }
+}
+
+function isDshSession(value: unknown): value is DshSessionFace {
+  return typeof value === 'object' && value !== null && typeof (value as { id?: unknown }).id === 'string'
 }
 
 function dshSession(
@@ -228,6 +249,9 @@ interface TimelineReply {
   cursor: { seq: number | null; ts: number } | null
   nextCursor: string | null
   sources: Record<string, boolean>
+  sourceOutcomes: Record<string, string>
+  degraded: boolean
+  reason: string | null
 }
 
 // ---------------------------------------------------------------------------
@@ -271,8 +295,12 @@ describe('GET session/<id> with fusion', () => {
     expect(unified.origin).toBe('sidecar')
     const timeline = reply.json.timeline as unknown as TimelineReply
     expect(timeline.entries.map((e) => e.seq)).toEqual([1, 2])
+    expect((timeline as unknown as Record<string, unknown>).events).toBeUndefined()
     expect(timeline.nextCursor).toBeNull()
     expect(timeline.sources.sidecarBuffer).toBe(true)
+    expect(timeline.sourceOutcomes.buffer).toBe('succeeded')
+    expect(timeline.degraded).toBe(false)
+    expect(timeline.reason).toBeNull()
   })
 
   it('resolves a dsh-live session the sidecar has not seen (session: null, unified: dsh-live)', async () => {
@@ -293,6 +321,24 @@ describe('GET session/<id> with fusion', () => {
     const timeline = reply.json.timeline as unknown as TimelineReply
     expect(timeline.entries.map((e) => e.kind)).toEqual(['message/user'])
     expect(timeline.sources.dshLive).toBe(true)
+  })
+
+  it('late-binds a resident dsh session before deciding the detail target is missing', async () => {
+    const feed = new FakeDshFeed()
+    const resident = dshSession('late-live', [
+      { type: 'agent/inbox/spliced', seq: 8, time: 1_000_000_800, data: {} },
+    ])
+    feed.seed(resident)
+    const h = await startHarness(true, { feed })
+
+    const reply = await get(h.base, `${API_PREFIX}/session/late-live`)
+
+    expect(reply.status).toBe(200)
+    expect(feed.getCalls).toEqual(['late-live'])
+    expect((reply.json.unified as { sessionId: string }).sessionId).toBe('late-live')
+    const timeline = reply.json.timeline as unknown as TimelineReply
+    expect(timeline.entries.map((entry) => entry.seq)).toEqual([8])
+    expect(timeline.sourceOutcomes.liveSession).toBe('succeeded')
   })
 
   it('404s an id neither the store nor fusion knows', async () => {
@@ -372,6 +418,64 @@ describe('GET session/<id>/timeline', () => {
     expect(page.entries.map((e) => e.seq)).toEqual([7])
     expect(page.sources.sidecarReplay).toBe(false)
     expect(page.sources.sidecarBuffer).toBe(true)
+    expect(page.sourceOutcomes.sidecarReplay).toBe('replay_unsupported')
+    expect(page.degraded).toBe(true)
+    expect(page.reason).toBe('partial_source_failure')
+  })
+
+  it('returns a healthy empty entries page without inventing timeline.events', async () => {
+    const engine: SessionQueryFace = {
+      traceSession: async () => {
+        throw new Error('unused')
+      },
+      readSession: async () => ({ events: [] }),
+      searchSessions: async () => ({ items: [] }),
+    }
+    const replay: SidecarReplayFace = { replay: async () => [] }
+    const h = await startHarness(true, { getSessionQuery: () => engine, replay })
+    h.store.applySnapshot([row('empty')])
+
+    const reply = await get(h.base, `${API_PREFIX}/session/empty/timeline`)
+    const page = reply.json as unknown as TimelineReply & { events?: unknown }
+
+    expect(reply.status).toBe(200)
+    expect(page.entries).toEqual([])
+    expect(page.events).toBeUndefined()
+    expect(page.sourceOutcomes.sessionQuery).toBe('succeeded')
+    expect(page.sourceOutcomes.sidecarReplay).toBe('succeeded')
+    expect(page.degraded).toBe(false)
+    expect(page.reason).toBeNull()
+  })
+
+  it('keeps a board-known target 200 when all usable sources fail, with redacted diagnostics', async () => {
+    const sensitive = '/Users/private/transcript session-id prompt-secret'
+    const engine: SessionQueryFace = {
+      traceSession: async () => {
+        throw new Error('unused')
+      },
+      readSession: async () => {
+        throw new Error(`read failed ${sensitive}`)
+      },
+      searchSessions: async () => ({ items: [] }),
+    }
+    const replay: SidecarReplayFace = {
+      replay: async () => {
+        throw new Error(`daemon failed ${sensitive}`)
+      },
+    }
+    const h = await startHarness(true, { getSessionQuery: () => engine, replay })
+    h.store.applySnapshot([row('known-empty')])
+
+    const reply = await get(h.base, `${API_PREFIX}/session/known-empty/timeline`)
+    const page = reply.json as unknown as TimelineReply
+
+    expect(reply.status).toBe(200)
+    expect(page.entries).toEqual([])
+    expect(page.degraded).toBe(true)
+    expect(page.reason).toBe('all_sources_failed')
+    expect(page.sourceOutcomes.sessionQuery).toBe('source_failed')
+    expect(page.sourceOutcomes.sidecarReplay).toBe('source_failed')
+    expect(JSON.stringify(reply.json)).not.toContain(sensitive)
   })
 
   it('decodes percent-encoded ids in the <id>/timeline split', async () => {

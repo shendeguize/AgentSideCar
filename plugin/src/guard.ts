@@ -32,11 +32,20 @@ export type GuardVerdict =
   | { ok: true }
   | { ok: false; status: number; reason: string }
 
-/** The minimal request surface the guard reads; mock-friendly for tests. */
+/**
+ * The minimal request surface the guard reads; mock-friendly for tests.
+ *
+ * `rawHeaders` is optional because host-framework adapters may expose only
+ * normalized headers. Real Node IncomingMessages carry it, and callers should
+ * preserve it so duplicate security-sensitive fields can be counted before
+ * Node's first-wins/join behavior loses information.
+ */
 export type GuardableRequest = Pick<
   IncomingMessage,
   'method' | 'headers' | 'socket' | 'url'
->
+> & {
+  rawHeaders?: readonly string[]
+}
 
 const OK: GuardVerdict = { ok: true }
 
@@ -53,10 +62,10 @@ const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH'])
  */
 export function isLoopbackAddress(addr: string | undefined): boolean {
   if (!addr) return false
-  let candidate = addr.trim().toLowerCase()
-  if (candidate.startsWith('::ffff:')) candidate = candidate.slice('::ffff:'.length)
-  if (candidate === '::1') return true
-  return isLoopbackIpv4(candidate)
+  const candidate = addr.trim().toLowerCase()
+  if (isLoopbackIpv4(candidate)) return true
+  const canonical = canonicalizeIpv6(candidate)
+  return canonical !== undefined && canonicalIpv6IsLoopback(canonical)
 }
 
 /** Strict dotted-quad check for `127.0.0.0/8`. */
@@ -69,21 +78,49 @@ function isLoopbackIpv4(candidate: string): boolean {
   return parts[0] === '127'
 }
 
-/** Parsed `host[:port]` authority; `host` is lowercased, IPv6 keeps brackets. */
+/**
+ * Canonicalize an IPv6 literal using Node's WHATWG URL parser. The returned
+ * value has no brackets (for example long-form loopback becomes `::1`).
+ */
+function canonicalizeIpv6(candidate: string): string | undefined {
+  try {
+    const hostname = new URL(`http://[${candidate}]/`).hostname.toLowerCase()
+    if (!hostname.startsWith('[') || !hostname.endsWith(']')) return undefined
+    return hostname.slice(1, -1)
+  } catch {
+    return undefined
+  }
+}
+
+/** True for canonical `::1` and the existing IPv4-mapped loopback contract. */
+function canonicalIpv6IsLoopback(candidate: string): boolean {
+  if (candidate === '::1') return true
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(candidate)
+  if (mapped === null) return false
+  const high = Number.parseInt(mapped[1]!, 16)
+  return high >>> 8 === 127
+}
+
+/** Parsed `host[:port]` authority in canonical tuple form. */
 interface Authority {
+  /** Lowercase hostname; IPv6 is WHATWG-canonical and bracketed. */
   host: string
-  /** Explicit port digits, or undefined when the header omitted the port. */
-  port: string | undefined
+  /** Normalized decimal port, or undefined when the header omitted it. */
+  port: number | undefined
+}
+
+/** Commas, arrays and line breaks make a normalized-header fallback ambiguous. */
+function headerValueIsAmbiguous(value: string): boolean {
+  return value.includes(',') || /[\r\n]/.test(value)
 }
 
 /**
  * Parse an authority string (`Host` header shape). Returns undefined for
  * anything malformed: empty, bad brackets, non-numeric or out-of-range port,
- * stray colons. Node keeps only the first `Host` header on duplicates, so a
- * single string is the full input space here.
+ * stray colons, or list/newline ambiguity.
  */
 function parseAuthority(raw: string | undefined): Authority | undefined {
-  if (typeof raw !== 'string') return undefined
+  if (typeof raw !== 'string' || headerValueIsAmbiguous(raw)) return undefined
   const value = raw.trim().toLowerCase()
   if (!value) return undefined
 
@@ -92,7 +129,9 @@ function parseAuthority(raw: string | undefined): Authority | undefined {
   if (value.startsWith('[')) {
     const close = value.indexOf(']')
     if (close <= 1) return undefined
-    host = value.slice(0, close + 1)
+    const canonical = canonicalizeIpv6(value.slice(1, close))
+    if (canonical === undefined) return undefined
+    host = `[${canonical}]`
     const rest = value.slice(close + 1)
     if (rest) {
       if (!rest.startsWith(':')) return undefined
@@ -108,21 +147,30 @@ function parseAuthority(raw: string | undefined): Authority | undefined {
       if (portPart.includes(':')) return undefined // unbracketed IPv6 in Host is invalid
     }
     if (!host || /[\s/@#?\\]/.test(host)) return undefined
+    if (isLoopbackIpv4(host)) {
+      host = host
+        .split('.')
+        .map((part) => String(Number(part)))
+        .join('.')
+    }
   }
 
+  let port: number | undefined
   if (portPart !== undefined) {
-    if (!/^\d{1,5}$/.test(portPart)) return undefined
-    const num = Number(portPart)
-    if (num < 1 || num > 65535) return undefined
+    if (!/^\d+$/.test(portPart)) return undefined
+    const significant = portPart.replace(/^0+/, '') || '0'
+    if (significant.length > 5) return undefined
+    port = Number(significant)
+    if (port < 1 || port > 65535) return undefined
   }
-  return { host, port: portPart }
+  return { host, port }
 }
 
 /** True when a parsed authority host names loopback. */
 function authorityIsLoopback(host: string): boolean {
   if (host === 'localhost') return true
   if (host.startsWith('[') && host.endsWith(']')) {
-    return isLoopbackAddress(host.slice(1, -1))
+    return canonicalIpv6IsLoopback(host.slice(1, -1))
   }
   return isLoopbackIpv4(host)
 }
@@ -140,26 +188,27 @@ export function hostIsLoopback(hostHeader: string | undefined): boolean {
 }
 
 /**
- * Same-origin check between an `Origin` header value and the request's
- * `Host` authority. Scheme may be http or https; host must match exactly
+ * Same-origin check between an `Origin` header value and the cleartext HTTP
+ * request's `Host` authority. The scheme must be http; host must match exactly
  * (WHATWG-normalized: lowercase, IPv6 canonical bracketed form) and the
- * effective ports must agree. A `Host` without a port accepts either
- * scheme-default origin port (80/443), covering default-port elision.
+ * effective ports must agree. A portless `Host` has effective port 80.
  */
 function originMatchesAuthority(origin: string, authority: Authority): boolean {
+  if (headerValueIsAmbiguous(origin)) return false
   let url: URL
   try {
     url = new URL(origin)
   } catch {
     return false // includes the opaque `Origin: null`
   }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+  if (url.protocol !== 'http:') return false
 
   if (url.hostname.toLowerCase() !== authority.host) return false
 
-  const originPort = url.port || (url.protocol === 'https:' ? '443' : '80')
-  if (authority.port !== undefined) return originPort === authority.port
-  return originPort === '80' || originPort === '443'
+  const originPort = url.port === '' ? 80 : Number(url.port)
+  if (!Number.isInteger(originPort) || originPort < 1 || originPort > 65535) return false
+  const authorityPort = authority.port ?? 80
+  return originPort === authorityPort
 }
 
 /** Reject when any (possibly `, `-joined multi-value) entry is `cross-site`. */
@@ -171,35 +220,66 @@ function declaresCrossSite(secFetchSite: string | string[] | undefined): boolean
   )
 }
 
+/** Return all case-insensitive raw-header values, or null for a malformed list. */
+function rawHeaderValues(rawHeaders: readonly string[], wantedName: string): string[] | null {
+  if (rawHeaders.length % 2 !== 0) return null
+  const values: string[] = []
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index]
+    const value = rawHeaders[index + 1]
+    if (name === undefined || value === undefined) return null
+    if (name.toLowerCase() === wantedName) values.push(value)
+  }
+  return values
+}
+
+type ReachabilityRequest = Pick<GuardableRequest, 'headers' | 'socket' | 'rawHeaders'>
+
 /** Layers 1-3: remote loopback, Host authority, Origin/sec-fetch-site. */
-function guardReachability(req: {
-  headers: IncomingMessage['headers']
-  socket: IncomingMessage['socket']
-}): GuardVerdict {
+function guardReachability(req: ReachabilityRequest): GuardVerdict {
   // Layer 1 — transport: only loopback peers, even if dsh binds 0.0.0.0.
   if (!isLoopbackAddress(req.socket?.remoteAddress ?? undefined)) {
     return forbid('remote_not_loopback')
   }
 
-  // Layer 2 — Host must be a loopback authority (DNS-rebinding defence).
-  const hostHeader = req.headers.host
-  const authority =
-    typeof hostHeader === 'string' ? parseAuthority(hostHeader) : undefined
+  // Layer 2 — exactly one case-insensitive raw Host is required when Node's
+  // lossless header list is available. The normalized fallback rejects
+  // arrays/list joins/newlines instead of relying on first-wins behavior.
+  let hostHeader: string | undefined
+  if (req.rawHeaders !== undefined) {
+    const values = rawHeaderValues(req.rawHeaders, 'host')
+    if (values === null || values.length !== 1) return forbid('host_not_loopback')
+    hostHeader = values[0]
+  } else {
+    const normalized = req.headers.host
+    hostHeader =
+      typeof normalized === 'string' && !headerValueIsAmbiguous(normalized)
+        ? normalized
+        : undefined
+  }
+  const authority = parseAuthority(hostHeader)
   if (!authority || !authorityIsLoopback(authority.host)) {
     return forbid('host_not_loopback')
   }
 
-  // Layer 3 — Origin, when present, must be same-origin with Host.
-  const origin = req.headers.origin
-  if (origin !== undefined) {
-    // Duplicate Origin headers (joined or arrayed by Node) never parse as a
-    // single valid origin — fail closed.
-    if (Array.isArray(origin) || !originMatchesAuthority(origin, authority)) {
-      return forbid('origin_mismatch')
-    }
-  }
+  // Layer 3 — explicit cross-site metadata takes precedence over Origin
+  // validation, then Origin (when present) must be same-origin with Host.
   if (declaresCrossSite(req.headers['sec-fetch-site'])) {
     return forbid('cross_site')
+  }
+
+  let origin: string | undefined
+  if (req.rawHeaders !== undefined) {
+    const values = rawHeaderValues(req.rawHeaders, 'origin')
+    if (values === null || values.length > 1) return forbid('origin_mismatch')
+    origin = values[0]
+  } else {
+    const normalized = req.headers.origin
+    if (Array.isArray(normalized)) return forbid('origin_mismatch')
+    origin = normalized
+  }
+  if (origin !== undefined && !originMatchesAuthority(origin, authority)) {
+    return forbid('origin_mismatch')
   }
 
   return OK
@@ -268,7 +348,9 @@ export function guardWriteAction(
  * A failing verdict means the caller must destroy the socket.
  */
 export function guardUpgrade(
-  req: Pick<IncomingMessage, 'headers' | 'socket'>,
+  req: Pick<IncomingMessage, 'headers' | 'socket'> & {
+    rawHeaders?: readonly string[]
+  },
 ): GuardVerdict {
   return guardReachability(req)
 }

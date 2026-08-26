@@ -30,6 +30,143 @@ window.__ModuleLoader__.load({
 		*/
 		/** Route namespace; must mirror routes.ts `API_PREFIX` (pinned by test). */
 		const API_PREFIX = "/plugins/agent-sidecar/api";
+		const INJECT_INELIGIBILITY_REASONS = /* @__PURE__ */ new Set([
+			"unsupported_agent",
+			"working_session",
+			"dead_session",
+			"child_session",
+			"remote_session",
+			"invalid_session",
+			"target_dead"
+		]);
+		/** Fail-closed legacy/malformed-host fallback; never infer eligibility locally. */
+		const INVALID_INJECT_ELIGIBILITY = Object.freeze({
+			allowed: false,
+			reason: "invalid_session"
+		});
+		function isRecord(value) {
+			return typeof value === "object" && value !== null && !Array.isArray(value);
+		}
+		/**
+		* Validate an untrusted host verdict. Only the exact positive tuple
+		* `{allowed:true, reason:"eligible"}` opens the gate.
+		*/
+		function normalizeInjectEligibility(value) {
+			if (!isRecord(value)) return INVALID_INJECT_ELIGIBILITY;
+			if (value["allowed"] === true && value["reason"] === "eligible") return {
+				allowed: true,
+				reason: "eligible"
+			};
+			const reason = value["reason"];
+			if (value["allowed"] === false && typeof reason === "string" && INJECT_INELIGIBILITY_REASONS.has(reason)) return {
+				allowed: false,
+				reason
+			};
+			return INVALID_INJECT_ELIGIBILITY;
+		}
+		/**
+		* Read the current verdict while retaining fail-closed compatibility with
+		* pre-verdict hosts. Camel-case wins when explicitly present; malformed
+		* values never fall through to another field or to a local allow-list.
+		*/
+		function sessionInjectEligibility(session, expected) {
+			if (session === null || session === void 0) return INVALID_INJECT_ELIGIBILITY;
+			if (expected?.agent !== void 0 && session.agent !== expected.agent || expected?.sessionId !== void 0 && session.session_id !== expected.sessionId) return INVALID_INJECT_ELIGIBILITY;
+			const record = session;
+			return normalizeInjectEligibility(Object.prototype.hasOwnProperty.call(record, "injectEligibility") ? record["injectEligibility"] : record["inject_eligibility"]);
+		}
+		/** Merge the global capability gate with the target verdict, global first. */
+		function injectBlockReason(injectEnabled, eligibility) {
+			if (!injectEnabled) return "inject_disabled";
+			const normalized = normalizeInjectEligibility(eligibility);
+			return normalized.allowed ? null : normalized.reason;
+		}
+		const TIMELINE_SOURCE_KEYS = [
+			"liveSession",
+			"sessionQuery",
+			"sidecarReplay",
+			"buffer"
+		];
+		const TIMELINE_SOURCE_OUTCOMES = /* @__PURE__ */ new Set([
+			"succeeded",
+			"unavailable",
+			"not_found",
+			"replay_unsupported",
+			"source_failed"
+		]);
+		const TIMELINE_FAILURE_OUTCOMES = /* @__PURE__ */ new Set(["replay_unsupported", "source_failed"]);
+		const LEGACY_TIMELINE_HEALTH = Object.freeze({
+			kind: "healthy",
+			legacy: true,
+			summary: null
+		});
+		const UNVERIFIED_TIMELINE_HEALTH = Object.freeze({
+			kind: "unverified",
+			legacy: false,
+			summary: null
+		});
+		function timelineSourceOutcomes(value) {
+			if (!isRecord(value)) return null;
+			const outcomes = {};
+			for (const key of TIMELINE_SOURCE_KEYS) {
+				const outcome = value[key];
+				if (typeof outcome !== "string" || !TIMELINE_SOURCE_OUTCOMES.has(outcome)) return null;
+				outcomes[key] = outcome;
+			}
+			return outcomes;
+		}
+		function timelineSourceSummary(outcomes) {
+			const summary = {
+				available: 0,
+				unavailable: 0,
+				failed: 0
+			};
+			for (const outcome of Object.values(outcomes)) if (outcome === "succeeded") summary.available += 1;
+			else if (TIMELINE_FAILURE_OUTCOMES.has(outcome)) summary.failed += 1;
+			else summary.unavailable += 1;
+			return summary;
+		}
+		/**
+		* Validate timeline health fields on an untrusted page object.
+		*
+		* A page from an older host has none of the three fields and remains a
+		* healthy legacy page. Any partial tuple, unknown enum, or inconsistent
+		* aggregate fails closed to `unverified` without exposing the bad value.
+		*/
+		function normalizeTimelineHealth(page) {
+			if (!isRecord(page)) return UNVERIFIED_TIMELINE_HEALTH;
+			const hasOutcomes = Object.prototype.hasOwnProperty.call(page, "sourceOutcomes");
+			const hasDegraded = Object.prototype.hasOwnProperty.call(page, "degraded");
+			const hasReason = Object.prototype.hasOwnProperty.call(page, "reason");
+			if (!hasOutcomes && !hasDegraded && !hasReason) return LEGACY_TIMELINE_HEALTH;
+			if (!hasOutcomes || !hasDegraded || !hasReason) return UNVERIFIED_TIMELINE_HEALTH;
+			const outcomes = timelineSourceOutcomes(page["sourceOutcomes"]);
+			const entries = page["entries"];
+			const degraded = page["degraded"];
+			const reason = page["reason"];
+			if (outcomes === null || !Array.isArray(entries) || typeof degraded !== "boolean") return UNVERIFIED_TIMELINE_HEALTH;
+			const values = Object.values(outcomes);
+			const failures = values.filter((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome));
+			const usable = values.filter((outcome) => outcome !== "unavailable" && outcome !== "not_found");
+			const allSourcesFailed = entries.length === 0 && usable.length > 0 && usable.every((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome));
+			const summary = timelineSourceSummary(outcomes);
+			if (!degraded && reason === null && failures.length === 0) return {
+				kind: "healthy",
+				legacy: false,
+				summary
+			};
+			if (degraded && reason === "all_sources_failed" && allSourcesFailed) return {
+				kind: "failed",
+				legacy: false,
+				summary
+			};
+			if (degraded && reason === "partial_source_failure" && failures.length > 0 && !allSourcesFailed) return {
+				kind: "partial",
+				legacy: false,
+				summary
+			};
+			return UNVERIFIED_TIMELINE_HEALTH;
+		}
 		/**
 		* Single normalized failure shape for every request path, so the UI has
 		* one catch surface. `reason` carries the server `{reason}` envelope for
@@ -121,6 +258,13 @@ window.__ModuleLoader__.load({
 			return await request(`${API_PREFIX}/state`, { method: "GET" }, opts);
 		}
 		/**
+		* `GET <prefix>/session/<id>` — single-session detail. Unknown ids reject
+		* with an ApiError carrying the server's `session_not_found` reason.
+		*/
+		async function fetchSession(sessionId, opts = {}) {
+			return await request(`${API_PREFIX}/session/${encodeURIComponent(sessionId)}`, { method: "GET" }, opts);
+		}
+		/**
 		* `POST <prefix>/action` — transport layer only: the envelope is passed
 		* through verbatim, failures are normalized, and there is deliberately NO
 		* retry here — requestId idempotency and the `delivery:unknown` no-retry
@@ -148,6 +292,7 @@ window.__ModuleLoader__.load({
 			"settings.expand": "展开",
 			"settings.collapse": "收起",
 			"settings.invalidNumber": "请输入不小于 {min} 的整数",
+			"settings.liveEffectNote": "本节设置保存后即时生效,无需重载插件或重启 DSH。",
 			"settings.sectionDaemon": "daemon 生命周期",
 			"settings.daemonPolicyLabel": "托管策略",
 			"settings.daemonPolicyHint": "adopt-or-host=探测并领养既有 daemon,否则自行拉起;adopt-only=只领养绝不拉起;off=不管理生命周期(仍只读对账既有 daemon 的数据)。",
@@ -169,16 +314,19 @@ window.__ModuleLoader__.load({
 			"settings.daemonDeferNote": "daemon 由系统服务(LaunchAgent)托管;插件只探测等待,不重复拉起,也不会终止它。",
 			"settings.daemonFailedNote": "连续托管失败已达熔断阈值;看板降级为最后快照。排查 sidecar 命令后可点击重试。",
 			"settings.daemonRetry": "重试",
+			"settings.daemonProfileNote": "此处只读:daemon 生命周期参数以 profile 的 cordis.patch 插件行 config 为准。Settings 修改不会驱动 supervisor;请编辑 profile patch 并重启 DSH。",
 			"settings.sectionSidecar": "sidecar 调用",
 			"settings.sidecarCommandLabel": "可执行命令",
 			"settings.sidecarCommandHint": "PATH 名、绝对路径或空格分隔的多段命令(如 python3 /path/agent-sidecar.pyz);插件绝不代装 sidecar。",
 			"settings.sidecarRuntimeDirLabel": "运行时目录",
 			"settings.sidecarRuntimeDirHint": "留空使用默认 ~/.agent_sidecar(尊重 AGENT_SIDECAR_RUNTIME_DIR 环境变量);非空时经环境变量传给受托管的 daemon。",
+			"settings.sidecarProfileNote": "此处只读:sidecar 命令与运行时目录以 profile 的 cordis.patch 插件行 config 为准。Settings 修改不会驱动 daemon 调用;请编辑 profile patch 并重启 DSH。",
 			"settings.sectionStream": "数据流对账",
 			"settings.streamActiveMsLabel": "活跃对账周期(毫秒)",
 			"settings.streamActiveMsHint": "有会话工作中时的 status 快照周期。",
 			"settings.streamIdleMsLabel": "空闲对账周期(毫秒)",
 			"settings.streamIdleMsHint": "无会话工作时的 status 快照周期。",
+			"settings.streamProfileNote": "此处只读:数据流对账周期以 profile 的 cordis.patch 插件行 config 为准。Settings 修改不会驱动 reconciler;请编辑 profile patch 并重启 DSH。",
 			"settings.sectionInject": "消息注入",
 			"settings.injectEnabledLabel": "启用注入",
 			"settings.injectEnabledHint": "关闭后注入面板为只读禁用态,写接口在服务端同步拒绝。",
@@ -190,6 +338,15 @@ window.__ModuleLoader__.load({
 			"settings.sectionAnalysis": "旁路分析",
 			"settings.analysisEnabledLabel": "启用 AI 旁路分析",
 			"settings.analysisEnabledHint": "按需拉起 dsh 分析会话解读被观测会话(消耗模型 token,默认关闭)。",
+			"settings.analysisProviderLabel": "分析 provider",
+			"settings.analysisProviderHint": "两个路由字段都留空时使用宿主默认模型;仅当 model 也非空时才使用显式 provider。",
+			"settings.analysisProviderPlaceholder": "宿主默认",
+			"settings.analysisModelLabel": "分析 model",
+			"settings.analysisModelHint": "两个路由字段都留空时使用宿主默认模型;仅当 provider 也非空时才使用显式 model。",
+			"settings.analysisModelPlaceholder": "宿主默认",
+			"settings.analysisRouteHostDefault": "当前路由:宿主默认模型(provider 与 model 均为空)。",
+			"settings.analysisRouteExplicit": "当前路由:显式 {provider} / {model}。",
+			"settings.analysisRoutePartial": "provider 与 model 必须同时留空或同时填写。请补全这一对或全部清空;保存已禁用。",
 			"settings.sectionUi": "看板界面",
 			"settings.uiTimeWindowHoursLabel": "会话时间窗(小时)",
 			"settings.uiTimeWindowHoursHint": "看板只显示该时间窗内活动过的会话。",
@@ -198,6 +355,7 @@ window.__ModuleLoader__.load({
 			"settings.sectionSkill": "skill 模式",
 			"settings.skillProvideLabel": "内嵌提供 skill",
 			"settings.skillProvideHint": "经 registerProvider 向 dsh 提供 agent-sidecar skill(M4 启用;重启后生效)。",
+			"settings.skillRestartNote": "skill.provide 在插件加载时从 profile 的 cordis.patch 读取。请编辑 profile patch,然后重载插件或重启 DSH;Settings 修改不会重新注册 skill。",
 			"inject.title": "注入消息",
 			"inject.confirmTitle": "确认注入",
 			"inject.close": "关闭",
@@ -220,6 +378,15 @@ window.__ModuleLoader__.load({
 			"inject.auditNote": "本次注入会被记入 sidecar 审计日志(含字节数与内容指纹,不含消息明文)。",
 			"inject.prepare": "准备注入",
 			"inject.preparing": "校验中…",
+			"inject.kimiTitle": "安全恢复",
+			"inject.kimiConfirmTitle": "确认安全恢复",
+			"inject.kimiMessagePlaceholder": "输入安全恢复消息(上限 16 KiB;请勿粘贴密钥等敏感内容)",
+			"inject.kimiActionLabel": "Kimi 操作",
+			"inject.kimiModeLabel": "安全恢复",
+			"inject.kimiModeHint": "将启动独立的 Kimi ACP 进程并通过该进程恢复会话；不会附加到现有终端，也不会 steer 现有终端。",
+			"inject.kimiAuditNote": "本次安全恢复会被记入 sidecar 审计日志(含字节数与内容指纹,不含消息明文)。",
+			"inject.kimiPrepare": "准备安全恢复",
+			"inject.kimiPreparing": "校验中…",
 			"inject.planTargetLabel": "目标现状",
 			"inject.planStatus": "当前状态:{status}",
 			"inject.statusObservedNote": "状态为从持久化数据推断的观察值,可能滞后。",
@@ -228,18 +395,28 @@ window.__ModuleLoader__.load({
 			"inject.countdown": "确认令牌 {seconds} 秒后过期",
 			"inject.confirmExecute": "确认注入",
 			"inject.executing": "注入中…",
+			"inject.kimiConfirmExecute": "开始安全恢复",
+			"inject.kimiExecuting": "正在启动安全恢复…",
 			"inject.cancel": "取消",
 			"inject.tokenExpired": "确认已超时,令牌失效;请重新准备注入。",
 			"inject.resultDelivered": "已投递:消息已注入目标会话。",
 			"inject.resultFailed": "注入失败。",
 			"inject.resultUnknown": "结果未知:消息可能已投递。请勿重试;请前往目标会话核对后再决定下一步。",
 			"inject.resultReplayed": "幂等重放:返回的是此前同一请求的结果,未发生二次注入。",
+			"inject.kimiResultUnknown": "Kimi 0.38 已完成本次安全恢复，但内容的送达状态无法证明。请勿自动或手工盲目重试相同内容。",
+			"inject.kimiResultFailed": "提示词发送前已拒绝：未向 Kimi 发送消息。",
+			"inject.kimiResultReplayed": "安全重放：这是同一请求的缓存结果；未启动新的 Kimi ACP 进程，也未再次发送内容。",
 			"inject.reprepare": "重新准备",
 			"inject.observeListen": "开启监听观察反应",
 			"inject.errInjectDisabled": "注入功能已在服务端关闭;请在设置中开启注入。",
 			"inject.errInvalidMessage": "消息未通过服务端校验。",
 			"inject.errTargetNotFound": "目标会话不存在或已离开观测范围。",
 			"inject.errTargetDead": "目标会话已结束(dead),无法注入。",
+			"inject.errWorkingSession": "该外部 agent 会话正在工作;仅 waiting 或 idle 状态可注入。",
+			"inject.kimiErrWorkingSession": "该 Kimi 会话正在工作；仅 waiting 或 idle 状态可进行安全恢复。",
+			"inject.errChildSession": "Agent Sidecar 不允许注入外部 agent 的子会话或 sidechain 会话。",
+			"inject.errRemoteSession": "远端会话不能从当前本机 host 注入。",
+			"inject.errInvalidSession": "host 未提供有效的目标注入资格判定;注入保持禁用。请更新或重启 host 后重新打开该会话。",
 			"inject.errTooManyPending": "待确认的注入请求过多,请稍后再试。",
 			"inject.errTokenMissing": "确认令牌缺失或未被签发;请重新准备。",
 			"inject.errTokenExpired": "确认令牌已过期;请重新准备。",
@@ -251,6 +428,7 @@ window.__ModuleLoader__.load({
 			"inject.errAborted": "请求已取消。",
 			"inject.errNetwork": "网络错误,请求未能送达。",
 			"inject.errParse": "服务端响应无法解析。",
+			"inject.errUnknown": "请求因未知原因失败。",
 			"inject.errGeneric": "请求失败({code})。",
 			"board.viewBoard": "会话看板",
 			"board.viewProjects": "项目视图",
@@ -289,11 +467,15 @@ window.__ModuleLoader__.load({
 			"board.topbar.dismiss": "知道了",
 			"board.topbar.showDead": "显示已结束",
 			"board.topbar.timeWindow": "时间窗",
+			"board.topbar.agentFilter": "Agent",
+			"board.topbar.agentFilterAria": "按 agent 类型过滤会话",
+			"board.topbar.allAgents": "全部 agent",
 			"board.topbar.countWorking": "{n} 工作中",
 			"board.topbar.countWaiting": "{n} 等待中",
 			"board.topbar.countTotal": "共 {n} 个会话",
 			"board.topbar.filterByStatusTitle": "只看「{label}」的会话",
 			"board.topbar.clearStatusFilterTitle": "取消状态过滤,显示全部会话",
+			"board.states.loading": "正在加载首个 sidecar 快照…",
 			"board.group.collapseTitle": "收起该分组",
 			"board.group.expandTitle": "展开该分组",
 			"board.group.showAll": "展开全部 {n} 个会话",
@@ -341,6 +523,7 @@ window.__ModuleLoader__.load({
 			"detail.sources.sidecarReplay": "sidecar 重放",
 			"detail.sources.sidecarBuffer": "sidecar 缓冲",
 			"detail.sources.none": "来源未知",
+			"detail.sources.healthSummary": "{available} 个可用 · {unavailable} 个不可用 · {failed} 个失败",
 			"detail.kind.user": "用户消息",
 			"detail.kind.assistant": "助手回复",
 			"detail.kind.thinking": "思考",
@@ -364,6 +547,10 @@ window.__ModuleLoader__.load({
 			"detail.timeline.hiddenNotice": "为保持流畅,较早的 {n} 条已折叠",
 			"detail.timeline.showAll": "全部显示",
 			"detail.timeline.chunkRun": "{n} 个流式分块",
+			"detail.timeline.degradedPartial": "部分时间线来源暂不可用,当前显示的事件可能不完整。",
+			"detail.timeline.degradedAll": "最近一次请求的可用时间线来源均读取失败,未能加载新事件。",
+			"detail.timeline.degradedUnverified": "无法确认时间线来源状态,当前事件可能不完整。",
+			"detail.timeline.degradedRetry": "可点击「刷新」重试时间线来源。",
 			"detail.states.loadingTitle": "正在加载时间线…",
 			"detail.states.emptyTitle": "暂无事件",
 			"detail.states.emptyHint": "该会话还没有可展示的规范化事件。",
@@ -490,7 +677,7 @@ window.__ModuleLoader__.load({
 			"command.unknownProject": "未知项目",
 			"command.untitled": "(无标题)",
 			"command.truncated": "还有 {n} 个会话未列出",
-			"command.boardHint": "打开会话视图的「Sidecar」Tab 查看完整看板",
+			"command.boardHint": "打开 Agent Center",
 			"command.unreachable": "sidecar 未连接",
 			"command.unreachableHint": "无法获取状态快照;请确认 agent-sidecar 插件已启用、daemon 可用后重试。",
 			"command.offlineFailed": "sidecar 已离线(daemon 连续启动失败已熔断)",
@@ -527,6 +714,7 @@ window.__ModuleLoader__.load({
 			"settings.expand": "Expand",
 			"settings.collapse": "Collapse",
 			"settings.invalidNumber": "Enter an integer no less than {min}",
+			"settings.liveEffectNote": "Changes in this section take effect immediately after saving.",
 			"settings.sectionDaemon": "Daemon lifecycle",
 			"settings.daemonPolicyLabel": "Management policy",
 			"settings.daemonPolicyHint": "adopt-or-host probes and adopts an existing daemon, else spawns one; adopt-only never spawns; off leaves the lifecycle alone (read-only reconcile still runs).",
@@ -548,16 +736,19 @@ window.__ModuleLoader__.load({
 			"settings.daemonDeferNote": "The daemon is managed by a system service (LaunchAgent); the plugin only probes and waits — it never spawns a duplicate or terminates it.",
 			"settings.daemonFailedNote": "Consecutive hosting failures reached the backoff limit; the board degraded to the last snapshot. Check the sidecar command, then retry.",
 			"settings.daemonRetry": "Retry",
+			"settings.daemonProfileNote": "Read-only here: daemon lifecycle values come from the plugin row config in the profile cordis.patch. Settings changes do not drive the supervisor; edit the profile patch and restart DSH.",
 			"settings.sectionSidecar": "Sidecar invocation",
 			"settings.sidecarCommandLabel": "Executable command",
 			"settings.sidecarCommandHint": "A PATH name, an absolute path, or a space-separated multi-part command (e.g. python3 /path/agent-sidecar.pyz); the plugin never installs the sidecar for you.",
 			"settings.sidecarRuntimeDirLabel": "Runtime directory",
 			"settings.sidecarRuntimeDirHint": "Empty uses the default ~/.agent_sidecar (honoring AGENT_SIDECAR_RUNTIME_DIR); a non-empty value is passed to spawned daemons via the environment.",
+			"settings.sidecarProfileNote": "Read-only here: sidecar command and runtime directory come from the plugin row config in the profile cordis.patch. Settings changes do not drive daemon invocation; edit the profile patch and restart DSH.",
 			"settings.sectionStream": "Stream reconciliation",
 			"settings.streamActiveMsLabel": "Active cadence (ms)",
 			"settings.streamActiveMsHint": "Status snapshot cadence while any session is working.",
 			"settings.streamIdleMsLabel": "Idle cadence (ms)",
 			"settings.streamIdleMsHint": "Status snapshot cadence while no session is working.",
+			"settings.streamProfileNote": "Read-only here: stream cadence values come from the plugin row config in the profile cordis.patch. Settings changes do not drive the reconciler; edit the profile patch and restart DSH.",
 			"settings.sectionInject": "Message injection",
 			"settings.injectEnabledLabel": "Enable injection",
 			"settings.injectEnabledHint": "When off, the inject panel renders read-only and disabled, and the server rejects write actions.",
@@ -569,6 +760,15 @@ window.__ModuleLoader__.load({
 			"settings.sectionAnalysis": "Bypass analysis",
 			"settings.analysisEnabledLabel": "Enable AI bypass analysis",
 			"settings.analysisEnabledHint": "Spins up a dsh analysis session over an observed session on demand (consumes model tokens; off by default).",
+			"settings.analysisProviderLabel": "Analysis provider",
+			"settings.analysisProviderHint": "Leave both route fields blank to use the host default; an explicit provider is used only when model is also set.",
+			"settings.analysisProviderPlaceholder": "Host default",
+			"settings.analysisModelLabel": "Analysis model",
+			"settings.analysisModelHint": "Leave both route fields blank to use the host default; an explicit model is used only when provider is also set.",
+			"settings.analysisModelPlaceholder": "Host default",
+			"settings.analysisRouteHostDefault": "Current route: host default model (provider and model are both blank).",
+			"settings.analysisRouteExplicit": "Current route: explicit {provider} / {model}.",
+			"settings.analysisRoutePartial": "Provider and model must either both be blank or both be set. Complete the pair or clear both; Save is disabled.",
 			"settings.sectionUi": "Board UI",
 			"settings.uiTimeWindowHoursLabel": "Session time window (hours)",
 			"settings.uiTimeWindowHoursHint": "The board lists only sessions active within this window.",
@@ -577,6 +777,7 @@ window.__ModuleLoader__.load({
 			"settings.sectionSkill": "Skill mode",
 			"settings.skillProvideLabel": "Provide the skill in-process",
 			"settings.skillProvideHint": "Provide the agent-sidecar skill to dsh via registerProvider (enabled in M4; applies after restart).",
+			"settings.skillRestartNote": "skill.provide is read from the profile cordis.patch when the plugin loads. Edit the profile patch, then reload the plugin or restart DSH; Settings changes do not re-register the skill.",
 			"inject.title": "Inject message",
 			"inject.confirmTitle": "Confirm injection",
 			"inject.close": "Close",
@@ -599,6 +800,15 @@ window.__ModuleLoader__.load({
 			"inject.auditNote": "This injection is recorded in the sidecar audit log (byte size and content fingerprint; never the message plaintext).",
 			"inject.prepare": "Prepare injection",
 			"inject.preparing": "Validating…",
+			"inject.kimiTitle": "Protected resume",
+			"inject.kimiConfirmTitle": "Confirm protected resume",
+			"inject.kimiMessagePlaceholder": "Message for protected resume (16 KiB max; never paste secrets)",
+			"inject.kimiActionLabel": "Kimi action",
+			"inject.kimiModeLabel": "Protected resume",
+			"inject.kimiModeHint": "Starts a separate Kimi ACP process and resumes the session through it. It never attaches to or steers the existing terminal.",
+			"inject.kimiAuditNote": "This protected resume is recorded in the sidecar audit log (byte size and content fingerprint; never the message plaintext).",
+			"inject.kimiPrepare": "Prepare protected resume",
+			"inject.kimiPreparing": "Validating…",
 			"inject.planTargetLabel": "Target snapshot",
 			"inject.planStatus": "Current status: {status}",
 			"inject.statusObservedNote": "Status is an observed value inferred from persisted data and may lag.",
@@ -607,18 +817,28 @@ window.__ModuleLoader__.load({
 			"inject.countdown": "The confirm token expires in {seconds}s",
 			"inject.confirmExecute": "Confirm injection",
 			"inject.executing": "Injecting…",
+			"inject.kimiConfirmExecute": "Start protected resume",
+			"inject.kimiExecuting": "Starting protected resume…",
 			"inject.cancel": "Cancel",
 			"inject.tokenExpired": "Confirmation timed out and the token is void; prepare the injection again.",
 			"inject.resultDelivered": "Delivered: the message was injected into the target session.",
 			"inject.resultFailed": "Injection failed.",
 			"inject.resultUnknown": "Outcome unknown: the message may have been delivered. Do NOT retry; check the target session before deciding anything.",
 			"inject.resultReplayed": "Idempotent replay: this is the earlier result of the same request — no second injection happened.",
+			"inject.kimiResultUnknown": "Kimi 0.38 completed this protected resume, but delivery to the resumed session cannot be proven. Do not automatically or manually retry the same content.",
+			"inject.kimiResultFailed": "Rejected before the prompt was sent: no message was sent to Kimi.",
+			"inject.kimiResultReplayed": "Safe replay: this is the cached result for the same request. No new Kimi ACP process was spawned and no content was sent again.",
 			"inject.reprepare": "Prepare again",
 			"inject.observeListen": "Listen for the reaction",
 			"inject.errInjectDisabled": "Injection is disabled on the server; enable it in Settings.",
 			"inject.errInvalidMessage": "The message failed server-side validation.",
 			"inject.errTargetNotFound": "The target session does not exist or left the observation window.",
 			"inject.errTargetDead": "The target session has ended (dead); it cannot be injected.",
+			"inject.errWorkingSession": "This external-agent session is working; injection is available only while it is waiting or idle.",
+			"inject.kimiErrWorkingSession": "This Kimi session is working; protected resume is available only while it is waiting or idle.",
+			"inject.errChildSession": "External child or sidechain sessions cannot be injected from Agent Sidecar.",
+			"inject.errRemoteSession": "Remote sessions cannot be injected from this local host.",
+			"inject.errInvalidSession": "The host did not provide a valid target eligibility verdict; injection stays disabled. Update or restart the host and reopen this session.",
 			"inject.errTooManyPending": "Too many injections are pending confirmation; try again later.",
 			"inject.errTokenMissing": "The confirm token is missing or was never issued; prepare again.",
 			"inject.errTokenExpired": "The confirm token expired; prepare again.",
@@ -630,6 +850,7 @@ window.__ModuleLoader__.load({
 			"inject.errAborted": "The request was cancelled.",
 			"inject.errNetwork": "Network error; the request could not be sent.",
 			"inject.errParse": "The server response could not be parsed.",
+			"inject.errUnknown": "The request failed for an unknown reason.",
 			"inject.errGeneric": "Request failed ({code}).",
 			"board.viewBoard": "Session board",
 			"board.viewProjects": "Projects",
@@ -668,11 +889,15 @@ window.__ModuleLoader__.load({
 			"board.topbar.dismiss": "Dismiss",
 			"board.topbar.showDead": "Show finished",
 			"board.topbar.timeWindow": "Time window",
+			"board.topbar.agentFilter": "Agent",
+			"board.topbar.agentFilterAria": "Filter sessions by agent type",
+			"board.topbar.allAgents": "All agents",
 			"board.topbar.countWorking": "{n} working",
 			"board.topbar.countWaiting": "{n} waiting",
 			"board.topbar.countTotal": "{n} sessions total",
 			"board.topbar.filterByStatusTitle": "Show only sessions marked \"{label}\"",
 			"board.topbar.clearStatusFilterTitle": "Clear the status filter and show all sessions",
+			"board.states.loading": "Loading the first sidecar snapshot…",
 			"board.group.collapseTitle": "Collapse this group",
 			"board.group.expandTitle": "Expand this group",
 			"board.group.showAll": "Show all {n} sessions",
@@ -720,6 +945,7 @@ window.__ModuleLoader__.load({
 			"detail.sources.sidecarReplay": "sidecar replay",
 			"detail.sources.sidecarBuffer": "sidecar buffer",
 			"detail.sources.none": "Unknown source",
+			"detail.sources.healthSummary": "{available} available · {unavailable} unavailable · {failed} failed",
 			"detail.kind.user": "User message",
 			"detail.kind.assistant": "Assistant reply",
 			"detail.kind.thinking": "Thinking",
@@ -743,6 +969,10 @@ window.__ModuleLoader__.load({
 			"detail.timeline.hiddenNotice": "{n} earlier entries collapsed to stay smooth",
 			"detail.timeline.showAll": "Show all",
 			"detail.timeline.chunkRun": "{n} streaming chunks",
+			"detail.timeline.degradedPartial": "Some timeline sources are unavailable. The events shown may be incomplete.",
+			"detail.timeline.degradedAll": "All usable timeline sources failed for the latest request. No new events could be loaded.",
+			"detail.timeline.degradedUnverified": "Timeline source status could not be verified. Events may be incomplete.",
+			"detail.timeline.degradedRetry": "Use Refresh to try the timeline sources again.",
 			"detail.states.loadingTitle": "Loading the timeline…",
 			"detail.states.emptyTitle": "No events yet",
 			"detail.states.emptyHint": "This session has no normalized events to show yet.",
@@ -869,7 +1099,7 @@ window.__ModuleLoader__.load({
 			"command.unknownProject": "Unknown project",
 			"command.untitled": "(untitled)",
 			"command.truncated": "{n} more sessions not listed",
-			"command.boardHint": "Open the \"Sidecar\" tab in the conversation view for the full board",
+			"command.boardHint": "Open Agent Center",
 			"command.unreachable": "sidecar is not connected",
 			"command.unreachableHint": "The state snapshot could not be fetched; check that the agent-sidecar plugin is enabled and the daemon is available, then retry.",
 			"command.offlineFailed": "sidecar is offline (daemon start failures tripped the breaker)",
@@ -1287,6 +1517,64 @@ window.__ModuleLoader__.load({
 			unknown: "neutral",
 			dead: "muted"
 		};
+		/** Agent families currently understood by the installed sidecar adapters. */
+		const SUPPORTED_AGENT_FILTERS = [
+			"dsh",
+			"claude",
+			"codex",
+			"cursor",
+			"cursor-cli",
+			"cursor-ide",
+			"copilot",
+			"kimi"
+		];
+		const AGENT_DISPLAY_NAMES = {
+			dsh: "DSH",
+			claude: "Claude",
+			codex: "Codex",
+			cursor: "Cursor",
+			"cursor-cli": "Cursor CLI",
+			"cursor-ide": "Cursor IDE",
+			copilot: "GitHub Copilot",
+			kimi: "Kimi"
+		};
+		/** Normalize a supported agent token; unknown/untrusted values become null. */
+		function normalizeAgentFilter(raw) {
+			if (raw === void 0) return null;
+			const normalized = raw.trim().toLowerCase();
+			return SUPPORTED_AGENT_FILTERS.includes(normalized) ? normalized : null;
+		}
+		/** Stable, recognizable display name for one supported agent token. */
+		function agentDisplayName(agent) {
+			return AGENT_DISPLAY_NAMES[agent];
+		}
+		/**
+		* Supported agents currently present on the board, in adapter-stable order.
+		* A still-selected supported value remains available after its last card
+		* disappears so the user can explicitly clear it. Unknown values are never
+		* reflected into labels or option values.
+		*/
+		function agentFilterOptions(sessions, selected) {
+			const available = /* @__PURE__ */ new Set();
+			for (const session of sessions) {
+				const agent = normalizeAgentFilter(session.agent);
+				if (agent !== null) available.add(agent);
+			}
+			const selectedAgent = normalizeAgentFilter(selected);
+			if (selectedAgent !== null) available.add(selectedAgent);
+			return SUPPORTED_AGENT_FILTERS.filter((agent) => available.has(agent));
+		}
+		/**
+		* Apply a toolbar agent choice. Empty/unknown values mean "All agents" and
+		* clear only the agent condition, preserving every other board filter.
+		*/
+		function withAgentFilter(filters, selected) {
+			const next = { ...filters };
+			const agent = normalizeAgentFilter(selected);
+			if (agent === null) delete next.agentFilter;
+			else next.agentFilter = agent;
+			return next;
+		}
 		/**
 		* Visibility rules (task spec):
 		* - an active `statusFilter` (UX-01) overrides everything: only sessions
@@ -1299,6 +1587,8 @@ window.__ModuleLoader__.load({
 		* - a non-finite or non-positive window disables the age filter entirely.
 		*/
 		function isSessionVisible(session, filters, nowMs) {
+			const agentFilter = normalizeAgentFilter(filters.agentFilter);
+			if (agentFilter !== null && normalizeAgentFilter(session.agent) !== agentFilter) return false;
 			const status = normalizeStatus(session.status);
 			if (filters.statusFilter !== void 0) return status === filters.statusFilter;
 			if (status === "dead" && !filters.showDead) return false;
@@ -2281,7 +2571,8 @@ window.__ModuleLoader__.load({
 				lastReconcileAtMs: null,
 				sessions: [],
 				injectCapability: false,
-				hasSnapshot: false
+				hasSnapshot: false,
+				initialLoadFailed: false
 			};
 		}
 		/**
@@ -2334,7 +2625,8 @@ window.__ModuleLoader__.load({
 				lastReconcileAtMs: snapshot.board.lastReconcileAt,
 				sessions: mapSessions(snapshot.board.sessions),
 				injectCapability: snapshot.capabilities.inject,
-				hasSnapshot: true
+				hasSnapshot: true,
+				initialLoadFailed: false
 			};
 		}
 		/** Resolve the real localStorage; some privacy modes throw on access. */
@@ -2364,6 +2656,8 @@ window.__ModuleLoader__.load({
 					showDead: candidate.showDead
 				};
 				if (candidate.statusFilter === "working" || candidate.statusFilter === "waiting") filters.statusFilter = candidate.statusFilter;
+				const agentFilter = typeof candidate.agentFilter === "string" ? normalizeAgentFilter(candidate.agentFilter) : null;
+				if (agentFilter !== null) filters.agentFilter = agentFilter;
 				return filters;
 			} catch {
 				return null;
@@ -2386,6 +2680,10 @@ window.__ModuleLoader__.load({
 			filtersTouched;
 			lastHostHealth = null;
 			started = false;
+			disposed = false;
+			generation = 0;
+			unsubscribeSnapshot = null;
+			unsubscribeStatus = null;
 			constructor(opts = {}) {
 				this.storage = opts.storage === void 0 ? defaultStorage() : opts.storage;
 				this.fetchFn = opts.fetchStateFn ?? fetchState;
@@ -2403,19 +2701,27 @@ window.__ModuleLoader__.load({
 			}
 			/** Wire stream listeners and begin streaming (idempotent). */
 			start() {
-				if (this.started) return;
+				if (this.started || this.disposed) return;
 				this.started = true;
-				this.stream.onSnapshot((snapshot) => {
-					this.applySnapshot(snapshot);
+				this.unsubscribeSnapshot = this.stream.onSnapshot((snapshot) => {
+					this.applySnapshot(snapshot, this.beginGeneration());
 				});
-				this.stream.onStatus((status) => {
-					this.applyStatus(status);
+				this.unsubscribeStatus = this.stream.onStatus((status) => {
+					this.applyStatus(status, this.beginGeneration());
 				});
 				this.stream.start();
 			}
 			/** Terminal teardown of the live feed. */
 			stop() {
+				if (this.disposed) return;
+				this.disposed = true;
+				this.beginGeneration();
+				this.unsubscribeSnapshot?.();
+				this.unsubscribeSnapshot = null;
+				this.unsubscribeStatus?.();
+				this.unsubscribeStatus = null;
 				this.stream.stop();
+				this.listeners.clear();
 			}
 			/** Forward the visibility resume to the stream (poll-mode immediate fetch). */
 			pollNow() {
@@ -2423,6 +2729,7 @@ window.__ModuleLoader__.load({
 			}
 			/** Change notifications for BOTH stores (state and filters). */
 			subscribe(listener) {
+				if (this.disposed) return () => {};
 				this.listeners.add(listener);
 				return () => {
 					this.listeners.delete(listener);
@@ -2439,6 +2746,9 @@ window.__ModuleLoader__.load({
 			/** User filter change: persist (package-prefixed key) and notify. */
 			setFilters(next) {
 				this.filters = { ...next };
+				const agentFilter = normalizeAgentFilter(next.agentFilter);
+				if (agentFilter === null) delete this.filters.agentFilter;
+				else this.filters.agentFilter = agentFilter;
 				this.filtersTouched = true;
 				if (this.storage !== null) try {
 					this.storage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(this.filters));
@@ -2462,26 +2772,52 @@ window.__ModuleLoader__.load({
 			/**
 			* Manual refresh (board's refresh button): one out-of-band snapshot
 			* pull. Resolves true when the snapshot applied, false on failure so
-			* the button can surface honest feedback (UX-07) — never rejects; the
-			* stream (and its status surface) remains the health authority.
+			* the button can surface honest feedback (UX-07) — never rejects. A
+			* first failure also settles startup as degraded; later failures keep
+			* the last successful snapshot and stream verdict intact.
 			*/
 			async refresh() {
+				if (this.disposed) return false;
+				const generation = this.beginGeneration();
 				try {
 					const snapshot = await this.fetchFn({});
-					this.applySnapshot(snapshot);
+					if (!this.isCurrentGeneration(generation)) return false;
+					this.applySnapshot(snapshot, generation);
 					return true;
 				} catch (err) {
+					if (!this.isCurrentGeneration(generation)) return false;
 					console.error("agent-sidecar: manual refresh failed", err);
+					this.settleInitialFailure(generation);
 					return false;
 				}
 			}
-			applySnapshot(snapshot) {
+			beginGeneration() {
+				this.generation += 1;
+				return this.generation;
+			}
+			isCurrentGeneration(generation) {
+				return !this.disposed && generation === this.generation;
+			}
+			applySnapshot(snapshot, generation) {
+				if (!this.isCurrentGeneration(generation)) return;
 				this.lastHostHealth = snapshot.board.streamHealth;
 				this.state = mapSnapshot(snapshot, this.stream.status);
 				this.notify();
 			}
-			applyStatus(status) {
+			applyStatus(status, generation) {
+				if (!this.isCurrentGeneration(generation)) return;
 				if (status === this.state.streamStatus) return;
+				if (status === "degraded" && !this.state.hasSnapshot) {
+					this.state = {
+						...this.state,
+						streamStatus: status,
+						streamHealth: "degraded",
+						hasSnapshot: true,
+						initialLoadFailed: true
+					};
+					this.notify();
+					return;
+				}
 				this.state = {
 					...this.state,
 					streamStatus: status,
@@ -2489,7 +2825,20 @@ window.__ModuleLoader__.load({
 				};
 				this.notify();
 			}
+			/** Settle initial loading after a failed state pull without hiding stale data later. */
+			settleInitialFailure(generation) {
+				if (!this.isCurrentGeneration(generation)) return;
+				if (this.state.hasSnapshot) return;
+				this.state = {
+					...this.state,
+					streamHealth: "degraded",
+					hasSnapshot: true,
+					initialLoadFailed: true
+				};
+				this.notify();
+			}
 			notify() {
+				if (this.disposed) return;
 				for (const listener of [...this.listeners]) listener();
 			}
 		};
@@ -2735,6 +3084,10 @@ window.__ModuleLoader__.load({
 			48,
 			168
 		];
+		/** Exact identity comparison; session ids are only unique within an agent. */
+		function matchesSessionFocusTarget$1(candidate, target) {
+			return target !== null && candidate.agent === target.agent && candidate.sessionId === target.sessionId;
+		}
 		function sessionDotState$1(status) {
 			if (status === "working") return "ongoing";
 			if (status === "waiting") return "warning";
@@ -2745,7 +3098,9 @@ window.__ModuleLoader__.load({
 			const [copied, setCopied] = (0, react.useState)(false);
 			const copyTimerRef = (0, react.useRef)(null);
 			const copyAliveRef = (0, react.useRef)(true);
+			const openerRef = (0, react.useRef)(null);
 			const dotState = sessionDotState$1(card.badge.status);
+			const isReturnFocusTarget = matchesSessionFocusTarget$1(card, props.returnFocusTarget);
 			(0, react.useEffect)(() => {
 				copyAliveRef.current = true;
 				return () => {
@@ -2756,6 +3111,13 @@ window.__ModuleLoader__.load({
 					}
 				};
 			}, []);
+			(0, react.useEffect)(() => {
+				if (!isReturnFocusTarget) return;
+				const opener = openerRef.current;
+				if (opener === null) return;
+				opener.focus({ preventScroll: true });
+				props.onReturnFocusConsumed();
+			}, [isReturnFocusTarget, props.onReturnFocusConsumed]);
 			const onCopyId = () => {
 				const clipboard = typeof navigator === "undefined" ? void 0 : navigator.clipboard;
 				if (clipboard === void 0) return;
@@ -2774,9 +3136,13 @@ window.__ModuleLoader__.load({
 				"data-testid": "agent-sidecar-card",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+						ref: openerRef,
 						type: "button",
 						className: board_module_css_default["cardOpen"],
-						onClick: () => onSelect(card.sessionId),
+						onClick: () => onSelect({
+							agent: card.agent,
+							sessionId: card.sessionId
+						}),
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 							className: board_module_css_default["cardHead"],
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
@@ -2841,6 +3207,10 @@ window.__ModuleLoader__.load({
 			const { group, onSelect } = props;
 			const [collapsed, setCollapsed] = (0, react.useState)(false);
 			const [expanded, setExpanded] = (0, react.useState)(false);
+			const returnTargetIndex = props.returnFocusTarget === null ? -1 : group.cards.findIndex((card) => matchesSessionFocusTarget$1(card, props.returnFocusTarget));
+			(0, react.useEffect)(() => {
+				if (returnTargetIndex >= 20 && !expanded) setExpanded(true);
+			}, [expanded, returnTargetIndex]);
 			const { shown, hiddenCount } = sliceCardsForDisplay(group.cards, 20, expanded);
 			const waitingInGroup = group.cards.filter((card) => card.badge.status === "waiting").length;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
@@ -2878,7 +3248,9 @@ window.__ModuleLoader__.load({
 						className: board_module_css_default["grid"],
 						children: shown.map((card) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionCard, {
 							card,
-							onSelect
+							onSelect,
+							returnFocusTarget: props.returnFocusTarget,
+							onReturnFocusConsumed: props.onReturnFocusConsumed
 						}, `${card.agent}:${card.sessionId}`))
 					}),
 					hiddenCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -2914,6 +3286,10 @@ window.__ModuleLoader__.load({
 				nowMs
 			});
 			const windowOptions = TIME_WINDOW_OPTIONS.includes(props.filters.timeWindowHours) ? TIME_WINDOW_OPTIONS : [...TIME_WINDOW_OPTIONS, props.filters.timeWindowHours].sort((a, b) => a - b);
+			const selectedAgent = normalizeAgentFilter(props.filters.agentFilter);
+			const availableAgents = agentFilterOptions(props.sessions, props.filters.agentFilter);
+			const fallbackFocusRef = (0, react.useRef)(null);
+			const returnTargetVisible = props.returnFocusTarget !== null && vm.groups.some((group) => group.cards.some((card) => matchesSessionFocusTarget$1(card, props.returnFocusTarget)));
 			const [refreshing, setRefreshing] = (0, react.useState)(false);
 			const [refreshFailed, setRefreshFailed] = (0, react.useState)(false);
 			const onRefreshClick = () => {
@@ -2940,15 +3316,35 @@ window.__ModuleLoader__.load({
 			const statusBadgeTitle = (status) => props.filters.statusFilter === status ? BOARD_STRINGS.topbar.clearStatusFilterTitle : formatTemplate$2(BOARD_STRINGS.topbar.filterByStatusTitle, { label: BOARD_STRINGS.status[status] });
 			const daemonDotState = props.daemonState === "failed" ? "error" : props.daemonState === "defer" || props.daemonState === "backoff" ? "warning" : props.daemonState === "adopted" || props.daemonState === "hosted" ? "done" : "ongoing";
 			const streamDotState = props.streamHealth === "ok" ? "done" : props.streamHealth === "degraded" ? "warning" : "ongoing";
+			(0, react.useEffect)(() => {
+				if (props.returnFocusTarget === null || returnTargetVisible) return;
+				const fallback = fallbackFocusRef.current;
+				if (fallback === null) return;
+				fallback.focus({ preventScroll: true });
+				props.onReturnFocusConsumed();
+			}, [
+				props.onReturnFocusConsumed,
+				props.returnFocusTarget,
+				returnTargetVisible
+			]);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				...surfaceProps("board", board_module_css_default["root"]),
+				ref: props.rootRef,
+				onScroll: (event) => {
+					props.onScrollTopChange(event.currentTarget.scrollTop);
+				},
 				"data-testid": "agent-sidecar-board",
+				"aria-busy": !props.hasSnapshot,
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
 						...surfaceProps("board-toolbar", board_module_css_default["topbar"]),
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								ref: fallbackFocusRef,
 								className: board_module_css_default["title"],
+								role: "heading",
+								"aria-level": 1,
+								tabIndex: -1,
 								children: BOARD_STRINGS.topbar.title
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -3004,6 +3400,25 @@ window.__ModuleLoader__.load({
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: board_module_css_default["spacer"] }),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
 								className: board_module_css_default["control"],
+								children: [t("board.topbar.agentFilter"), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
+									className: board_module_css_default["select"],
+									"aria-label": t("board.topbar.agentFilterAria"),
+									value: selectedAgent ?? "",
+									onChange: (ev) => {
+										props.onFiltersChange(withAgentFilter(props.filters, ev.target.value));
+									},
+									"data-testid": "agent-sidecar-agent-filter",
+									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+										value: "",
+										children: t("board.topbar.allAgents")
+									}), availableAgents.map((agent) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+										value: agent,
+										children: agentDisplayName(agent)
+									}, agent))]
+								})]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
+								className: board_module_css_default["control"],
 								children: [BOARD_STRINGS.topbar.timeWindow, /* @__PURE__ */ (0, react_jsx_runtime.jsx)("select", {
 									className: board_module_css_default["select"],
 									value: String(props.filters.timeWindowHours),
@@ -3039,7 +3454,7 @@ window.__ModuleLoader__.load({
 							})
 						]
 					}),
-					refreshFailed && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					props.hasSnapshot && !props.initialLoadFailed && refreshFailed && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: board_module_css_default["banner"],
 						"data-tone": "warn",
 						role: "status",
@@ -3053,13 +3468,26 @@ window.__ModuleLoader__.load({
 							children: BOARD_STRINGS.topbar.dismiss
 						})]
 					}),
-					vm.banner !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					props.hasSnapshot && vm.banner !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: board_module_css_default["banner"],
 						"data-tone": vm.banner.tone,
 						role: "status",
 						children: vm.banner.text
 					}),
-					vm.emptyState !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					!props.hasSnapshot ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: board_module_css_default["empty"],
+						role: "status",
+						"data-testid": "agent-sidecar-board-loading",
+						children: t("board.states.loading")
+					}) : props.initialLoadFailed ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: board_module_css_default["empty"],
+						"data-kind": "error",
+						role: "alert",
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							className: board_module_css_default["emptyTitle"],
+							children: BOARD_STRINGS.topbar.refreshFailed
+						})
+					}) : vm.emptyState !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: board_module_css_default["empty"],
 						"data-kind": vm.emptyState.kind,
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -3071,7 +3499,9 @@ window.__ModuleLoader__.load({
 						})]
 					}) : vm.groups.map((group) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectGroup, {
 						group,
-						onSelect: props.onSelectSession
+						onSelect: props.onSelectSession,
+						returnFocusTarget: props.returnFocusTarget,
+						onReturnFocusConsumed: props.onReturnFocusConsumed
 					}, group.key === "" ? "\0unknown" : group.key))
 				]
 			});
@@ -3334,6 +3764,9 @@ window.__ModuleLoader__.load({
 		* `loading` shows as a quiet header chip — honest degradation without
 		* blanking data the user already has.
 		*/
+		function matchesSessionFocusTarget(candidate, target) {
+			return target !== null && candidate.agent === target.agent && candidate.sessionId === target.sessionId;
+		}
 		function sessionDotState(status) {
 			if (status === "working") return "ongoing";
 			if (status === "waiting") return "warning";
@@ -3342,10 +3775,23 @@ window.__ModuleLoader__.load({
 		function SessionRow$1(props) {
 			const { session, onSelect } = props;
 			const dotState = sessionDotState(session.badge.status);
+			const openerRef = (0, react.useRef)(null);
+			const isReturnFocusTarget = matchesSessionFocusTarget(session, props.returnFocusTarget);
+			(0, react.useEffect)(() => {
+				if (!isReturnFocusTarget) return;
+				const opener = openerRef.current;
+				if (opener === null) return;
+				opener.focus({ preventScroll: true });
+				props.onReturnFocusConsumed();
+			}, [isReturnFocusTarget, props.onReturnFocusConsumed]);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+				ref: openerRef,
 				type: "button",
 				className: project_view_module_css_default["session"],
-				onClick: () => onSelect(session.sessionId),
+				onClick: () => onSelect({
+					agent: session.agent,
+					sessionId: session.sessionId
+				}),
 				"data-testid": "agent-sidecar-project-session",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
@@ -3390,6 +3836,10 @@ window.__ModuleLoader__.load({
 		function AgentLane(props) {
 			const { lane, onSelect } = props;
 			const [expanded, setExpanded] = (0, react.useState)(false);
+			const returnTargetIndex = props.returnFocusTarget === null ? -1 : lane.sessions.findIndex((session) => matchesSessionFocusTarget(session, props.returnFocusTarget));
+			(0, react.useEffect)(() => {
+				if (returnTargetIndex >= 10 && !expanded) setExpanded(true);
+			}, [expanded, returnTargetIndex]);
 			const { shown, hiddenCount } = sliceCardsForDisplay(lane.sessions, 10, expanded);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: project_view_module_css_default["lane"],
@@ -3406,7 +3856,9 @@ window.__ModuleLoader__.load({
 						className: project_view_module_css_default["laneSessions"],
 						children: shown.map((session) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionRow$1, {
 							session,
-							onSelect
+							onSelect,
+							returnFocusTarget: props.returnFocusTarget,
+							onReturnFocusConsumed: props.onReturnFocusConsumed
 						}, `${session.agent}:${session.sessionId}`))
 					}),
 					hiddenCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
@@ -3472,7 +3924,9 @@ window.__ModuleLoader__.load({
 					className: project_view_module_css_default["lanes"],
 					children: group.lanes.map((lane) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(AgentLane, {
 						lane,
-						onSelect
+						onSelect,
+						returnFocusTarget: props.returnFocusTarget,
+						onReturnFocusConsumed: props.onReturnFocusConsumed
 					}, lane.agent))
 				})]
 			});
@@ -3485,15 +3939,36 @@ window.__ModuleLoader__.load({
 				nowMs
 			});
 			const hasContent = vm.groups.length > 0;
+			const fallbackFocusRef = (0, react.useRef)(null);
+			const returnTargetVisible = props.returnFocusTarget !== null && vm.groups.some((group) => group.lanes.some((lane) => lane.sessions.some((session) => matchesSessionFocusTarget(session, props.returnFocusTarget))));
+			(0, react.useEffect)(() => {
+				if (props.returnFocusTarget === null || returnTargetVisible) return;
+				const fallback = fallbackFocusRef.current;
+				if (fallback === null) return;
+				fallback.focus({ preventScroll: true });
+				props.onReturnFocusConsumed();
+			}, [
+				props.onReturnFocusConsumed,
+				props.returnFocusTarget,
+				returnTargetVisible
+			]);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				...surfaceProps("project-view", project_view_module_css_default["root"]),
+				ref: props.rootRef,
+				onScroll: (event) => {
+					props.onScrollTopChange(event.currentTarget.scrollTop);
+				},
 				"data-testid": "agent-sidecar-project-view",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
 						className: project_view_module_css_default["topbar"],
 						children: [
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								ref: fallbackFocusRef,
 								className: project_view_module_css_default["title"],
+								role: "heading",
+								"aria-level": 1,
+								tabIndex: -1,
 								children: PROJECT_VIEW_STRINGS.title
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -3518,7 +3993,9 @@ window.__ModuleLoader__.load({
 					}),
 					hasContent ? vm.groups.map((group) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectSection, {
 						group,
-						onSelect: props.onSelectSession
+						onSelect: props.onSelectSession,
+						returnFocusTarget: props.returnFocusTarget,
+						onReturnFocusConsumed: props.onReturnFocusConsumed
 					}, group.key === "" ? "\0unknown" : group.key)) : props.error !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: project_view_module_css_default["empty"],
 						"data-kind": "error",
@@ -3731,39 +4208,6 @@ window.__ModuleLoader__.load({
 				})]
 			});
 		}
-		function TextField(props) {
-			const id = (0, react.useId)();
-			const [draft, setDraft] = (0, react.useState)(props.value);
-			(0, react.useEffect)(() => {
-				setDraft(props.value);
-			}, [props.value]);
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: settings_card_module_css_default["field"],
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
-						className: settings_card_module_css_default["label"],
-						htmlFor: id,
-						children: props.label
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Input, {
-						id,
-						className: settings_card_module_css_default["input"],
-						type: "text",
-						value: draft,
-						placeholder: props.placeholder ?? "",
-						disabled: props.disabled,
-						onChange: (event) => {
-							setDraft(event.target.value);
-							props.onCommit(event.target.value);
-						}
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: settings_card_module_css_default["hint"],
-						children: props.hint
-					})
-				]
-			});
-		}
 		function NumberField(props) {
 			const id = (0, react.useId)();
 			const [draft, setDraft] = (0, react.useState)(String(props.value));
@@ -3817,12 +4261,11 @@ window.__ModuleLoader__.load({
 		* decides which namespaces to dispatch and stacks what comes back"
 		* (harness `packages/client/ui-settings-plugins/src/client/slot-contract.ts`;
 		* unclaimed namespaces render nothing per the adding-a-settings-card
-		* cookbook). This card therefore carries the form UI for the key items of
-		* the host Config (src/config.ts): daemon.policy/backoffLimit,
-		* sidecar.command/runtimeDir, stream.reconcileActiveMs/IdleMs,
-		* inject.enabled/defaultMode, analysis.enabled, ui.timeWindowHours/showDead,
-		* skill.provide — plus the daemon status/retry row and the injection safety
-		* note the design doc (§4.a/§5.3/§6) puts on the settings surface.
+		* cookbook). This card therefore draws the live form UI for
+		* inject.enabled/defaultMode, analysis enabled/provider/model and
+		* ui.timeWindowHours/showDead, plus read-only deployment guidance for the
+		* profile-owned daemon/sidecar/stream/skill groups, daemon status/retry, and
+		* the injection safety note.
 		*
 		* WIRING CONTRACT (T2.4): the card is fully controlled and presentational.
 		* `values` is the staged draft owned by the wiring controller; every edit
@@ -3832,6 +4275,12 @@ window.__ModuleLoader__.load({
 		* callbacks. Registration into `settings.plugin.item` (keyed by the Host
 		* settings namespace) also belongs to the wiring half — this module exports
 		* the component and its props contract only.
+		*
+		* Runtime ownership is deliberately explicit: daemon/sidecar/stream values
+		* and skill.provide are read from the profile cordis.patch config when the
+		* plugin is applied, so this card shows those groups as read-only guidance.
+		* inject/analysis/ui remain editable because their effective settings are
+		* consumed live.
 		*
 		* The card renders as an `<li>` because the plugin-configuration tab stacks
 		* cards in a list (shipped PluginCard precedent). Chrome (disclosure
@@ -3863,17 +4312,72 @@ window.__ModuleLoader__.load({
 				}), props.children]
 			});
 		}
+		/** Trim one edited route token exactly as the host does before resolving it. */
+		function normalizeAnalysisRouteField(value) {
+			return value.trim();
+		}
+		/**
+		* Resolve the analysis route contract shared with the host:
+		* both blank means host default, both set means explicit, and a partial pair
+		* is invalid settings UI input (the runtime would otherwise silently fall
+		* back to the host default).
+		*/
+		function resolveAnalysisRoute(provider, model) {
+			const normalizedProvider = normalizeAnalysisRouteField(provider);
+			const normalizedModel = normalizeAnalysisRouteField(model);
+			const hasProvider = normalizedProvider !== "";
+			return {
+				kind: hasProvider === (normalizedModel !== "") ? hasProvider ? "explicit" : "host-default" : "partial",
+				provider: normalizedProvider,
+				model: normalizedModel
+			};
+		}
+		function AnalysisRouteField(props) {
+			const id = (0, react.useId)();
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: settings_card_module_css_default["field"],
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("label", {
+						className: settings_card_module_css_default["label"],
+						htmlFor: id,
+						children: props.label
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Input, {
+						id,
+						className: `${settings_card_module_css_default["input"]} ${props.invalid ? settings_card_module_css_default["inputInvalid"] : ""}`,
+						type: "text",
+						value: props.value,
+						placeholder: props.placeholder,
+						disabled: props.disabled,
+						...props.invalid ? { "aria-invalid": true } : {},
+						onChange: (event) => {
+							props.onCommit(normalizeAnalysisRouteField(event.target.value));
+						}
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: settings_card_module_css_default["hint"],
+						children: props.hint
+					})
+				]
+			});
+		}
 		/**
 		* Render the Agent Sidecar settings card.
 		* @param props - staged values, form state, and the wiring callbacks.
 		* @returns the card.
 		*/
 		function SettingsCard(props) {
-			const [open, setOpen] = (0, react.useState)(false);
+			const [open, setOpen] = (0, react.useState)(props.defaultOpen ?? false);
 			const t$2 = props.t ?? t;
 			const { values } = props;
 			const disabled = !props.writable || props.saving;
 			const title = t$2("settings.cardTitle");
+			const analysisRoute = resolveAnalysisRoute(values.analysisProvider, values.analysisModel);
+			const analysisRouteInvalid = analysisRoute.kind === "partial";
+			const analysisRouteStatus = analysisRoute.kind === "host-default" ? t$2("settings.analysisRouteHostDefault") : analysisRoute.kind === "explicit" ? t$2("settings.analysisRouteExplicit", {
+				provider: analysisRoute.provider,
+				model: analysisRoute.model
+			}) : t$2("settings.analysisRoutePartial");
 			const daemonNote = props.daemon?.state === "defer" ? t$2("settings.daemonDeferNote") : props.daemon?.state === "failed" ? t$2("settings.daemonFailedNote") : void 0;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
 				...surfaceProps("settings-card", `${settings_card_module_css_default["card"]} ${open ? settings_card_module_css_default["cardOpen"] : ""}`),
@@ -3912,133 +4416,72 @@ window.__ModuleLoader__.load({
 						}) : null,
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
 							title: t$2("settings.sectionDaemon"),
-							children: [
-								props.daemon ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-									className: settings_card_module_css_default["field"],
-									children: [
-										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-											className: settings_card_module_css_default["label"],
-											children: t$2("settings.daemonStatusLabel")
-										}),
-										/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-											className: settings_card_module_css_default["statusRow"],
-											children: [
-												/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-													className: statusDotClass(props.daemon.state),
-													"aria-hidden": true
-												}),
-												/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-													className: settings_card_module_css_default["statusText"],
-													children: t$2(DAEMON_STATE_KEY[props.daemon.state])
-												}),
-												props.daemon.pid !== void 0 && props.daemon.version !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-													className: settings_card_module_css_default["statusMeta"],
-													children: t$2("settings.daemonPidVersion", {
-														pid: props.daemon.pid,
-														version: props.daemon.version
-													})
-												}) : null,
-												props.daemon.state === "failed" && props.onDaemonRetry !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-													type: "button",
-													size: "sm",
-													variant: "outline",
-													className: settings_card_module_css_default["retry"],
-													onClick: props.onDaemonRetry,
-													children: t$2("settings.daemonRetry")
-												}) : null
-											]
-										}),
-										daemonNote !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-											className: settings_card_module_css_default["note"],
-											children: daemonNote
-										}) : null
-									]
-								}) : null,
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SelectField, {
-									label: t$2("settings.daemonPolicyLabel"),
-									hint: t$2("settings.daemonPolicyHint"),
-									value: values.daemonPolicy,
-									disabled,
-									options: [
-										{
-											value: "adopt-or-host",
-											label: t$2("settings.daemonPolicyAdoptOrHost")
-										},
-										{
-											value: "adopt-only",
-											label: t$2("settings.daemonPolicyAdoptOnly")
-										},
-										{
-											value: "off",
-											label: t$2("settings.daemonPolicyOff")
-										}
-									],
-									onCommit: (value) => {
-										props.onChange("daemonPolicy", value);
-									}
-								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(NumberField, {
-									label: t$2("settings.daemonBackoffLimitLabel"),
-									hint: t$2("settings.daemonBackoffLimitHint"),
-									invalidHint: t$2("settings.invalidNumber", { min: 1 }),
-									min: 1,
-									value: values.daemonBackoffLimit,
-									disabled,
-									onCommit: (value) => {
-										props.onChange("daemonBackoffLimit", value);
-									}
-								})
-							]
+							children: [props.daemon ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: settings_card_module_css_default["field"],
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: settings_card_module_css_default["label"],
+										children: t$2("settings.daemonStatusLabel")
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+										className: settings_card_module_css_default["statusRow"],
+										children: [
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: statusDotClass(props.daemon.state),
+												"aria-hidden": true
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: settings_card_module_css_default["statusText"],
+												children: t$2(DAEMON_STATE_KEY[props.daemon.state])
+											}),
+											props.daemon.pid !== void 0 && props.daemon.version !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: settings_card_module_css_default["statusMeta"],
+												children: t$2("settings.daemonPidVersion", {
+													pid: props.daemon.pid,
+													version: props.daemon.version
+												})
+											}) : null,
+											props.daemon.state === "failed" && props.onDaemonRetry !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+												type: "button",
+												size: "sm",
+												variant: "outline",
+												className: settings_card_module_css_default["retry"],
+												onClick: props.onDaemonRetry,
+												children: t$2("settings.daemonRetry")
+											}) : null
+										]
+									}),
+									daemonNote !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+										className: settings_card_module_css_default["note"],
+										children: daemonNote
+									}) : null
+								]
+							}) : null, /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+								className: settings_card_module_css_default["note"],
+								children: t$2("settings.daemonProfileNote")
+							})]
 						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
 							title: t$2("settings.sectionSidecar"),
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(TextField, {
-								label: t$2("settings.sidecarCommandLabel"),
-								hint: t$2("settings.sidecarCommandHint"),
-								value: values.sidecarCommand,
-								placeholder: "agent-sidecar",
-								disabled,
-								onCommit: (value) => {
-									props.onChange("sidecarCommand", value);
-								}
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TextField, {
-								label: t$2("settings.sidecarRuntimeDirLabel"),
-								hint: t$2("settings.sidecarRuntimeDirHint"),
-								value: values.sidecarRuntimeDir,
-								placeholder: "~/.agent_sidecar",
-								disabled,
-								onCommit: (value) => {
-									props.onChange("sidecarRuntimeDir", value);
-								}
-							})]
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+								className: settings_card_module_css_default["note"],
+								children: t$2("settings.sidecarProfileNote")
+							})
 						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
 							title: t$2("settings.sectionStream"),
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(NumberField, {
-								label: t$2("settings.streamActiveMsLabel"),
-								hint: t$2("settings.streamActiveMsHint"),
-								invalidHint: t$2("settings.invalidNumber", { min: 100 }),
-								min: 100,
-								value: values.streamReconcileActiveMs,
-								disabled,
-								onCommit: (value) => {
-									props.onChange("streamReconcileActiveMs", value);
-								}
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(NumberField, {
-								label: t$2("settings.streamIdleMsLabel"),
-								hint: t$2("settings.streamIdleMsHint"),
-								invalidHint: t$2("settings.invalidNumber", { min: 100 }),
-								min: 100,
-								value: values.streamReconcileIdleMs,
-								disabled,
-								onCommit: (value) => {
-									props.onChange("streamReconcileIdleMs", value);
-								}
-							})]
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+								className: settings_card_module_css_default["note"],
+								children: t$2("settings.streamProfileNote")
+							})
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
 							title: t$2("settings.sectionInject"),
 							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+									className: settings_card_module_css_default["note"],
+									children: t$2("settings.liveEffectNote")
+								}),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 									className: settings_card_module_css_default["note"],
 									children: t$2("settings.injectSafetyNote")
@@ -4070,50 +4513,85 @@ window.__ModuleLoader__.load({
 								})
 							]
 						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
 							title: t$2("settings.sectionAnalysis"),
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ToggleField, {
-								label: t$2("settings.analysisEnabledLabel"),
-								hint: t$2("settings.analysisEnabledHint"),
-								checked: values.analysisEnabled,
-								disabled,
-								onCommit: (checked) => {
-									props.onChange("analysisEnabled", checked);
-								}
-							})
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+									className: settings_card_module_css_default["note"],
+									children: t$2("settings.liveEffectNote")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ToggleField, {
+									label: t$2("settings.analysisEnabledLabel"),
+									hint: t$2("settings.analysisEnabledHint"),
+									checked: values.analysisEnabled,
+									disabled,
+									onCommit: (checked) => {
+										props.onChange("analysisEnabled", checked);
+									}
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(AnalysisRouteField, {
+									label: t$2("settings.analysisProviderLabel"),
+									hint: t$2("settings.analysisProviderHint"),
+									value: values.analysisProvider,
+									placeholder: t$2("settings.analysisProviderPlaceholder"),
+									disabled,
+									invalid: analysisRouteInvalid && analysisRoute.provider === "",
+									onCommit: (value) => {
+										props.onChange("analysisProvider", value);
+									}
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(AnalysisRouteField, {
+									label: t$2("settings.analysisModelLabel"),
+									hint: t$2("settings.analysisModelHint"),
+									value: values.analysisModel,
+									placeholder: t$2("settings.analysisModelPlaceholder"),
+									disabled,
+									invalid: analysisRouteInvalid && analysisRoute.model === "",
+									onCommit: (value) => {
+										props.onChange("analysisModel", value);
+									}
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+									className: analysisRouteInvalid ? settings_card_module_css_default["invalidHint"] : settings_card_module_css_default["note"],
+									...analysisRouteInvalid ? { role: "alert" } : {},
+									children: analysisRouteStatus
+								})
+							]
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
 							title: t$2("settings.sectionUi"),
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(NumberField, {
-								label: t$2("settings.uiTimeWindowHoursLabel"),
-								hint: t$2("settings.uiTimeWindowHoursHint"),
-								invalidHint: t$2("settings.invalidNumber", { min: 1 }),
-								min: 1,
-								value: values.uiTimeWindowHours,
-								disabled,
-								onCommit: (value) => {
-									props.onChange("uiTimeWindowHours", value);
-								}
-							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ToggleField, {
-								label: t$2("settings.uiShowDeadLabel"),
-								hint: t$2("settings.uiShowDeadHint"),
-								checked: values.uiShowDead,
-								disabled,
-								onCommit: (checked) => {
-									props.onChange("uiShowDead", checked);
-								}
-							})]
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+									className: settings_card_module_css_default["note"],
+									children: t$2("settings.liveEffectNote")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(NumberField, {
+									label: t$2("settings.uiTimeWindowHoursLabel"),
+									hint: t$2("settings.uiTimeWindowHoursHint"),
+									invalidHint: t$2("settings.invalidNumber", { min: 1 }),
+									min: 1,
+									value: values.uiTimeWindowHours,
+									disabled,
+									onCommit: (value) => {
+										props.onChange("uiTimeWindowHours", value);
+									}
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ToggleField, {
+									label: t$2("settings.uiShowDeadLabel"),
+									hint: t$2("settings.uiShowDeadHint"),
+									checked: values.uiShowDead,
+									disabled,
+									onCommit: (checked) => {
+										props.onChange("uiShowDead", checked);
+									}
+								})
+							]
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
 							title: t$2("settings.sectionSkill"),
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ToggleField, {
-								label: t$2("settings.skillProvideLabel"),
-								hint: t$2("settings.skillProvideHint"),
-								checked: values.skillProvide,
-								disabled,
-								onCommit: (checked) => {
-									props.onChange("skillProvide", checked);
-								}
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+								className: settings_card_module_css_default["note"],
+								children: t$2("settings.skillRestartNote")
 							})
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -4143,8 +4621,10 @@ window.__ModuleLoader__.load({
 									type: "button",
 									size: "sm",
 									variant: "primary",
-									disabled: !props.dirty || props.saving || !props.writable,
-									onClick: props.onSave,
+									disabled: !props.dirty || props.saving || !props.writable || analysisRouteInvalid,
+									onClick: () => {
+										if (!analysisRouteInvalid) props.onSave();
+									},
 									children: t$2(props.saving ? "settings.saving" : "settings.save")
 								})
 							]
@@ -6314,7 +6794,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:src/client/inject/inject.module.css.mjs
-		const css$4 = ".a2ZgPq_panel{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-card);background:var(--agsc-bg);flex-direction:column;max-width:560px;display:flex}.a2ZgPq_header{border-bottom:1px solid var(--agsc-border-strong);align-items:center;gap:12px;padding:14px 16px 10px;display:flex}.a2ZgPq_title{min-width:0;color:var(--agsc-fg);flex:1;margin:0;font-size:15px;font-weight:600;line-height:1.4}.a2ZgPq_body{flex-direction:column;gap:10px;padding:12px 16px 14px;display:flex}.a2ZgPq_capabilityOff,.a2ZgPq_noticeWarn,.a2ZgPq_noticeError,.a2ZgPq_warnBar,.a2ZgPq_auditNote,.a2ZgPq_resultOk,.a2ZgPq_resultFail,.a2ZgPq_resultUnknown{border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);margin:0;padding:8px 10px;font-size:12px;line-height:1.6}.a2ZgPq_noticeWarn,.a2ZgPq_warnBar{border:1px solid var(--agsc-warn);color:var(--agsc-warn)}.a2ZgPq_noticeError,.a2ZgPq_resultFail{border:1px solid var(--agsc-err);color:var(--agsc-err)}.a2ZgPq_noticeDetail,.a2ZgPq_noTarget,.a2ZgPq_modeHint,.a2ZgPq_planKey,.a2ZgPq_observedNote,.a2ZgPq_resultDetail{color:var(--agsc-fg-dimmed)}.a2ZgPq_targetRow,.a2ZgPq_planRow{align-items:baseline;gap:10px;min-width:0;display:flex}.a2ZgPq_noTarget,.a2ZgPq_planKey,.a2ZgPq_modeHint,.a2ZgPq_resultDetail{font-size:12px;line-height:1.5}.a2ZgPq_agentTag{flex:none}.a2ZgPq_planTitle{min-width:0;color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;line-height:1.5;overflow:hidden}.a2ZgPq_field,.a2ZgPq_modeText,.a2ZgPq_planPreview{flex-direction:column;display:flex}.a2ZgPq_field{gap:6px}.a2ZgPq_label,.a2ZgPq_modeLabel{color:var(--agsc-fg);font-size:13px;line-height:1.5}.a2ZgPq_textarea{appearance:none;resize:vertical;border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);min-height:96px;color:var(--agsc-fg);font:inherit;padding:8px 10px;font-size:13px;line-height:1.6}.a2ZgPq_textarea:focus-visible{border-color:var(--agsc-accent);outline:none}.a2ZgPq_textarea::placeholder{color:var(--agsc-fg-dimmed)}.a2ZgPq_textarea:disabled{cursor:default;opacity:.5}.a2ZgPq_byteRow{align-items:center;gap:10px;display:flex}.a2ZgPq_byteBar{background:var(--agsc-border);border-radius:2px;flex:1;height:3px;overflow:hidden}.a2ZgPq_byteFill{background:var(--agsc-accent);border-radius:2px;height:100%;transition:width .12s}.a2ZgPq_byteFillOver{background:var(--agsc-err)}.a2ZgPq_byteText,.a2ZgPq_byteTextOver{color:var(--agsc-fg-dimmed);font-variant-numeric:tabular-nums;flex:none;font-size:11px;line-height:1.5}.a2ZgPq_byteTextOver,.a2ZgPq_invalid{color:var(--agsc-err)}.a2ZgPq_invalid{margin:0;font-size:12px;line-height:1.5}.a2ZgPq_modes{border:0;flex-direction:column;gap:8px;margin:0;padding:0;display:flex}.a2ZgPq_modeOption{cursor:pointer;align-items:flex-start;gap:10px;display:flex}.a2ZgPq_modeOption input{width:14px;height:14px;accent-color:var(--agsc-accent);cursor:pointer;margin:3px 0 0}.a2ZgPq_modeOption input:disabled{cursor:default}.a2ZgPq_modeText{gap:2px;min-width:0}.a2ZgPq_auditNote{padding:8px 10px}.a2ZgPq_planBox{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);flex-direction:column;gap:6px;padding:10px 12px;display:flex}.a2ZgPq_planKey{flex:none}.a2ZgPq_planValue{min-width:0;color:var(--agsc-fg);align-items:baseline;gap:8px;font-size:13px;line-height:1.5;display:flex}.a2ZgPq_observedNote{margin:0;font-size:11px;line-height:1.5}.a2ZgPq_planPreview{gap:4px;min-width:0}.a2ZgPq_preview{border:1px solid var(--agsc-border-strong);background:var(--agsc-bg);max-height:120px;color:var(--agsc-fg-secondary);white-space:pre-wrap;word-break:break-word;border-radius:6px;margin:0;padding:8px 10px;font-size:12px;line-height:1.6;overflow:auto}.a2ZgPq_countdown{color:var(--agsc-fg-secondary);font-variant-numeric:tabular-nums;margin:0;font-size:12px;line-height:1.5}.a2ZgPq_resultOk,.a2ZgPq_resultFail,.a2ZgPq_resultUnknown{color:var(--agsc-fg);padding:10px 12px;font-size:13px}.a2ZgPq_resultOk{border:1px solid var(--agsc-ok)}.a2ZgPq_resultUnknown{border:1px solid var(--agsc-fg-dimmed);color:var(--agsc-fg-secondary)}.a2ZgPq_resultDetail{margin:0;line-height:1.6}.a2ZgPq_footer{justify-content:flex-end;align-items:center;gap:8px;padding-top:4px;display:flex}.a2ZgPq_btnDanger{appearance:none;border:1px solid var(--agsc-err);border-radius:var(--agsc-radius-control);color:var(--agsc-err);font:inherit;cursor:pointer;background:0 0;padding:5px 14px;font-size:13px;font-weight:600;line-height:1.5}.a2ZgPq_btnDanger:hover:not(:disabled){background:var(--agsc-err);color:var(--agsc-bg-raised)}.a2ZgPq_btnDanger:disabled{cursor:default;opacity:.4}.a2ZgPq_btnDanger:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:1px}";
+		const css$4 = ".a2ZgPq_panel{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-card);background:var(--agsc-bg);flex-direction:column;max-width:560px;display:flex}.a2ZgPq_header{border-bottom:1px solid var(--agsc-border-strong);align-items:center;gap:12px;padding:14px 16px 10px;display:flex}.a2ZgPq_title{min-width:0;color:var(--agsc-fg);flex:1;margin:0;font-size:15px;font-weight:600;line-height:1.4}.a2ZgPq_body{flex-direction:column;gap:10px;padding:12px 16px 14px;display:flex}.a2ZgPq_capabilityOff,.a2ZgPq_noticeWarn,.a2ZgPq_noticeError,.a2ZgPq_warnBar,.a2ZgPq_auditNote,.a2ZgPq_resultOk,.a2ZgPq_resultFail,.a2ZgPq_resultUnknown{border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);margin:0;padding:8px 10px;font-size:12px;line-height:1.6}.a2ZgPq_noticeWarn,.a2ZgPq_warnBar{border:1px solid var(--agsc-warn);color:var(--agsc-warn)}.a2ZgPq_noticeError,.a2ZgPq_resultFail{border:1px solid var(--agsc-err);color:var(--agsc-err)}.a2ZgPq_noticeDetail,.a2ZgPq_noTarget,.a2ZgPq_modeHint,.a2ZgPq_resultDetail{color:var(--agsc-fg-dimmed)}.a2ZgPq_planKey,.a2ZgPq_observedNote{color:var(--agsc-fg-secondary)}.a2ZgPq_targetRow,.a2ZgPq_planRow{align-items:baseline;gap:10px;min-width:0;display:flex}.a2ZgPq_noTarget,.a2ZgPq_planKey,.a2ZgPq_modeHint,.a2ZgPq_resultDetail{font-size:12px;line-height:1.5}.a2ZgPq_agentTag{flex:none}.a2ZgPq_planTitle{min-width:0;color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;line-height:1.5;overflow:hidden}.a2ZgPq_field,.a2ZgPq_modeText,.a2ZgPq_planPreview{flex-direction:column;display:flex}.a2ZgPq_field{gap:6px}.a2ZgPq_label,.a2ZgPq_modeLabel{color:var(--agsc-fg);font-size:13px;line-height:1.5}.a2ZgPq_textarea{appearance:none;resize:vertical;border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);min-height:96px;color:var(--agsc-fg);font:inherit;padding:8px 10px;font-size:13px;line-height:1.6}.a2ZgPq_textarea:focus-visible{border-color:var(--agsc-accent);outline:none}.a2ZgPq_textarea::placeholder{color:var(--agsc-fg-dimmed)}.a2ZgPq_textarea:disabled{cursor:default;opacity:.5}.a2ZgPq_byteRow{align-items:center;gap:10px;display:flex}.a2ZgPq_byteBar{background:var(--agsc-border);border-radius:2px;flex:1;height:3px;overflow:hidden}.a2ZgPq_byteFill{background:var(--agsc-accent);border-radius:2px;height:100%;transition:width .12s}.a2ZgPq_byteFillOver{background:var(--agsc-err)}.a2ZgPq_byteText,.a2ZgPq_byteTextOver{color:var(--agsc-fg-dimmed);font-variant-numeric:tabular-nums;flex:none;font-size:11px;line-height:1.5}.a2ZgPq_byteTextOver,.a2ZgPq_invalid{color:var(--agsc-err)}.a2ZgPq_invalid{margin:0;font-size:12px;line-height:1.5}.a2ZgPq_modes{border:0;flex-direction:column;gap:8px;margin:0;padding:0;display:flex}.a2ZgPq_modeOption{cursor:pointer;align-items:flex-start;gap:10px;display:flex}.a2ZgPq_modeOption input{width:14px;height:14px;accent-color:var(--agsc-accent);cursor:pointer;margin:3px 0 0}.a2ZgPq_modeOption input:disabled{cursor:default}.a2ZgPq_modeText{gap:2px;min-width:0}.a2ZgPq_auditNote{padding:8px 10px}.a2ZgPq_planBox{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);flex-direction:column;gap:6px;padding:10px 12px;display:flex}.a2ZgPq_planKey{flex:none}.a2ZgPq_planValue{min-width:0;color:var(--agsc-fg);align-items:baseline;gap:8px;font-size:13px;line-height:1.5;display:flex}.a2ZgPq_observedNote{margin:0;font-size:11px;line-height:1.5}.a2ZgPq_planPreview{gap:4px;min-width:0}.a2ZgPq_preview{border:1px solid var(--agsc-border-strong);background:var(--agsc-bg);max-height:120px;color:var(--agsc-fg-secondary);white-space:pre-wrap;word-break:break-word;border-radius:6px;margin:0;padding:8px 10px;font-size:12px;line-height:1.6;overflow:auto}.a2ZgPq_countdown{color:var(--agsc-fg-secondary);font-variant-numeric:tabular-nums;margin:0;font-size:12px;line-height:1.5}.a2ZgPq_resultOk,.a2ZgPq_resultFail,.a2ZgPq_resultUnknown{color:var(--agsc-fg);padding:10px 12px;font-size:13px}.a2ZgPq_resultOk{border:1px solid var(--agsc-ok)}.a2ZgPq_resultUnknown{border:1px solid var(--agsc-fg-dimmed);color:var(--agsc-fg-secondary)}.a2ZgPq_resultDetail{margin:0;line-height:1.6}.a2ZgPq_footer{justify-content:flex-end;align-items:center;gap:8px;padding-top:4px;display:flex}.a2ZgPq_btnDanger{appearance:none;border:1px solid var(--agsc-err);border-radius:var(--agsc-radius-control);color:var(--agsc-fg);font:inherit;cursor:pointer;background:0 0;padding:5px 14px;font-size:13px;font-weight:600;line-height:1.5}.a2ZgPq_btnDanger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--agsc-fg)}.a2ZgPq_btnDanger:disabled{cursor:default;opacity:.4}.a2ZgPq_btnDanger:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:1px}";
 		const tagId$4 = "@shendeguize/dsh-agent-sidecar/src/client/inject/inject.module.css";
 		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$4, css$4);
 		if (typeof document !== "undefined") {
@@ -6686,7 +7166,7 @@ window.__ModuleLoader__.load({
 		* the data layer's transport reasons (api.ts). Unlisted codes fall back to
 		* the generic template via {@link errorCopy}.
 		*/
-		const ERROR_COPY = {
+		const ERROR_COPY$1 = {
 			inject_disabled: "inject.errInjectDisabled",
 			invalid_message: "inject.errInvalidMessage",
 			target_not_found: "inject.errTargetNotFound",
@@ -6705,7 +7185,7 @@ window.__ModuleLoader__.load({
 		};
 		/** Error code → renderable copy; unknown codes get the generic template. */
 		function errorCopy(code) {
-			const key = ERROR_COPY[code];
+			const key = ERROR_COPY$1[code];
 			return key === void 0 ? {
 				key: "inject.errGeneric",
 				params: { code }
@@ -6723,6 +7203,63 @@ window.__ModuleLoader__.load({
 		function renderCopy(t, copy) {
 			return t(copy.key, copy.params);
 		}
+		/**
+		* Client-visible eligibility vocabulary. The shared inject logic predates
+		* these host verdicts, so this local overlay keeps every known reason
+		* localized without reflecting a raw machine code.
+		*/
+		const ERROR_COPY = {
+			inject_disabled: "inject.errInjectDisabled",
+			unsupported_agent: "inject.errUnsupportedAgent",
+			working_session: "inject.errWorkingSession",
+			dead_session: "inject.errTargetDead",
+			target_dead: "inject.errTargetDead",
+			child_session: "inject.errChildSession",
+			remote_session: "inject.errRemoteSession",
+			invalid_session: "inject.errInvalidSession"
+		};
+		/** Known gateway copy plus a code-free fallback for unexpected failures. */
+		function injectErrorCopy(code) {
+			const eligibilityKey = ERROR_COPY[code];
+			if (eligibilityKey !== void 0) return { key: eligibilityKey };
+			const copy = errorCopy(code);
+			return copy.key === "inject.errGeneric" ? { key: "inject.errUnknown" } : copy;
+		}
+		function reduceEligibilityAwarePanel(state, event) {
+			if (event.type !== "ELIGIBILITY_BLOCKED") return reducePanel(state, event);
+			return state.phase === "preparing" || state.phase === "confirm" ? initialPanelState() : state;
+		}
+		function isKimiAgent(agent) {
+			return agent?.trim().toLowerCase() === "kimi";
+		}
+		/** Kimi's protected-resume transport has no mid-turn steering path. */
+		function effectiveInjectMode(agent, selectedMode) {
+			return isKimiAgent(agent) ? "queue" : selectedMode;
+		}
+		/** Build the exact prepare request after applying agent-specific mode safety. */
+		function createPanelPrepareRequest(target, message, selectedMode) {
+			return {
+				target: {
+					agent: target.agent,
+					sessionId: target.sessionId
+				},
+				mode: effectiveInjectMode(target.agent, selectedMode),
+				message
+			};
+		}
+		/** Kimi 0.38 never has a client-displayable delivered receipt. */
+		function displayInjectOutcome(agent, outcome) {
+			return isKimiAgent(agent) && outcome === "delivered" ? "unknown" : outcome;
+		}
+		/** Select the honest result headline for the target transport. */
+		function resultCopyKey(agent, outcome) {
+			const displayOutcome = displayInjectOutcome(agent, outcome);
+			if (isKimiAgent(agent)) {
+				if (displayOutcome === "unknown") return "inject.kimiResultUnknown";
+				if (displayOutcome === "failed") return "inject.kimiResultFailed";
+			}
+			return RESULT_COPY[displayOutcome];
+		}
 		/** cursor-cli process-list warning (gated) + the always-on audit note. */
 		function Warnings(props) {
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [props.agent !== null && showsProcessListWarning(props.agent) ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
@@ -6731,7 +7268,7 @@ window.__ModuleLoader__.load({
 				children: props.t("inject.argvWarning")
 			}) : null, /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 				className: inject_module_css_default["auditNote"],
-				children: props.t("inject.auditNote")
+				children: props.t(isKimiAgent(props.agent) ? "inject.kimiAuditNote" : "inject.auditNote")
 			})] });
 		}
 		/** Confirm-phase plan: live target snapshot + message digest. */
@@ -6777,9 +7314,13 @@ window.__ModuleLoader__.load({
 							children: t("inject.planModeLabel")
 						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							className: inject_module_css_default["planValue"],
-							children: t(MODE_COPY[plan.mode].label)
+							children: t(isKimiAgent(plan.target.agent) ? "inject.kimiModeLabel" : MODE_COPY[plan.mode].label)
 						})]
 					}),
+					isKimiAgent(plan.target.agent) ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+						className: inject_module_css_default["observedNote"],
+						children: t("inject.kimiModeHint")
+					}) : null,
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: inject_module_css_default["planPreview"],
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -6796,12 +7337,16 @@ window.__ModuleLoader__.load({
 		function InjectPanel(props) {
 			const t$1 = props.t ?? t;
 			const now = props.nowMs ?? Date.now;
-			const [state, dispatch] = (0, react.useReducer)(reducePanel, void 0, initialPanelState);
+			const isKimi = isKimiAgent(props.target?.agent);
+			const [state, dispatch] = (0, react.useReducer)(reduceEligibilityAwarePanel, void 0, initialPanelState);
 			const [draft, setDraft] = (0, react.useState)("");
-			const [mode, setMode] = (0, react.useState)(props.defaultMode);
+			const [mode, setMode] = (0, react.useState)(() => props.target === null ? props.defaultMode : effectiveInjectMode(props.target.agent, props.defaultMode));
 			const [clock, setClock] = (0, react.useState)(() => now());
 			const textareaId = (0, react.useId)();
 			const modeGroup = (0, react.useId)();
+			const blockedReasonId = (0, react.useId)();
+			const panelTitleKey = isKimi ? "inject.kimiTitle" : "inject.title";
+			const blockReason = props.capability.inject ? props.target === null ? null : injectBlockReason(true, props.eligibility) : "inject_disabled";
 			const inConfirm = state.phase === "confirm";
 			(0, react.useEffect)(() => {
 				if (!inConfirm) return;
@@ -6818,32 +7363,29 @@ window.__ModuleLoader__.load({
 					clearInterval(id);
 				};
 			}, [inConfirm]);
+			(0, react.useEffect)(() => {
+				if (blockReason !== null) dispatch({ type: "ELIGIBILITY_BLOCKED" });
+			}, [blockReason]);
 			const validation = validateMessage(draft);
 			const gate = deriveEditorGate({
-				injectEnabled: props.capability.inject,
+				injectEnabled: props.capability.inject && blockReason === null,
 				hasTarget: props.target !== null,
 				phase: state.phase,
 				validation
 			});
 			const handlePrepare = async () => {
 				const target = props.target;
-				if (target === null || !gate.canPrepare) return;
+				if (target === null || blockReason !== null || !gate.canPrepare) return;
 				const message = draft;
+				const request = createPanelPrepareRequest(target, message, mode);
 				dispatch({
 					type: "PREPARE_START",
 					message,
-					mode
+					mode: request.mode
 				});
 				let event;
 				try {
-					event = classifyPrepareResponse(await props.onPrepare({
-						target: {
-							agent: target.agent,
-							sessionId: target.sessionId
-						},
-						mode,
-						message
-					}));
+					event = classifyPrepareResponse(await props.onPrepare(request));
 				} catch {
 					event = {
 						type: "PREPARE_ERROR",
@@ -6853,7 +7395,7 @@ window.__ModuleLoader__.load({
 				dispatch(event);
 			};
 			const handleExecute = async () => {
-				if (state.phase !== "confirm") return;
+				if (state.phase !== "confirm" || blockReason !== null) return;
 				const { requestId, confirmToken, message } = state;
 				dispatch({ type: "EXECUTE_START" });
 				let event;
@@ -6898,41 +7440,51 @@ window.__ModuleLoader__.load({
 				onClick: props.onClose,
 				children: t$1("inject.close")
 			}) : null;
-			if (!props.capability.inject) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
-				...panelSurface,
-				"aria-label": t$1("inject.title"),
-				onKeyDown: handleKeyDown,
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
-					className: inject_module_css_default["header"],
-					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", {
-						className: inject_module_css_default["title"],
-						children: t$1("inject.title")
-					})
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					className: inject_module_css_default["body"],
-					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
-						className: inject_module_css_default["capabilityOff"],
-						role: "status",
-						children: t$1("inject.capabilityOff")
-					}), closeButton !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: inject_module_css_default["footer"],
-						children: closeButton
-					}) : null]
-				})]
-			});
-			if (state.phase === "result") {
-				const { result } = state;
-				const actions = resultActions(result.outcome);
-				const toneClass = result.outcome === "delivered" ? inject_module_css_default["resultOk"] : result.outcome === "failed" ? inject_module_css_default["resultFail"] : inject_module_css_default["resultUnknown"];
+			if (blockReason !== null) {
+				const blockedCopy = renderCopy(t$1, injectErrorCopy(blockReason));
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
 					...panelSurface,
-					"aria-label": t$1("inject.title"),
+					"aria-label": t$1(panelTitleKey),
+					"aria-describedby": blockedReasonId,
 					onKeyDown: handleKeyDown,
 					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
 						className: inject_module_css_default["header"],
 						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", {
 							className: inject_module_css_default["title"],
-							children: t$1("inject.title")
+							children: t$1(panelTitleKey)
+						})
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: inject_module_css_default["body"],
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+							id: blockedReasonId,
+							className: inject_module_css_default["capabilityOff"],
+							role: "status",
+							"data-testid": "agent-sidecar-inject-blocked-reason",
+							children: isKimi && blockReason === "working_session" ? t$1("inject.kimiErrWorkingSession") : blockedCopy
+						}), closeButton !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							className: inject_module_css_default["footer"],
+							children: closeButton
+						}) : null]
+					})]
+				});
+			}
+			if (state.phase === "result") {
+				const { result } = state;
+				const resultAgent = state.plan?.target.agent ?? "";
+				const isKimiResult = isKimiAgent(resultAgent);
+				const displayOutcome = displayInjectOutcome(resultAgent, result.outcome);
+				const actions = resultActions(displayOutcome);
+				const toneClass = displayOutcome === "delivered" ? inject_module_css_default["resultOk"] : displayOutcome === "failed" ? inject_module_css_default["resultFail"] : inject_module_css_default["resultUnknown"];
+				const resultCopy = resultCopyKey(resultAgent, result.outcome);
+				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
+					...panelSurface,
+					"aria-label": t$1(isKimiResult ? "inject.kimiTitle" : "inject.title"),
+					onKeyDown: handleKeyDown,
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
+						className: inject_module_css_default["header"],
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", {
+							className: inject_module_css_default["title"],
+							children: t$1(isKimiResult ? "inject.kimiTitle" : "inject.title")
 						})
 					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: inject_module_css_default["body"],
@@ -6940,21 +7492,21 @@ window.__ModuleLoader__.load({
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 								className: toneClass,
 								role: "status",
-								children: t$1(RESULT_COPY[result.outcome])
+								children: t$1(resultCopy)
 							}),
-							result.outcome === "failed" && result.errorCode !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+							displayOutcome === "failed" && result.errorCode !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 								className: inject_module_css_default["resultDetail"],
-								children: renderCopy(t$1, errorCopy(result.errorCode))
+								children: renderCopy(t$1, injectErrorCopy(result.errorCode))
 							}) : null,
 							result.replayed === true ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 								className: inject_module_css_default["resultDetail"],
-								children: t$1("inject.resultReplayed")
+								children: t$1(isKimiResult ? "inject.kimiResultReplayed" : "inject.resultReplayed")
 							}) : null,
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								className: inject_module_css_default["footer"],
 								children: [
 									closeButton,
-									isDeliveredResult(result) && props.onObserve !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+									!isKimiResult && isDeliveredResult(result) && props.onObserve !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 										type: "button",
 										size: "sm",
 										variant: "primary",
@@ -6971,7 +7523,7 @@ window.__ModuleLoader__.load({
 										},
 										children: t$1("inject.reprepare")
 									}) : null,
-									result.outcome === "delivered" && props.onClose === void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+									!isKimiResult && result.outcome === "delivered" && props.onClose === void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 										type: "button",
 										size: "sm",
 										variant: "primary",
@@ -6988,16 +7540,17 @@ window.__ModuleLoader__.load({
 			}
 			if (state.phase === "confirm" || state.phase === "executing") {
 				const executing = state.phase === "executing";
+				const isKimiPlan = isKimiAgent(state.plan.target.agent);
 				const countdown = state.phase === "confirm" ? tokenCountdown(state.expiresAt, clock) : null;
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
 					...panelSurface,
-					"aria-label": t$1("inject.confirmTitle"),
+					"aria-label": t$1(isKimiPlan ? "inject.kimiConfirmTitle" : "inject.confirmTitle"),
 					onKeyDown: handleKeyDown,
 					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
 						className: inject_module_css_default["header"],
 						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", {
 							className: inject_module_css_default["title"],
-							children: t$1("inject.confirmTitle")
+							children: t$1(isKimiPlan ? "inject.kimiConfirmTitle" : "inject.confirmTitle")
 						})
 					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: inject_module_css_default["body"],
@@ -7033,7 +7586,7 @@ window.__ModuleLoader__.load({
 									onClick: () => {
 										handleExecute();
 									},
-									children: t$1(executing ? "inject.executing" : "inject.confirmExecute")
+									children: t$1(isKimiPlan ? executing ? "inject.kimiExecuting" : "inject.kimiConfirmExecute" : executing ? "inject.executing" : "inject.confirmExecute")
 								})]
 							})
 						]
@@ -7047,24 +7600,21 @@ window.__ModuleLoader__.load({
 			const showInvalid = !validation.ok && validation.code !== "empty";
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
 				...panelSurface,
-				"aria-label": t$1("inject.title"),
+				"aria-label": t$1(panelTitleKey),
 				onKeyDown: handleKeyDown,
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("header", {
 					className: inject_module_css_default["header"],
 					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", {
 						className: inject_module_css_default["title"],
-						children: t$1("inject.title")
+						children: t$1(panelTitleKey)
 					})
 				}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					className: inject_module_css_default["body"],
 					children: [
-						notice !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("p", {
+						notice !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
 							className: notice.kind === "token_expired" ? inject_module_css_default["noticeWarn"] : inject_module_css_default["noticeError"],
 							role: "alert",
-							children: [renderCopy(t$1, noticeCopy(notice)), notice.kind === "prepare_rejected" && notice.detail !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-								className: inject_module_css_default["noticeDetail"],
-								children: [" ", notice.detail]
-							}) : null]
+							children: renderCopy(t$1, notice.kind === "token_expired" ? noticeCopy(notice) : injectErrorCopy(notice.code))
 						}) : null,
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: inject_module_css_default["targetRow"],
@@ -7098,7 +7648,7 @@ window.__ModuleLoader__.load({
 									id: textareaId,
 									className: inject_module_css_default["textarea"],
 									value: draft,
-									placeholder: t$1("inject.messagePlaceholder"),
+									placeholder: t$1(isKimi ? "inject.kimiMessagePlaceholder" : "inject.messagePlaceholder"),
 									disabled: !canEdit,
 									rows: 5,
 									autoFocus: true,
@@ -7130,7 +7680,22 @@ window.__ModuleLoader__.load({
 								}) : null
 							]
 						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("fieldset", {
+						isKimi ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("fieldset", {
+							className: inject_module_css_default["modes"],
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("legend", {
+								className: inject_module_css_default["label"],
+								children: t$1("inject.kimiActionLabel")
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+								className: inject_module_css_default["modeText"],
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: inject_module_css_default["modeLabel"],
+									children: t$1("inject.kimiModeLabel")
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: inject_module_css_default["modeHint"],
+									children: t$1("inject.kimiModeHint")
+								})]
+							})]
+						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("fieldset", {
 							className: inject_module_css_default["modes"],
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("legend", {
 								className: inject_module_css_default["label"],
@@ -7172,7 +7737,7 @@ window.__ModuleLoader__.load({
 								onClick: () => {
 									handlePrepare();
 								},
-								children: t$1(preparing ? "inject.preparing" : "inject.prepare")
+								children: t$1(isKimi ? preparing ? "inject.kimiPreparing" : "inject.kimiPrepare" : preparing ? "inject.preparing" : "inject.prepare")
 							})]
 						})
 					]
@@ -7391,6 +7956,9 @@ window.__ModuleLoader__.load({
 		*
 		* - initial load via detail/transport.ts `fetchSessionDetail` (header +
 		*   newest timeline page in one round-trip);
+		* - every SSE snapshot invalidates any older detail request immediately,
+		*   then runs at most one latest queued detail refresh; only that generation
+		*   may publish authoritative header metadata;
 		* - older-history pagination via `fetchTimelinePage(cursor)`;
 		* - listen mode: the controller's SSE `state` frames carry no per-session
 		*   events (ADR-2/ADR-3), so the integration calls {@link
@@ -7402,8 +7970,9 @@ window.__ModuleLoader__.load({
 		*   (dsh-tools/logic.ts `externalLineageFallback`).
 		*
 		* Same store discipline as controller.ts: subscribe/getState for
-		* `useSyncExternalStore`, immutable state snapshots, `dispose()` makes
-		* late settlements no-ops. All transport is injectable for node tests.
+		* `useSyncExternalStore`, immutable state snapshots, generation-scoped
+		* requests, and `dispose()` cancellation plus late-settlement no-ops. All
+		* transport is injectable for node tests.
 		*
 		* @module
 		*/
@@ -7425,6 +7994,22 @@ window.__ModuleLoader__.load({
 		function reasonOf(err) {
 			return isApiError(err) ? err.reason : "network_error";
 		}
+		/** A degraded page remains visible until a fresh generation proves healthy. */
+		function isDegradedHealth(health) {
+			return health.kind === "partial" || health.kind === "failed";
+		}
+		/**
+		* Accumulate health across accepted pages. A healthy pagination/listen page
+		* cannot erase an earlier degraded page. Starting a new newest-window
+		* generation can clear that warning only with an explicit (non-legacy)
+		* healthy verdict; legacy or unverified hosts retain the prior warning.
+		*/
+		function aggregateTimelineHealth(current, incoming, initialOfGeneration) {
+			if (initialOfGeneration && incoming.kind === "healthy" && !incoming.legacy) return incoming;
+			if (current.kind === "failed" || incoming.kind === "failed") return current.kind === "failed" ? current : incoming;
+			if (isDegradedHealth(current) || isDegradedHealth(incoming)) return isDegradedHealth(current) ? current : incoming;
+			return incoming;
+		}
 		var DetailStore = class {
 			state;
 			listeners = /* @__PURE__ */ new Set();
@@ -7434,6 +8019,12 @@ window.__ModuleLoader__.load({
 			listenLimit;
 			disposed = false;
 			opened = false;
+			detailGeneration = 0;
+			detailInFlight = null;
+			detailQueued = false;
+			timelineGeneration = 0;
+			pendingRequests = /* @__PURE__ */ new Set();
+			timelineRequests = /* @__PURE__ */ new Set();
 			paging = false;
 			listenInFlight = false;
 			listenQueued = false;
@@ -7448,6 +8039,7 @@ window.__ModuleLoader__.load({
 					sessionId,
 					header: options.hint ?? EMPTY_HEADER,
 					timeline: createTimelineVM(sessionId),
+					timelineHealth: LEGACY_TIMELINE_HEALTH,
 					loading: false,
 					error: null,
 					hasMore: false,
@@ -7472,71 +8064,160 @@ window.__ModuleLoader__.load({
 				};
 				for (const fn of [...this.listeners]) fn();
 			}
+			/** Allocate one cancellable transport request owned by this store. */
+			startRequest(timeline) {
+				const request = new AbortController();
+				this.pendingRequests.add(request);
+				if (timeline) this.timelineRequests.add(request);
+				return request;
+			}
+			finishRequest(request) {
+				this.pendingRequests.delete(request);
+				this.timelineRequests.delete(request);
+			}
+			isCurrentTimelineRequest(generation, request) {
+				return !this.disposed && !request.signal.aborted && generation === this.timelineGeneration;
+			}
+			isCurrentDetailRequest(generation, request) {
+				return !this.disposed && !request.signal.aborted && generation === this.detailGeneration && this.detailInFlight?.request === request;
+			}
+			/**
+			* A newest-window request starts a new timeline generation. Abort pending
+			* page/listen/refresh transports and reset their local ownership flags so
+			* late settlements cannot mutate entries, health, cursors, or busy state.
+			*/
+			beginTimelineGeneration() {
+				this.timelineGeneration += 1;
+				for (const request of this.timelineRequests) request.abort();
+				this.timelineRequests.clear();
+				this.paging = false;
+				this.listenInFlight = false;
+				this.listenQueued = false;
+				this.refreshInFlight = false;
+				return this.timelineGeneration;
+			}
+			/**
+			* Start the current detail generation. Once the timeline is ready, a detail
+			* refresh commits header metadata only; its nested newest page must not
+			* compete with the independent timeline generation/cursor state.
+			*/
+			startDetailRefresh() {
+				const generation = this.detailGeneration;
+				const timelineGeneration = this.timelineGeneration;
+				const request = this.startRequest(false);
+				this.detailInFlight = {
+					generation,
+					request
+				};
+				const sessionId = this.state.sessionId;
+				const run = async () => {
+					try {
+						const wire = await this.fetchDetailFn(sessionId, { signal: request.signal });
+						if (!this.isCurrentDetailRequest(generation, request)) return;
+						const header = headerFromDetailWire(wire) ?? this.state.header;
+						if (this.state.ready) this.setState({ header });
+						else if (wire.timeline === null || timelineGeneration !== this.timelineGeneration) this.setState({
+							header,
+							loading: false,
+							error: "fusion_not_wired"
+						});
+						else {
+							const timeline = applyTimelinePage(createTimelineVM(sessionId), wire.timeline);
+							this.setState({
+								header,
+								timeline,
+								timelineHealth: aggregateTimelineHealth(this.state.timelineHealth, normalizeTimelineHealth(wire.timeline), true),
+								loading: false,
+								error: null,
+								hasMore: timeline.nextCursor !== null,
+								ready: true
+							});
+						}
+						this.loadLineage(header.agent);
+					} catch (err) {
+						if (!this.isCurrentDetailRequest(generation, request)) return;
+						if (!this.state.ready) {
+							this.setState({
+								loading: false,
+								error: reasonOf(err)
+							});
+							this.loadLineage(this.state.header.agent);
+						}
+					} finally {
+						this.finishRequest(request);
+						if (this.detailInFlight?.request !== request) return;
+						this.detailInFlight = null;
+						if (this.detailQueued && !this.disposed) {
+							this.detailQueued = false;
+							this.startDetailRefresh();
+						}
+					}
+				};
+				return run();
+			}
+			/**
+			* Invalidate the pending detail response synchronously. Bursts retain only
+			* one queued refresh carrying the latest generation; real fetch observes
+			* Abort immediately, while injected transports remain protected by the
+			* generation check even if they ignore cancellation.
+			*/
+			scheduleDetailRefresh() {
+				if (this.disposed || !this.opened) return;
+				this.detailGeneration += 1;
+				if (this.detailInFlight !== null) {
+					this.detailInFlight.request.abort();
+					this.detailQueued = true;
+					return;
+				}
+				this.startDetailRefresh();
+			}
 			/** Initial load: header + newest timeline page, then lineage. Idempotent. */
 			async open() {
 				if (this.opened || this.disposed) return;
 				this.opened = true;
+				this.beginTimelineGeneration();
+				this.detailGeneration += 1;
 				this.setState({
 					loading: true,
 					error: null
 				});
-				try {
-					const wire = await this.fetchDetailFn(this.state.sessionId);
-					if (this.disposed) return;
-					const header = headerFromDetailWire(wire) ?? this.state.header;
-					if (wire.timeline === null) this.setState({
-						header,
-						loading: false,
-						error: "fusion_not_wired"
-					});
-					else {
-						const timeline = applyTimelinePage(createTimelineVM(this.state.sessionId), wire.timeline);
-						this.setState({
-							header,
-							timeline,
-							loading: false,
-							error: null,
-							hasMore: timeline.nextCursor !== null,
-							ready: true
-						});
-					}
-					this.loadLineage(header.agent);
-				} catch (err) {
-					if (this.disposed) return;
-					this.setState({
-						loading: false,
-						error: reasonOf(err)
-					});
-					this.loadLineage(this.state.header.agent);
-				}
+				await this.startDetailRefresh();
 			}
 			/** Fetch one older history page via the accumulated cursor. */
 			async loadMore() {
 				const { timeline } = this.state;
-				if (this.disposed || this.paging || !this.state.ready) return;
+				if (this.disposed || this.paging || this.refreshInFlight || !this.state.ready) return;
 				if (timeline.nextCursor === null) return;
+				const generation = this.timelineGeneration;
+				const request = this.startRequest(true);
+				const sessionId = this.state.sessionId;
 				this.paging = true;
 				this.setState({
 					loading: true,
 					error: null
 				});
 				try {
-					const page = await this.fetchPageFn(this.state.sessionId, { cursor: timeline.nextCursor });
-					if (this.disposed) return;
+					const page = await this.fetchPageFn(sessionId, {
+						cursor: timeline.nextCursor,
+						signal: request.signal
+					});
+					if (!this.isCurrentTimelineRequest(generation, request)) return;
 					const next = applyTimelinePage(this.state.timeline, page);
 					this.setState({
 						timeline: next,
+						timelineHealth: aggregateTimelineHealth(this.state.timelineHealth, normalizeTimelineHealth(page), false),
 						loading: false,
 						hasMore: next.nextCursor !== null
 					});
 				} catch (err) {
-					if (this.disposed) return;
+					if (!this.isCurrentTimelineRequest(generation, request)) return;
 					this.setState({
 						loading: false,
 						error: reasonOf(err)
 					});
 				} finally {
-					this.paging = false;
+					this.finishRequest(request);
+					if (generation === this.timelineGeneration) this.paging = false;
 				}
 			}
 			/** Flip listen mode; turning it on refetches the newest window at once. */
@@ -7550,37 +8231,47 @@ window.__ModuleLoader__.load({
 			* once after a delivered injection (UX-05 observation loop). Unlike the
 			* silent best-effort listen refetch, it reports in-flight state and
 			* surfaces a failure reason (rendered as the inline banner). Appended
-			* entries get the listen-merge highlight. Coalesced: at most one manual
-			* refresh in flight, extra calls are dropped.
+			* entries get the listen-merge highlight. Every call starts a generation:
+			* a newer refresh supersedes pending paging/listen/refresh requests.
 			*/
 			async refreshNewest() {
-				if (this.disposed || !this.state.ready || this.refreshInFlight) return;
+				if (this.disposed || !this.state.ready) return;
+				const generation = this.beginTimelineGeneration();
+				const request = this.startRequest(true);
+				const sessionId = this.state.sessionId;
 				this.refreshInFlight = true;
 				this.setState({
+					loading: false,
 					refreshing: true,
 					error: null
 				});
 				try {
-					const page = await this.fetchPageFn(this.state.sessionId, { ...this.listenLimit !== void 0 ? { limit: this.listenLimit } : {} });
-					if (this.disposed) return;
+					const page = await this.fetchPageFn(sessionId, {
+						...this.listenLimit !== void 0 ? { limit: this.listenLimit } : {},
+						signal: request.signal
+					});
+					if (!this.isCurrentTimelineRequest(generation, request)) return;
 					this.setState({
 						timeline: applyListenPage(this.state.timeline, page),
+						timelineHealth: aggregateTimelineHealth(this.state.timelineHealth, normalizeTimelineHealth(page), true),
 						refreshing: false
 					});
 				} catch (err) {
-					if (this.disposed) return;
+					if (!this.isCurrentTimelineRequest(generation, request)) return;
 					this.setState({
 						refreshing: false,
 						error: reasonOf(err)
 					});
 				} finally {
-					this.refreshInFlight = false;
+					this.finishRequest(request);
+					if (generation === this.timelineGeneration) this.refreshInFlight = false;
 				}
 			}
 			/**
-			* SSE `state` frame hook (one call per controller notification). Refreshes
-			* the header from the live board card when given, and in listen mode
-			* triggers a coalesced newest-window refetch.
+			* SSE `state` frame hook (one call per controller notification). The card
+			* hint paints immediately, then a generation-safe detail refresh resolves
+			* authoritative metadata. Listen mode independently refetches the newest
+			* timeline window.
 			*/
 			notifySnapshot(card) {
 				if (this.disposed) return;
@@ -7588,26 +8279,38 @@ window.__ModuleLoader__.load({
 					const h = this.state.header;
 					if (card.agent !== h.agent || card.title !== h.title || card.project !== h.project || card.status !== h.status) this.setState({ header: card });
 				}
+				this.scheduleDetailRefresh();
 				if (this.state.listening && this.state.ready) this.scheduleListenRefetch();
 			}
 			/** At most one refetch in flight; at most one more queued (idempotence). */
 			scheduleListenRefetch() {
-				if (this.disposed || !this.state.ready) return;
+				if (this.disposed || !this.state.ready || this.refreshInFlight) return;
 				if (this.listenInFlight) {
 					this.listenQueued = true;
 					return;
 				}
+				const generation = this.timelineGeneration;
+				const request = this.startRequest(true);
 				this.listenInFlight = true;
-				this.runListenRefetch();
+				this.runListenRefetch(generation, request);
 			}
-			async runListenRefetch() {
+			async runListenRefetch(generation, request) {
+				const sessionId = this.state.sessionId;
 				try {
-					const page = await this.fetchPageFn(this.state.sessionId, { ...this.listenLimit !== void 0 ? { limit: this.listenLimit } : {} });
-					if (this.disposed) return;
-					this.setState({ timeline: applyListenPage(this.state.timeline, page) });
+					const page = await this.fetchPageFn(sessionId, {
+						...this.listenLimit !== void 0 ? { limit: this.listenLimit } : {},
+						signal: request.signal
+					});
+					if (!this.isCurrentTimelineRequest(generation, request)) return;
+					this.setState({
+						timeline: applyListenPage(this.state.timeline, page),
+						timelineHealth: aggregateTimelineHealth(this.state.timelineHealth, normalizeTimelineHealth(page), false)
+					});
 				} catch {} finally {
+					this.finishRequest(request);
+					if (generation !== this.timelineGeneration || this.disposed) return;
 					this.listenInFlight = false;
-					if (this.listenQueued && !this.disposed) {
+					if (this.listenQueued) {
 						this.listenQueued = false;
 						this.scheduleListenRefetch();
 					}
@@ -7642,8 +8345,14 @@ window.__ModuleLoader__.load({
 					return;
 				}
 				try {
-					const body = await this.fetchLineageFn(this.state.sessionId);
-					if (this.disposed) return;
+					const request = this.startRequest(false);
+					let body;
+					try {
+						body = await this.fetchLineageFn(this.state.sessionId, { signal: request.signal });
+					} finally {
+						this.finishRequest(request);
+					}
+					if (this.disposed || request.signal.aborted) return;
 					this.setState({ lineage: {
 						loading: false,
 						error: null,
@@ -7663,7 +8372,16 @@ window.__ModuleLoader__.load({
 			}
 			/** Late settlements become no-ops; subscribers are dropped. Idempotent. */
 			dispose() {
+				if (this.disposed) return;
 				this.disposed = true;
+				this.detailGeneration += 1;
+				this.timelineGeneration += 1;
+				for (const request of this.pendingRequests) request.abort();
+				this.pendingRequests.clear();
+				this.timelineRequests.clear();
+				this.detailInFlight = null;
+				this.detailQueued = false;
+				this.listenQueued = false;
 				this.listeners.clear();
 			}
 		};
@@ -7746,6 +8464,115 @@ window.__ModuleLoader__.load({
 		*/
 		const ANALYSIS_DISABLED_REASON_ID = "agent-sidecar-analysis-disabled-reason";
 		/**
+		* Coalesce target-verdict refreshes driven by the existing detail/SSE
+		* notification stream. There is deliberately no timer or independent poll.
+		*/
+		function createInjectEligibilityRefresher(sessionId, getExpectedAgent, onEligibility, fetchSessionFn = fetchSession) {
+			let disposed = false;
+			let generation = 0;
+			let activeController = null;
+			return {
+				refresh: () => {
+					if (disposed) return Promise.resolve();
+					const requestGeneration = ++generation;
+					activeController?.abort();
+					const controller = new AbortController();
+					activeController = controller;
+					const expectedAgent = getExpectedAgent();
+					onEligibility(INVALID_INJECT_ELIGIBILITY);
+					return (async () => {
+						let eligibility = INVALID_INJECT_ELIGIBILITY;
+						try {
+							eligibility = sessionInjectEligibility((await fetchSessionFn(sessionId, { signal: controller.signal })).session, {
+								sessionId,
+								...expectedAgent === "" ? {} : { agent: expectedAgent }
+							});
+						} catch {}
+						if (disposed || controller.signal.aborted || requestGeneration !== generation || getExpectedAgent() !== expectedAgent) return;
+						onEligibility(eligibility);
+					})().finally(() => {
+						if (activeController === controller) activeController = null;
+					});
+				},
+				dispose: () => {
+					disposed = true;
+					generation += 1;
+					activeController?.abort();
+					activeController = null;
+				}
+			};
+		}
+		/** Guard retained even behind native `disabled` for synthetic activation. */
+		function requestInjectOpen(reason, onOpen) {
+			if (reason !== null) return false;
+			onOpen();
+			return true;
+		}
+		/** Native-disabled, visibly explained detail-page injection trigger. */
+		function DetailInjectTrigger(props) {
+			const reasonId = (0, react.useId)();
+			const reason = injectBlockReason(props.injectEnabled, props.eligibility);
+			const hint = reason === null ? void 0 : t(injectErrorCopy(reason).key);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+				size: "sm",
+				variant: "outline",
+				disabled: reason !== null,
+				title: hint,
+				"aria-describedby": reason === null ? void 0 : reasonId,
+				onClick: () => {
+					requestInjectOpen(reason, props.onOpen);
+				},
+				"data-testid": "agent-sidecar-detail-inject",
+				children: t("detail.actions.inject")
+			}), reason !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+				id: reasonId,
+				className: detail_view_module_css_default["analysisDisabledReason"],
+				"data-testid": "agent-sidecar-detail-inject-reason",
+				children: hint
+			})] });
+		}
+		/**
+		* Content-free timeline degradation surface. A degraded empty page replaces
+		* the healthy-empty body; partial failures with entries keep those entries
+		* visible. The existing manual newest-window refresh is reused as retry.
+		*/
+		function TimelineAvailabilityBoundary(props) {
+			const { health } = props;
+			const degraded = health.kind !== "healthy";
+			const blocksHealthyEmpty = degraded && props.entryCount === 0;
+			const messageKey = health.kind === "partial" ? "detail.timeline.degradedPartial" : health.kind === "failed" ? "detail.timeline.degradedAll" : "detail.timeline.degradedUnverified";
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [degraded && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				className: detail_view_module_css_default["toolsSection"],
+				role: health.kind === "partial" ? "status" : "alert",
+				"data-kind": health.kind,
+				"data-testid": "agent-sidecar-timeline-degraded",
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t(messageKey) }),
+					health.summary !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						"data-testid": "agent-sidecar-timeline-source-summary",
+						children: t("detail.sources.healthSummary", { ...health.summary })
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("detail.timeline.degradedRetry") }),
+					blocksHealthyEmpty && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: [props.onClose !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+						type: "button",
+						size: "sm",
+						variant: "outline",
+						onClick: props.onClose,
+						children: t("detail.header.close")
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+						type: "button",
+						size: "sm",
+						variant: "outline",
+						disabled: props.refreshing,
+						title: t("detail.header.refreshHint"),
+						onClick: props.onRefresh,
+						"data-testid": "agent-sidecar-timeline-retry",
+						children: props.refreshing ? t("detail.header.refreshing") : t("detail.header.refresh")
+					})] })
+				]
+			}), !blocksHealthyEmpty && props.children] });
+		}
+		/**
 		* The detail view. Owner remounts it per session id (`key={sessionId}`),
 		* so every store below is scoped to exactly one session.
 		*/
@@ -7755,15 +8582,22 @@ window.__ModuleLoader__.load({
 			const [searchStore] = (0, react.useState)(() => integration.createSearchStore());
 			const [analysisStore] = (0, react.useState)(() => integration.createAnalysisStore());
 			const [injectOpen, setInjectOpen] = (0, react.useState)(false);
+			const [injectEligibility, setInjectEligibility] = (0, react.useState)(INVALID_INJECT_ELIGIBILITY);
 			const [analysisOpen, setAnalysisOpen] = (0, react.useState)(false);
 			const [toolsOpen, setToolsOpen] = (0, react.useState)(false);
+			const detailRootRef = (0, react.useRef)(null);
+			const focusFrameRef = (0, react.useRef)(null);
 			(0, react.useEffect)(() => {
+				const eligibilityRefresher = createInjectEligibilityRefresher(sessionId, () => detailStore.getState().header.agent, setInjectEligibility);
 				detailStore.open();
+				eligibilityRefresher.refresh();
 				const unsubscribe = controller.subscribe(() => {
 					detailStore.notifySnapshot(findCardHint(controller.getState().sessions, sessionId));
+					eligibilityRefresher.refresh();
 				});
 				return () => {
 					unsubscribe();
+					eligibilityRefresher.dispose();
 					detailStore.dispose();
 					searchStore.dispose();
 					analysisStore.dispose();
@@ -7775,6 +8609,23 @@ window.__ModuleLoader__.load({
 				analysisStore,
 				sessionId
 			]);
+			(0, react.useEffect)(() => {
+				if (typeof window === "undefined") return;
+				const root = detailRootRef.current;
+				if (root === null) return;
+				focusFrameRef.current = window.requestAnimationFrame(() => {
+					focusFrameRef.current = null;
+					if (detailRootRef.current !== root || !root.isConnected) return;
+					const back = root.querySelector("[data-testid=\"agent-sidecar-detail\"] header button:not([disabled])");
+					const heading = root.querySelector("h1,[role=\"heading\"]");
+					(back ?? heading)?.focus({ preventScroll: true });
+				});
+				return () => {
+					if (focusFrameRef.current === null) return;
+					window.cancelAnimationFrame(focusFrameRef.current);
+					focusFrameRef.current = null;
+				};
+			}, [sessionId]);
 			const detail = (0, react.useSyncExternalStore)(detailStore.subscribe, detailStore.getState, detailStore.getState);
 			const search = (0, react.useSyncExternalStore)(searchStore.subscribe, searchStore.getState, searchStore.getState);
 			const analysis = (0, react.useSyncExternalStore)(analysisStore.subscribe, analysisStore.getState, analysisStore.getState);
@@ -7800,19 +8651,18 @@ window.__ModuleLoader__.load({
 			};
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				...surfaceProps("detail", detail_view_module_css_default["detailRoot"]),
+				ref: detailRootRef,
 				"data-testid": "agent-sidecar-detail-view",
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: detail_view_module_css_default["actionsRow"],
 						children: [
-							injectIntegration !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-								size: "sm",
-								variant: "outline",
-								onClick: () => {
+							injectIntegration !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(DetailInjectTrigger, {
+								injectEnabled: view.injectCapability,
+								eligibility: injectEligibility,
+								onOpen: () => {
 									setInjectOpen(true);
-								},
-								"data-testid": "agent-sidecar-detail-inject",
-								children: t("detail.actions.inject")
+								}
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 								size: "sm",
@@ -7881,25 +8731,34 @@ window.__ModuleLoader__.load({
 							onSelectSession: props.onSelectSession
 						})] })]
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionDetail, {
-						sessionId,
-						header: detail.header,
-						timeline: detail.timeline,
-						loading: detail.loading,
-						error: detail.error,
-						hasMore: detail.hasMore,
-						listening: detail.listening,
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(TimelineAvailabilityBoundary, {
+						health: detail.timelineHealth,
+						entryCount: detail.timeline.entries.length,
 						refreshing: detail.refreshing,
-						onLoadMore: () => {
-							detailStore.loadMore();
-						},
-						onToggleListen: () => {
-							detailStore.toggleListen();
-						},
 						onRefresh: () => {
 							detailStore.refreshNewest();
 						},
-						onClose: props.onClose
+						onClose: props.onClose,
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionDetail, {
+							sessionId,
+							header: detail.header,
+							timeline: detail.timeline,
+							loading: detail.loading,
+							error: detail.error,
+							hasMore: detail.hasMore,
+							listening: detail.listening,
+							refreshing: detail.refreshing,
+							onLoadMore: () => {
+								detailStore.loadMore();
+							},
+							onToggleListen: () => {
+								detailStore.toggleListen();
+							},
+							onRefresh: () => {
+								detailStore.refreshNewest();
+							},
+							onClose: props.onClose
+						})
 					}),
 					analysisOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(AnalysisPanel, {
 						enabled: analysisEnabled,
@@ -7929,6 +8788,7 @@ window.__ModuleLoader__.load({
 						headless: true,
 						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(InjectPanel, {
 							capability: { inject: view.injectCapability },
+							eligibility: injectEligibility,
 							target: {
 								agent: detail.header.agent,
 								sessionId,
@@ -8066,6 +8926,7 @@ window.__ModuleLoader__.load({
 		//#endregion
 		//#region src/client/navigation/modal-isolation.ts
 		const DIALOG_SELECTOR$1 = "[role=\"dialog\"][aria-modal=\"true\"]";
+		const MODAL_ISOLATION_STATE = Symbol.for("@shendeguize/dsh-agent-sidecar/modal-isolation-state");
 		const FOCUSABLE_SELECTOR = [
 			"a[href],area[href],button:not([disabled])",
 			"input:not([disabled]):not([type=\"hidden\"]),select:not([disabled])",
@@ -8077,111 +8938,355 @@ window.__ModuleLoader__.load({
 		function restorableIn(element, dialog) {
 			return element?.isConnected === true && dialog.contains(element) && !element.hidden && element.closest("[inert],[aria-hidden=\"true\"]") === null && element.getClientRects().length > 0;
 		}
+		function activeElement() {
+			return document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		}
+		function stateSlot(target) {
+			return target;
+		}
+		function snapshotAttribute(element, attribute) {
+			return {
+				present: element.hasAttribute(attribute),
+				value: element.getAttribute(attribute)
+			};
+		}
+		function snapshotsEqual(left, right) {
+			return left.present === right.present && left.value === right.value;
+		}
+		function leaseFor(state, element, attribute) {
+			return state.leases.get(element)?.get(attribute);
+		}
+		function ownsAttribute(state, element, attribute) {
+			const lease = leaseFor(state, element, attribute);
+			return lease !== void 0 && snapshotsEqual(snapshotAttribute(element, attribute), lease.written);
+		}
+		function markContested(state, element, attribute) {
+			const attributes = state.contested.get(element) ?? /* @__PURE__ */ new Set();
+			attributes.add(attribute);
+			state.contested.set(element, attributes);
+			const leases = state.leases.get(element);
+			leases?.delete(attribute);
+			if (leases?.size === 0) state.leases.delete(element);
+		}
+		function auditLeases(state) {
+			for (const [element, leases] of [...state.leases]) for (const [attribute, lease] of [...leases]) if (!snapshotsEqual(snapshotAttribute(element, attribute), lease.written)) markContested(state, element, attribute);
+		}
+		function notePendingMutation(state, element, attribute, oldValue) {
+			const byAttribute = state.pendingMutations.get(element) ?? /* @__PURE__ */ new Map();
+			const mutations = byAttribute.get(attribute) ?? [];
+			mutations.push(oldValue);
+			byAttribute.set(attribute, mutations);
+			state.pendingMutations.set(element, byAttribute);
+		}
+		function consumePendingMutation(state, element, attribute, oldValue) {
+			const byAttribute = state.pendingMutations.get(element);
+			const mutations = byAttribute?.get(attribute);
+			if (mutations?.[0] !== oldValue) return false;
+			mutations.shift();
+			if (mutations.length === 0) byAttribute?.delete(attribute);
+			if (byAttribute?.size === 0) state.pendingMutations.delete(element);
+			return true;
+		}
+		function processAttributeMutations(state, mutations) {
+			for (const mutation of mutations) {
+				if (mutation.type !== "attributes" || !(mutation.target instanceof HTMLElement) || mutation.attributeName !== "inert" && mutation.attributeName !== "aria-hidden") continue;
+				const attribute = mutation.attributeName;
+				if (consumePendingMutation(state, mutation.target, attribute, mutation.oldValue)) continue;
+				if (leaseFor(state, mutation.target, attribute) !== void 0) markContested(state, mutation.target, attribute);
+			}
+		}
+		function reinsertedDialogs(state, mutations) {
+			const known = state.dialogStack.map((frame) => frame.dialog);
+			const removed = /* @__PURE__ */ new Set();
+			const reinserted = /* @__PURE__ */ new Set();
+			for (const mutation of mutations) {
+				if (mutation.type !== "childList") continue;
+				const removedNodes = Array.from(mutation.removedNodes ?? []);
+				const addedNodes = Array.from(mutation.addedNodes ?? []);
+				for (const dialog of known) {
+					if (removedNodes.some((node) => node === dialog || node.contains(dialog))) removed.add(dialog);
+					if (removed.has(dialog) && addedNodes.some((node) => node === dialog || node.contains(dialog))) reinserted.add(dialog);
+				}
+			}
+			return reinserted;
+		}
+		function writeOwnedAttribute(state, element, attribute, value) {
+			if (state.contested.get(element)?.has(attribute) === true) return;
+			const existing = leaseFor(state, element, attribute);
+			if (existing !== void 0) {
+				if (!ownsAttribute(state, element, attribute)) {
+					markContested(state, element, attribute);
+					return;
+				}
+				existing.generation = state.generation;
+				return;
+			}
+			const original = snapshotAttribute(element, attribute);
+			const intended = {
+				present: true,
+				value
+			};
+			if (attribute === "inert" && (original.present || element.inert)) return;
+			if (snapshotsEqual(original, intended)) return;
+			notePendingMutation(state, element, attribute, original.value);
+			element.setAttribute(attribute, value);
+			const written = snapshotAttribute(element, attribute);
+			const leases = state.leases.get(element) ?? /* @__PURE__ */ new Map();
+			leases.set(attribute, {
+				original,
+				written,
+				generation: state.generation
+			});
+			state.leases.set(element, leases);
+		}
+		function restoreOwnedAttribute(state, element, attribute) {
+			const lease = leaseFor(state, element, attribute);
+			if (lease !== void 0) {
+				if (ownsAttribute(state, element, attribute)) {
+					notePendingMutation(state, element, attribute, snapshotAttribute(element, attribute).value);
+					if (lease.original.present) element.setAttribute(attribute, lease.original.value ?? "");
+					else element.removeAttribute(attribute);
+				}
+				const leases = state.leases.get(element);
+				leases?.delete(attribute);
+				if (leases?.size === 0) state.leases.delete(element);
+			}
+			const contested = state.contested.get(element);
+			contested?.delete(attribute);
+			if (contested?.size === 0) state.contested.delete(element);
+		}
+		function syncOwnedAttributes(state, desired) {
+			for (const [element, leases] of [...state.leases]) for (const attribute of [...leases.keys()]) if (desired.get(element)?.has(attribute) !== true) restoreOwnedAttribute(state, element, attribute);
+			for (const [element, attributes] of [...state.contested]) for (const attribute of [...attributes]) if (desired.get(element)?.has(attribute) !== true) restoreOwnedAttribute(state, element, attribute);
+			for (const [element, attributes] of desired) for (const attribute of attributes) writeOwnedAttribute(state, element, attribute, attribute === "inert" ? "" : "true");
+		}
+		function isHiddenOutsideIsolation(state, element) {
+			let current = element;
+			while (current !== null && current !== state.body) {
+				if (current.hidden) return true;
+				if (current.getAttribute("aria-hidden") === "true" && !ownsAttribute(state, current, "aria-hidden")) return true;
+				if ((current.hasAttribute("inert") || current.inert) && !ownsAttribute(state, current, "inert")) return true;
+				current = current.parentElement;
+			}
+			return false;
+		}
+		function collectModalDialogs(state) {
+			const outer = state.surfaceRef.current?.closest(DIALOG_SELECTOR$1) ?? null;
+			if (outer === null || !state.body.contains(outer) || isHiddenOutsideIsolation(state, outer)) return [];
+			const dialogs = Array.from(state.body.querySelectorAll(DIALOG_SELECTOR$1));
+			const outerIndex = dialogs.indexOf(outer);
+			if (outerIndex < 0) return [];
+			return dialogs.slice(outerIndex).filter((dialog) => !isHiddenOutsideIsolation(state, dialog));
+		}
+		function restorableOpenerIn(state, element, dialog) {
+			return element?.isConnected === true && dialog.contains(element) && !element.hidden && !isHiddenOutsideIsolation(state, element) && element.getClientRects().length > 0;
+		}
+		function refreshDialogStack(state, reinserted = /* @__PURE__ */ new Set()) {
+			const previousTop = state.dialogStack.at(-1);
+			const dialogs = collectModalDialogs(state);
+			const mounted = new Set(dialogs);
+			const closed = state.dialogStack.filter((frame) => !mounted.has(frame.dialog) || reinserted.has(frame.dialog));
+			state.dialogStack = state.dialogStack.filter((frame) => mounted.has(frame.dialog) && !reinserted.has(frame.dialog));
+			for (const dialog of dialogs) {
+				if (state.dialogStack.some((frame) => frame.dialog === dialog)) continue;
+				const parent = state.dialogStack.at(-1);
+				const active = activeElement();
+				const opener = parent !== void 0 && restorableOpenerIn(state, active, parent.dialog) ? active : reinserted.has(dialog) ? null : parent?.focus ?? null;
+				state.nextDialogGeneration += 1;
+				state.dialogStack.push({
+					dialog,
+					opener,
+					focus: null,
+					generation: state.nextDialogGeneration
+				});
+			}
+			const currentTop = state.dialogStack.at(-1);
+			state.topDialog = currentTop?.dialog ?? null;
+			return {
+				changed: previousTop !== currentTop,
+				closed
+			};
+		}
+		function bodyBranch(body, dialog) {
+			let branch = dialog;
+			while (branch.parentElement !== null && branch.parentElement !== body) branch = branch.parentElement;
+			return branch.parentElement === body ? branch : null;
+		}
+		function desiredIsolation(state) {
+			const desired = /* @__PURE__ */ new Map();
+			const top = state.topDialog;
+			if (top === null) return desired;
+			const add = (element, attribute) => {
+				const attributes = desired.get(element) ?? /* @__PURE__ */ new Set();
+				attributes.add(attribute);
+				desired.set(element, attributes);
+			};
+			const activeBranch = bodyBranch(state.body, top);
+			for (const child of Array.from(state.body.children)) if (child instanceof HTMLElement && child !== activeBranch) add(child, "inert");
+			for (const frame of state.dialogStack) {
+				if (frame.dialog === top || frame.dialog.contains(top)) continue;
+				add(frame.dialog, "inert");
+				add(frame.dialog, "aria-hidden");
+			}
+			return desired;
+		}
+		function queueFocus(state, dialog, preferred = null) {
+			const dialogGeneration = state.dialogStack.find((frame) => frame.dialog === dialog)?.generation;
+			if (dialogGeneration === void 0) return;
+			const pending = state.pendingFocus;
+			if (pending !== null && pending.dialog === dialog && pending.generation === dialogGeneration && pending.runtimeGeneration === state.generation && preferred === null && restorableIn(pending.preferred, dialog)) return;
+			if (pending !== null) window.cancelAnimationFrame(pending.frame);
+			const owner = state.owner;
+			const request = {
+				frame: 0,
+				dialog,
+				preferred,
+				generation: dialogGeneration,
+				runtimeGeneration: state.generation
+			};
+			request.frame = window.requestAnimationFrame(() => {
+				if (state.pendingFocus !== request) return;
+				state.pendingFocus = null;
+				const currentFrame = state.dialogStack.at(-1);
+				if (state.owner !== owner || state.generation !== request.runtimeGeneration || currentFrame?.dialog !== request.dialog || currentFrame.generation !== request.generation || !request.dialog.isConnected || !state.body.contains(request.dialog)) return;
+				if (request.preferred === null && request.dialog.contains(document.activeElement)) return;
+				(restorableIn(request.preferred, request.dialog) ? request.preferred : focusableElements(request.dialog)[0])?.focus({ preventScroll: true });
+			});
+			state.pendingFocus = request;
+		}
+		function syncIsolation(state, reinserted = /* @__PURE__ */ new Set(), restoreFocus = true) {
+			auditLeases(state);
+			const { changed, closed } = refreshDialogStack(state, reinserted);
+			syncOwnedAttributes(state, desiredIsolation(state));
+			if (!restoreFocus) return;
+			const next = state.topDialog;
+			const opener = next === null ? null : [...closed].reverse().find((frame) => restorableIn(frame.opener, next))?.opener ?? null;
+			if (next !== null && (changed || !next.contains(document.activeElement))) queueFocus(state, next, opener);
+			else if (changed && next === null && state.previousFocus?.isConnected === true) state.previousFocus.focus({ preventScroll: true });
+		}
+		function processMutationBatch(state, mutations, restoreFocus = true) {
+			const reinserted = reinsertedDialogs(state, mutations);
+			processAttributeMutations(state, mutations);
+			syncIsolation(state, reinserted, restoreFocus);
+		}
+		function stopRuntime(state) {
+			if (state.observer !== null) {
+				const mutations = state.observer.takeRecords();
+				state.observer.disconnect();
+				if (mutations.length > 0) processMutationBatch(state, mutations, false);
+			}
+			state.observer = null;
+			if (state.onFocusIn !== null) {
+				document.removeEventListener("focusin", state.onFocusIn);
+				state.onFocusIn = null;
+			}
+			if (state.onKeyDown !== null) {
+				document.removeEventListener("keydown", state.onKeyDown, true);
+				state.onKeyDown = null;
+			}
+			if (state.pendingFocus !== null) {
+				window.cancelAnimationFrame(state.pendingFocus.frame);
+				state.pendingFocus = null;
+			}
+			state.pendingMutations.clear();
+		}
+		function startRuntime(state) {
+			const owner = state.owner;
+			const generation = state.generation;
+			const isCurrent = () => state.owner === owner && state.generation === generation;
+			state.onFocusIn = (event) => {
+				if (!isCurrent() || !(event.target instanceof HTMLElement)) return;
+				const dialog = event.target.closest(DIALOG_SELECTOR$1);
+				const frame = state.dialogStack.find((item) => item.dialog === dialog);
+				if (frame !== void 0) frame.focus = event.target;
+			};
+			state.onKeyDown = (event) => {
+				if (!isCurrent() || event.key !== "Tab" || event.defaultPrevented) return;
+				syncIsolation(state);
+				const dialog = state.topDialog;
+				if (dialog === null) return;
+				const focusable = focusableElements(dialog);
+				if (focusable.length === 0) {
+					event.preventDefault();
+					return;
+				}
+				const activeIndex = focusable.indexOf(document.activeElement);
+				const wrapsBackward = event.shiftKey && activeIndex <= 0;
+				const wrapsForward = !event.shiftKey && activeIndex === focusable.length - 1;
+				if (activeIndex < 0 || wrapsBackward || wrapsForward) {
+					event.preventDefault();
+					(event.shiftKey ? focusable.at(-1) : focusable[0])?.focus({ preventScroll: true });
+				}
+			};
+			state.observer = new window.MutationObserver((mutations) => {
+				if (!isCurrent()) return;
+				processMutationBatch(state, mutations);
+			});
+			state.observer.observe(state.body, {
+				attributes: true,
+				attributeFilter: ["inert", "aria-hidden"],
+				attributeOldValue: true,
+				childList: true,
+				subtree: true
+			});
+			document.addEventListener("focusin", state.onFocusIn);
+			document.addEventListener("keydown", state.onKeyDown, true);
+			syncIsolation(state);
+		}
+		/** Attach body-branch and stacked-dialog isolation with HMR-safe ownership. */
+		function attachModalIsolation(surfaceRef) {
+			if (typeof document === "undefined" || typeof window === "undefined" || typeof window.MutationObserver === "undefined") return () => {};
+			const body = document.body;
+			if (body === null) return () => {};
+			const owner = Symbol("modal-isolation");
+			const slot = stateSlot(body);
+			const previous = slot[MODAL_ISOLATION_STATE];
+			const state = previous ?? {
+				body,
+				owner,
+				generation: 0,
+				surfaceRef,
+				previousFocus: activeElement(),
+				dialogStack: [],
+				topDialog: null,
+				nextDialogGeneration: 0,
+				leases: /* @__PURE__ */ new Map(),
+				contested: /* @__PURE__ */ new Map(),
+				pendingMutations: /* @__PURE__ */ new Map(),
+				observer: null,
+				onFocusIn: null,
+				onKeyDown: null,
+				pendingFocus: null
+			};
+			if (previous !== void 0) stopRuntime(previous);
+			if (!Number.isSafeInteger(state.nextDialogGeneration)) state.nextDialogGeneration = 0;
+			for (const frame of state.dialogStack) if (Number.isSafeInteger(frame.generation)) state.nextDialogGeneration = Math.max(state.nextDialogGeneration, frame.generation);
+			else {
+				state.nextDialogGeneration += 1;
+				frame.generation = state.nextDialogGeneration;
+			}
+			state.owner = owner;
+			state.generation += 1;
+			state.surfaceRef = surfaceRef;
+			for (const leases of state.leases.values()) for (const lease of leases.values()) lease.generation = state.generation;
+			slot[MODAL_ISOLATION_STATE] = state;
+			startRuntime(state);
+			return () => {
+				if (state.owner !== owner || slot[MODAL_ISOLATION_STATE] !== state) return;
+				stopRuntime(state);
+				auditLeases(state);
+				syncOwnedAttributes(state, /* @__PURE__ */ new Map());
+				state.dialogStack = [];
+				state.topDialog = null;
+				delete slot[MODAL_ISOLATION_STATE];
+				if (state.previousFocus?.isConnected === true) state.previousFocus.focus({ preventScroll: true });
+			};
+		}
 		/** Isolate the active official Modal, including sibling-portaled nested dialogs. */
 		function useModalIsolation(open, surfaceRef) {
 			(0, react.useEffect)(() => {
-				if (!open || typeof document === "undefined" || typeof window === "undefined") return;
-				const body = document.body;
-				if (body === null || typeof window.MutationObserver === "undefined") return;
-				const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-				const originalInert = /* @__PURE__ */ new Map();
-				const dialogStack = [];
-				let topDialog = null;
-				let focusFrame = null;
-				const getTopDialog = () => {
-					const outer = surfaceRef.current?.closest(DIALOG_SELECTOR$1) ?? null;
-					if (outer === null) return null;
-					const dialogs = Array.from(body.querySelectorAll(DIALOG_SELECTOR$1));
-					return dialogs.indexOf(outer) < 0 ? null : dialogs.at(-1) ?? null;
-				};
-				const bodyBranch = (dialog) => {
-					let branch = dialog;
-					while (branch.parentNode !== null && branch.parentNode !== body) branch = branch.parentNode;
-					return branch instanceof HTMLElement ? branch : null;
-				};
-				const isolateAround = (dialog) => {
-					const activeBranch = dialog === null ? null : bodyBranch(dialog);
-					const next = new Set(Array.from(body.children).filter((element) => element instanceof HTMLElement && element !== activeBranch));
-					for (const [element, wasInert] of originalInert) {
-						if (next.has(element)) continue;
-						element.inert = wasInert;
-						originalInert.delete(element);
-					}
-					for (const element of next) {
-						if (!originalInert.has(element)) originalInert.set(element, element.inert);
-						element.inert = true;
-					}
-				};
-				const queueFocus = (dialog, preferred = null) => {
-					if (focusFrame !== null) window.cancelAnimationFrame(focusFrame);
-					focusFrame = window.requestAnimationFrame(() => {
-						focusFrame = null;
-						if (getTopDialog() !== dialog) return;
-						(restorableIn(preferred, dialog) ? preferred : focusableElements(dialog)[0])?.focus({ preventScroll: true });
-					});
-				};
-				const sync = () => {
-					const next = getTopDialog();
-					const changed = next !== topDialog;
-					let closed = [];
-					if (changed && next !== null) {
-						const index = dialogStack.findIndex((frame) => frame.dialog === next);
-						if (index < 0) {
-							const parent = dialogStack.at(-1);
-							const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-							const opener = parent !== void 0 && restorableIn(active, parent.dialog) ? active : parent?.focus ?? null;
-							dialogStack.push({
-								dialog: next,
-								opener,
-								focus: null
-							});
-						} else closed = dialogStack.splice(index + 1);
-					}
-					topDialog = next;
-					isolateAround(next);
-					const opener = next === null ? null : closed.reverse().find((frame) => restorableIn(frame.opener, next))?.opener ?? null;
-					if (next !== null && (changed || !next.contains(document.activeElement))) queueFocus(next, opener);
-				};
-				const onFocusIn = (event) => {
-					if (!(event.target instanceof HTMLElement)) return;
-					const dialog = event.target.closest(DIALOG_SELECTOR$1);
-					const frame = dialogStack.find((item) => item.dialog === dialog);
-					if (frame !== void 0) frame.focus = event.target;
-				};
-				const onKeyDown = (event) => {
-					if (event.key !== "Tab" || event.defaultPrevented) return;
-					const dialog = getTopDialog();
-					if (dialog === null) return;
-					if (dialog !== topDialog) sync();
-					const focusable = focusableElements(dialog);
-					if (focusable.length === 0) {
-						event.preventDefault();
-						return;
-					}
-					const activeIndex = focusable.indexOf(document.activeElement);
-					const wrapsBackward = event.shiftKey && activeIndex <= 0;
-					const wrapsForward = !event.shiftKey && activeIndex === focusable.length - 1;
-					if (activeIndex < 0 || wrapsBackward || wrapsForward) {
-						event.preventDefault();
-						(event.shiftKey ? focusable.at(-1) : focusable[0])?.focus({ preventScroll: true });
-					}
-				};
-				const observer = new window.MutationObserver(sync);
-				observer.observe(body, {
-					childList: true,
-					subtree: true
-				});
-				document.addEventListener("focusin", onFocusIn);
-				document.addEventListener("keydown", onKeyDown, true);
-				sync();
-				return () => {
-					observer.disconnect();
-					document.removeEventListener("focusin", onFocusIn);
-					document.removeEventListener("keydown", onKeyDown, true);
-					if (focusFrame !== null) window.cancelAnimationFrame(focusFrame);
-					for (const [element, wasInert] of originalInert) element.inert = wasInert;
-					if (previousFocus?.isConnected === true) previousFocus.focus({ preventScroll: true });
-				};
+				if (!open) return;
+				return attachModalIsolation(surfaceRef);
 			}, [open, surfaceRef]);
 		}
 		//#endregion
@@ -8372,6 +9477,40 @@ window.__ModuleLoader__.load({
 		* write (it recovers by reloading host state instead).
 		*/
 		/**
+		* Reserved in-memory identity that cannot match a real adapter/session pair.
+		* It asks Board/ProjectView to take their existing missing-card fallback.
+		*/
+		const FALLBACK_FOCUS_TARGET = Object.freeze({
+			agent: Symbol("agent-sidecar-fallback-agent"),
+			sessionId: Symbol("agent-sidecar-fallback-session")
+		});
+		/** Clamp a remembered offset to the currently rendered scroll range. */
+		function clampScrollTop(requested, scrollHeight, clientHeight) {
+			const normalized = Number.isFinite(requested) ? requested : 0;
+			const maximum = Math.max(0, scrollHeight - clientHeight);
+			return Math.min(Math.max(0, normalized), maximum);
+		}
+		/**
+		* Run restoration after two animation frames and return an idempotent
+		* cancellation handle for rapid re-navigation, StrictMode, HMR, and unmount.
+		*/
+		function scheduleAfterLayout(scheduler, callback) {
+			let active = true;
+			let frame = scheduler.requestAnimationFrame(() => {
+				if (!active) return;
+				frame = scheduler.requestAnimationFrame(() => {
+					frame = null;
+					if (active) callback();
+				});
+			});
+			return () => {
+				if (!active) return;
+				active = false;
+				if (frame !== null) scheduler.cancelAnimationFrame(frame);
+				frame = null;
+			};
+		}
+		/**
 		* Project-correlation view bound to its store: refresh on entry, then
 		* throttled SSE-driven refreshes for as long as the view is on screen.
 		*/
@@ -8388,7 +9527,11 @@ window.__ModuleLoader__.load({
 				groups: state.groups,
 				loading: state.loading,
 				error: state.error === null ? null : detailErrorText(state.error),
-				onSelectSession: props.onSelectSession
+				onSelectSession: props.onSelectSession,
+				rootRef: props.rootRef,
+				onScrollTopChange: props.onScrollTopChange,
+				returnFocusTarget: props.returnFocusTarget,
+				onReturnFocusConsumed: props.onReturnFocusConsumed
 			});
 		}
 		/**
@@ -8413,28 +9556,116 @@ window.__ModuleLoader__.load({
 				const filters = (0, react.useSyncExternalStore)(subscribe, getFilters, getFilters);
 				const [mainView, setMainView] = (0, react.useState)("board");
 				const [detail, setDetail] = (0, react.useState)(null);
+				const [returnFocusRequest, setReturnFocusRequest] = (0, react.useState)(null);
+				const viewRootsRef = (0, react.useRef)({
+					board: null,
+					projects: null
+				});
+				const scrollTopsRef = (0, react.useRef)({
+					board: 0,
+					projects: 0
+				});
+				const returnRequestRef = (0, react.useRef)(null);
+				const pendingFocusCancelRef = (0, react.useRef)(null);
 				const [projectsStore] = (0, react.useState)(() => integration?.createProjectsStore() ?? null);
 				(0, react.useEffect)(() => () => {
 					projectsStore?.dispose();
 				}, [projectsStore]);
-				const openDetail = (sessionId) => {
+				const cancelPendingFocus = (0, react.useCallback)(() => {
+					pendingFocusCancelRef.current?.();
+					pendingFocusCancelRef.current = null;
+				}, []);
+				const clearReturnFocus = (0, react.useCallback)(() => {
+					returnRequestRef.current = null;
+					setReturnFocusRequest(null);
+				}, []);
+				const consumeReturnFocus = (0, react.useCallback)(() => {
+					setReturnFocusRequest((current) => {
+						if (current !== null && returnRequestRef.current === current) returnRequestRef.current = null;
+						return null;
+					});
+				}, []);
+				const setBoardRoot = (0, react.useCallback)((element) => {
+					viewRootsRef.current.board = element;
+				}, []);
+				const setProjectsRoot = (0, react.useCallback)((element) => {
+					viewRootsRef.current.projects = element;
+				}, []);
+				const saveVisibleScroll = (view) => {
+					const root = viewRootsRef.current[view];
+					if (root !== null) scrollTopsRef.current[view] = root.scrollTop;
+				};
+				const detailHintFor = (sessionId) => findCardHint(state.sessions, sessionId) ?? (projectsStore !== null ? findProjectSessionHint(projectsStore.getState().groups, sessionId) : null);
+				const openDetail = (target, source) => {
 					if (integration === void 0) return;
-					const hint = findCardHint(state.sessions, sessionId) ?? (projectsStore !== null ? findProjectSessionHint(projectsStore.getState().groups, sessionId) : null);
+					cancelPendingFocus();
+					clearReturnFocus();
+					saveVisibleScroll(source);
+					const returnRequest = {
+						view: source,
+						focusTarget: target
+					};
 					setDetail({
-						id: sessionId,
-						hint
+						id: target.sessionId,
+						hint: detailHintFor(target.sessionId),
+						returnRequest
 					});
 				};
+				const switchDetailSession = (sessionId) => {
+					setDetail((current) => current === null ? null : {
+						id: sessionId,
+						hint: detailHintFor(sessionId),
+						returnRequest: {
+							view: current.returnRequest.view,
+							focusTarget: null
+						}
+					});
+				};
+				const closeDetail = () => {
+					if (detail === null) return;
+					cancelPendingFocus();
+					returnRequestRef.current = detail.returnRequest;
+					setDetail(null);
+				};
+				const switchMainView = (next) => {
+					if (next === mainView) return;
+					cancelPendingFocus();
+					clearReturnFocus();
+					saveVisibleScroll(mainView);
+					setMainView(next);
+				};
+				(0, react.useEffect)(() => {
+					if (detail !== null || typeof window === "undefined") return;
+					cancelPendingFocus();
+					const request = returnRequestRef.current;
+					const view = request?.view ?? mainView;
+					pendingFocusCancelRef.current = scheduleAfterLayout(window, () => {
+						pendingFocusCancelRef.current = null;
+						if (request !== null && returnRequestRef.current !== request) return;
+						const root = viewRootsRef.current[view];
+						if (root === null || !root.isConnected) return;
+						root.scrollTop = clampScrollTop(scrollTopsRef.current[view], root.scrollHeight, root.clientHeight);
+						if (request === null) return;
+						setReturnFocusRequest(request);
+					});
+					return cancelPendingFocus;
+				}, [
+					cancelPendingFocus,
+					detail,
+					mainView
+				]);
+				(0, react.useEffect)(() => () => {
+					returnRequestRef.current = null;
+					cancelPendingFocus();
+				}, [cancelPendingFocus]);
 				if (integration !== void 0 && detail !== null) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SidecarDetailView, {
 					sessionId: detail.id,
 					hint: detail.hint,
 					controller,
 					integration: integration.detail,
-					onClose: () => {
-						setDetail(null);
-					},
-					onSelectSession: openDetail
-				}, detail.id);
+					onClose: closeDetail,
+					onSelectSession: switchDetailSession
+				}, `${detail.returnRequest.focusTarget?.agent ?? "internal"}:${detail.id}`);
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					className: detail_view_module_css_default["switcherBar"],
 					"data-testid": "agent-sidecar-view-switcher",
@@ -8444,7 +9675,7 @@ window.__ModuleLoader__.load({
 						"data-active": mainView === "board" || void 0,
 						"aria-pressed": mainView === "board",
 						onClick: () => {
-							setMainView("board");
+							switchMainView("board");
 						},
 						children: t("board.viewBoard")
 					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
@@ -8453,26 +9684,44 @@ window.__ModuleLoader__.load({
 						"data-active": mainView === "projects" || void 0,
 						"aria-pressed": mainView === "projects",
 						onClick: () => {
-							setMainView("projects");
+							switchMainView("projects");
 						},
 						children: t("board.viewProjects")
 					})]
 				}), mainView === "projects" && projectsStore !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectsContainer, {
 					controller,
 					store: projectsStore,
-					onSelectSession: openDetail
+					onSelectSession: (target) => {
+						openDetail(target, "projects");
+					},
+					rootRef: setProjectsRoot,
+					onScrollTopChange: (scrollTop) => {
+						scrollTopsRef.current.projects = scrollTop;
+					},
+					returnFocusTarget: returnFocusRequest?.view === "projects" ? returnFocusRequest.focusTarget ?? FALLBACK_FOCUS_TARGET : null,
+					onReturnFocusConsumed: consumeReturnFocus
 				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Board, {
 					daemonState: state.daemonState,
 					...state.daemonDetail !== void 0 ? { daemonDetail: state.daemonDetail } : {},
 					streamHealth: state.streamHealth,
 					lastReconcileAtMs: state.lastReconcileAtMs,
+					hasSnapshot: state.hasSnapshot,
+					initialLoadFailed: state.initialLoadFailed,
 					sessions: state.sessions,
 					filters,
 					onFiltersChange: (next) => {
 						controller.setFilters(next);
 					},
 					onRefresh: () => controller.refresh(),
-					onSelectSession: openDetail
+					onSelectSession: (target) => {
+						openDetail(target, "board");
+					},
+					rootRef: setBoardRoot,
+					onScrollTopChange: (scrollTop) => {
+						scrollTopsRef.current.board = scrollTop;
+					},
+					returnFocusTarget: returnFocusRequest?.view === "board" ? returnFocusRequest.focusTarget ?? FALLBACK_FOCUS_TARGET : null,
+					onReturnFocusConsumed: consumeReturnFocus
 				})] });
 			};
 		}

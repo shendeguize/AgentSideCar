@@ -62,13 +62,16 @@ interface FakeGateway {
   api: InjectGatewayApi
   prepareCalls: PrepareRequest[]
   executeCalls: ExecuteRequest[]
+  executeDispatches: ExecuteRequest[]
   /** Next result each fake method resolves with; mutate per test. */
   results: { prepare: PrepareResult; execute: InjectResult }
 }
 
-function makeGateway(): FakeGateway {
+function makeGateway(cacheExecuteResults = false): FakeGateway {
   const prepareCalls: PrepareRequest[] = []
   const executeCalls: ExecuteRequest[] = []
+  const executeDispatches: ExecuteRequest[] = []
+  const executeCache = new Map<string, InjectResult>()
   const results: FakeGateway['results'] = {
     prepare: {
       ok: true,
@@ -86,10 +89,17 @@ function makeGateway(): FakeGateway {
     },
     execute: async (req) => {
       executeCalls.push(req)
-      return results.execute
+      const cached = executeCache.get(req.requestId)
+      if (cacheExecuteResults && cached !== undefined) {
+        return { ...cached, replayed: true }
+      }
+      executeDispatches.push(req)
+      const result = { ...results.execute }
+      if (cacheExecuteResults) executeCache.set(req.requestId, result)
+      return result
     },
   }
-  return { api, prepareCalls, executeCalls, results }
+  return { api, prepareCalls, executeCalls, executeDispatches, results }
 }
 
 interface LogEntry {
@@ -116,10 +126,12 @@ afterEach(async () => {
   for (const harness of harnesses.splice(0)) await harness.close()
 })
 
-async function startHarness(init: { withGateway?: boolean } = {}): Promise<Harness> {
+async function startHarness(
+  init: { withGateway?: boolean; cacheExecuteResults?: boolean } = {},
+): Promise<Harness> {
   const store = new SessionStore()
   const supervisor = makeSupervisor()
-  const gateway = makeGateway()
+  const gateway = makeGateway(init.cacheExecuteResults)
   const inject = { enabled: false }
   const logs: LogEntry[] = []
   const routes = createRoutes({
@@ -253,7 +265,13 @@ describe('POST action inject.prepare', () => {
     ['inject_disabled', 403],
     ['invalid_message', 422],
     ['target_not_found', 404],
+    ['target_changed', 409],
     ['target_dead', 409],
+    ['working_session', 409],
+    ['invalid_session', 422],
+    ['dsh_model_unconfigured', 409],
+    ['dsh_preset_unsupported', 409],
+    ['executor_error', 502],
     ['too_many_pending', 429],
     ['unsupported_agent', 422], // issued at prepare since M2 review F-6
   ] as const)('maps a %s rejection to %i with reason and detail', async (errorCode, status) => {
@@ -318,23 +336,38 @@ describe('POST action inject.execute', () => {
     ])
   })
 
-  it('passes the replayed flag through on an idempotent repeat', async () => {
-    const harness = await startHarness()
+  it('returns a same-request replay as 200/replayed without a second dispatch', async () => {
+    const harness = await startHarness({ cacheExecuteResults: true })
     harness.inject.enabled = true
-    harness.gateway.results.execute = { outcome: 'delivered', replayed: true }
+    harness.gateway.results.execute = { outcome: 'unknown', errorCode: 'timeout' }
 
-    const reply = await postAction(harness.base, EXECUTE_ENVELOPE)
-    expect(reply.status).toBe(200)
-    expect(JSON.parse(reply.body)).toEqual({ outcome: 'delivered', replayed: true })
+    const first = await postAction(harness.base, EXECUTE_ENVELOPE)
+    const replay = await postAction(harness.base, EXECUTE_ENVELOPE)
+    expect(first.status).toBe(200)
+    expect(JSON.parse(first.body)).toEqual({ outcome: 'unknown', errorCode: 'timeout' })
+    expect(replay.status).toBe(200)
+    expect(JSON.parse(replay.body)).toEqual({
+      outcome: 'unknown',
+      errorCode: 'timeout',
+      replayed: true,
+    })
+    expect(harness.gateway.executeCalls).toHaveLength(2)
+    expect(harness.gateway.executeDispatches).toHaveLength(1)
   })
 
   it.each([
     ['executor_error', 502],
     ['unsupported_agent', 422],
+    ['target_not_found', 404],
+    ['target_changed', 409],
+    ['working_session', 409],
+    ['invalid_session', 422],
     ['token_missing', 401],
     ['token_expired', 401],
     ['token_reused', 409],
     ['token_mismatch', 409],
+    ['dsh_model_unconfigured', 409],
+    ['dsh_preset_unsupported', 409],
   ] as const)('maps a failed outcome with %s to %i', async (errorCode, status) => {
     const harness = await startHarness()
     harness.inject.enabled = true
@@ -358,7 +391,7 @@ describe('POST action inject.execute', () => {
     expect(codeless.status).toBe(502)
   })
 
-  it('answers 200 for outcome unknown and never re-fires the gateway (S6)', async () => {
+  it('keeps a normalized Kimi completed/unknown delivery terminal without claiming delivered', async () => {
     const harness = await startHarness()
     harness.inject.enabled = true
     harness.gateway.results.execute = {
@@ -374,6 +407,8 @@ describe('POST action inject.execute', () => {
       errorCode: 'send_timeout',
       detail: 'no receipt',
     })
+    expect(JSON.parse(reply.body)).not.toHaveProperty('delivery')
+    expect(reply.body).not.toContain('delivered')
     // The terminal-unknown invariant: exactly one dispatch per HTTP request.
     expect(harness.gateway.executeCalls).toHaveLength(1)
   })

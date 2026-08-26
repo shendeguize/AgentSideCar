@@ -402,6 +402,13 @@ describe('command locale segment', () => {
     expect(Object.keys(commandEn).sort()).toEqual(Object.keys(commandZh).sort())
   })
 
+  it('names Agent Center as the final action without promising a Sidecar tab', () => {
+    expect(commandZh['command.boardHint']).toBe('打开 Agent Center')
+    expect(commandEn['command.boardHint']).toBe('Open Agent Center')
+    expect(commandZh['command.boardHint']).not.toContain('Tab')
+    expect(commandEn['command.boardHint']).not.toContain('tab')
+  })
+
   it('every key sits in the command domain and every entry is non-empty', () => {
     for (const dict of [commandZh, commandEn]) {
       for (const [key, value] of Object.entries(dict)) {
@@ -576,6 +583,19 @@ describe('createSidecarCommandContribution', () => {
       contribution.ui.onSelect({ id: 'board', label: 'open board' }, undefined),
     ).toBeUndefined()
     expect(openAgentCenter).toHaveBeenCalledOnce()
+  })
+
+  it('keeps repeated board selections on one idempotent Agent Center overlay state', () => {
+    const navigation = createCenterNavigation()
+    const listener = vi.fn()
+    navigation.subscribe(listener)
+    const contribution = createSidecarCommandContribution({ openCenter: navigation.open })
+
+    contribution.ui.onSelect({ id: 'board', label: '打开 Agent Center' }, undefined)
+    contribution.ui.onSelect({ id: 'board', label: '打开 Agent Center' }, undefined)
+
+    expect(navigation.getSnapshot()).toBe(true)
+    expect(listener).toHaveBeenCalledOnce()
   })
 
   it('leaves informational option selections inert', () => {

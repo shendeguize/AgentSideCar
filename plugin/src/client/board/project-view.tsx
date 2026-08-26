@@ -15,7 +15,7 @@
  */
 
 import { Button, Pill, StateDot, type StateDotState } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
   buildProjectViewModel,
@@ -30,13 +30,35 @@ import { formatTemplate, sliceCardsForDisplay } from './logic.ts'
 import { surfaceProps } from '../theme/parts.ts'
 import styles from './project-view.module.css'
 
+interface SessionFocusTarget {
+  agent: string
+  sessionId: string
+}
+
+function matchesSessionFocusTarget(
+  candidate: SessionFocusTarget,
+  target: SessionFocusTarget | null,
+): boolean {
+  return target !== null
+    && candidate.agent === target.agent
+    && candidate.sessionId === target.sessionId
+}
+
 export interface ProjectViewProps {
   /** Wire groups of `GET projects` (owner passes the response through). */
   groups: ProjectGroupVM[]
   loading: boolean
   /** Human-readable fetch error, or null. */
   error: string | null
-  onSelectSession: (sessionId: string) => void
+  onSelectSession: (target: SessionFocusTarget) => void
+  /** Composite in-memory identity awaiting return-focus restoration. */
+  returnFocusTarget: SessionFocusTarget | null
+  /** Called only after the matching row or fallback heading has been focused. */
+  onReturnFocusConsumed: () => void
+  /** Current mounted scroll container; null on route/view unmount. */
+  rootRef: (element: HTMLDivElement | null) => void
+  /** Persist this view's independent scroll position in the route owner. */
+  onScrollTopChange: (scrollTop: number) => void
   /** Clock injection for deterministic rendering; defaults to Date.now(). */
   nowMs?: number
 }
@@ -49,15 +71,27 @@ function sessionDotState(status: DerivedProjectSessionVM['badge']['status']): St
 
 function SessionRow(props: {
   session: DerivedProjectSessionVM
-  onSelect: (sessionId: string) => void
+  onSelect: (target: SessionFocusTarget) => void
+  returnFocusTarget: SessionFocusTarget | null
+  onReturnFocusConsumed: () => void
 }): ReactElement {
   const { session, onSelect } = props
   const dotState = sessionDotState(session.badge.status)
+  const openerRef = useRef<HTMLButtonElement>(null)
+  const isReturnFocusTarget = matchesSessionFocusTarget(session, props.returnFocusTarget)
+  useEffect(() => {
+    if (!isReturnFocusTarget) return
+    const opener = openerRef.current
+    if (opener === null) return
+    opener.focus({ preventScroll: true })
+    props.onReturnFocusConsumed()
+  }, [isReturnFocusTarget, props.onReturnFocusConsumed])
   return (
     <button
+      ref={openerRef}
       type="button"
       className={styles['session']}
-      onClick={() => onSelect(session.sessionId)}
+      onClick={() => onSelect({ agent: session.agent, sessionId: session.sessionId })}
       data-testid="agent-sidecar-project-session"
     >
       <Pill className={styles['statusPill']}>
@@ -85,13 +119,23 @@ function SessionRow(props: {
 
 function AgentLane(props: {
   lane: AgentLaneVM
-  onSelect: (sessionId: string) => void
+  onSelect: (target: SessionFocusTarget) => void
+  returnFocusTarget: SessionFocusTarget | null
+  onReturnFocusConsumed: () => void
 }): ReactElement {
   const { lane, onSelect } = props
   // UX-20: lanes fold past the row limit — ephemeral view state, same
   // pattern as the board's group truncation. Rows are status-sorted, so
   // the fold never hides a leading working/waiting run (slice guard).
   const [expanded, setExpanded] = useState(false)
+  const returnTargetIndex = props.returnFocusTarget === null
+    ? -1
+    : lane.sessions.findIndex((session) =>
+      matchesSessionFocusTarget(session, props.returnFocusTarget),
+    )
+  useEffect(() => {
+    if (returnTargetIndex >= LANE_SESSION_LIMIT && !expanded) setExpanded(true)
+  }, [expanded, returnTargetIndex])
   const { shown, hiddenCount } = sliceCardsForDisplay(lane.sessions, LANE_SESSION_LIMIT, expanded)
   return (
     <div className={styles['lane']}>
@@ -107,6 +151,8 @@ function AgentLane(props: {
             key={`${session.agent}:${session.sessionId}`}
             session={session}
             onSelect={onSelect}
+            returnFocusTarget={props.returnFocusTarget}
+            onReturnFocusConsumed={props.onReturnFocusConsumed}
           />
         ))}
       </div>
@@ -136,7 +182,9 @@ function AgentLane(props: {
 
 function ProjectSection(props: {
   group: DerivedProjectGroupVM
-  onSelect: (sessionId: string) => void
+  onSelect: (target: SessionFocusTarget) => void
+  returnFocusTarget: SessionFocusTarget | null
+  onReturnFocusConsumed: () => void
 }): ReactElement {
   const { group, onSelect } = props
   return (
@@ -167,7 +215,13 @@ function ProjectSection(props: {
       </div>
       <div className={styles['lanes']}>
         {group.lanes.map((lane) => (
-          <AgentLane key={lane.agent} lane={lane} onSelect={onSelect} />
+          <AgentLane
+            key={lane.agent}
+            lane={lane}
+            onSelect={onSelect}
+            returnFocusTarget={props.returnFocusTarget}
+            onReturnFocusConsumed={props.onReturnFocusConsumed}
+          />
         ))}
       </div>
     </section>
@@ -179,14 +233,41 @@ export function ProjectView(props: ProjectViewProps): ReactElement {
   const nowMs = props.nowMs ?? Date.now()
   const vm = buildProjectViewModel({ groups: props.groups, nowMs })
   const hasContent = vm.groups.length > 0
+  const fallbackFocusRef = useRef<HTMLSpanElement>(null)
+  const returnTargetVisible = props.returnFocusTarget !== null
+    && vm.groups.some((group) =>
+      group.lanes.some((lane) =>
+        lane.sessions.some((session) =>
+          matchesSessionFocusTarget(session, props.returnFocusTarget),
+        ),
+      ),
+    )
+
+  useEffect(() => {
+    if (props.returnFocusTarget === null || returnTargetVisible) return
+    const fallback = fallbackFocusRef.current
+    if (fallback === null) return
+    fallback.focus({ preventScroll: true })
+    props.onReturnFocusConsumed()
+  }, [props.onReturnFocusConsumed, props.returnFocusTarget, returnTargetVisible])
 
   return (
     <div
       {...surfaceProps('project-view', styles['root'])}
+      ref={props.rootRef}
+      onScroll={(event) => { props.onScrollTopChange(event.currentTarget.scrollTop) }}
       data-testid="agent-sidecar-project-view"
     >
       <header className={styles['topbar']}>
-        <span className={styles['title']}>{PROJECT_VIEW_STRINGS.title}</span>
+        <span
+          ref={fallbackFocusRef}
+          className={styles['title']}
+          role="heading"
+          aria-level={1}
+          tabIndex={-1}
+        >
+          {PROJECT_VIEW_STRINGS.title}
+        </span>
         <span className={styles['summary']}>{vm.summaryLabel}</span>
         {props.loading && (
           <span role="status">
@@ -207,6 +288,8 @@ export function ProjectView(props: ProjectViewProps): ReactElement {
             key={group.key === '' ? '\u0000unknown' : group.key}
             group={group}
             onSelect={props.onSelectSession}
+            returnFocusTarget={props.returnFocusTarget}
+            onReturnFocusConsumed={props.onReturnFocusConsumed}
           />
         ))
       ) : props.error !== null ? (

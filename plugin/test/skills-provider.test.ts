@@ -134,17 +134,46 @@ describe('registerSidecarSkillProvider', () => {
       source: 'bundled',
       content: SIDECAR_SKILL_CONTENT,
     })
-    // Semantic anchors of the dsh-scene body (condensed from the canonical
-    // skills/agent-sidecar/SKILL.md): observation via CLI + board, dsh
-    // injection routed to the plugin panel (unsupported_dsh), and the
-    // S5/S6 wording preserved.
+    // Semantic anchors of the dsh-scene body: observation via CLI + board,
+    // protected Kimi ACP resume, in-process DSH injection, direct-send
+    // compatibility boundaries, and the S5/S6 wording preserved.
     const content = definition!.content
     expect(content).toContain('agent-sidecar status --json')
     expect(content).toContain('Sidecar')
+    expect(content).toContain('Kimi Code 0.38.0')
+    expect(content).toContain('protected ACP')
+    expect(content).toContain('local, top-level')
+    expect(content).toContain('`waiting` or `idle`')
+    expect(content).toContain('`working`, `dead`, child/sidechain')
+    expect(content).toContain('internal request mode to `queue`')
+    expect(content).toContain('**Protected resume**')
+    expect(content).toContain('not queueing or steering')
+    expect(content).toContain('ACP JSON-RPC NDJSON')
+    expect(content).toContain('Kimi process argv')
+    expect(content).toContain('default/manual mode')
+    expect(content).toContain('permission request or question')
+    expect(content).toContain('`cancelled`')
+    expect(content).toContain('`outcome: "completed"`')
+    expect(content).toContain('Replaying the same retained')
+    expect(content).toContain('without spawning')
+    expect(content).toContain('`unsupported_kimi`')
+    expect(content).toContain('`followup`')
+    expect(content).toContain('guarded cold resume')
+    expect(content).toContain('`dsh_model_unconfigured`')
+    expect(content).toContain('`dsh_preset_unsupported`')
     expect(content).toContain('unsupported_dsh')
     expect(content).toContain('explicitly requests')
     expect(content).toContain('--allow-write')
     expect(content).toContain('delivery: "unknown"')
+    expect(content).toContain('only that CLI path is unsupported')
+    expect(content).not.toContain('Kimi Code 0.38 remains unsupported')
+    expect(content).not.toContain('`cursor-ide`, `copilot`, `kimi`, `dsh`')
+    expect(content).not.toContain('DSH has neither session resume')
+    expect(content).not.toContain('~/.dsh/skills/')
+    expect(content).not.toMatch(/\/(?:Users|home|private|tmp)\//)
+    expect(content).not.toMatch(
+      /(?:^|[\s`"'(])\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+/m,
+    )
     expect(content).not.toContain('audit reset --allow-write --confirm')
 
     const stranger = await provider.get(

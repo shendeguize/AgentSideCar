@@ -64,10 +64,13 @@
 .noticeDetail,
 .noTarget,
 .modeHint,
-.planKey,
-.observedNote,
 .resultDetail {
   color: var(--agsc-fg-dimmed);
+}
+
+.planKey,
+.observedNote {
+  color: var(--agsc-fg-secondary);
 }
 
 .targetRow,
@@ -322,7 +325,7 @@
   border: 1px solid var(--agsc-err);
   border-radius: var(--agsc-radius-control);
   background: transparent;
-  color: var(--agsc-err);
+  color: var(--agsc-fg);
   font: inherit;
   font-size: 13px;
   font-weight: 600;
@@ -331,8 +334,8 @@
 }
 
 .btnDanger:hover:not(:disabled) {
-  background: var(--agsc-err);
-  color: var(--agsc-bg-raised);
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--agsc-fg);
 }
 
 .btnDanger:disabled {

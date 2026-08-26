@@ -22,6 +22,7 @@ import {
   STDERR_DETAIL_BYTES,
   type SendCliLogLevel,
   type SpawnLike,
+  type SpawnedProcess,
 } from '../src/send-cli.ts'
 
 // ---------------------------------------------------------------------------
@@ -61,11 +62,12 @@ async function main() {
     }),
   )
   const requestIdAt = argv.indexOf('--request-id')
+  const agentAt = argv.indexOf('--agent')
   const receipt = (outcome, delivery, extra) =>
     JSON.stringify(
       Object.assign(
         {
-          agent: 'claude',
+          agent: agentAt >= 0 ? argv[agentAt + 1] : '',
           session_id: argv[1] || '',
           outcome,
           delivery,
@@ -95,6 +97,36 @@ async function main() {
         1,
         receipt('failed', 'unknown', { returncode: 3, error_code: 'native_exit' }),
       )
+    case 'kimi-completed-unknown':
+      return exitWithStdout(0, receipt('completed', 'unknown', { returncode: 0 }))
+    case 'kimi-protocol-error':
+      return exitWithStdout(
+        1,
+        receipt('failed', 'unknown', { error_code: 'protocol_error' }),
+      )
+    case 'mismatch-agent':
+      return exitWithStdout(
+        0,
+        receipt('completed', 'delivered', { agent: 'codex', returncode: 0 }),
+      )
+    case 'mismatch-session':
+      return exitWithStdout(
+        0,
+        receipt('completed', 'delivered', { session_id: 'replacement', returncode: 0 }),
+      )
+    case 'mismatch-request':
+      return exitWithStdout(
+        0,
+        receipt('completed', 'delivered', { request_id: 'req-other', returncode: 0 }),
+      )
+    case 'unknown-mismatch-session':
+      return exitWithStdout(
+        1,
+        receipt('failed', 'unknown', {
+          session_id: 'replacement',
+          error_code: 'timeout',
+        }),
+      )
     case 'exit1-silent':
       return exitWithStderr(1, 'send: something went wrong\\n')
     case 'exit2':
@@ -103,14 +135,21 @@ async function main() {
       return process.exit(130)
     case 'exit7':
       return process.exit(7)
+    case 'signal':
+      return process.kill(process.pid, 'SIGTERM')
     case 'nonjson-exit0':
       return exitWithStdout(0, 'this is not a JSON receipt\\n')
+    case 'malformed-error':
+      return exitWithStdout(2, JSON.stringify({ code: 'working_session', extra: true }) + '\\n')
     case 'stderr-flood':
       return exitWithStderr(1, 'E'.repeat(5000) + '\\n')
     case 'hang':
       setInterval(() => {}, 1000)
       return
     default:
+      if (scenario.startsWith('error-')) {
+        return exitWithStdout(2, JSON.stringify({ code: scenario.slice(6) }) + '\\n')
+      }
       return process.exit(99)
   }
 }
@@ -219,6 +258,40 @@ function request(overrides?: Partial<InjectExecutionRequest>): InjectExecutionRe
   }
 }
 
+function seamExecutor(proc: SpawnedProcess | (() => SpawnedProcess)) {
+  return createSendCliExecutor({
+    spawn: () => typeof proc === 'function' ? proc() : proc,
+    opts: { hardTimeoutBufferMs: 10, timeoutMs: 10 },
+  })
+}
+
+function settledProcess(options: {
+  code?: number | null
+  writeError?: boolean
+  endError?: boolean
+  stdoutListenerError?: boolean
+  exitError?: Error
+} = {}): SpawnedProcess {
+  return {
+    stdin: {
+      write: () => {
+        if (options.writeError === true) throw new Error('partial write')
+      },
+      end: () => {
+        if (options.endError === true) throw new Error('end failed')
+      },
+    },
+    onStdout: () => {
+      if (options.stdoutListenerError === true) throw new Error('prewrite setup failed')
+    },
+    onStderr: () => {},
+    exited: options.exitError === undefined
+      ? Promise.resolve(options.code === undefined ? 1 : options.code)
+      : Promise.reject(options.exitError),
+    kill: () => {},
+  }
+}
+
 function sha256(message: string): string {
   return createHash('sha256').update(Buffer.from(message, 'utf8')).digest('hex')
 }
@@ -243,11 +316,13 @@ describe('createSendCliExecutor', () => {
     expect(result).toEqual({ outcome: 'delivered' })
 
     const obs = observation()
-    // Verified argv shape: session_prefix positional, stdin transport,
-    // no --mode / --agent (absent from sidecar/cli.py's send subcommand).
+    // Exact session + agent binding, stdin transport, and no message / mode.
     expect(obs.argv).toEqual([
       'send',
       'sess-claude-42',
+      '--agent',
+      'claude',
+      '--exact-session',
       '--message-stdin',
       '--allow-write',
       '--json',
@@ -261,6 +336,34 @@ describe('createSendCliExecutor', () => {
     // The log callback never sees the message body (S8).
     expect(JSON.stringify(logs)).not.toContain('TOP-SECRET')
     expect(logs.length).toBeGreaterThan(0)
+  })
+
+  it('passes Kimi through exact-session stdin argv without exposing the prompt', async () => {
+    const { executor, logs, observation } = harness('kimi-completed-unknown')
+    const result = await executor.execute(request({
+      target: { agent: 'kimi', sessionId: 'sess-kimi-42' },
+      message: 'KIMI-TOP-SECRET prompt',
+    }))
+
+    expect(result).toEqual({ outcome: 'unknown' })
+    const obs = observation()
+    expect(obs.argv).toEqual([
+      'send',
+      'sess-kimi-42',
+      '--agent',
+      'kimi',
+      '--exact-session',
+      '--message-stdin',
+      '--allow-write',
+      '--json',
+      '--request-id',
+      'req-0001',
+      '--timeout',
+      '30',
+    ])
+    expect(obs.argv).not.toContain('KIMI-TOP-SECRET prompt')
+    expect(JSON.stringify(logs)).not.toContain('KIMI-TOP-SECRET')
+    expect(obs.stdinSha256).toBe(sha256('KIMI-TOP-SECRET prompt'))
   })
 
   it('delivers a 16 KiB message intact through stdin', async () => {
@@ -306,52 +409,178 @@ describe('createSendCliExecutor', () => {
     // exit code is 1, but the parsed receipt is authoritative (S6: the
     // message may have been consumed, so this must not read as plain failed).
     expect(result.outcome).toBe('unknown')
-    expect(result.errorCode).toBe('native_exit')
+    expect(result.errorCode).toBe('executor_error')
   })
 
-  it('falls back to failed on exit 1 without a receipt, keeping stderr as detail', async () => {
-    const { executor } = harness('exit1-silent')
+  it('keeps a successful Kimi ACP completion as delivery unknown', async () => {
+    const { executor } = harness('kimi-completed-unknown')
+    const result = await executor.execute(request({
+      target: { agent: 'kimi', sessionId: 'sess-claude-42' },
+    }))
+    expect(result).toEqual({ outcome: 'unknown' })
+  })
+
+  it('normalizes Kimi ACP receipt failures without upgrading unknown delivery', async () => {
+    const { executor } = harness('kimi-protocol-error')
+    const result = await executor.execute(request({
+      target: { agent: 'kimi', sessionId: 'sess-claude-42' },
+    }))
+    expect(result).toEqual({ outcome: 'unknown', errorCode: 'executor_error' })
+  })
+
+  it.each([
+    'mismatch-agent',
+    'mismatch-session',
+    'mismatch-request',
+    'unknown-mismatch-session',
+  ])('fails receipt identity mismatch closed as terminal unknown: %s', async (scenario) => {
+    const { executor } = harness(scenario)
     const result = await executor.execute(request())
-    expect(result.outcome).toBe('failed')
-    expect(result.errorCode).toBeUndefined()
-    expect(result.detail).toContain('something went wrong')
+    expect(result).toMatchObject({
+      outcome: 'unknown',
+      errorCode: 'executor_error',
+    })
+    expect(result.detail).toContain('identity mismatch')
   })
 
-  it('maps exit 2 to usage_error', async () => {
+  it.each(['claude', 'kimi'])(
+    'keeps receipt-free exit 1 terminal unknown after %s stdin submission',
+    async (agent) => {
+      const { executor } = harness('exit1-silent')
+      const result = await executor.execute(request({
+        target: { agent, sessionId: `sess-${agent}-42` },
+      }))
+      expect(result.outcome).toBe('unknown')
+      expect(result.errorCode).toBe('executor_error')
+      expect(result.detail).toContain('something went wrong')
+    },
+  )
+
+  it.each([
+    ['working_session', 'working_session'],
+    ['session_busy', 'working_session'],
+    ['dead_session', 'dead_session'],
+    ['child_session', 'child_session'],
+    ['remote_session', 'remote_session'],
+    ['invalid_session', 'invalid_session'],
+    ['session_unavailable', 'target_not_found'],
+    ['session_changed', 'target_changed'],
+    ['ambiguous_session', 'invalid_session'],
+    ['unsupported_cursor_ide', 'unsupported_agent'],
+    ['unsupported_kimi', 'unsupported_agent'],
+    ['protocol_error', 'executor_error'],
+    ['cleanup_incomplete', 'executor_error'],
+    ['audit_error', 'executor_error'],
+  ])('maps Python JSON error %s to %s', async (pythonCode, expected) => {
+    const { executor } = harness(`error-${pythonCode}`)
+    const result = await executor.execute(request())
+    expect(result).toEqual({ outcome: 'failed', errorCode: expected })
+  })
+
+  it('keeps unstructured exit 2 terminal unknown after stdin submission', async () => {
     const { executor } = harness('exit2')
     const result = await executor.execute(request())
-    expect(result).toMatchObject({ outcome: 'failed', errorCode: 'usage_error' })
+    expect(result).toMatchObject({ outcome: 'unknown', errorCode: 'executor_error' })
     expect(result.detail).toContain('--allow-write')
   })
 
-  it('maps exit 130 to interrupted', async () => {
+  it('keeps receipt-free exit 130 terminal unknown', async () => {
     const { executor } = harness('exit130')
     const result = await executor.execute(request())
-    expect(result).toMatchObject({ outcome: 'failed', errorCode: 'interrupted' })
+    expect(result).toMatchObject({ outcome: 'unknown', errorCode: 'interrupted' })
   })
 
-  it('maps other exit codes to exit_<code>', async () => {
+  it('keeps other receipt-free exit codes terminal unknown', async () => {
     const { executor } = harness('exit7')
     const result = await executor.execute(request())
-    expect(result).toMatchObject({ outcome: 'failed', errorCode: 'exit_7' })
+    expect(result).toMatchObject({ outcome: 'unknown', errorCode: 'executor_error' })
   })
 
-  it('treats exit 0 with non-JSON stdout as delivered with a parse warning', async () => {
-    const { executor } = harness('nonjson-exit0')
-    const result = await executor.execute(request())
-    expect(result.outcome).toBe('delivered')
-    expect(result.errorCode).toBeUndefined()
-    expect(result.detail).toContain('parse_warning')
+  it.each(['claude', 'kimi'])(
+    'treats parse-missing exit 0 as terminal unknown for %s',
+    async (agent) => {
+      const { executor } = harness('nonjson-exit0')
+      const result = await executor.execute(request({
+        target: { agent, sessionId: `sess-${agent}-42` },
+      }))
+      expect(result.outcome).toBe('unknown')
+      expect(result.errorCode).toBe('executor_error')
+      expect(result.detail).toContain('no valid bound send receipt or error')
+    },
+  )
+
+  it.each(['claude', 'kimi'])(
+    'kills a hung %s CLI after stdin submission and reports terminal unknown',
+    async (agent) => {
+      const { executor } = harness('hang', { timeoutMs: 300, hardTimeoutBufferMs: 100 })
+      const startedAt = Date.now()
+      const result = await executor.execute(request({
+        target: { agent, sessionId: `sess-${agent}-42` },
+      }))
+      expect(result.outcome).toBe('unknown')
+      expect(result.errorCode).toBe('timeout')
+      // 300ms budget + 100ms buffer: well inside 5s proves the kill fired.
+      expect(Date.now() - startedAt).toBeLessThan(5000)
+    },
+  )
+
+  it.each(['claude', 'kimi'])(
+    'keeps %s signal death terminal unknown after stdin submission',
+    async (agent) => {
+      const { executor } = harness('signal')
+      expect(await executor.execute(request({
+        target: { agent, sessionId: `sess-${agent}-42` },
+      }))).toMatchObject({ outcome: 'unknown', errorCode: 'executor_error' })
+    },
+  )
+
+  it.each([
+    ['claude', 'write throws after possibly partial submission', { writeError: true }],
+    ['claude', 'end throws after the message write', { endError: true }],
+    ['kimi', 'write throws after possibly partial submission', { writeError: true }],
+    ['kimi', 'end throws after the message write', { endError: true }],
+  ] as const)('keeps %s %s terminal unknown without a receipt', async (agent, _label, options) => {
+    const executor = seamExecutor(settledProcess(options))
+    expect(await executor.execute(request({
+      target: { agent, sessionId: `sess-${agent}-42` },
+    }))).toMatchObject({
+      outcome: 'unknown',
+      errorCode: 'executor_error',
+    })
   })
 
-  it('kills a hung CLI at the hard timeout and reports terminal unknown', async () => {
-    const { executor } = harness('hang', { timeoutMs: 300, hardTimeoutBufferMs: 100 })
-    const startedAt = Date.now()
-    const result = await executor.execute(request())
-    expect(result.outcome).toBe('unknown')
-    expect(result.errorCode).toBe('timeout')
-    // 300ms budget + 100ms buffer: well inside 5s proves the kill fired.
-    expect(Date.now() - startedAt).toBeLessThan(5000)
+  it('allows only definite prewrite failures to return failed without JSON', async () => {
+    const directSpawnFailure = createSendCliExecutor({
+      spawn: () => {
+        throw new Error('spawn failed')
+      },
+    })
+    expect(await directSpawnFailure.execute(request())).toMatchObject({
+      outcome: 'failed',
+      errorCode: 'cli_not_found',
+    })
+
+    const listenerSetupFailure = seamExecutor(settledProcess({ stdoutListenerError: true }))
+    expect(await listenerSetupFailure.execute(request())).toEqual({
+      outcome: 'failed',
+      errorCode: 'executor_error',
+    })
+  })
+
+  it('keeps asynchronous spawn rejection unknown once stdin submission began', async () => {
+    const executor = seamExecutor(settledProcess({ exitError: new Error('spawn rejected') }))
+    expect(await executor.execute(request())).toMatchObject({
+      outcome: 'unknown',
+      errorCode: 'executor_error',
+    })
+  })
+
+  it('requires the exact structured pre-delivery error envelope for failed', async () => {
+    const { executor } = harness('malformed-error')
+    expect(await executor.execute(request())).toMatchObject({
+      outcome: 'unknown',
+      errorCode: 'executor_error',
+    })
   })
 
   it('clamps sub-second timeout budgets to the CLI floor of 1 second', async () => {
@@ -363,22 +592,23 @@ describe('createSendCliExecutor', () => {
     expect(obs.argv[timeoutAt + 1]).toBe('1')
   })
 
-  it('maps a missing CLI executable to cli_not_found', async () => {
+  it('keeps an asynchronously missing CLI unknown after stdin submission starts', async () => {
     const { executor } = harness('ok', {
       command: [join(workDir, 'definitely-missing-agent-sidecar')],
     })
     const result = await executor.execute(request())
-    expect(result.outcome).toBe('failed')
-    expect(result.errorCode).toBe('cli_not_found')
-    expect(result.detail).toContain('ENOENT')
+    expect(result.outcome).toBe('unknown')
+    expect(result.errorCode).toBe('executor_error')
   })
 
   it('truncates collected stderr detail at 2 KiB', async () => {
     const { executor } = harness('stderr-flood')
     const result = await executor.execute(request())
-    expect(result.outcome).toBe('failed')
+    expect(result.outcome).toBe('unknown')
     expect(result.detail).toBeDefined()
-    expect(result.detail!.length).toBe(STDERR_DETAIL_BYTES)
-    expect(result.detail!.startsWith('EEE')).toBe(true)
+    const stderrDetail = result.detail!.split('stderr: ')[1]
+    expect(stderrDetail).toBeDefined()
+    expect(stderrDetail!.length).toBe(STDERR_DETAIL_BYTES)
+    expect(stderrDetail!.startsWith('EEE')).toBe(true)
   })
 })

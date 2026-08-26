@@ -315,6 +315,82 @@ describe('SidecarSocketClient', () => {
     expect(snapshot?.tailErrors).toEqual([])
   })
 
+  it('keeps raw daemon local/remote provenance through eligibility only', async () => {
+    daemon = await startMockDaemon({
+      statusSessions: [
+        row({ session_id: 'plain-local' }),
+        row({ session_id: 'fleet-local', host: 'local' }),
+        row({ session_id: 'fleet-remote', host: 'edge-a' }),
+        row({ session_id: 'flag-remote', extra: { remote: true } }),
+      ],
+    })
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    const snapshot = await client.status()
+    expect(snapshot?.sessions).toHaveLength(4)
+
+    const store = new SessionStore()
+    store.applySnapshot(snapshot?.sessions ?? [])
+    const views = new Map(
+      store.getBoardState().sessions.map((session) => [session.session_id, session]),
+    )
+    expect(views.get('plain-local')?.inject_eligibility).toEqual({
+      allowed: true,
+      reason: 'eligible',
+    })
+    expect(views.get('fleet-local')?.inject_eligibility).toEqual({
+      allowed: true,
+      reason: 'eligible',
+    })
+    for (const sessionId of ['fleet-remote', 'flag-remote']) {
+      expect(views.get(sessionId)?.inject_eligibility).toEqual({
+        allowed: false,
+        reason: 'remote_session',
+      })
+    }
+    for (const view of views.values()) {
+      expect(view).not.toHaveProperty('extra')
+      expect(view).not.toHaveProperty('parent_id')
+      expect(view).not.toHaveProperty('host')
+    }
+  })
+
+  it('retains malformed injection fields as disabled board rows', async () => {
+    const base = row()
+    daemon = await startMockDaemon({
+      statusSessions: [
+        { ...base, session_id: 'unknown-status', status: 'paused' },
+        { ...base, session_id: 'malformed-status', status: 7 },
+        { ...base, session_id: 'malformed-extra', extra: [] },
+        { ...base, session_id: 'malformed-parent', parent_id: { id: 'secret' } },
+      ],
+    })
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    const snapshot = await client.status()
+    expect(snapshot?.sessions.map((session) => session.session_id)).toEqual([
+      'unknown-status',
+      'malformed-status',
+      'malformed-extra',
+      'malformed-parent',
+    ])
+
+    const store = new SessionStore()
+    store.applySnapshot(snapshot?.sessions ?? [])
+    const views = store.getBoardState().sessions
+    expect(views).toHaveLength(4)
+    expect(views.find((view) => view.session_id === 'unknown-status')?.status).toBe('paused')
+    expect(views.find((view) => view.session_id === 'malformed-status')?.status).toBe(
+      '<invalid>',
+    )
+    for (const view of views) {
+      expect(view.inject_eligibility).toEqual({
+        allowed: false,
+        reason: 'invalid_session',
+      })
+      expect(view).not.toHaveProperty('extra')
+      expect(view).not.toHaveProperty('parent_id')
+    }
+  })
+
   it('status resolves null on a daemon-declared error', async () => {
     daemon = await startMockDaemon({ statusBehavior: 'error' })
     const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
@@ -834,6 +910,35 @@ describe('SessionStore', () => {
     store.applyEvent(ev({ extra: { seq: 2 } }))
 
     expect(store.getBoardState().sessions[0]?.gap).toBe(false)
+  })
+
+  it('never evaluates or stores forged row getters and prototypes', () => {
+    const store = new SessionStore()
+    let getterReads = 0
+    const accessorExtra: Record<string, unknown> = {}
+    Object.defineProperty(accessorExtra, 'remote', {
+      enumerable: true,
+      get() {
+        getterReads += 1
+        return false
+      },
+    })
+    const customPrototype = Object.assign(Object.create({ inherited: true }), row({
+      session_id: 'forged-prototype',
+    })) as SessionRow
+
+    store.applySnapshot([
+      row({ session_id: 'accessor-extra', extra: accessorExtra }),
+      customPrototype,
+    ])
+
+    expect(getterReads).toBe(0)
+    expect(store.getBoardState().sessions).toEqual([
+      expect.objectContaining({
+        session_id: 'accessor-extra',
+        inject_eligibility: { allowed: false, reason: 'invalid_session' },
+      }),
+    ])
   })
 
   it('keeps event hints invisible until the session appears in a snapshot', () => {

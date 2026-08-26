@@ -108,7 +108,8 @@ export const API_PREFIX = '/plugins/agent-sidecar/api'
  * dependency structural (the class has private state), so the real gateway
  * and plain-object test fakes are equally assignable.
  */
-export type InjectGatewayApi = Pick<InjectGateway, 'prepare' | 'execute'>
+export type InjectGatewayApi = Pick<InjectGateway, 'prepare' | 'execute'> &
+  Partial<Pick<InjectGateway, 'bindTargetVerifier'>>
 
 /**
  * The slice of {@link FusionQuery} the M3 read endpoints drive. Structural
@@ -242,7 +243,16 @@ const PREPARE_ERROR_STATUS: Readonly<Record<string, number>> = {
   inject_disabled: 403,
   invalid_message: 422,
   target_not_found: 404,
+  target_changed: 409,
   target_dead: 409,
+  working_session: 409,
+  dead_session: 409,
+  child_session: 422,
+  remote_session: 422,
+  invalid_session: 422,
+  dsh_model_unconfigured: 409,
+  dsh_preset_unsupported: 409,
+  executor_error: 502,
   too_many_pending: 429,
   // Issued at prepare since M2 review F-6 (no injection path for this
   // agent); same 422 the execute-side defense-in-depth check maps to.
@@ -254,10 +264,21 @@ const PREPARE_ERROR_STATUS: Readonly<Record<string, number>> = {
  * (executor-native vocab) and codeless failures fall back to 502.
  */
 const EXECUTE_ERROR_STATUS: Readonly<Record<string, number>> = {
+  inject_disabled: 403,
+  target_not_found: 404,
+  target_changed: 409,
+  target_dead: 409,
+  working_session: 409,
+  dead_session: 409,
+  child_session: 422,
+  remote_session: 422,
+  invalid_session: 422,
   token_missing: 401,
   token_expired: 401,
   token_reused: 409,
   token_mismatch: 409,
+  dsh_model_unconfigured: 409,
+  dsh_preset_unsupported: 409,
   unsupported_agent: 422,
   executor_error: 502,
 }
@@ -392,7 +413,15 @@ function timelineBody(page: TimelinePage): Record<string, unknown> {
     cursor: page.cursor,
     nextCursor: page.cursor === null ? null : encodeCursor(page.cursor),
     sources: page.sources,
+    sourceOutcomes: page.sourceOutcomes,
+    degraded: page.degraded,
+    reason: page.reason,
   }
+}
+
+/** A successful source consultation is positive evidence that the target exists. */
+function timelineConfirmsTarget(page: TimelinePage): boolean {
+  return Object.values(page.sourceOutcomes).some((outcome) => outcome === 'succeeded')
 }
 
 /** `event: <name>` + single-line JSON data (JSON.stringify never emits raw newlines). */
@@ -441,6 +470,22 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
   const maxSseClients = opts.maxSseClients ?? DEFAULT_MAX_SSE_CLIENTS
   const sseHeartbeatMs = opts.sseHeartbeatMs ?? DEFAULT_SSE_HEARTBEAT_MS
   const sseBufferLimit = opts.sseBufferLimit ?? DEFAULT_SSE_BUFFER_LIMIT
+
+  // Route assembly owns both objects, so bind the gateway to the same
+  // sanitized SessionStore projection served by state/detail/SSE. This
+  // supersedes the legacy status-only verifier without exposing raw rows.
+  deps.injectGateway?.bindTargetVerifier?.(async (target) => {
+    const view = deps.store.getSession(target.agent, target.sessionId)
+    if (view === null) return null
+    return {
+      agent: view.agent,
+      sessionId: view.session_id,
+      status: view.status,
+      title: view.title,
+      project: view.project,
+      inject_eligibility: view.inject_eligibility,
+    }
+  })
 
   const clients = new Set<SseClient>()
   let disposed = false
@@ -570,12 +615,17 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
     }
     // M3: the unified view also resolves dsh-live sessions the sidecar has
     // not observed on disk yet, so those answer 200 instead of 404.
-    const unified = fusion.getUnifiedSessions().find((s) => s.sessionId === id) ?? null
-    if (view === undefined && unified === null) {
+    let unified = fusion.getUnifiedSessions().find((s) => s.sessionId === id) ?? null
+    const page = await fusion.getSessionTimeline(id)
+    // A direct live-session lookup during the timeline pull may have seeded a
+    // session that predated the fusion subscription; refresh without scanning.
+    if (unified === null) {
+      unified = fusion.getUnifiedSessions().find((s) => s.sessionId === id) ?? null
+    }
+    if (view === undefined && unified === null && !timelineConfirmsTarget(page)) {
       writeJson(res, 404, { reason: 'session_not_found' })
       return
     }
-    const page = await fusion.getSessionTimeline(id)
     writeJson(res, 200, {
       session: view ?? null,
       unified,
@@ -610,14 +660,9 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
       return
     }
     const page = await fusion.getSessionTimeline(id, { before, limit })
-    // Unknown id: no source contributed, nothing buffered, and the board
-    // does not list it either → an honest 404 instead of an empty page.
-    const anySource =
-      page.sources.dshLive ||
-      page.sources.dshCold ||
-      page.sources.sidecarReplay ||
-      page.sources.sidecarBuffer
-    if (!anySource && page.entries.length === 0) {
+    // Board/fusion-known sessions stay 200 even when every usable source
+    // failed, so an empty degraded page cannot masquerade as target absence.
+    if (!timelineConfirmsTarget(page)) {
       const known =
         deps.store.getBoardState().sessions.some((s) => s.session_id === id) ||
         fusion.getUnifiedSessions().some((s) => s.sessionId === id)
@@ -1025,7 +1070,18 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
       return
     }
 
-    const verdict = guardRequest(req, deps.guardOptions)
+    // Preserve Node's lossless header list at the framework boundary. The
+    // guard uses it to count Host/Origin before `headers` first-wins/joins.
+    const verdict = guardRequest(
+      {
+        method: req.method,
+        url: req.url,
+        headers: req.headers,
+        rawHeaders: req.rawHeaders,
+        socket: req.socket,
+      },
+      deps.guardOptions,
+    )
     const method = (req.method ?? '').toUpperCase()
     const subpath = subpathOf(req.url)
     // The gateway-backed action handler reads its own bounded body; every

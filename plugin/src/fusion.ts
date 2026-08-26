@@ -103,6 +103,12 @@ export interface DshEventFace {
   ): () => void
   on(event: 'session/created', handler: (session: DshSessionFace) => void): () => void
   on(event: 'session/disposed', handler: (session: DshSessionFace) => void): () => void
+  /**
+   * Optional direct live-session lookup (`ctx.sessions.get`). When the
+   * event subscription binds after a session was announced, this lets an
+   * on-demand timeline read seed the cache without scanning every session.
+   */
+  get?(sessionId: string): DshSessionFace | undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -291,13 +297,39 @@ export interface TimelineSources {
   sidecarBuffer: boolean
 }
 
+/** Stable, content-free result of consulting one timeline source. */
+export type TimelineSourceOutcome =
+  | 'succeeded'
+  | 'unavailable'
+  | 'not_found'
+  | 'replay_unsupported'
+  | 'source_failed'
+
+/** Per-source observability; `sessionQuery` is the legacy `dshCold` source. */
+export interface TimelineSourceOutcomes {
+  liveSession: TimelineSourceOutcome
+  sessionQuery: TimelineSourceOutcome
+  sidecarReplay: TimelineSourceOutcome
+  buffer: TimelineSourceOutcome
+}
+
+/** Stable page-level degradation reason (never an upstream error detail). */
+export type TimelineDegradedReason =
+  | 'partial_source_failure'
+  | 'all_sources_failed'
+  | null
+
 /** One on-demand timeline page (entries ascending). */
 export interface TimelinePage {
   sessionId: string
   entries: TimelineEntry[]
   /** Cursor for the next older page; null when the page reached the log start. */
   cursor: TimelineCursor | null
+  /** Legacy contribution flags retained for source counts and existing clients. */
   sources: TimelineSources
+  sourceOutcomes: TimelineSourceOutcomes
+  degraded: boolean
+  reason: TimelineDegradedReason
 }
 
 /** `getLineage` result; degrades instead of throwing (design §4.e.4). */
@@ -391,6 +423,78 @@ function normalizeProject(project: string): string {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+const TIMELINE_FAILURE_OUTCOMES = new Set<TimelineSourceOutcome>([
+  'replay_unsupported',
+  'source_failed',
+])
+
+/**
+ * Extract only a bounded, known machine code for internal classification.
+ * The returned timeline contract never includes this value or the upstream
+ * message, which may contain paths, ids, prompts, or other private content.
+ */
+function knownTimelineErrorCode(error: unknown): string | null {
+  const knownCodes = [
+    'unknown_session',
+    'not_found',
+    'SESSION_NOT_FOUND',
+    'replay_unsupported',
+  ] as const
+  if (typeof error === 'object' && error !== null) {
+    const record = error as Record<string, unknown>
+    for (const key of ['code', 'errorCode'] as const) {
+      const value = record[key]
+      if (typeof value === 'string' && knownCodes.some((code) => value === code)) return value
+    }
+  }
+  if (error instanceof Error) {
+    for (const code of knownCodes) {
+      if (
+        error.message === code ||
+        error.message.startsWith(`${code}:`) ||
+        error.message.startsWith(`${code} `)
+      ) {
+        return code
+      }
+    }
+  }
+  return null
+}
+
+function classifySourceFailure(error: unknown): TimelineSourceOutcome {
+  const code = knownTimelineErrorCode(error)
+  return code === 'unknown_session' || code === 'not_found' || code === 'SESSION_NOT_FOUND'
+    ? 'not_found'
+    : 'source_failed'
+}
+
+function classifyReplayFailure(error: unknown): TimelineSourceOutcome {
+  return knownTimelineErrorCode(error) === 'replay_unsupported'
+    ? 'replay_unsupported'
+    : classifySourceFailure(error)
+}
+
+function degradationOf(sourceOutcomes: TimelineSourceOutcomes, entriesEmpty: boolean): {
+  degraded: boolean
+  reason: TimelineDegradedReason
+} {
+  const outcomes = Object.values(sourceOutcomes)
+  const failures = outcomes.filter((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome))
+  if (failures.length === 0) return { degraded: false, reason: null }
+  const usable = outcomes.filter(
+    (outcome) => outcome !== 'unavailable' && outcome !== 'not_found',
+  )
+  return {
+    degraded: true,
+    reason:
+      entriesEmpty &&
+      usable.length > 0 &&
+      usable.every((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome))
+        ? 'all_sources_failed'
+        : 'partial_source_failure',
+  }
 }
 
 /**
@@ -695,8 +799,8 @@ export class FusionQuery {
    * event identity (seq+kind+text for seq-carrying events — same-seq
    * sibling events from multi-block records all survive), newest window
    * first with a backward cursor. Sources are pulled on demand; a
-   * missing/failing source silently narrows the page (provenance is
-   * reported in `sources`).
+   * missing/failing source narrows the page while `sourceOutcomes`,
+   * `degraded`, and `reason` retain content-free observability.
    */
   async getSessionTimeline(
     sessionId: string,
@@ -709,21 +813,38 @@ export class FusionQuery {
       sidecarReplay: false,
       sidecarBuffer: false,
     }
+    const sourceOutcomes: TimelineSourceOutcomes = {
+      liveSession: this.dshEvents === null ? 'unavailable' : 'not_found',
+      sessionQuery: 'unavailable',
+      sidecarReplay: this.replaySource === null ? 'unavailable' : 'not_found',
+      buffer: 'not_found',
+    }
 
     let dshEvents: readonly DshSessionEventFace[] = []
-    const liveEntry = this.live.get(sessionId)
+    let liveEntry = this.live.get(sessionId)
+    if (liveEntry === undefined && this.dshEvents?.get !== undefined) {
+      try {
+        const session = this.dshEvents.get(sessionId)
+        if (session !== undefined) liveEntry = this.ensureLive(session)
+      } catch (error) {
+        sourceOutcomes.liveSession = classifySourceFailure(error)
+      }
+    }
     if (liveEntry !== undefined) {
       dshEvents = liveEntry.session.events
       sources.dshLive = true
+      sourceOutcomes.liveSession = 'succeeded'
     } else {
-      const engine = this.resolveSessionQuery()
+      const resolved = this.resolveSessionQueryForTimeline()
+      const engine = resolved.engine
+      sourceOutcomes.sessionQuery = resolved.outcome
       if (engine !== null) {
         try {
           dshEvents = (await engine.readSession(sessionId)).events
           sources.dshCold = true
-        } catch {
-          // Cold dsh log unavailable (unknown id / persistence off):
-          // the sidecar side still yields an honest partial timeline.
+          sourceOutcomes.sessionQuery = 'succeeded'
+        } catch (error) {
+          sourceOutcomes.sessionQuery = classifySourceFailure(error)
         }
       }
     }
@@ -742,13 +863,15 @@ export class FusionQuery {
         const replayed = await this.replaySource.replay({ sessionId })
         for (const ev of replayed) addSidecar(ev)
         sources.sidecarReplay = true
-      } catch {
-        // Replay op unavailable — fall through to the bounded ring.
+        sourceOutcomes.sidecarReplay = 'succeeded'
+      } catch (error) {
+        sourceOutcomes.sidecarReplay = classifyReplayFailure(error)
       }
     }
     const ring = this.buffers.get(sessionId)
     if (ring !== undefined && ring.length > 0) {
       sources.sidecarBuffer = true
+      sourceOutcomes.buffer = 'succeeded'
       for (const ev of ring) addSidecar(ev)
     }
 
@@ -777,7 +900,15 @@ export class FusionQuery {
     const first = window[0]
     const cursor =
       startIdx > 0 && first !== undefined ? { seq: first.seq, ts: first.ts } : null
-    return { sessionId, entries: window, cursor, sources }
+    const degradation = degradationOf(sourceOutcomes, entries.length === 0)
+    return {
+      sessionId,
+      entries: window,
+      cursor,
+      sources,
+      sourceOutcomes,
+      ...degradation,
+    }
   }
 
   /**
@@ -872,6 +1003,23 @@ export class FusionQuery {
   }
 
   // -------------------------------------------------------------------------
+
+  private resolveSessionQueryForTimeline(): {
+    engine: SessionQueryFace | null
+    outcome: TimelineSourceOutcome
+  } {
+    if (this.getSessionQueryThunk === null) {
+      return { engine: null, outcome: 'unavailable' }
+    }
+    try {
+      const engine = this.getSessionQueryThunk() ?? null
+      return engine === null
+        ? { engine: null, outcome: 'unavailable' }
+        : { engine, outcome: 'not_found' }
+    } catch (error) {
+      return { engine: null, outcome: classifySourceFailure(error) }
+    }
+  }
 
   private resolveSessionQuery(): SessionQueryFace | null {
     if (this.getSessionQueryThunk === null) return null

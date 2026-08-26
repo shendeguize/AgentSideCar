@@ -36,6 +36,7 @@
  */
 
 import { createConnection, type Socket } from 'node:net'
+import { sanitizeSessionExtra } from './inject-eligibility.ts'
 
 // ---------------------------------------------------------------------------
 // Wire types (mirroring sidecar/model.py and sidecar/daemon.py responses).
@@ -69,6 +70,14 @@ export interface SessionRow {
   status: string
   extra: Record<string, unknown>
   parent_id: string | null
+  /** Fleet/merge provenance; consumed by eligibility and never projected to the board wire. */
+  host?: string
+  remote?: boolean
+  source?: string
+  remote_alias?: string
+  remote_host?: string
+  /** Set only when injection-sensitive wire fields could not be represented safely. */
+  invalid_session?: true
 }
 
 /** One normalized event from the subscribe stream (`Event.to_dict`). */
@@ -177,8 +186,17 @@ export const DEFAULT_MAX_LINE_BYTES = 32 * 1024 * 1024
 // ---------------------------------------------------------------------------
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  try {
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  } catch {
+    return false
+  }
 }
+
+const SESSION_STATUSES: ReadonlySet<string> = new Set(['working', 'waiting', 'idle', 'dead'])
+const INVALID_STATUS = '<invalid>'
 
 function parseHttpPingInfo(value: unknown): HttpPingInfo | null {
   if (value === null || value === undefined) return { enabled: false }
@@ -212,20 +230,81 @@ function parsePingInfo(value: unknown): PingInfo | null {
  */
 function parseSessionRow(value: unknown): SessionRow | null {
   if (!isRecord(value)) return null
+  const agent = value['agent']
   const sessionId = value['session_id']
-  if (typeof sessionId !== 'string' || sessionId === '') return null
+  const project = value['project']
+  const transcript = value['transcript']
   const updatedAt = value['updated_at']
-  return {
-    agent: typeof value['agent'] === 'string' ? value['agent'] : '',
-    session_id: sessionId,
-    project: typeof value['project'] === 'string' ? value['project'] : '',
-    transcript: typeof value['transcript'] === 'string' ? value['transcript'] : '',
-    updated_at: typeof updatedAt === 'number' && Number.isFinite(updatedAt) ? updatedAt : 0,
-    title: typeof value['title'] === 'string' ? value['title'] : '',
-    status: typeof value['status'] === 'string' ? value['status'] : 'idle',
-    extra: isRecord(value['extra']) ? value['extra'] : {},
-    parent_id: typeof value['parent_id'] === 'string' ? value['parent_id'] : null,
+  const title = value['title']
+  if (
+    typeof agent !== 'string' ||
+    agent === '' ||
+    typeof sessionId !== 'string' ||
+    sessionId === '' ||
+    typeof project !== 'string' ||
+    typeof transcript !== 'string' ||
+    typeof updatedAt !== 'number' ||
+    !Number.isFinite(updatedAt) ||
+    typeof title !== 'string'
+  ) {
+    return null
   }
+
+  let invalid = false
+  const rawStatus = value['status']
+  const status = typeof rawStatus === 'string' ? rawStatus : INVALID_STATUS
+  if (!SESSION_STATUSES.has(status)) invalid = true
+
+  let extra = sanitizeSessionExtra(value['extra'])
+  if (extra === null) {
+    invalid = true
+    extra = {}
+  }
+
+  const rawParentId = value['parent_id']
+  let parentId: string | null
+  if (rawParentId === null || typeof rawParentId === 'string') {
+    parentId = rawParentId
+  } else {
+    invalid = true
+    parentId = null
+  }
+
+  const row: SessionRow = {
+    agent,
+    session_id: sessionId,
+    project,
+    transcript,
+    updated_at: updatedAt,
+    title,
+    status,
+    extra,
+    parent_id: parentId,
+  }
+
+  const copyMarker = (
+    key: 'host' | 'source' | 'remote_alias' | 'remote_host',
+    nonempty: boolean,
+  ): void => {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) return
+    const marker = value[key]
+    if (typeof marker !== 'string' || (nonempty && marker === '')) {
+      invalid = true
+      return
+    }
+    row[key] = marker
+  }
+  copyMarker('host', true)
+  copyMarker('source', false)
+  copyMarker('remote_alias', true)
+  copyMarker('remote_host', true)
+
+  if (Object.prototype.hasOwnProperty.call(value, 'remote')) {
+    if (typeof value['remote'] === 'boolean') row.remote = value['remote']
+    else invalid = true
+  }
+  if (invalid) row.invalid_session = true
+  return row
 }
 
 function parseRecordList(value: unknown): Array<Record<string, unknown>> | null {

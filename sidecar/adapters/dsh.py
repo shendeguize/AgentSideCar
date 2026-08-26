@@ -6,11 +6,19 @@ import json
 import os
 import selectors
 import shutil
+import stat
 import struct
 import subprocess
+import sys
+import tempfile
+import threading
 import time
+import weakref
+from collections import OrderedDict
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from sidecar.adapters.base import (
     Adapter,
@@ -32,6 +40,18 @@ _REPLAY_RETAINED_BYTES = 8 * 1024 * 1024
 _REPLAY_RECORDS = 1024
 _REPLAY_LINE_BYTES = 1024 * 1024
 _REPLAY_TIMEOUT_S = 10.0
+_DISCOVERY_MAX_ENTRIES = 4096
+_DISCOVERY_MAX_CANDIDATES = 256
+_DISCOVERY_COMPRESSED_BYTES = 64 * 1024 * 1024
+_DISCOVERY_EXECUTABLE_BYTES = 64 * 1024 * 1024
+_DISCOVERY_HEADER_BYTES = 64 * 1024
+# Allow a loaded-machine cold decoder launch to finish instead of briefly
+# hiding an active session. The shared five-second discovery deadline still
+# prevents multiple bad candidates from extending the scan linearly.
+_DISCOVERY_CANDIDATE_TIMEOUT_S = 3.5
+_DISCOVERY_TIMEOUT_S = 5.0
+_DISCOVERY_HEADER_CACHE_ENTRIES = 512
+_SESSION_FORMAT_VERSION = 0
 
 
 def _utf16_units(value: str) -> Iterable[int]:
@@ -100,18 +120,934 @@ def _transcript_path(dsh_home: Path, cwd: str, session_id: str) -> Path:
     return dsh_home / "sessions" / project / _encode_segment(session_id) / "session.jsonl.zstd"
 
 
-def _stop_process(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=0.2)
-    except subprocess.TimeoutExpired:
-        process.kill()
+def _configured_dsh_home(home: Path) -> Optional[Path]:
+    """Resolve DSH's independent home without treating blanks as cwd."""
+
+    configured = os.environ.get("DSH_HOME")
+    if configured is None or not configured.strip():
+        return home / ".dsh"
+    if "\x00" in configured:
+        return None
+    candidate = Path(configured)
+    if not candidate.is_absolute():
+        return None
+    return Path(os.path.normpath(str(candidate)))
+
+
+_FileIdentity = Tuple[int, int, int, int, int]
+_ExecutableIdentity = Tuple[int, int, int, int, int, int, int]
+
+
+class _DecodeOutcome(Enum):
+    SUCCESS = "success"
+    DETERMINISTIC_INVALID = "deterministic_invalid"
+    TRANSIENT_FAILURE = "transient_failure"
+
+
+@dataclass(frozen=True)
+class _HeaderDecode:
+    outcome: _DecodeOutcome
+    header: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class _ResolvedExecutable:
+    path: Path
+    identity: _ExecutableIdentity
+
+
+@dataclass
+class _BoundExecutableState:
+    descriptor: int
+    snapshot: Optional[tempfile.TemporaryDirectory]
+    lock: threading.Lock
+
+
+def _close_bound_executable_state(state: _BoundExecutableState) -> None:
+    """Idempotently release the platform-specific bound executable resource."""
+
+    with state.lock:
+        descriptor = state.descriptor
+        snapshot = state.snapshot
+        state.descriptor = -1
+        state.snapshot = None
+    if descriptor >= 0:
         try:
-            process.wait(timeout=0.2)
-        except subprocess.TimeoutExpired:
+            os.close(descriptor)
+        except OSError:
             pass
+    if snapshot is not None:
+        try:
+            snapshot.cleanup()
+        except OSError:
+            pass
+
+
+class _BoundExecutable:
+    """One fixed-identity decoder binding shared for an adapter's lifetime."""
+
+    def __init__(
+        self,
+        executable: _ResolvedExecutable,
+        descriptor: int,
+        launch_path: str,
+        inherited_fds: Tuple[int, ...],
+        snapshot: Optional[tempfile.TemporaryDirectory] = None,
+        environment: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.path = executable.path
+        self.identity = executable.identity
+        self.launch_path = launch_path
+        self._inherited_fds = inherited_fds
+        self.environment = environment
+        self._state = _BoundExecutableState(
+            descriptor,
+            snapshot,
+            threading.Lock(),
+        )
+        self._finalizer = weakref.finalize(
+            self,
+            _close_bound_executable_state,
+            self._state,
+        )
+
+    @property
+    def descriptor(self) -> int:
+        with self._state.lock:
+            return self._state.descriptor
+
+    @property
+    def inherited_fds(self) -> Tuple[int, ...]:
+        with self._state.lock:
+            if self._state.descriptor < 0 and self._inherited_fds:
+                return ()
+            return self._inherited_fds
+
+    @property
+    def closed(self) -> bool:
+        with self._state.lock:
+            return self._state.descriptor < 0 and self._state.snapshot is None
+
+    def spawn_decoder(self, source_fd: int) -> subprocess.Popen:
+        """Spawn while holding the resource lock against concurrent close."""
+
+        with self._state.lock:
+            if self._state.descriptor < 0 and self._state.snapshot is None:
+                raise OSError("bound decoder is closed")
+            return subprocess.Popen(
+                [str(self.path), "-dc"],
+                executable=self.launch_path,
+                pass_fds=self._inherited_fds,
+                stdin=source_fd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+                env=self.environment,
+            )
+
+    def close(self) -> None:
+        """Release the descriptor/snapshot once; safe to call repeatedly."""
+
+        self._finalizer()
+
+
+@dataclass(frozen=True)
+class _DurableCandidate:
+    project_name: str
+    directory_name: str
+    session_id: str
+    transcript: Path
+    identity: _FileIdentity
+
+
+def _stat_ns(details: os.stat_result, name: str, fallback: float) -> int:
+    return int(getattr(details, name, int(fallback * 1_000_000_000)))
+
+
+def _file_identity(details: os.stat_result) -> _FileIdentity:
+    return (
+        int(details.st_dev),
+        int(details.st_ino),
+        int(details.st_size),
+        _stat_ns(details, "st_mtime_ns", details.st_mtime),
+        _stat_ns(details, "st_ctime_ns", details.st_ctime),
+    )
+
+
+def _executable_identity(details: os.stat_result) -> _ExecutableIdentity:
+    return (
+        int(details.st_dev),
+        int(details.st_ino),
+        int(details.st_uid),
+        int(details.st_mode),
+        int(details.st_size),
+        _stat_ns(details, "st_mtime_ns", details.st_mtime),
+        _stat_ns(details, "st_ctime_ns", details.st_ctime),
+    )
+
+
+def _acceptable_executable(path: Path) -> Optional[_ResolvedExecutable]:
+    try:
+        details = path.lstat()
+    except OSError:
+        return None
+    geteuid = getattr(os, "geteuid", None)
+    effective_uid = geteuid() if callable(geteuid) else details.st_uid
+    mode = stat.S_IMODE(details.st_mode)
+    if (
+        not path.is_absolute()
+        or stat.S_ISLNK(details.st_mode)
+        or not stat.S_ISREG(details.st_mode)
+        or details.st_size <= 0
+        or details.st_size > _DISCOVERY_EXECUTABLE_BYTES
+        or details.st_uid not in (0, effective_uid)
+        or bool(mode & 0o022)
+        or not bool(mode & 0o111)
+        or not os.access(str(path), os.X_OK)
+    ):
+        return None
+    return _ResolvedExecutable(path, _executable_identity(details))
+
+
+def _resolve_discovery_zstd(value: str) -> Optional[_ResolvedExecutable]:
+    """Resolve one stable decoder path without retaining future PATH behavior."""
+
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None
+    separators = (os.path.sep,) + ((os.path.altsep,) if os.path.altsep else ())
+    if any(separator in value for separator in separators):
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            return None
+        return _acceptable_executable(Path(os.path.normpath(str(candidate))))
+    resolved = shutil.which(value)
+    if not resolved:
+        return None
+    try:
+        candidate = Path(resolved)
+        if not candidate.is_absolute():
+            candidate = Path.cwd() / candidate
+        candidate = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return _acceptable_executable(candidate)
+
+
+def _open_executable(executable: _ResolvedExecutable) -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        return -1
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(str(executable.path), flags)
+        details = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or _executable_identity(details) != executable.identity
+        ):
+            os.close(descriptor)
+            return -1
+        return descriptor
+    except OSError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        return -1
+
+
+def _write_all(descriptor: int, chunk: bytes) -> None:
+    offset = 0
+    while offset < len(chunk):
+        written = os.write(descriptor, chunk[offset:])
+        if written <= 0:
+            raise OSError("short executable snapshot write")
+        offset += written
+
+
+def _snapshot_executable(
+    executable: _ResolvedExecutable,
+    source_fd: int,
+) -> Tuple[Optional[tempfile.TemporaryDirectory], Optional[str]]:
+    snapshot: Optional[tempfile.TemporaryDirectory] = None
+    destination_fd = -1
+    try:
+        snapshot = tempfile.TemporaryDirectory(prefix="agent-sidecar-dsh-")
+        os.chmod(snapshot.name, 0o700)
+        directory_details = Path(snapshot.name).lstat()
+        geteuid = getattr(os, "geteuid", None)
+        effective_uid = (
+            geteuid() if callable(geteuid) else directory_details.st_uid
+        )
+        if (
+            not stat.S_ISDIR(directory_details.st_mode)
+            or directory_details.st_uid != effective_uid
+            or bool(stat.S_IMODE(directory_details.st_mode) & 0o077)
+        ):
+            raise OSError("unsafe executable snapshot directory")
+        snapshot_path = Path(snapshot.name) / "decoder"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        destination_fd = os.open(str(snapshot_path), flags, 0o700)
+        os.lseek(source_fd, 0, os.SEEK_SET)
+        copied = 0
+        while copied < executable.identity[4]:
+            chunk = os.read(
+                source_fd,
+                min(1024 * 1024, executable.identity[4] - copied),
+            )
+            if not chunk:
+                raise OSError("short executable snapshot read")
+            _write_all(destination_fd, chunk)
+            copied += len(chunk)
+        if os.read(source_fd, 1):
+            raise OSError("executable grew while snapshotting")
+        if _executable_identity(os.fstat(source_fd)) != executable.identity:
+            raise OSError("executable changed while snapshotting")
+        os.fsync(destination_fd)
+        os.close(destination_fd)
+        destination_fd = -1
+        os.chmod(snapshot_path, 0o500)
+        details = snapshot_path.lstat()
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_size != executable.identity[4]
+            or bool(stat.S_IMODE(details.st_mode) & 0o077)
+        ):
+            raise OSError("unsafe executable snapshot")
+        return snapshot, str(snapshot_path)
+    except OSError:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        if snapshot is not None:
+            snapshot.cleanup()
+        return None, None
+
+
+def _darwin_snapshot_environment(executable: _ResolvedExecutable) -> Dict[str, str]:
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("DYLD_")
+    }
+    library_path = executable.path.parent.parent / "lib"
+    try:
+        details = library_path.lstat()
+    except OSError:
+        return environment
+    geteuid = getattr(os, "geteuid", None)
+    effective_uid = geteuid() if callable(geteuid) else details.st_uid
+    if (
+        not library_path.is_absolute()
+        or stat.S_ISLNK(details.st_mode)
+        or not stat.S_ISDIR(details.st_mode)
+        or details.st_uid not in (0, effective_uid)
+        or bool(stat.S_IMODE(details.st_mode) & 0o022)
+    ):
+        return environment
+    environment["DYLD_LIBRARY_PATH"] = str(library_path)
+    return environment
+
+
+def _bind_executable(executable: _ResolvedExecutable) -> Optional[_BoundExecutable]:
+    descriptor = _open_executable(executable)
+    if descriptor < 0:
+        return None
+    snapshot: Optional[tempfile.TemporaryDirectory] = None
+    try:
+        if sys.platform.startswith("linux"):
+            bound = _BoundExecutable(
+                executable,
+                descriptor,
+                "/dev/fd/{}".format(descriptor),
+                (descriptor,),
+            )
+            descriptor = -1
+            return bound
+        if sys.platform == "darwin":
+            snapshot, launch_path = _snapshot_executable(executable, descriptor)
+            if snapshot is not None and launch_path is not None:
+                environment = _darwin_snapshot_environment(executable)
+                os.close(descriptor)
+                descriptor = -1
+                bound = _BoundExecutable(
+                    executable,
+                    -1,
+                    launch_path,
+                    (),
+                    snapshot,
+                    environment,
+                )
+                snapshot = None
+                return bound
+        return None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if snapshot is not None:
+            try:
+                snapshot.cleanup()
+            except OSError:
+                pass
+
+
+def _directory_flags() -> int:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        return 0
+    return os.O_RDONLY | nofollow | directory | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_directory(path: Path) -> int:
+    flags = _directory_flags()
+    if not flags:
+        return -1
+    try:
+        descriptor = os.open(str(path), flags)
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            return -1
+        return descriptor
+    except OSError:
+        return -1
+
+
+def _open_directory_at(parent_fd: int, name: str) -> int:
+    flags = _directory_flags()
+    if not flags:
+        return -1
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            return -1
+        return descriptor
+    except OSError:
+        return -1
+
+
+def _open_regular_at(parent_fd: int, name: str) -> Tuple[int, Optional[os.stat_result]]:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        return -1, None
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+        details = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(details.st_mode)
+            or details.st_size <= 0
+            or details.st_size > _DISCOVERY_COMPRESSED_BYTES
+        ):
+            os.close(descriptor)
+            return -1, None
+        return descriptor, details
+    except OSError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        return -1, None
+
+
+def _decode_segment(value: str) -> Optional[str]:
+    """Decode one canonical DSH UTF-16 path segment."""
+
+    if not value or value in (".", ".."):
+        return None
+    units: List[int] = []
+    index = 0
+    hexdigits = "0123456789ABCDEF"
+    while index < len(value):
+        char = value[index]
+        if char == "~":
+            encoded = value[index + 1 : index + 5]
+            if len(encoded) != 4 or any(item not in hexdigits for item in encoded):
+                return None
+            units.append(int(encoded, 16))
+            index += 5
+            continue
+        if not (
+            char.isascii()
+            and (char.isalnum() or char in "._-")
+        ):
+            return None
+        units.append(ord(char))
+        index += 1
+    try:
+        raw = b"".join(struct.pack(">H", unit) for unit in units)
+        decoded = raw.decode("utf-16-be", "surrogatepass")
+        if not decoded or _encode_segment(decoded) != value:
+            return None
+        return decoded
+    except (UnicodeError, ValueError):
+        return None
+
+
+def _scan_directory_names(
+    descriptor: int,
+    budget: int,
+    deadline: float,
+) -> Tuple[List[str], int, bool]:
+    """Collect real child-directory names and prove the entry scan completed."""
+
+    names: List[str] = []
+    consumed = 0
+    try:
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                if time.monotonic() >= deadline or consumed >= budget:
+                    return names, consumed, False
+                consumed += 1
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        names.append(entry.name)
+                except OSError:
+                    continue
+    except OSError:
+        return names, consumed, False
+    return sorted(names), consumed, time.monotonic() < deadline
+
+
+def _enumerate_durable_candidates(
+    sessions_path: Path,
+    sessions_fd: int,
+    deadline: float,
+) -> Tuple[List[_DurableCandidate], Set[str], bool]:
+    remaining = _DISCOVERY_MAX_ENTRIES
+    projects, consumed, complete = _scan_directory_names(
+        sessions_fd,
+        remaining,
+        deadline,
+    )
+    remaining -= consumed
+    if not complete:
+        return [], set(), False
+
+    candidates: List[_DurableCandidate] = []
+    seen_ids: Set[str] = set()
+    ambiguous_ids: Set[str] = set()
+    for project_name in projects:
+        if time.monotonic() >= deadline:
+            return [], set(), False
+        project_fd = _open_directory_at(sessions_fd, project_name)
+        if project_fd < 0:
+            continue
+        try:
+            directories, consumed, complete = _scan_directory_names(
+                project_fd,
+                remaining,
+                deadline,
+            )
+            remaining -= consumed
+            if not complete:
+                return [], set(), False
+            for directory_name in directories:
+                if time.monotonic() >= deadline:
+                    return [], set(), False
+                session_id = _decode_segment(directory_name)
+                if session_id is None:
+                    continue
+                directory_fd = _open_directory_at(project_fd, directory_name)
+                if directory_fd < 0:
+                    continue
+                try:
+                    transcript_fd, details = _open_regular_at(
+                        directory_fd,
+                        "session.jsonl.zstd",
+                    )
+                    if transcript_fd < 0 or details is None:
+                        continue
+                    os.close(transcript_fd)
+                finally:
+                    os.close(directory_fd)
+                if session_id in seen_ids:
+                    ambiguous_ids.add(session_id)
+                else:
+                    seen_ids.add(session_id)
+                candidates.append(
+                    _DurableCandidate(
+                        project_name,
+                        directory_name,
+                        session_id,
+                        sessions_path
+                        / project_name
+                        / directory_name
+                        / "session.jsonl.zstd",
+                        _file_identity(details),
+                    )
+                )
+        finally:
+            os.close(project_fd)
+    return candidates, ambiguous_ids, True
+
+
+def _open_candidate(
+    sessions_fd: int,
+    candidate: _DurableCandidate,
+) -> Tuple[int, Optional[os.stat_result]]:
+    project_fd = _open_directory_at(sessions_fd, candidate.project_name)
+    if project_fd < 0:
+        return -1, None
+    try:
+        directory_fd = _open_directory_at(project_fd, candidate.directory_name)
+        if directory_fd < 0:
+            return -1, None
+        try:
+            descriptor, details = _open_regular_at(
+                directory_fd,
+                "session.jsonl.zstd",
+            )
+        finally:
+            os.close(directory_fd)
+    finally:
+        os.close(project_fd)
+    if (
+        descriptor < 0
+        or details is None
+        or _file_identity(details) != candidate.identity
+    ):
+        if descriptor >= 0:
+            os.close(descriptor)
+        return -1, None
+    return descriptor, details
+
+
+def _read_durable_header(
+    source_fd: int,
+    executable: _BoundExecutable,
+    timeout: float,
+) -> _HeaderDecode:
+    """Decode only the bounded first logical line from one bound file."""
+
+    if timeout <= 0:
+        return _HeaderDecode(_DecodeOutcome.TRANSIENT_FAILURE)
+    deadline = time.monotonic() + timeout
+    # Preserve a bounded reaping window even when decoding consumes its budget.
+    # This avoids leaking a timed-out child while retaining at least half of
+    # very small synthetic budgets and nearly all real cold-launch budgets.
+    cleanup_reserve = min(0.1, max(0.05, timeout * 0.03), timeout * 0.5)
+    drain_deadline = deadline - cleanup_reserve
+    if time.monotonic() >= drain_deadline:
+        return _HeaderDecode(_DecodeOutcome.TRANSIENT_FAILURE)
+    try:
+        process = executable.spawn_decoder(source_fd)
+    except OSError:
+        return _HeaderDecode(_DecodeOutcome.TRANSIENT_FAILURE)
+    if process.stdout is None:
+        _stop_process(process, deadline)
+        return _HeaderDecode(_DecodeOutcome.TRANSIENT_FAILURE)
+
+    raw = bytearray()
+    complete = False
+    eof = False
+    failed = False
+    decoded_header: Optional[Dict[str, Any]] = None
+    invalid_complete = False
+    selector: Optional[selectors.BaseSelector] = None
+    try:
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while len(raw) < _DISCOVERY_HEADER_BYTES:
+            remaining = drain_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                ready = selector.select(min(0.05, remaining))
+            except (OSError, ValueError):
+                failed = True
+                break
+            if not ready:
+                # A child can exit before its pipe buffer is observed. Keep
+                # draining until EOF, a complete line, or the deadline.
+                continue
+            try:
+                chunk = os.read(
+                    process.stdout.fileno(),
+                    min(8192, _DISCOVERY_HEADER_BYTES - len(raw)),
+                )
+            except OSError:
+                failed = True
+                break
+            if not chunk:
+                eof = True
+                break
+            newline = chunk.find(b"\n")
+            if newline >= 0:
+                raw.extend(chunk[:newline])
+                complete = True
+                break
+            raw.extend(chunk)
+        if complete:
+            try:
+                loaded = json.loads(bytes(raw).decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeError):
+                invalid_complete = True
+            else:
+                if isinstance(loaded, dict):
+                    decoded_header = loaded
+                else:
+                    invalid_complete = True
+        discarded = 0
+        while (
+            invalid_complete
+            and process.poll() is None
+            and discarded < _DISCOVERY_HEADER_BYTES
+        ):
+            remaining = drain_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                ready = selector.select(min(0.05, remaining))
+            except (OSError, ValueError):
+                failed = True
+                break
+            if not ready:
+                continue
+            try:
+                chunk = os.read(
+                    process.stdout.fileno(),
+                    min(8192, _DISCOVERY_HEADER_BYTES - discarded),
+                )
+            except OSError:
+                failed = True
+                break
+            if not chunk:
+                eof = True
+                break
+            discarded += len(chunk)
+    except (OSError, ValueError):
+        failed = True
+    finally:
+        if selector is not None:
+            try:
+                selector.close()
+            except OSError:
+                failed = True
+        try:
+            process.stdout.close()
+        except OSError:
+            failed = True
+        returncode = process.poll()
+        if eof and returncode is None:
+            try:
+                returncode = process.wait(
+                    timeout=max(0.0, deadline - time.monotonic())
+                )
+            except subprocess.TimeoutExpired:
+                failed = True
+        stopped_returncode, stopped = _stop_process(process, deadline)
+        if returncode is None:
+            returncode = stopped_returncode
+    if failed:
+        return _HeaderDecode(_DecodeOutcome.TRANSIENT_FAILURE)
+    if complete:
+        if returncode not in (None, 0) and not stopped:
+            return _HeaderDecode(_DecodeOutcome.TRANSIENT_FAILURE)
+        if invalid_complete:
+            if stopped or returncode != 0:
+                return _HeaderDecode(_DecodeOutcome.TRANSIENT_FAILURE)
+            return _HeaderDecode(_DecodeOutcome.DETERMINISTIC_INVALID)
+        return _HeaderDecode(_DecodeOutcome.SUCCESS, decoded_header)
+    if returncode not in (None, 0) and not stopped:
+        return _HeaderDecode(_DecodeOutcome.TRANSIENT_FAILURE)
+    if not complete:
+        if not eof and len(raw) < _DISCOVERY_HEADER_BYTES:
+            return _HeaderDecode(_DecodeOutcome.TRANSIENT_FAILURE)
+        return _HeaderDecode(_DecodeOutcome.DETERMINISTIC_INVALID)
+
+
+def _durable_session(
+    candidate: _DurableCandidate,
+    header: Mapping[str, Any],
+    updated_at: float,
+) -> Optional[Session]:
+    """Validate one durable header and conservatively normalize a top-level session."""
+
+    session_id = header.get("id")
+    created_at = header.get("createdAt")
+    delegation_depth = header.get("delegationDepth")
+    version = header.get("version")
+    if (
+        header.get("type") != "session"
+        or not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != _SESSION_FORMAT_VERSION
+        or not isinstance(created_at, int)
+        or isinstance(created_at, bool)
+        or created_at < 0
+        or created_at > (1 << 53) - 1
+        or not isinstance(delegation_depth, int)
+        or isinstance(delegation_depth, bool)
+        or delegation_depth != 0
+        or "parentSession" in header
+        or "origin" in header
+        or "seedLength" in header
+    ):
+        return None
+
+    raw_cwd = header.get("cwd")
+    if (
+        not isinstance(raw_cwd, str)
+        or not raw_cwd
+        or "\x00" in raw_cwd
+        or not os.path.isabs(raw_cwd)
+    ):
+        return None
+    agent_preset = header.get("agentPreset")
+    if "agentPreset" in header and not isinstance(agent_preset, str):
+        return None
+    cwd = raw_cwd
+    try:
+        project_name = _project_key(cwd)
+        directory_name = _encode_segment(session_id)
+    except ValueError:
+        return None
+    if (
+        session_id != candidate.session_id
+        or project_name != candidate.project_name
+        or directory_name != candidate.directory_name
+    ):
+        return None
+
+    created_epoch = float(created_at) / 1000.0
+    session = Session(
+        agent="dsh",
+        session_id=session_id,
+        project=cwd,
+        transcript=str(candidate.transcript),
+        updated_at=updated_at or created_epoch,
+        title=snip(Path(cwd).name or cwd or "DSH session", 160),
+        extra={
+            "source": "session_store",
+            "created_at": created_at,
+            "transcript_exists": True,
+            "replay_available": True,
+            "durable_only": True,
+            "open_evidence": False,
+        },
+    )
+    session.status = Status.IDLE
+    return session
+
+
+def _discover_durable_sessions(
+    dsh_home: Path,
+    executable: Optional[_BoundExecutable],
+    cached_ids: Set[str],
+    header_cache: "OrderedDict[_FileIdentity, _HeaderDecode]",
+) -> List[Session]:
+    """Boundedly find cache-missing sessions in DSH's durable session store."""
+
+    if executable is None or executable.closed:
+        return []
+    deadline = time.monotonic() + _DISCOVERY_TIMEOUT_S
+    sessions_path = dsh_home / "sessions"
+    sessions_fd = _open_directory(sessions_path)
+    if sessions_fd < 0:
+        return []
+    try:
+        candidates, ambiguous, complete = _enumerate_durable_candidates(
+            sessions_path,
+            sessions_fd,
+            deadline,
+        )
+        if not complete:
+            return []
+        selected = [
+            candidate
+            for candidate in candidates
+            if candidate.session_id not in cached_ids
+            and candidate.session_id not in ambiguous
+        ][:_DISCOVERY_MAX_CANDIDATES]
+        found: Dict[str, Session] = {}
+        for candidate in selected:
+            if time.monotonic() >= deadline:
+                break
+            source_fd, details = _open_candidate(sessions_fd, candidate)
+            if source_fd < 0 or details is None:
+                continue
+            try:
+                try:
+                    decoded = header_cache.pop(candidate.identity)
+                except KeyError:
+                    remaining = min(
+                        _DISCOVERY_CANDIDATE_TIMEOUT_S,
+                        deadline - time.monotonic(),
+                    )
+                    decoded = _read_durable_header(
+                        source_fd,
+                        executable,
+                        remaining,
+                    )
+                    for identity in list(header_cache):
+                        if (
+                            identity[:2] == candidate.identity[:2]
+                            and identity != candidate.identity
+                        ):
+                            del header_cache[identity]
+                    if decoded.outcome is not _DecodeOutcome.TRANSIENT_FAILURE:
+                        header_cache[candidate.identity] = decoded
+                        while len(header_cache) > _DISCOVERY_HEADER_CACHE_ENTRIES:
+                            header_cache.popitem(last=False)
+                else:
+                    header_cache[candidate.identity] = decoded
+            finally:
+                os.close(source_fd)
+            header = decoded.header or {}
+            session = _durable_session(
+                candidate,
+                header,
+                details.st_mtime,
+            )
+            if session is not None:
+                found[session.session_id] = session
+    finally:
+        os.close(sessions_fd)
+    return sorted(
+        found.values(),
+        key=lambda session: (-session.updated_at, session.session_id),
+    )
+
+
+def _stop_process(
+    process: subprocess.Popen,
+    deadline: Optional[float] = None,
+) -> Tuple[Optional[int], bool]:
+    returncode = process.poll()
+    if returncode is not None:
+        return returncode, False
+    stopped = True
+    try:
+        process.terminate()
+    except OSError:
+        return process.poll(), stopped
+    wait_timeout = 0.2
+    if deadline is not None:
+        wait_timeout = max(
+            0.0,
+            min(wait_timeout, (deadline - time.monotonic()) / 2.0),
+        )
+    try:
+        returncode = process.wait(timeout=wait_timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            return process.poll(), stopped
+        wait_timeout = 0.2
+        if deadline is not None:
+            wait_timeout = max(0.0, min(wait_timeout, deadline - time.monotonic()))
+        try:
+            returncode = process.wait(timeout=wait_timeout)
+        except subprocess.TimeoutExpired:
+            returncode = process.poll()
+    return returncode, stopped
 
 
 class ReplayPage(List[Dict[str, Any]]):
@@ -323,11 +1259,35 @@ class DSHAdapter(Adapter):
     name = "dsh"
     agent_names = ("dsh",)
 
-    def __init__(self) -> None:
+    def __init__(self, discovery_zstd_binary: str = "zstd") -> None:
         self._seen_seq: Dict[str, int] = {}
+        self._discovery_lock = threading.RLock()
+        try:
+            self._discovery_zstd = _resolve_discovery_zstd(
+                discovery_zstd_binary
+            )
+        except (OSError, RuntimeError, ValueError):
+            self._discovery_zstd = None
+        self._discovery_decoder: Optional[_BoundExecutable] = None
+        if self._discovery_zstd is not None:
+            try:
+                self._discovery_decoder = _bind_executable(self._discovery_zstd)
+            except (OSError, RuntimeError):
+                # Projection-cache discovery remains available if a trusted
+                # decoder cannot be bound during adapter initialization.
+                self._discovery_decoder = None
+        self._durable_header_cache: "OrderedDict[_FileIdentity, _HeaderDecode]" = (
+            OrderedDict()
+        )
 
     def discover(self, home: Path) -> Iterable[Session]:
-        dsh_home = home / ".dsh"
+        with self._discovery_lock:
+            return self._discover(home)
+
+    def _discover(self, home: Path) -> List[Session]:
+        dsh_home = _configured_dsh_home(home)
+        if dsh_home is None:
+            return []
         index_path = dsh_home / "storages" / "session_projcache.json"
         index = read_json_object(index_path, _INDEX_BYTES)
         tables = as_mapping(index.get("tables"))
@@ -408,7 +1368,24 @@ class DSHAdapter(Adapter):
             )
             session.status = self.infer_status(session) or Status.IDLE
             sessions.append(session)
+        cached_ids = {session.session_id for session in sessions}
+        sessions.extend(
+            session
+            for session in _discover_durable_sessions(
+                dsh_home,
+                self._discovery_decoder,
+                cached_ids,
+                self._durable_header_cache,
+            )
+        )
         return sessions
+
+    def close(self) -> None:
+        """Explicitly release the adapter-lifetime discovery decoder."""
+
+        with self._discovery_lock:
+            if self._discovery_decoder is not None:
+                self._discovery_decoder.close()
 
     def normalize(self, record: Mapping[str, Any], session: Session) -> Iterable[Event]:
         native_type = str(record.get("type") or "")

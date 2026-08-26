@@ -15,12 +15,19 @@
 
 import { EventEmitter } from 'node:events'
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import { connect as netConnect, type AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { SessionRow } from '../src/bridge.ts'
+import type { InjectErrorCode } from '../src/inject-gateway.ts'
 import { SessionStore } from '../src/session-store.ts'
 import { DaemonSupervisor } from '../src/supervisor.ts'
-import { API_PREFIX, createRoutes, type Routes, type RoutesOptions } from '../src/routes.ts'
+import {
+  API_PREFIX,
+  createRoutes,
+  type InjectGatewayApi,
+  type Routes,
+  type RoutesOptions,
+} from '../src/routes.ts'
 
 // ---------------------------------------------------------------------------
 // Fixtures.
@@ -73,7 +80,10 @@ interface Fixture {
   logs: LogEntry[]
 }
 
-function makeFixture(opts: RoutesOptions = {}): Fixture {
+function makeFixture(
+  opts: RoutesOptions = {},
+  injectGateway?: InjectGatewayApi,
+): Fixture {
   const store = new SessionStore()
   const supervisor = makeSupervisor()
   const inject = { enabled: false }
@@ -83,6 +93,7 @@ function makeFixture(opts: RoutesOptions = {}): Fixture {
       store,
       supervisor,
       guardOptions: { allowWriteActions: () => inject.enabled },
+      ...(injectGateway === undefined ? {} : { injectGateway }),
       log: (level, msg) => {
         logs.push({ level, msg })
       },
@@ -109,8 +120,11 @@ afterEach(async () => {
   for (const harness of harnesses.splice(0)) await harness.close()
 })
 
-async function startHarness(opts: RoutesOptions = {}): Promise<Harness> {
-  const fixture = makeFixture(opts)
+async function startHarness(
+  opts: RoutesOptions = {},
+  injectGateway?: InjectGatewayApi,
+): Promise<Harness> {
+  const fixture = makeFixture(opts, injectGateway)
   // Carrier shape of the dsh webServer: dispatch, catch, 400.
   const server = createServer((req, res) => {
     fixture.routes.handle(req, res).catch(() => {
@@ -176,6 +190,51 @@ function request(
     req.on('error', reject)
     if (init.body !== undefined) req.write(init.body)
     req.end()
+  })
+}
+
+/** Send exact header lines so duplicate singleton fields reach rawHeaders. */
+function rawRequest(base: URL, path: string, headerLines: string[]): Promise<{ status: number; raw: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = netConnect({
+      host: base.hostname,
+      port: Number(base.port),
+    })
+    let raw = ''
+    let settled = false
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+    socket.setEncoding('utf8')
+    socket.setTimeout(2000, () => {
+      socket.destroy()
+      fail(new Error('timed out waiting for raw HTTP response'))
+    })
+    socket.on('error', fail)
+    socket.on('data', (chunk: string) => {
+      raw += chunk
+    })
+    socket.on('end', () => {
+      if (settled) return
+      const match = /^HTTP\/1\.[01] (\d{3})\b/.exec(raw)
+      if (match === null) {
+        fail(new Error(`invalid raw HTTP response: ${raw}`))
+        return
+      }
+      settled = true
+      resolve({ status: Number(match[1]), raw })
+    })
+    socket.on('connect', () => {
+      socket.end([
+        `GET ${path} HTTP/1.1`,
+        ...headerLines,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n'))
+    })
   })
 }
 
@@ -364,6 +423,58 @@ describe('guard integration', () => {
     expect(reply.status).toBe(403)
     expect(JSON.parse(reply.body)).toEqual({ reason: 'host_not_loopback' })
   })
+
+  it('rejects an HTTPS Origin on the real cleartext loopback carrier without route data', async () => {
+    const harness = await startHarness()
+    harness.store.applySnapshot([row('must-not-leak')])
+    const reply = await request(harness.base, `${API_PREFIX}/state`, {
+      headers: { origin: `https://${harness.base.host}` },
+    })
+    expect(reply.status).toBe(403)
+    expect(JSON.parse(reply.body)).toEqual({ reason: 'origin_mismatch' })
+  })
+
+  it.each([
+    {
+      name: 'same duplicate Host',
+      headers: (authority: string) => [`Host: ${authority}`, `host: ${authority}`],
+      reason: 'host_not_loopback',
+    },
+    {
+      name: 'different duplicate Host',
+      headers: (authority: string) => [`HOST: ${authority}`, 'Host: evil.example'],
+      reason: 'host_not_loopback',
+    },
+    {
+      name: 'same duplicate Origin',
+      headers: (authority: string) => [
+        `Host: ${authority}`,
+        `Origin: http://${authority}`,
+        `origin: http://${authority}`,
+      ],
+      reason: 'origin_mismatch',
+    },
+    {
+      name: 'different duplicate Origin',
+      headers: (authority: string) => [
+        `Host: ${authority}`,
+        `ORIGIN: http://${authority}`,
+        'Origin: http://evil.example',
+      ],
+      reason: 'origin_mismatch',
+    },
+  ])('rejects $name from raw TCP before any route body', async ({ headers, reason }) => {
+    const harness = await startHarness()
+    harness.store.applySnapshot([row('must-not-leak')])
+    const reply = await rawRequest(
+      harness.base,
+      `${API_PREFIX}/state`,
+      headers(harness.base.host),
+    )
+    expect(reply.status).toBe(403)
+    expect(reply.raw).toContain(`"reason":"${reason}"`)
+    expect(reply.raw).not.toContain('must-not-leak')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -391,6 +502,49 @@ describe('GET state', () => {
     harness.inject.enabled = true
     const flipped = JSON.parse((await request(harness.base, `${API_PREFIX}/state`)).body)
     expect(flipped.capabilities).toEqual({ inject: true })
+  })
+
+  it('projects only the derived verdict and never raw extra or parent topology', async () => {
+    const harness = await startHarness()
+    const secret = 'PRIVATE-parent-value'
+    harness.store.applySnapshot([
+      row('safe-wire', {
+        status: 'waiting',
+        extra: { nested: { token: secret } },
+        parent_id: secret,
+      }),
+    ])
+
+    const reply = await request(harness.base, `${API_PREFIX}/state`)
+    const session = JSON.parse(reply.body).board.sessions[0]
+    expect(session.inject_eligibility).toEqual({
+      allowed: false,
+      reason: 'child_session',
+    })
+    expect(session).not.toHaveProperty('extra')
+    expect(session).not.toHaveProperty('parent_id')
+    expect(session).not.toHaveProperty('transcript')
+    expect(reply.body).not.toContain(secret)
+  })
+
+  it('projects remote_session when explicit remote and child markers coexist', async () => {
+    const harness = await startHarness()
+    const secret = 'PRIVATE-remote-child-value'
+    harness.store.applySnapshot([
+      row('remote-child', {
+        status: 'waiting',
+        extra: { host: secret },
+        parent_id: secret,
+      }),
+    ])
+
+    const reply = await request(harness.base, `${API_PREFIX}/state`)
+    const session = JSON.parse(reply.body).board.sessions[0]
+    expect(session.inject_eligibility).toEqual({
+      allowed: false,
+      reason: 'remote_session',
+    })
+    expect(reply.body).not.toContain(secret)
   })
 
   it('answers 405 with an Allow header for non-GET methods', async () => {
@@ -467,6 +621,26 @@ describe('GET stream (SSE)', () => {
     const afterSupervisor = await sse.nextState()
     expect(afterSupervisor.daemon.state).toBe('defer')
 
+    sse.close()
+  })
+
+  it('pushes eligibility transitions from authoritative status snapshots', async () => {
+    const harness = await startHarness()
+    harness.store.applySnapshot([row('transition', { status: 'working' })])
+    const sse = await openStream(harness)
+
+    const initial = await sse.nextState()
+    expect(initial.board.sessions[0].inject_eligibility).toEqual({
+      allowed: false,
+      reason: 'working_session',
+    })
+
+    harness.store.applySnapshot([row('transition', { status: 'waiting' })])
+    const updated = await sse.nextState()
+    expect(updated.board.sessions[0].inject_eligibility).toEqual({
+      allowed: true,
+      reason: 'eligible',
+    })
     sse.close()
   })
 
@@ -561,6 +735,53 @@ describe('POST action', () => {
     const reply = await request(harness.base, `${API_PREFIX}/action`)
     expect(reply.status).toBe(405)
     expect(reply.headers.allow).toBe('POST')
+  })
+
+  it.each([
+    ['unsupported_agent', 422],
+    ['dead_session', 409],
+    ['working_session', 409],
+    ['child_session', 422],
+    ['remote_session', 422],
+    ['invalid_session', 422],
+  ] as const)('maps eligibility reason %s consistently in both phases', async (reason, status) => {
+    let errorCode: InjectErrorCode = reason
+    const gateway: InjectGatewayApi = {
+      prepare: async () => ({ ok: false, errorCode }),
+      execute: async () => ({ outcome: 'failed', errorCode }),
+    }
+    const harness = await startHarness({}, gateway)
+    harness.inject.enabled = true
+
+    const prepared = await request(harness.base, `${API_PREFIX}/action`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'inject.prepare',
+        target: { agent: 'claude', sessionId: 's1' },
+        mode: 'queue',
+        message: 'hello',
+      }),
+    })
+    expect(prepared.status).toBe(status)
+    expect(JSON.parse(prepared.body)).toEqual({ reason })
+
+    errorCode = reason
+    const executed = await request(harness.base, `${API_PREFIX}/action`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'inject.execute',
+        requestId: 'req-1',
+        confirmToken: 'token',
+        message: 'hello',
+      }),
+    })
+    expect(executed.status).toBe(status)
+    expect(JSON.parse(executed.body)).toEqual({
+      outcome: 'failed',
+      errorCode: reason,
+    })
   })
 })
 
