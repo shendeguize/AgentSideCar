@@ -3,6 +3,7 @@ import io
 import json
 import os
 import queue
+import shlex
 import signal
 import subprocess
 import sys
@@ -52,12 +53,23 @@ def event_line(**changes):
     ).encode("utf-8")
 
 
-def completed(argv, version=(3, 11, 0), returncode=0, stderr=b""):
+def completed(
+    argv,
+    version=(3, 11, 0),
+    executable="/usr/bin/python3",
+    returncode=0,
+    stderr=b"",
+):
+    payload = (
+        {"python": None}
+        if version is None
+        else {"python": list(version), "executable": executable}
+    )
     return subprocess.CompletedProcess(
         argv,
         returncode,
         stdout=json.dumps(
-            {"python": list(version)},
+            payload,
             separators=(",", ":"),
         ).encode("ascii")
         + b"\n",
@@ -249,6 +261,24 @@ class RemoteWatchTransportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             remote.remote_watch_ssh_argv("edge;touch")
 
+    def test_watch_builders_default_to_python3_and_shell_quote_custom_executable(self):
+        default_command = remote.remote_watch_shell_command()
+        default_argv = remote.remote_watch_ssh_argv("edge")
+        custom = "/opt/Python Builds/python3"
+        custom_command = remote.remote_watch_shell_command(
+            python_executable=custom,
+        )
+        custom_argv = remote.remote_watch_ssh_argv(
+            "edge",
+            python_executable=custom,
+        )
+
+        self.assertEqual("python3", shlex.split(default_command)[0])
+        self.assertEqual("python3", shlex.split(default_argv[-1])[0])
+        self.assertEqual(custom, shlex.split(custom_command)[0])
+        self.assertEqual(custom, shlex.split(custom_argv[-1])[0])
+        self.assertIn(shlex.quote(custom), custom_command)
+
     def test_first_frame_must_be_exact_ready_and_typed_error_is_sanitized(self):
         for frame in (b'{"type": "ready"}', b'{"type":"end"}', b"banner"):
             stream = RemoteWatchHostStream(
@@ -308,10 +338,10 @@ class RemoteWatchTransportTests(unittest.TestCase):
             before_ready.read_ready()
         self.assertEqual("protocol", raised.exception.code)
 
-    def test_probe_floor_accepts_38_and_rejects_37_before_stream_transfer(self):
+    def test_probe_floor_accepts_38_and_exhaustion_stops_stream_transfer(self):
         cases = (
             ((3, 8, 19), True),
-            ((3, 7, 19), False),
+            (None, False),
         )
         for version, accepted in cases:
             with self.subTest(version=version):
@@ -340,6 +370,46 @@ class RemoteWatchTransportTests(unittest.TestCase):
                     self.assertIsNone(stream)
                     self.assertEqual("python_too_old", failure.code)
                     self.assertEqual([], stream_calls)
+
+    def test_watch_uses_discovered_executable_and_host_bindings_do_not_bleed(self):
+        probe_calls = []
+        stream_calls = []
+        executables = {
+            "first": "/opt/first+python",
+            "second": "/srv/second-python",
+        }
+
+        def runner(argv, **kwargs):
+            del kwargs
+            alias = argv[-2]
+            probe_calls.append(alias)
+            return completed(argv, executable=executables[alias])
+
+        def stream_factory(argv, artifact, **kwargs):
+            del artifact, kwargs
+            stream_calls.append((argv[-2], shlex.split(argv[-1])[0]))
+            return FakeLineStream([READY_FRAME, END_FRAME])
+
+        for alias in ("first", "second", "first"):
+            stream, failure = open_remote_watch_host(
+                remote.RemoteHost(alias, "ready"),
+                b"zipapp",
+                runner=runner,
+                stream_factory=stream_factory,
+            )
+            self.assertIsNone(failure)
+            self.assertEqual(alias, stream.read_ready().host)
+            stream.close()
+
+        self.assertEqual(["first", "second", "first"], probe_calls)
+        self.assertEqual(
+            [
+                ("first", executables["first"]),
+                ("second", executables["second"]),
+                ("first", executables["first"]),
+            ],
+            stream_calls,
+        )
 
     def test_fragmented_local_process_lines_use_bounded_line_stream(self):
         code = (
@@ -516,7 +586,7 @@ class RemoteWatchFleetTests(unittest.TestCase):
 
         def runner(argv, **kwargs):
             del kwargs
-            version = (3, 7, 19) if argv[-2] == "old" else (3, 11, 0)
+            version = None if argv[-2] == "old" else (3, 11, 0)
             return completed(argv, version)
 
         def stream_factory(argv, artifact, **kwargs):
@@ -752,7 +822,8 @@ class RemoteWatchFleetTests(unittest.TestCase):
                 "#!{}\n"
                 "import json,os,subprocess,sys,time\n"
                 "if 'watch --all' not in sys.argv[-1]:\n"
-                "    print(json.dumps({{'python':[3,9,6]}},separators=(',',':')))\n"
+                "    print(json.dumps({{'python':[3,9,6],"
+                "'executable':'/usr/bin/python3'}},separators=(',',':')))\n"
                 "    raise SystemExit(0)\n"
                 "sys.stdin.buffer.read()\n"
                 "code=('import os,sys,time;'\n"

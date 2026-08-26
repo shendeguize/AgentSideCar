@@ -365,13 +365,24 @@ The sidecar builds a bounded zipapp from its active installed `sidecar` package
 and streams it over noninteractive SSH. That source is the checkout when run
 there, installed site-packages under pipx or a wheel, or the embedded package
 under a zipapp. No remote installation or third-party Python package is
-required. Before transfer, the target's `python3` is probed and must be Python
-3.8 or newer.
+required. Before transfer, the target is probed in this exact bounded order:
+`python3`, `python3.14`, `python3.13`, `python3.12`, `python3.11`,
+`python3.10`, `python3.9`, and `python3.8`. The first available candidate
+running Python 3.8 or newer is used. Candidate names are resolved with the
+`PATH` visible to the remote noninteractive SSH shell, which may differ from
+an interactive login's `PATH`.
 
 SSH requires an already trusted host key and working noninteractive
 authentication. It does not enroll host keys or fall back to an interactive
-prompt. The transient zipapp is executed with the remote Python interpreter
-and removed after the snapshot.
+prompt. The probe uses `sh -c` to fix the inner candidate loop to POSIX syntax,
+but the outer command string is still parsed by the remote login shell. The
+existing multiline bootstrap already establishes this shell boundary; remote
+execution is not shell-independent. The resolved executable path is reused
+only for the bootstrap within that same host session. Every invocation probes
+afresh, with no local or remote cache or persistence. The transient zipapp is
+executed with that interpreter and removed after the snapshot. If the bounded
+candidate list is exhausted, the host retains the stable `python_too_old`
+failure code; no new error code is introduced.
 
 Remote failures are isolated by host and reported on stderr with stable codes,
 including `resource_limit` for bounded-data violations. Rows from local and
@@ -415,12 +426,20 @@ human output prepends a fixed-width host column. Local watch commands without
 
 Remote watch uses the same DSH Center inventory and eligibility rules as remote
 snapshots: hosts must be enabled, nonlocal, non-orphaned, and in the `ready` or
-`no_dsh` phase. Each host's `python3` is probed for Python 3.8+ before transfer.
-The sidecar then streams a bounded zipapp built deterministically from the
-active installed `sidecar` package over strict, noninteractive SSH. The zipapp
-is written to a private temporary file on the host, preflighted, run in
-isolated Python mode, and removed during cleanup; no remote Agent Sidecar
-installation or third-party Python package is required.
+`no_dsh` phase. Each host uses the same bounded Python candidate order as
+remote snapshots (`python3`, then `python3.14` down through `python3.8`) and
+selects the first available Python 3.8+ interpreter. Resolution uses the
+noninteractive SSH shell's `PATH`, which may differ from an interactive
+login's. `sh -c` fixes only the inner POSIX probe syntax; the outer command is
+still parsed by the remote login shell, as is the existing multiline
+bootstrap. The selected executable path is reused only by the bootstrap in
+that host session; every invocation probes afresh and creates no local or
+remote cache. Exhaustion remains `python_too_old`. The sidecar then streams a
+bounded zipapp built deterministically from the active installed `sidecar`
+package over strict, noninteractive SSH. The zipapp is written to a private
+temporary file on the host, preflighted, run in isolated Python mode, and
+removed during cleanup; no remote Agent Sidecar installation or third-party
+Python package is required.
 
 Local, remote, and per-host queues are bounded. Producers apply backpressure
 rather than dropping queued events, and fair draining prevents a busy host

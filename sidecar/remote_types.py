@@ -80,6 +80,7 @@ EXIT_INVALID_INVENTORY = 2
 EXIT_NO_SUCCESS = 3
 
 _ALIAS_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_PYTHON_EXECUTABLE_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
 _STATUS_VALUES = frozenset(("working", "waiting", "idle", "dead"))
 _COMMAND_ARGS = {
     "status": ("status", "--json"),
@@ -100,6 +101,26 @@ class ProtocolResourceLimitError(ValueError):
     """A stable protocol failure for validly framed data exceeding a bound."""
 
     code = "resource_limit"
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """One validated remote Python interpreter discovery result."""
+
+    version: Tuple[int, int, int]
+    executable: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.version, tuple)
+            or len(self.version) != 3
+            or any(
+                type(item) is not int or item < 0 or item > 999
+                for item in self.version
+            )
+        ):
+            raise ValueError("invalid remote Python version")
+        _validate_python_executable(self.executable)
 
 
 @dataclass(frozen=True)
@@ -182,6 +203,19 @@ def _validate_alias(alias: object) -> str:
     ):
         raise ValueError("invalid remote host alias")
     return alias
+
+
+def _validate_python_executable(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 1024
+        or not value.startswith("/")
+        or _PYTHON_EXECUTABLE_RE.fullmatch(value) is None
+        or ".." in value.split("/")
+    ):
+        raise ValueError("invalid remote Python executable")
+    return value
 
 
 def _validate_recent_seconds(value: object) -> float:

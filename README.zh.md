@@ -325,11 +325,19 @@ agent-sidecar status --remote --host <host-alias> --json
 Sidecar 会从当前生效、已安装的 `sidecar` 包构建有界 zipapp，并通过非交互 SSH
 进行流式传输：从检出版本运行时来源为检出版本；从 pipx 或 wheel 运行时来源为
 site-packages；从 zipapp 运行时来源为内嵌包。远程无需安装 Agent Sidecar 或任何
-第三方 Python 包。传输前会探测目标的 `python3`，其版本必须为 Python 3.8 或
-更高版本。
+第三方 Python 包。传输前会严格按以下有界顺序探测目标：`python3`、
+`python3.14`、`python3.13`、`python3.12`、`python3.11`、`python3.10`、
+`python3.9`、`python3.8`，并使用首个可用且版本不低于 Python 3.8 的候选。
+候选名称通过远程非交互 SSH Shell 可见的 `PATH` 解析，该 `PATH` 可能不同于
+交互式登录时的 `PATH`。
 
 SSH 要求主机密钥已经受信任，并且非交互认证可用。它不会登记主机密钥，也不会
-回退到交互提示。临时 zipapp 由远程 Python 解释器执行，并在快照完成后删除。
+回退到交互提示。探测使用 `sh -c` 只是为了固定内层候选循环的 POSIX 语法；外层
+命令字符串仍由远程登录 Shell 解析。既有的多行 bootstrap 已经建立了这一 Shell
+边界，远程执行并非与 Shell 无关。解析得到的可执行文件路径只在同一次主机会话中
+供紧随其后的 bootstrap 复用。每次调用都会重新探测，不在本地或远程缓存或持久化。
+临时 zipapp 由该解释器执行，并在快照完成后删除。若有界候选全部耗尽，该主机仍
+使用稳定错误码 `python_too_old`；不新增错误码。
 
 远程故障按主机隔离，并在 stderr 上使用稳定错误码报告，其中有界数据违规对应
 `resource_limit`。本地行和成功远程主机的行仍会输出。机群部分成功时退出码为
@@ -366,8 +374,13 @@ agent-sidecar watch --all --remote --from-start --json
 `--remote` 的本地监视命令保持原有事件模式和展示形式。
 
 远程监视使用与远程快照相同的 DSH Center 清单和资格规则：主机必须已启用、非
-本地、非孤立，并处于 `ready` 或 `no_dsh` 阶段。每台主机都会在传输前探测
-`python3` 是否为 Python 3.8+。之后 Sidecar 从当前生效、已安装的 `sidecar` 包
+本地、非孤立，并处于 `ready` 或 `no_dsh` 阶段。每台主机使用与远程快照相同的
+有界 Python 候选顺序（`python3`，然后从 `python3.14` 依次到 `python3.8`），
+并选择首个可用的 Python 3.8+ 解释器。解析使用非交互 SSH Shell 的 `PATH`，它
+可能不同于交互式登录环境。`sh -c` 只固定内层探测的 POSIX 语法；外层命令仍由
+远程登录 Shell 解析，既有多行 bootstrap 也是如此。所选可执行文件路径只供该次
+主机会话的 bootstrap 复用；每次调用都会重新探测，不创建本地或远程缓存。候选
+耗尽仍报告 `python_too_old`。之后 Sidecar 从当前生效、已安装的 `sidecar` 包
 确定性构建有界 zipapp，并通过严格的非交互 SSH 进行流式传输。zipapp 被写入远程
 私有临时文件，经过预检后以隔离 Python 模式运行，并在清理时删除；远程不需要安装
 Agent Sidecar 或第三方 Python 包。

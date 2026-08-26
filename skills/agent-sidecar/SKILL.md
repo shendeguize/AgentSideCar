@@ -115,8 +115,21 @@ Remote `list` keeps the 48-hour default; add `--all` only when full history is
 requested. Remote watch always requires `--all`, follows local and remote
 sources concurrently, and applies `--from-start` to both sides when requested.
 It cannot watch a remote session prefix. It uses eligible DSH Center hosts with
-`python3` preflighted at Python 3.8+, strict noninteractive SSH, an ephemeral
-zipapp, and bounded queues that backpressure producers.
+strict noninteractive SSH, an ephemeral zipapp, and bounded queues that
+backpressure producers. For each host, the Python probe tries exactly
+`python3`, `python3.14`, `python3.13`, `python3.12`, `python3.11`,
+`python3.10`, `python3.9`, and `python3.8`, then uses the first available
+candidate running Python 3.8 or newer. Candidate names resolve against the
+`PATH` visible to the remote noninteractive SSH shell, which can differ from
+an interactive login.
+
+The probe's `sh -c` wrapper fixes only the inner candidate loop to POSIX
+syntax. The outer command string is still parsed by the remote login shell;
+the existing multiline bootstrap already has this boundary, so do not claim
+shell independence. Reuse the resolved executable path only for the bootstrap
+within the same host session. Every invocation probes afresh, with no local or
+remote cache or persistence. Exhausting the bounded candidates retains the
+stable `python_too_old` failure code; do not infer a new error code.
 
 Do not use remote mode by default. Never hide a remote failure or
 `events may be missed`/transition-gap warning. Remote watch does not reconnect

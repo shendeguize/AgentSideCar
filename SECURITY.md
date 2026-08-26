@@ -94,6 +94,14 @@ SSH configuration, pre-trusted host keys, and noninteractive authentication;
 it does not enroll host keys, manage credentials, or establish an additional
 application-layer encryption boundary.
 
+The remote-produced interpreter executable path is validated locally before
+reuse: it must be a nonempty absolute path of at most 1024 characters, contain
+only `[A-Za-z0-9._+/-]`, and have no `..` path segment. It is then inserted as
+a separate token through `shlex.join`. Probe and bootstrap use separate SSH
+connections, so replacement at that path remains possible between them,
+equivalent to the prior bare-Python re-resolution window. This is session-local
+path reuse, not inode or file-descriptor binding.
+
 The active Agent Sidecar package is streamed as a bounded temporary zipapp,
 executed with remote Python, and removed during cleanup. Remote data is then
 rendered locally. Inventory entries, host aliases, addresses, authentication
