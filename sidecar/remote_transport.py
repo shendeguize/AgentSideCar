@@ -38,6 +38,7 @@ from sidecar.remote_types import (
     _parse_execution_response,
     _parse_one_line_json,
     _validate_alias,
+    validate_remote_python_executable,
 )
 
 
@@ -308,11 +309,36 @@ _PROBE_SCRIPT = (
 ) % shlex.quote(_PROBE_CODE)
 
 
-def _probe_shell_command() -> str:
+def _validated_probe_candidates(
+    candidates: Sequence[str],
+) -> Tuple[str, ...]:
+    try:
+        values = tuple(candidates)
+    except TypeError as error:
+        raise TypeError("Python candidates must be a sequence") from error
+    if values == REMOTE_PYTHON_CANDIDATES:
+        return values
+    if len(values) != 1:
+        raise ValueError("Python candidate override must contain one path")
+    return (validate_remote_python_executable(values[0]),)
+
+
+def _bootstrap_python_executable(
+    candidates: Tuple[str, ...],
+    hit: ProbeResult,
+) -> str:
+    if candidates == REMOTE_PYTHON_CANDIDATES:
+        return hit.executable
+    return candidates[0]
+
+
+def _probe_shell_command(
+    candidates: Sequence[str] = REMOTE_PYTHON_CANDIDATES,
+) -> str:
     """Build the fixed one-round-trip bounded interpreter probe command."""
 
     return shlex.join(
-        ("sh", "-c", _PROBE_SCRIPT, "sh") + REMOTE_PYTHON_CANDIDATES
+        ("sh", "-c", _PROBE_SCRIPT, "sh") + _validated_probe_candidates(candidates)
     )
 
 
@@ -557,13 +583,20 @@ def ssh_argv(
     command: Optional[str] = None,
     recent_seconds: Optional[float] = None,
     python_executable: str = "python3",
+    candidates: Sequence[str] = REMOTE_PYTHON_CANDIDATES,
 ) -> Tuple[str, ...]:
     """Build direct OpenSSH argv for a probe or allowlisted sidecar command."""
 
     if command is None and recent_seconds is not None:
         raise ValueError("recent_seconds requires a remote command")
+    if command is not None and tuple(candidates) != REMOTE_PYTHON_CANDIDATES:
+        raise ValueError("Python candidates require a probe command")
     remote_command = (
-        _PROBE_REMOTE_COMMAND
+        (
+            _PROBE_REMOTE_COMMAND
+            if candidates is REMOTE_PYTHON_CANDIDATES
+            else _probe_shell_command(candidates)
+        )
         if command is None
         else remote_shell_command(
             command,
@@ -682,6 +715,7 @@ def _probe_result(payload: object) -> Optional[ProbeResult]:
 def probe_remote_python(
     host: RemoteHost,
     *,
+    candidates: Sequence[str] = REMOTE_PYTHON_CANDIDATES,
     runner: Optional[Callable[..., object]] = None,
     timeout: float = PROBE_TIMEOUT_SECONDS,
     cancel_event: Optional[threading.Event] = None,
@@ -696,9 +730,10 @@ def probe_remote_python(
         raise ValueError("probe timeout is out of bounds") from error
     if not 0 < bounded_timeout <= PROBE_TIMEOUT_SECONDS:
         raise ValueError("probe timeout is out of bounds")
+    probe_candidates = _validated_probe_candidates(candidates)
     if cancel_event is not None and cancel_event.is_set():
         return None, RemoteFailure(host.alias, "timeout")
-    probe_argv = ssh_argv(host.alias)
+    probe_argv = ssh_argv(host.alias, candidates=probe_candidates)
     try:
         if runner is None:
             completed = _bounded_popen(
@@ -747,6 +782,7 @@ def execute_remote_host(
     artifact: bytes,
     *,
     recent_seconds: Optional[float] = None,
+    python_candidates: Sequence[str] = REMOTE_PYTHON_CANDIDATES,
     runner: Optional[Callable[..., object]] = None,
     timeout: float = HOST_TIMEOUT_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
@@ -765,6 +801,7 @@ def execute_remote_host(
         raise ValueError("invalid zipapp artifact")
     if not 0 < float(timeout) <= HOST_TIMEOUT_SECONDS:
         raise ValueError("host timeout is out of bounds")
+    probe_candidates = _validated_probe_candidates(python_candidates)
     deadline = monotonic() + float(timeout)
 
     remaining = deadline - monotonic()
@@ -772,6 +809,7 @@ def execute_remote_host(
         return None, RemoteFailure(host.alias, "timeout")
     hit, failure = probe_remote_python(
         host,
+        candidates=probe_candidates,
         runner=runner,
         timeout=min(PROBE_TIMEOUT_SECONDS, remaining),
         cancel_event=cancel_event,
@@ -780,6 +818,7 @@ def execute_remote_host(
         return None, failure
     if hit is None:
         return None, RemoteFailure(host.alias, "protocol")
+    bootstrap_executable = _bootstrap_python_executable(probe_candidates, hit)
 
     remaining = deadline - monotonic()
     if remaining <= 0 or (cancel_event is not None and cancel_event.is_set()):
@@ -791,7 +830,7 @@ def execute_remote_host(
                     host.alias,
                     command=command,
                     recent_seconds=recent_seconds,
-                    python_executable=hit.executable,
+                    python_executable=bootstrap_executable,
                 ),
                 input_data=artifact,
                 input_limit=MAX_ARTIFACT_BYTES,
@@ -807,7 +846,7 @@ def execute_remote_host(
                         host.alias,
                         command=command,
                         recent_seconds=recent_seconds,
-                        python_executable=hit.executable,
+                        python_executable=bootstrap_executable,
                     )
                 ),
                 input=artifact,

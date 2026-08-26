@@ -25,6 +25,8 @@ from sidecar.process_runner import (
 from sidecar.remote_inventory import load_remote_hosts
 from sidecar.remote_transport import (
     REMOTE_BOOTSTRAP,
+    REMOTE_PYTHON_CANDIDATES,
+    _validated_probe_candidates,
     build_zipapp_bytes,
     execute_remote_host,
     probe_remote_python,
@@ -64,10 +66,12 @@ from sidecar.remote_types import (
     _encoded_row,
     _parse_bounded_json_with_limits,
     _validate_alias,
+    validate_remote_python_executable,
 )
 from sidecar.remote_watch import RemoteWatchSession
 from sidecar.remote_watch_transport import (
     REMOTE_WATCH_BOOTSTRAP,
+    open_remote_watch_host,
     remote_watch_shell_command,
     remote_watch_ssh_argv,
 )
@@ -162,6 +166,7 @@ def watch_remote(
     hosts: Optional[Sequence[RemoteHost]] = None,
     selected: Optional[Iterable[str]] = None,
     from_start: bool = False,
+    python_candidates: Optional[Sequence[str]] = None,
     runner: Optional[Callable[..., object]] = None,
     stream_factory: Optional[Callable[..., object]] = None,
     host_opener: Optional[Callable[..., object]] = None,
@@ -182,6 +187,11 @@ def watch_remote(
 
     if type(from_start) is not bool:
         raise TypeError("from_start must be bool")
+    probe_candidates = (
+        REMOTE_PYTHON_CANDIDATES
+        if python_candidates is None
+        else _validated_probe_candidates(python_candidates)
+    )
     available = (
         load_remote_hosts(
             runner=runner,
@@ -204,13 +214,25 @@ def watch_remote(
         or len(zipapp) > MAX_ARTIFACT_BYTES
     ):
         raise ValueError("invalid zipapp artifact")
+    effective_host_opener = host_opener
+    if python_candidates is not None:
+        provider = open_remote_watch_host if host_opener is None else host_opener
+
+        def effective_host_opener(host, artifact, **kwargs):
+            return provider(
+                host,
+                artifact,
+                python_candidates=probe_candidates,
+                **kwargs
+            )
+
     return RemoteWatchSession(
         targets,
         zipapp,
         from_start=from_start,
         runner=runner,
         stream_factory=stream_factory,
-        host_opener=host_opener,
+        host_opener=effective_host_opener,
         queue_items=queue_items,
         cancel_event=cancel_event,
     )
@@ -223,6 +245,7 @@ def aggregate_remote(
     hosts: Optional[Sequence[RemoteHost]] = None,
     selected: Optional[Iterable[str]] = None,
     max_workers: int = DEFAULT_MAX_WORKERS,
+    python_candidates: Optional[Sequence[str]] = None,
     runner: Optional[Callable[..., object]] = None,
     artifact: Optional[bytes] = None,
     inventory_env: Optional[Mapping[str, str]] = None,
@@ -244,6 +267,11 @@ def aggregate_remote(
         raise ValueError("max_workers must be a positive integer")
     if not 0 < float(fleet_timeout) <= FLEET_TIMEOUT_SECONDS:
         raise ValueError("fleet timeout is out of bounds")
+    probe_candidates = (
+        REMOTE_PYTHON_CANDIDATES
+        if python_candidates is None
+        else _validated_probe_candidates(python_candidates)
+    )
     workers = min(max_workers, MAX_WORKERS)
     available = (
         load_remote_hosts(
@@ -296,6 +324,7 @@ def aggregate_remote(
                 command,
                 zipapp,
                 recent_seconds=recent_seconds,
+                python_candidates=probe_candidates,
                 runner=runner,
                 timeout=min(HOST_TIMEOUT_SECONDS, remaining),
                 cancel_event=cancel_event,
@@ -437,6 +466,7 @@ __all__ = [
     "PROBE_TIMEOUT_SECONDS",
     "ProtocolResourceLimitError",
     "REMOTE_BOOTSTRAP",
+    "REMOTE_PYTHON_CANDIDATES",
     "REMOTE_WATCH_BOOTSTRAP",
     "RemoteAggregate",
     "RemoteFailure",
@@ -457,5 +487,6 @@ __all__ = [
     "remote_watch_shell_command",
     "remote_watch_ssh_argv",
     "ssh_argv",
+    "validate_remote_python_executable",
     "watch_remote",
 ]

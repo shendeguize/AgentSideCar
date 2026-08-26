@@ -111,6 +111,14 @@ user identifies those hosts. Remote rows and events include a `host` provenance
 field; local values are marked `local`. Human remote-watch output prepends a
 host column.
 
+When the user supplies an exact remote interpreter, append
+`--remote-python <absolute-path>` to remote `list`, `status`, or
+`watch --all`. One value applies to every selected host in that invocation;
+there is no per-host interpreter setting. Selection precedence is the CLI
+option, then `AGENT_SIDECAR_REMOTE_PYTHON`, then the bounded defaults. The
+environment variable is read only for remote-enabled forms of those three
+commands.
+
 Remote `list` keeps the 48-hour default; add `--all` only when full history is
 requested. Remote watch always requires `--all`, follows local and remote
 sources concurrently, and applies `--from-start` to both sides when requested.
@@ -126,10 +134,21 @@ an interactive login.
 The probe's `sh -c` wrapper fixes only the inner candidate loop to POSIX
 syntax. The outer command string is still parsed by the remote login shell;
 the existing multiline bootstrap already has this boundary, so do not claim
-shell independence. Reuse the resolved executable path only for the bootstrap
+shell independence. Under bounded default discovery, reuse the validated
+executable path returned by the qualifying interpreter only for the bootstrap
 within the same host session. Every invocation probes afresh, with no local or
 remote cache or persistence. Exhausting the bounded candidates retains the
 stable `python_too_old` failure code; do not infer a new error code.
+
+Explicit paths must be nonempty absolute paths no longer than 1024 characters,
+use only `[A-Za-z0-9._+/-]`, and contain no `..` segment. Invalid CLI or
+environment values fail locally with exit `2` before SSH. A valid pin becomes
+the probe's single argv candidate without changing the fixed script, and the
+bootstrap uses that same operator token verbatim. Validate every probe response
+field, but never let a differing returned executable replace the explicit pin.
+If it is missing, non-executable, or older than Python 3.8 on a host, report
+that host's `python_too_old` and the local aggregate hint; never retry with the
+default candidates or bare `python3`.
 
 Do not use remote mode by default. Never hide a remote failure or
 `events may be missed`/transition-gap warning. Remote watch does not reconnect

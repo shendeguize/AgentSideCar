@@ -1083,6 +1083,34 @@ class SSHExecutionTests(unittest.TestCase):
             tuple(shlex.split(remote_transport._PROBE_REMOTE_COMMAND)),
         )
 
+    def test_explicit_probe_has_exact_one_element_argv_and_identical_script(self):
+        explicit = "/opt/custom+python/python3.8"
+        default_tokens = tuple(shlex.split(remote.ssh_argv("edge")[-1]))
+        explicit_tokens = tuple(
+            shlex.split(remote.ssh_argv("edge", candidates=(explicit,))[-1])
+        )
+
+        self.assertEqual(
+            ("sh", "-c", remote_transport._PROBE_SCRIPT, "sh")
+            + remote_transport.REMOTE_PYTHON_CANDIDATES,
+            default_tokens,
+        )
+        self.assertEqual(
+            ("sh", "-c", remote_transport._PROBE_SCRIPT, "sh", explicit),
+            explicit_tokens,
+        )
+        self.assertEqual(
+            default_tokens[2].encode("utf-8"),
+            explicit_tokens[2].encode("utf-8"),
+        )
+        self.assertNotIn(explicit, remote_transport._PROBE_SCRIPT)
+        self.assertTrue(
+            all(
+                candidate not in explicit_tokens[4:]
+                for candidate in remote_transport.REMOTE_PYTHON_CANDIDATES
+            )
+        )
+
     @unittest.skipUnless(os.name == "posix", "probe shell requires POSIX")
     def test_probe_shell_skips_missing_broken_and_old_then_stops_at_first_hit(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1109,13 +1137,11 @@ class SSHExecutionTests(unittest.TestCase):
             write_candidate("python3.13", "exit 1\n")
             write_candidate(
                 "python3.12",
-                "printf '%s\\n' "
-                '\'{"python":[3,12,1],"executable":"/opt/python3.12"}\' >&3\n',
+                "exec {} \"$@\"\n".format(shlex.quote(sys.executable)),
             )
             write_candidate(
                 "python3.11",
-                "printf '%s\\n' "
-                '\'{"python":[3,11,9],"executable":"/opt/python3.11"}\' >&3\n',
+                "exec {} \"$@\"\n".format(shlex.quote(sys.executable)),
             )
             environment = {"PATH": str(root), "PROBE_CALLS": str(log)}
 
@@ -1131,13 +1157,16 @@ class SSHExecutionTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False,
-                timeout=3,
+                timeout=10,
             )
 
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(
-                b'{"python":[3,12,1],"executable":"/opt/python3.12"}\n',
-                result.stdout,
+                {
+                    "python": list(sys.version_info[:3]),
+                    "executable": sys.executable,
+                },
+                json.loads(result.stdout),
             )
             self.assertEqual(b"", result.stderr)
             self.assertEqual(
@@ -1157,6 +1186,88 @@ class SSHExecutionTests(unittest.TestCase):
                 timeout=3,
             )
             self.assertEqual(b'{"python":null}\n', exhausted.stdout)
+
+    @unittest.skipUnless(os.name == "posix", "probe shell requires POSIX")
+    def test_explicit_missing_nonexecutable_and_old_fail_closed_without_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            calls_path = root / "calls"
+            fallback = root / "python3"
+            fallback.write_text(
+                "#!/bin/sh\n"
+                'printf "fallback\\n" >> "$PROBE_CALLS"\n'
+                "printf '%s\\n' "
+                '\'{"python":[3,12,0],"executable":"/fallback/python3"}\' >&3\n',
+                encoding="utf-8",
+            )
+            fallback.chmod(0o755)
+
+            nonexecutable = root / "nonexecutable-python"
+            nonexecutable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            nonexecutable.chmod(0o644)
+            old = root / "old-python"
+            old.write_text(
+                "#!/bin/sh\n"
+                'printf "old\\n" >> "$PROBE_CALLS"\n'
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            old.chmod(0o755)
+            missing = root / "missing-python"
+            environment = {
+                "PATH": "{}:/usr/bin:/bin".format(root),
+                "PROBE_CALLS": str(calls_path),
+            }
+
+            for label, candidate, expected_calls in (
+                ("missing", missing, []),
+                ("nonexecutable", nonexecutable, []),
+                ("old", old, ["old"]),
+            ):
+                with self.subTest(label=label):
+                    calls_path.unlink(missing_ok=True)
+                    runner_calls = []
+
+                    def runner(argv, **kwargs):
+                        del kwargs
+                        runner_calls.append(tuple(argv))
+                        return subprocess.run(
+                            shlex.split(argv[-1]),
+                            env=environment,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            check=False,
+                            timeout=3,
+                        )
+
+                    hit, failure = remote.probe_remote_python(
+                        remote.RemoteHost("edge", "ready"),
+                        candidates=(str(candidate),),
+                        runner=runner,
+                    )
+
+                    self.assertIsNone(hit)
+                    self.assertEqual("python_too_old", failure.code)
+                    self.assertEqual(1, len(runner_calls))
+                    self.assertEqual(
+                        (
+                            "sh",
+                            "-c",
+                            remote_transport._PROBE_SCRIPT,
+                            "sh",
+                            str(candidate),
+                        ),
+                        tuple(shlex.split(runner_calls[0][-1])),
+                    )
+                    self.assertEqual(
+                        expected_calls,
+                        (
+                            calls_path.read_text(encoding="utf-8").splitlines()
+                            if calls_path.exists()
+                            else []
+                        ),
+                    )
 
     def test_probe_success_and_exhaustion_have_named_results_and_one_ssh_call(self):
         calls = []
@@ -1191,6 +1302,69 @@ class SSHExecutionTests(unittest.TestCase):
         self.assertIsNone(hit)
         self.assertEqual("python_too_old", failure.code)
         self.assertEqual(1, len(calls))
+
+    def test_snapshot_uses_explicit_candidate_verbatim_for_probe_and_bootstrap(self):
+        pinned = "/opt/pinned/python3.8"
+        resolved = "/resolved/python3.8"
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((tuple(argv), kwargs))
+            if len(calls) == 1:
+                return probe_completed(argv, executable=resolved)
+            return execution_completed(argv, [])
+
+        rows, failure = remote.execute_remote_host(
+            remote.RemoteHost("edge", "ready"),
+            "status",
+            b"zipapp",
+            python_candidates=(pinned,),
+            runner=runner,
+        )
+
+        self.assertEqual((), rows)
+        self.assertIsNone(failure)
+        self.assertEqual(2, len(calls))
+        probe_tokens = tuple(shlex.split(calls[0][0][-1]))
+        bootstrap_tokens = tuple(shlex.split(calls[1][0][-1]))
+        self.assertEqual(
+            ("sh", "-c", remote_transport._PROBE_SCRIPT, "sh", pinned),
+            probe_tokens,
+        )
+        self.assertEqual(probe_tokens[-1], bootstrap_tokens[0])
+        self.assertEqual(pinned, bootstrap_tokens[0])
+        self.assertNotEqual(resolved, bootstrap_tokens[0])
+        self.assertNotIn("python3", probe_tokens[4:])
+
+    def test_explicit_snapshot_probe_response_is_validated_without_fallback(self):
+        pinned = "/opt/pinned/python3.8"
+        malformed = (
+            {"python": [3, 8, 0], "executable": "relative/python3"},
+            {"python": [3, 7, 999], "executable": "/resolved/python3"},
+        )
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                calls = []
+
+                def runner(argv, **kwargs):
+                    calls.append((tuple(argv), kwargs))
+                    return json_completed(argv, payload)
+
+                rows, failure = remote.execute_remote_host(
+                    remote.RemoteHost("edge", "ready"),
+                    "status",
+                    b"zipapp",
+                    python_candidates=(pinned,),
+                    runner=runner,
+                )
+
+                self.assertIsNone(rows)
+                self.assertEqual("protocol", failure.code)
+                self.assertEqual(1, len(calls))
+                self.assertEqual(
+                    (pinned,),
+                    tuple(shlex.split(calls[0][0][-1]))[4:],
+                )
 
     def test_probe_response_validation_fails_closed(self):
         malformed = [
@@ -2069,6 +2243,33 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(0, future.cancel_calls)
         self.assertEqual([True], executor.shutdown_calls)
         self.assertFalse(executor.cancel_events[0].is_set())
+
+    def test_aggregate_threads_one_explicit_candidate_to_every_snapshot_host(self):
+        pinned = ("/opt/pinned/python3.8",)
+        calls = []
+
+        def execute(host, command, artifact, **kwargs):
+            del command, artifact
+            calls.append((host.alias, kwargs["python_candidates"]))
+            return (), None
+
+        with mock.patch.object(remote, "execute_remote_host", new=execute):
+            result = remote.aggregate_remote(
+                "status",
+                hosts=(
+                    remote.RemoteHost("first", "ready"),
+                    remote.RemoteHost("second", "ready"),
+                ),
+                max_workers=1,
+                python_candidates=pinned,
+                artifact=b"zipapp",
+            )
+
+        self.assertEqual(("first", "second"), result.succeeded)
+        self.assertEqual(
+            [("first", pinned), ("second", pinned)],
+            calls,
+        )
 
     def test_python38_shutdown_signature_cancels_pending_work_on_deadline(self):
         running = TrackingFuture()

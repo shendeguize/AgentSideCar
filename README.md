@@ -323,6 +323,7 @@ agent-sidecar list --agent cursor-ide --agent claude
 agent-sidecar list --all --json
 agent-sidecar list --remote
 agent-sidecar list --remote --host <host-alias> --json
+agent-sidecar list --remote --remote-python /usr/bin/python3.11 --json
 ```
 
 `list` shows sessions updated in the last 48 hours by default. `--all` removes
@@ -338,6 +339,7 @@ agent-sidecar status
 agent-sidecar status --json
 agent-sidecar status --remote
 agent-sidecar status --remote --host <host-alias> --json
+agent-sidecar status --remote --remote-python /usr/bin/python3.11 --json
 ```
 
 `ps` reports supported local agent executables; process presence is supporting
@@ -349,7 +351,10 @@ only `working` and `waiting` sessions.
 `list --remote` and `status --remote` merge the local snapshot with eligible
 hosts from DSH Center inventory. `--host <host-alias>` is repeatable,
 case-insensitive, and valid only with `--remote`; it limits the remote targets
-but never removes local rows.
+but never removes local rows. `--remote-python <absolute-path>` is also valid
+only with `--remote` and pins one interpreter path across every selected host
+for that invocation. This is a fleet-wide option; there is no per-host remote
+interpreter configuration.
 
 Remote human output adds a `HOST` column. Remote JSON adds `host` to every row:
 `local` marks local provenance, while each remote row carries its
@@ -372,17 +377,38 @@ running Python 3.8 or newer is used. Candidate names are resolved with the
 `PATH` visible to the remote noninteractive SSH shell, which may differ from
 an interactive login's `PATH`.
 
+Interpreter selection has strict precedence: `--remote-python`, then
+`AGENT_SIDECAR_REMOTE_PYTHON`, then the bounded default candidates. The
+environment variable has the same fleet-wide scope and is read only by
+remote-enabled `list`, `status`, and `watch`; non-remote calls ignore it. An
+explicit value must be a nonempty absolute path no longer than 1024 characters,
+use only `[A-Za-z0-9._+/-]`, and contain no `..` path segment. Invalid CLI or
+environment values exit `2` locally before any SSH connection is attempted.
+
 SSH requires an already trusted host key and working noninteractive
 authentication. It does not enroll host keys or fall back to an interactive
 prompt. The probe uses `sh -c` to fix the inner candidate loop to POSIX syntax,
 but the outer command string is still parsed by the remote login shell. The
 existing multiline bootstrap already establishes this shell boundary; remote
-execution is not shell-independent. The resolved executable path is reused
+execution is not shell-independent. For bounded default discovery, the
+validated executable path returned by the qualifying interpreter is reused
 only for the bootstrap within that same host session. Every invocation probes
 afresh, with no local or remote cache or persistence. The transient zipapp is
 executed with that interpreter and removed after the snapshot. If the bounded
 candidate list is exhausted, the host retains the stable `python_too_old`
 failure code; no new error code is introduced.
+
+An explicit interpreter is passed as one argv token to the same fixed probe
+script; user data is never inserted into the script text. The explicit path is
+the probe's one-element candidate list and the bootstrap uses that same
+operator token verbatim. All probe response fields remain validated, but a
+differing returned executable cannot replace the explicit pin. If that path is
+missing, non-executable, or older than Python 3.8 on a host, that host reports
+`python_too_old` and the command fails closed for it without trying the default
+candidates or `python3`. After the per-host failures, one local aggregate hint
+distinguishes an unsatisfied explicit pin from exhaustion of the bounded
+defaults and points to `--remote-python` and
+`AGENT_SIDECAR_REMOTE_PYTHON` when appropriate.
 
 Remote failures are isolated by host and reported on stderr with stable codes,
 including `resource_limit` for bounded-data violations. Rows from local and
@@ -402,6 +428,7 @@ agent-sidecar watch --all --from-start --json
 agent-sidecar watch --all --remote
 agent-sidecar watch --all --remote --host <host-alias>
 agent-sidecar watch --all --remote --from-start --json
+agent-sidecar watch --all --remote --remote-python /usr/bin/python3.11 --json
 ```
 
 A session prefix and `--all` are mutually exclusive. Without `--from-start`,
@@ -417,7 +444,9 @@ concurrently, then fairly merges their events into one stream. `--host
 <host-alias>` is repeatable, case-insensitive, and limits only the remote side;
 local sessions remain included. `--from-start` applies to both local and remote
 sources. Remote mode requires `--all`: watching a remote session by ID prefix
-is unsupported.
+is unsupported. `--remote-python <absolute-path>` uses the same fleet-wide
+option, environment precedence, local validation, and fail-closed behavior as
+remote `list` and `status`; no per-host interpreter override is available.
 
 Every event has host provenance in remote mode. JSON output adds `host` to each
 event (`local` for local events and the inventory alias for remote events);
@@ -432,11 +461,13 @@ selects the first available Python 3.8+ interpreter. Resolution uses the
 noninteractive SSH shell's `PATH`, which may differ from an interactive
 login's. `sh -c` fixes only the inner POSIX probe syntax; the outer command is
 still parsed by the remote login shell, as is the existing multiline
-bootstrap. The selected executable path is reused only by the bootstrap in
-that host session; every invocation probes afresh and creates no local or
-remote cache. Exhaustion remains `python_too_old`. The sidecar then streams a
-bounded zipapp built deterministically from the active installed `sidecar`
-package over strict, noninteractive SSH. The zipapp is written to a private
+bootstrap. Under bounded default discovery, the selected executable path is
+reused only by the bootstrap in that host session; explicit pins retain the
+exact operator token as described above. Every invocation probes afresh and
+creates no local or remote cache. Exhaustion remains `python_too_old`. The
+sidecar then streams a bounded zipapp built deterministically from the active
+installed `sidecar` package over strict, noninteractive SSH. The zipapp is
+written to a private
 temporary file on the host, preflighted, run in isolated Python mode, and
 removed during cleanup; no remote Agent Sidecar installation or third-party
 Python package is required.
@@ -767,6 +798,11 @@ events. By default it uses:
   `AGENT_SIDECAR_RUNTIME_DIR`);
 - Unix socket: `~/.agent_sidecar/daemon.sock`;
 - PID file: `~/.agent_sidecar/daemon.pid`.
+
+Separately, `AGENT_SIDECAR_REMOTE_PYTHON` supplies the fleet-wide absolute
+remote interpreter path when `--remote-python` is absent. It is read only for
+remote-enabled `list`, `status`, and `watch`; precedence is CLI option,
+environment variable, then bounded default candidates.
 
 The default daemon has no network listener. Its runtime directory is created
 with user-only permissions where supported, and the socket and PID file are

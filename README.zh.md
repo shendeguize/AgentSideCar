@@ -287,6 +287,7 @@ agent-sidecar list --agent cursor-ide --agent claude
 agent-sidecar list --all --json
 agent-sidecar list --remote
 agent-sidecar list --remote --host <host-alias> --json
+agent-sidecar list --remote --remote-python /usr/bin/python3.11 --json
 ```
 
 `list` 默认显示最近 48 小时内更新的会话。`--all` 会取消此时间过滤。
@@ -302,6 +303,7 @@ agent-sidecar status
 agent-sidecar status --json
 agent-sidecar status --remote
 agent-sidecar status --remote --host <host-alias> --json
+agent-sidecar status --remote --remote-python /usr/bin/python3.11 --json
 ```
 
 `ps` 报告受支持的本地 Agent 可执行进程；进程存在只是辅助证据，无法可靠归属到
@@ -312,6 +314,8 @@ agent-sidecar status --remote --host <host-alias> --json
 `list --remote` 和 `status --remote` 会把本地快照与 DSH Center 清单中符合条件的
 主机合并。`--host <host-alias>` 可重复使用、不区分大小写，并且只有与 `--remote`
 一起使用时才有效；它会限制远程目标，但绝不会移除本地行。
+`--remote-python <absolute-path>` 也只能与 `--remote` 一起使用，并为该次调用中
+所有选中主机固定同一个解释器路径。这是机群级选项，不提供逐主机远程解释器配置。
 
 远程人类可读输出会增加 `HOST` 列。远程 JSON 会给每一行增加 `host`：`local`
 表示本地来源，每个远程行则携带清单提供的主机别名。不带 `--remote` 的本地命令
@@ -331,13 +335,28 @@ site-packages；从 zipapp 运行时来源为内嵌包。远程无需安装 Agen
 候选名称通过远程非交互 SSH Shell 可见的 `PATH` 解析，该 `PATH` 可能不同于
 交互式登录时的 `PATH`。
 
+解释器选择采用严格优先级：`--remote-python`，其次是
+`AGENT_SIDECAR_REMOTE_PYTHON`，最后是有界默认候选。该环境变量同样作用于整个
+机群，并且只会在启用远程模式的 `list`、`status` 和 `watch` 中读取；非远程调用
+会忽略它。显式值必须是非空绝对路径，长度不超过 1024 个字符，只包含
+`[A-Za-z0-9._+/-]`，且不含 `..` 路径段。无效的 CLI 或环境变量值会在发起任何
+SSH 连接之前于本地以退出码 `2` 拒绝。
+
 SSH 要求主机密钥已经受信任，并且非交互认证可用。它不会登记主机密钥，也不会
 回退到交互提示。探测使用 `sh -c` 只是为了固定内层候选循环的 POSIX 语法；外层
 命令字符串仍由远程登录 Shell 解析。既有的多行 bootstrap 已经建立了这一 Shell
-边界，远程执行并非与 Shell 无关。解析得到的可执行文件路径只在同一次主机会话中
-供紧随其后的 bootstrap 复用。每次调用都会重新探测，不在本地或远程缓存或持久化。
-临时 zipapp 由该解释器执行，并在快照完成后删除。若有界候选全部耗尽，该主机仍
-使用稳定错误码 `python_too_old`；不新增错误码。
+边界，远程执行并非与 Shell 无关。使用有界默认发现时，达标解释器返回且通过校验的
+可执行文件路径只在同一次主机会话中供紧随其后的 bootstrap 复用。每次调用都会重新
+探测，不在本地或远程缓存或持久化。临时 zipapp 由该解释器执行，并在快照完成后
+删除。若有界候选全部耗尽，该主机仍使用稳定错误码 `python_too_old`；不新增错误码。
+
+显式解释器会作为一个独立 argv token 传给同一份固定探测脚本；用户数据绝不会
+插入脚本文本。该显式路径是探测时唯一的候选，bootstrap 会逐字使用同一个运维方
+token。探测响应的所有字段仍会完整校验，但不同的返回 `executable` 不能替换显式
+固定值。如果该路径在某台主机上缺失、不可执行或低于 Python 3.8，该主机报告
+`python_too_old` 并关闭失败，不会再尝试默认候选或 `python3`。逐主机故障之后，
+本地至多输出一条聚合提示，用不同文案区分显式固定失败与有界默认候选耗尽，并在
+适用时指向 `--remote-python` 和 `AGENT_SIDECAR_REMOTE_PYTHON`。
 
 远程故障按主机隔离，并在 stderr 上使用稳定错误码报告，其中有界数据违规对应
 `resource_limit`。本地行和成功远程主机的行仍会输出。机群部分成功时退出码为
@@ -355,6 +374,7 @@ agent-sidecar watch --all --from-start --json
 agent-sidecar watch --all --remote
 agent-sidecar watch --all --remote --host <host-alias>
 agent-sidecar watch --all --remote --from-start --json
+agent-sidecar watch --all --remote --remote-python /usr/bin/python3.11 --json
 ```
 
 会话前缀与 `--all` 互斥。不使用 `--from-start` 时只输出新观察到的事件。
@@ -368,6 +388,8 @@ agent-sidecar watch --all --remote --from-start --json
 公平地合并到一个流中。`--host <host-alias>` 可重复使用、不区分大小写，并且只
 限制远程侧；本地会话始终保留。`--from-start` 同时作用于本地和远程数据源。远程
 模式必须使用 `--all`：不支持按 ID 前缀监视远程会话。
+`--remote-python <absolute-path>` 沿用远程 `list` 和 `status` 的机群级选项、
+环境变量优先级、本地校验与关闭失败语义；不提供逐主机解释器覆盖。
 
 远程模式下的每个事件都带有主机来源。JSON 输出会给每个事件增加 `host`（本地
 事件为 `local`，远程事件为清单别名）；人类可读输出会添加固定宽度主机列。不带
@@ -378,12 +400,13 @@ agent-sidecar watch --all --remote --from-start --json
 有界 Python 候选顺序（`python3`，然后从 `python3.14` 依次到 `python3.8`），
 并选择首个可用的 Python 3.8+ 解释器。解析使用非交互 SSH Shell 的 `PATH`，它
 可能不同于交互式登录环境。`sh -c` 只固定内层探测的 POSIX 语法；外层命令仍由
-远程登录 Shell 解析，既有多行 bootstrap 也是如此。所选可执行文件路径只供该次
-主机会话的 bootstrap 复用；每次调用都会重新探测，不创建本地或远程缓存。候选
-耗尽仍报告 `python_too_old`。之后 Sidecar 从当前生效、已安装的 `sidecar` 包
-确定性构建有界 zipapp，并通过严格的非交互 SSH 进行流式传输。zipapp 被写入远程
-私有临时文件，经过预检后以隔离 Python 模式运行，并在清理时删除；远程不需要安装
-Agent Sidecar 或第三方 Python 包。
+远程登录 Shell 解析，既有多行 bootstrap 也是如此。使用有界默认发现时，所选
+可执行文件路径只供该次主机会话的 bootstrap 复用；显式固定则保留上述运维方提供的
+原 token。每次调用都会重新探测，不创建本地或远程缓存。候选耗尽仍报告
+`python_too_old`。之后 Sidecar 从当前生效、已安装的 `sidecar` 包确定性构建有界
+zipapp，并通过严格的非交互 SSH 进行流式传输。zipapp 被写入远程私有临时文件，
+经过预检后以隔离 Python 模式运行，并在清理时删除；远程不需要安装 Agent Sidecar
+或第三方 Python 包。
 
 本地、远程和每主机队列都有界。生产者通过背压等待，而不是丢弃已入队事件；公平
 排空可防止繁忙主机饿死其他主机。远程版本预检之后，子监视进程生成一个有效事件
@@ -648,6 +671,10 @@ agent-sidecar service install --http --http-port 43123 --force
 - 运行时目录：`~/.agent_sidecar`（可用 `AGENT_SIDECAR_RUNTIME_DIR` 覆盖）；
 - Unix 套接字：`~/.agent_sidecar/daemon.sock`；
 - PID 文件：`~/.agent_sidecar/daemon.pid`。
+
+另有 `AGENT_SIDECAR_REMOTE_PYTHON`：当未提供 `--remote-python` 时，它提供
+机群级远程解释器绝对路径。只有启用远程模式的 `list`、`status` 和 `watch` 会
+读取它；优先级依次为 CLI 选项、环境变量、有界默认候选。
 
 默认守护进程没有网络监听器。其运行时目录会在平台支持时以仅当前用户权限创建，
 套接字和 PID 文件的权限模式为 `0600`。守护进程拒绝替换不安全的非套接字/非普通

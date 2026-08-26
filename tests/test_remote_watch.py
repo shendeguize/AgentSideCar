@@ -15,7 +15,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-from sidecar import remote
+from sidecar import remote, remote_transport
 from sidecar.process_runner import (
     BoundedLineStreamEndReason,
     BoundedLineStreamProcessError,
@@ -411,6 +411,113 @@ class RemoteWatchTransportTests(unittest.TestCase):
             stream_calls,
         )
 
+    def test_watch_uses_explicit_candidate_verbatim_for_probe_and_bootstrap(self):
+        pinned = "/opt/pinned/python3.8"
+        resolved = "/resolved/python3.8"
+        probe_calls = []
+        stream_calls = []
+
+        def runner(argv, **kwargs):
+            del kwargs
+            probe_calls.append(tuple(argv))
+            return completed(argv, executable=resolved)
+
+        def stream_factory(argv, artifact, **kwargs):
+            del kwargs
+            stream_calls.append((tuple(argv), artifact))
+            return FakeLineStream([READY_FRAME, END_FRAME])
+
+        stream, failure = open_remote_watch_host(
+            remote.RemoteHost("edge", "ready"),
+            b"zipapp",
+            python_candidates=(pinned,),
+            runner=runner,
+            stream_factory=stream_factory,
+        )
+
+        self.assertIsNone(failure)
+        self.assertEqual("edge", stream.read_ready().host)
+        stream.close()
+        self.assertEqual(1, len(probe_calls))
+        probe_tokens = tuple(shlex.split(probe_calls[0][-1]))
+        self.assertEqual(
+            ("sh", "-c", remote_transport._PROBE_SCRIPT, "sh", pinned),
+            probe_tokens,
+        )
+        self.assertEqual(1, len(stream_calls))
+        bootstrap_tokens = tuple(shlex.split(stream_calls[0][0][-1]))
+        self.assertEqual(probe_tokens[-1], bootstrap_tokens[0])
+        self.assertEqual(pinned, bootstrap_tokens[0])
+        self.assertNotEqual(resolved, bootstrap_tokens[0])
+        self.assertEqual(b"zipapp", stream_calls[0][1])
+
+    def test_explicit_watch_probe_response_is_validated_without_fallback(self):
+        pinned = "/opt/pinned/python3.8"
+        malformed = (
+            {"python": [3, 8, 0], "executable": "relative/python3"},
+            {"python": [3, 7, 999], "executable": "/resolved/python3"},
+        )
+        for payload in malformed:
+            with self.subTest(payload=payload):
+                probe_calls = []
+                stream_calls = []
+
+                def runner(argv, **kwargs):
+                    del kwargs
+                    probe_calls.append(tuple(argv))
+                    return subprocess.CompletedProcess(
+                        argv,
+                        0,
+                        stdout=json.dumps(
+                            payload,
+                            separators=(",", ":"),
+                        ).encode("ascii")
+                        + b"\n",
+                        stderr=b"",
+                    )
+
+                stream, failure = open_remote_watch_host(
+                    remote.RemoteHost("edge", "ready"),
+                    b"zipapp",
+                    python_candidates=(pinned,),
+                    runner=runner,
+                    stream_factory=lambda *args, **kwargs: stream_calls.append(
+                        (args, kwargs)
+                    ),
+                )
+
+                self.assertIsNone(stream)
+                self.assertEqual("protocol", failure.code)
+                self.assertEqual(1, len(probe_calls))
+                self.assertEqual(
+                    (pinned,),
+                    tuple(shlex.split(probe_calls[0][-1]))[4:],
+                )
+                self.assertEqual([], stream_calls)
+
+    def test_explicit_watch_probe_exhaustion_never_opens_default_stream(self):
+        pinned = "/missing/python3.8"
+        probe_calls = []
+        stream_calls = []
+
+        stream, failure = open_remote_watch_host(
+            remote.RemoteHost("edge", "ready"),
+            b"zipapp",
+            python_candidates=(pinned,),
+            runner=lambda argv, **kwargs: (
+                probe_calls.append(tuple(argv)) or completed(argv, version=None)
+            ),
+            stream_factory=lambda *args, **kwargs: stream_calls.append(
+                (args, kwargs)
+            ),
+        )
+
+        self.assertIsNone(stream)
+        self.assertEqual("python_too_old", failure.code)
+        self.assertEqual(1, len(probe_calls))
+        self.assertEqual((pinned,), tuple(shlex.split(probe_calls[0][-1]))[4:])
+        self.assertEqual([], stream_calls)
+
     def test_fragmented_local_process_lines_use_bounded_line_stream(self):
         code = (
             "import os,time;"
@@ -530,6 +637,54 @@ class RemoteWatchFleetTests(unittest.TestCase):
                 for index in (1, 2)
             },
             {(event.host, event.session_id) for event in events},
+        )
+
+    def test_watch_facade_threads_one_explicit_candidate_to_every_host(self):
+        pinned = ("/opt/pinned/python3.8",)
+        calls = []
+
+        def opener(host, artifact, **kwargs):
+            calls.append(
+                (
+                    host.alias,
+                    artifact,
+                    kwargs["python_candidates"],
+                )
+            )
+            return (
+                RemoteWatchHostStream(
+                    host,
+                    FakeLineStream([READY_FRAME, END_FRAME]),
+                ),
+                None,
+            )
+
+        hosts = (
+            remote.RemoteHost("first", "ready"),
+            remote.RemoteHost("second", "ready"),
+        )
+        with remote.watch_remote(
+            hosts=hosts,
+            python_candidates=pinned,
+            host_opener=opener,
+            artifact=b"zipapp",
+        ) as session:
+            items = list(session)
+
+        self.assertEqual(
+            {"first", "second"},
+            {
+                item.host
+                for item in items
+                if isinstance(item, remote.RemoteWatchReady)
+            },
+        )
+        self.assertEqual(
+            [
+                ("first", b"zipapp", pinned),
+                ("second", b"zipapp", pinned),
+            ],
+            sorted(calls),
         )
 
     def test_round_robin_and_priority_prevent_hot_host_starvation(self):

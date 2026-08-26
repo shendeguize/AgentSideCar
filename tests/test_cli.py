@@ -491,6 +491,228 @@ class CLITests(unittest.TestCase):
                 stderr.getvalue(),
             )
 
+        for command in ("list", "status", "watch"):
+            self.assertIn(
+                "--remote-python PATH",
+                command_parsers[command].format_help(),
+            )
+
+    def test_remote_python_requires_remote_before_any_provider_runs(self):
+        def unexpected(*args, **kwargs):
+            self.fail("remote provider must not run: {!r} {!r}".format(args, kwargs))
+
+        cases = (
+            ["list", "--remote-python", "/opt/python3.8", "--json"],
+            ["status", "--remote-python", "/opt/python3.8", "--json"],
+            ["watch", "--all", "--remote-python", "/opt/python3.8", "--json"],
+        )
+        for argv in cases:
+            with self.subTest(command=argv[0]):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                code = main(
+                    argv,
+                    scanner=FakeScanner(),
+                    client=OfflineClient(),
+                    stdout=stdout,
+                    stderr=stderr,
+                    remote_aggregator=unexpected,
+                    remote_watch_provider=unexpected,
+                )
+
+                self.assertEqual(2, code)
+                self.assertEqual("", stdout.getvalue())
+                self.assertEqual(
+                    "{}: --remote-python requires --remote\n".format(argv[0]),
+                    stderr.getvalue(),
+                )
+
+    def test_invalid_remote_python_cli_and_env_stop_before_remote_setup(self):
+        invalid_values = (
+            "",
+            "python3",
+            "relative/python3",
+            "/opt/python 3",
+            "/opt/python\n3",
+            "/opt/python\x003",
+            "/opt/'python3",
+            "/" + "p" * 1024,
+            "/opt/../python3",
+        )
+
+        def unexpected(*args, **kwargs):
+            self.fail("remote provider must not run: {!r} {!r}".format(args, kwargs))
+
+        for source, command in (("cli", "list"), ("env", "status")):
+            for value in invalid_values:
+                with self.subTest(source=source, value=repr(value)):
+                    argv = [command, "--remote", "--json"]
+                    environment = {}
+                    if source == "cli":
+                        argv.extend(("--remote-python", value))
+                    else:
+                        environment[cli_module.REMOTE_PYTHON_ENV] = value
+                    stdout = io.StringIO()
+                    stderr = io.StringIO()
+                    patched_environment = dict(os.environ)
+                    patched_environment.pop(cli_module.REMOTE_PYTHON_ENV, None)
+                    patched_environment.update(environment)
+                    with mock.patch.object(
+                        cli_module.os,
+                        "environ",
+                        patched_environment,
+                    ):
+                        code = main(
+                            argv,
+                            scanner=FakeScanner(),
+                            client=OfflineClient(),
+                            stdout=stdout,
+                            stderr=stderr,
+                            remote_aggregator=unexpected,
+                            remote_watch_provider=unexpected,
+                        )
+
+                    self.assertEqual(2, code)
+                    self.assertEqual("", stdout.getvalue())
+                    self.assertEqual(
+                        "{}: --remote-python/{} must be a valid absolute "
+                        "executable path\n".format(
+                            command,
+                            cli_module.REMOTE_PYTHON_ENV,
+                        ),
+                        stderr.getvalue(),
+                    )
+
+    def test_remote_python_env_is_ignored_without_remote_mode(self):
+        scanner = FakeScanner()
+        with mock.patch.dict(
+            os.environ,
+            {cli_module.REMOTE_PYTHON_ENV: "invalid relative path"},
+            clear=False,
+        ):
+            code, stdout, stderr = self.run_cli(["list", "--json"], scanner)
+
+        self.assertEqual(0, code)
+        self.assertEqual([], json.loads(stdout))
+        self.assertEqual("", stderr)
+        self.assertEqual([RECENT_SECONDS], scanner.recent_calls)
+
+    def test_remote_python_precedence_for_list_status_and_watch(self):
+        cases = (
+            ("default", None, [], None),
+            ("env", "/env/python3.8", [], ("/env/python3.8",)),
+            (
+                "cli",
+                "/env/python3.8",
+                ["--remote-python", "/cli/python3.9"],
+                ("/cli/python3.9",),
+            ),
+        )
+        for command in ("list", "status", "watch"):
+            for source, environment_value, extra, expected in cases:
+                with self.subTest(command=command, source=source):
+                    calls = []
+
+                    def aggregate(operation, **kwargs):
+                        calls.append((operation, kwargs))
+                        return RemoteAggregate(
+                            operation,
+                            hosts=("edge",),
+                            succeeded=("edge",),
+                        )
+
+                    def watch_provider(**kwargs):
+                        calls.append(("watch", kwargs))
+                        return FakeRemoteWatchSession(
+                            (RemoteWatchReady("edge"),),
+                            hosts=("edge",),
+                        )
+
+                    argv = [command, "--remote", "--json"]
+                    if command == "watch":
+                        argv.insert(1, "--all")
+                        argv.append("--from-start")
+                    argv.extend(extra)
+                    with mock.patch.dict(os.environ, {}, clear=False):
+                        os.environ.pop(cli_module.REMOTE_PYTHON_ENV, None)
+                        if environment_value is not None:
+                            os.environ[cli_module.REMOTE_PYTHON_ENV] = (
+                                environment_value
+                            )
+                        code = main(
+                            argv,
+                            scanner=FakeScanner(),
+                            client=OfflineClient(),
+                            stdout=io.StringIO(),
+                            stderr=io.StringIO(),
+                            remote_aggregator=aggregate,
+                            remote_watch_provider=watch_provider,
+                        )
+
+                    self.assertEqual(0, code)
+                    self.assertEqual(1, len(calls))
+                    if expected is None:
+                        self.assertNotIn("python_candidates", calls[0][1])
+                    else:
+                        self.assertEqual(
+                            expected,
+                            calls[0][1]["python_candidates"],
+                        )
+
+    def test_explicit_remote_python_rejects_legacy_provider_signatures(self):
+        snapshot_calls = []
+
+        def legacy_snapshot(command, selected=None):
+            snapshot_calls.append((command, selected))
+            return RemoteAggregate(command)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "remote aggregator does not accept python_candidates",
+        ):
+            main(
+                [
+                    "status",
+                    "--remote",
+                    "--remote-python",
+                    "/opt/python3.8",
+                    "--json",
+                ],
+                scanner=FakeScanner(),
+                client=OfflineClient(),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+                remote_aggregator=legacy_snapshot,
+            )
+        self.assertEqual([], snapshot_calls)
+
+        args = build_parser().parse_args(
+            [
+                "watch",
+                "--all",
+                "--remote",
+                "--remote-python",
+                "/opt/python3.8",
+            ]
+        )
+        args.remote_python_candidates = ("/opt/python3.8",)
+        watch_calls = []
+
+        def legacy_watch(selected=None, from_start=False):
+            watch_calls.append((selected, from_start))
+            return FakeRemoteWatchSession()
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "remote watch provider does not accept python_candidates",
+        ):
+            cli_module._open_remote_watch(
+                legacy_watch,
+                args,
+                threading.Event(),
+            )
+        self.assertEqual([], watch_calls)
+
     def test_internal_recency_parser_is_bounded_and_mutually_exclusive(self):
         invalid_values = (
             "0",
@@ -866,7 +1088,55 @@ class CLITests(unittest.TestCase):
             json.loads(stdout.getvalue()),
         )
         self.assertEqual(
-            "remote old-edge: python_too_old\n",
+            "remote old-edge: python_too_old\n"
+            "remote: no Python >= 3.8 found among bounded candidates on "
+            "1 host(s); use --remote-python <absolute-path> or "
+            "AGENT_SIDECAR_REMOTE_PYTHON to pin an interpreter\n",
+            stderr.getvalue(),
+        )
+
+    def test_explicit_remote_python_uses_canonical_aggregate_hint(self):
+        result = RemoteAggregate(
+            "status",
+            failures=(
+                RemoteFailure("old-a", "python_too_old"),
+                RemoteFailure("old-b", "python_too_old"),
+            ),
+            hosts=("old-a", "old-b"),
+        )
+        calls = []
+        stderr = io.StringIO()
+
+        def aggregate(command, selected=None, python_candidates=None):
+            calls.append((command, selected, python_candidates))
+            return result
+
+        code = main(
+            [
+                "status",
+                "--remote",
+                "--remote-python",
+                "/opt/python3.8",
+                "--json",
+            ],
+            scanner=FakeScanner(),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=stderr,
+            remote_aggregator=aggregate,
+        )
+
+        self.assertEqual(3, code)
+        self.assertEqual(
+            [("status", None, ("/opt/python3.8",))],
+            calls,
+        )
+        self.assertEqual(
+            "remote old-a: python_too_old\n"
+            "remote old-b: python_too_old\n"
+            "remote: the interpreter set via "
+            "--remote-python/AGENT_SIDECAR_REMOTE_PYTHON is missing or "
+            "older than 3.8 on 2 host(s)\n",
             stderr.getvalue(),
         )
 
@@ -2567,7 +2837,174 @@ class CLITests(unittest.TestCase):
         )
         self.assertEqual(
             "watch: remote failure host=old code=python_too_old; "
-            "events may be missed\n",
+            "events may be missed\n"
+            "remote: no Python >= 3.8 found among bounded candidates on "
+            "1 host(s); use --remote-python <absolute-path> or "
+            "AGENT_SIDECAR_REMOTE_PYTHON to pin an interpreter\n",
+            stderr.getvalue(),
+        )
+        self.assertEqual(
+            1,
+            stderr.getvalue().count(
+                "no Python >= 3.8 found among bounded candidates"
+            ),
+        )
+
+    def test_watch_remote_python_hint_is_emitted_once_for_multiple_failures(self):
+        remote_session = FakeRemoteWatchSession(
+            (
+                RemoteWatchFailure("old-a", "python_too_old"),
+                RemoteWatchFailure("old-b", "python_too_old"),
+                RemoteWatchFailure("offline", "unreachable"),
+            ),
+            hosts=("old-a", "old-b", "offline"),
+            all_failed=True,
+        )
+        stderr = io.StringIO()
+
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner(),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=stderr,
+            remote_watch_provider=lambda **kwargs: remote_session,
+        )
+
+        self.assertEqual(3, code)
+        self.assertEqual(
+            "watch: no sessions found\n"
+            "watch: remote failure host=old-a code=python_too_old; "
+            "events may be missed\n"
+            "watch: remote failure host=old-b code=python_too_old; "
+            "events may be missed\n"
+            "watch: remote failure host=offline code=unreachable; "
+            "events may be missed\n"
+            "remote: no Python >= 3.8 found among bounded candidates on "
+            "2 host(s); use --remote-python <absolute-path> or "
+            "AGENT_SIDECAR_REMOTE_PYTHON to pin an interpreter\n",
+            stderr.getvalue(),
+        )
+        self.assertEqual(
+            1,
+            stderr.getvalue().count(
+                "no Python >= 3.8 found among bounded candidates"
+            ),
+        )
+
+    def test_watch_teardown_hint_failure_preserves_selected_outcome(self):
+        class FailingHintStderr(io.StringIO):
+            def __init__(self, error):
+                super().__init__()
+                self.error = error
+                self.hint_attempts = 0
+
+            def write(self, value):
+                if value.startswith("remote: no Python >= 3.8"):
+                    self.hint_attempts += 1
+                    raise self.error
+                return super().write(value)
+
+        for error in (
+            BrokenPipeError("closed"),
+            OSError("closed"),
+            ValueError("closed"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                remote_session = FakeRemoteWatchSession(
+                    (
+                        RemoteWatchFailure("old-a", "python_too_old"),
+                        RemoteWatchFailure("old-b", "python_too_old"),
+                    ),
+                    hosts=("old-a", "old-b"),
+                    all_failed=True,
+                )
+                remote_session.hosts = None
+                stderr = FailingHintStderr(error)
+
+                code = main(
+                    ["watch", "--all", "--remote", "--from-start", "--json"],
+                    scanner=FakeScanner(),
+                    client=OfflineClient(),
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                    remote_watch_provider=lambda **kwargs: remote_session,
+                )
+
+                self.assertEqual(3, code)
+                self.assertEqual(1, stderr.hint_attempts)
+                self.assertTrue(remote_session.closed)
+                self.assertIn(
+                    "watch: remote failure host=old-a code=python_too_old",
+                    stderr.getvalue(),
+                )
+                self.assertFalse(
+                    any(
+                        thread.name.startswith("sidecar-watch-")
+                        for thread in threading.enumerate()
+                    )
+                )
+
+    def test_watch_reports_python_hint_after_startup_while_local_source_is_active(self):
+        hint_written = threading.Event()
+        hint_seen_while_active = threading.Event()
+        report_calls = []
+        local_event = Event(
+            "t",
+            "claude",
+            "local",
+            "assistant",
+            "local remains active through remote startup",
+        )
+        remote_session = FakeRemoteWatchSession(
+            (
+                RemoteWatchFailure("old", "python_too_old"),
+                RemoteWatchReady("good"),
+            ),
+            hosts=("old", "good"),
+        )
+        stderr = io.StringIO()
+        original_report = cli_module._report_remote_python_hint
+
+        def report_hint(*args, **kwargs):
+            original_report(*args, **kwargs)
+            report_calls.append((args, kwargs))
+            hint_written.set()
+
+        def direct(sessions, from_start=False, cancel_event=None):
+            del sessions, from_start, cancel_event
+
+            def events():
+                if hint_written.wait(2):
+                    hint_seen_while_active.set()
+                yield local_event
+
+            return events()
+
+        with mock.patch.object(
+            cli_module,
+            "_report_remote_python_hint",
+            new=report_hint,
+        ):
+            code = main(
+                ["watch", "--all", "--remote", "--from-start", "--json"],
+                scanner=FakeScanner([make_session("local")]),
+                client=OfflineClient(),
+                stdout=io.StringIO(),
+                stderr=stderr,
+                watch_provider=direct,
+                remote_watch_provider=lambda **kwargs: remote_session,
+            )
+
+        self.assertEqual(0, code)
+        self.assertTrue(hint_seen_while_active.is_set())
+        self.assertEqual(1, len(report_calls))
+        self.assertEqual(
+            "watch: remote failure host=old code=python_too_old; "
+            "events may be missed\n"
+            "remote: no Python >= 3.8 found among bounded candidates on "
+            "1 host(s); use --remote-python <absolute-path> or "
+            "AGENT_SIDECAR_REMOTE_PYTHON to pin an interpreter\n",
             stderr.getvalue(),
         )
 
@@ -3208,6 +3645,57 @@ class CLITests(unittest.TestCase):
         )
 
         self.assertEqual(130, code)
+        self.assertTrue(remote_session.closed)
+        self.assertFalse(
+            any(
+                thread.name.startswith("sidecar-watch-")
+                for thread in threading.enumerate()
+            )
+        )
+
+    def test_remote_watch_interrupt_survives_deferred_hint_write_failure(self):
+        class FailingHintStderr(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.hint_attempts = 0
+
+            def write(self, value):
+                if value.startswith("remote: no Python >= 3.8"):
+                    self.hint_attempts += 1
+                    raise BrokenPipeError("closed")
+                return super().write(value)
+
+        class DeferredInterruptQueue(queue.Queue):
+            def __init__(self, maxsize=0):
+                super().__init__(maxsize=maxsize)
+                self.delivered = False
+
+            def get(self, block=True, timeout=None):
+                if self.delivered:
+                    raise KeyboardInterrupt
+                entry = super().get(block=block, timeout=timeout)
+                self.delivered = True
+                return entry
+
+        remote_session = FakeRemoteWatchSession(
+            (RemoteWatchFailure("old", "python_too_old"),),
+            hosts=("old",),
+        )
+        remote_session.hosts = None
+        stderr = FailingHintStderr()
+
+        code = main(
+            ["watch", "--all", "--remote", "--from-start", "--json"],
+            scanner=FakeScanner(),
+            client=OfflineClient(),
+            stdout=io.StringIO(),
+            stderr=stderr,
+            remote_watch_provider=lambda **kwargs: remote_session,
+            remote_watch_queue=DeferredInterruptQueue(maxsize=1),
+        )
+
+        self.assertEqual(130, code)
+        self.assertEqual(1, stderr.hint_attempts)
         self.assertTrue(remote_session.closed)
         self.assertFalse(
             any(
