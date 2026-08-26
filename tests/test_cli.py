@@ -4400,6 +4400,7 @@ class SendCLITests(unittest.TestCase):
         session,
         *,
         outcome="completed",
+        delivery=None,
         response="",
         stderr="",
         error_code=None,
@@ -4410,7 +4411,11 @@ class SendCLITests(unittest.TestCase):
             agent=session.agent,
             session_id=session.session_id,
             outcome=outcome,
-            delivery="delivered" if outcome == "completed" else "unknown",
+            delivery=(
+                "delivered" if outcome == "completed" else "unknown"
+            )
+            if delivery is None
+            else delivery,
             returncode=0 if outcome == "completed" else 7,
             response=response,
             stderr=stderr,
@@ -4508,6 +4513,8 @@ class SendCLITests(unittest.TestCase):
         self.assertIn("local headless resume", send_help)
         self.assertIn("may modify agent state", send_help)
         self.assertIn("--allow-write", send_help)
+        self.assertIn("--agent NAME", send_help)
+        self.assertIn("--exact-session", send_help)
         self.assertIn("--timeout SEC", send_help)
         self.assertIn("--request-id ID", send_help)
         self.assertIn("--json", send_help)
@@ -4515,11 +4522,52 @@ class SendCLITests(unittest.TestCase):
         self.assertEqual("abc", args.session_prefix)
         self.assertEqual("hello", args.message)
         self.assertFalse(args.allow_write)
+        self.assertFalse(args.exact_session)
         self.assertEqual(DEFAULT_SEND_TIMEOUT_SECONDS, args.timeout)
         self.assertIsNone(args.request_id)
         self.assertEqual("request-explicit", explicit.request_id)
         self.assertEqual("-private", hyphen.message)
         self.assertTrue(hyphen.allow_write)
+
+    def test_send_agent_and_stdin_options_are_order_independent(self):
+        parser = build_parser()
+        cases = (
+            [
+                "send",
+                "abc",
+                "--agent",
+                "CLAUDE",
+                "--exact-session",
+                "--message-stdin",
+                "--allow-write",
+                "--request-id",
+                "request-order",
+                "--json",
+            ],
+            [
+                "send",
+                "--json",
+                "--request-id",
+                "request-order",
+                "--allow-write",
+                "--message-stdin",
+                "--exact-session",
+                "--agent",
+                "CLAUDE",
+                "abc",
+            ],
+        )
+        for argv in cases:
+            with self.subTest(argv=argv):
+                args = parser.parse_args(argv)
+                self.assertEqual("abc", args.session_prefix)
+                self.assertEqual("CLAUDE", args.agent)
+                self.assertTrue(args.exact_session)
+                self.assertTrue(args.message_stdin)
+                self.assertTrue(args.allow_write)
+                self.assertEqual("request-order", args.request_id)
+                self.assertTrue(args.json)
+                self.assertIsNone(args.message)
 
     def test_allow_write_abbreviations_are_parser_errors_before_scanning(self):
         for abbreviation in ("--a", "--allow", "--allow-writ"):
@@ -4654,17 +4702,147 @@ class SendCLITests(unittest.TestCase):
                     return object()
 
                 code = main(
-                    ["send", prefix, "private", "--allow-write"],
+                    [
+                        "send",
+                        prefix,
+                        "private",
+                        "--allow-write",
+                        "--request-id",
+                        "request-" + prefix,
+                    ],
                     scanner=scanner,
                     stdout=io.StringIO(),
                     stderr=io.StringIO(),
                     send_planner=planner,
-                    send_executor=lambda plan, **kwargs: self.result(expected),
+                    send_executor=lambda plan, **kwargs: self.result(
+                        expected,
+                        request_id=kwargs["request_id"],
+                    ),
                 )
 
                 self.assertEqual(0, code)
                 self.assertEqual([(expected, "private")], selected)
                 self.assertEqual([None], scanner.recent_calls)
+
+    def test_send_agent_filter_is_case_normalized_before_prefix_resolution(self):
+        claude = make_session("shared-session", agent="claude")
+        codex = make_session("shared-session", agent="codex")
+        codex_longer = make_session("shared-session-longer", agent="codex")
+        selected = []
+
+        def planner(session, message):
+            selected.append((session, message))
+            return object()
+
+        def executor(plan, **kwargs):
+            del plan
+            return self.result(
+                codex,
+                request_id=kwargs["request_id"],
+            )
+
+        code = main(
+            [
+                "send",
+                "shared-session",
+                "private",
+                "--agent",
+                "CoDeX",
+                "--exact-session",
+                "--allow-write",
+                "--request-id",
+                "request-agent-bound",
+                "--json",
+            ],
+            scanner=FakeScanner([claude, codex, codex_longer]),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            send_planner=planner,
+            send_executor=executor,
+        )
+
+        self.assertEqual(0, code)
+        self.assertEqual([(codex, "private")], selected)
+
+    def test_send_agent_selection_errors_are_stable_json_without_execution(self):
+        cases = (
+            (
+                "wrong agent",
+                ["send", "same-id", "PRIVATE", "--agent", "codex"],
+                [make_session("same-id", agent="claude")],
+                "target_not_found",
+            ),
+            (
+                "missing target",
+                ["send", "missing", "PRIVATE", "--agent", "claude"],
+                [make_session("other", agent="claude")],
+                "target_not_found",
+            ),
+            (
+                "ambiguous within agent",
+                ["send", "amb", "PRIVATE", "--agent", "claude"],
+                [
+                    make_session("amb-one", agent="claude"),
+                    make_session("amb-two", agent="claude"),
+                    make_session("amb-only-codex", agent="codex"),
+                ],
+                "ambiguous_session",
+            ),
+            (
+                "exact target replaced by same-agent longer prefix",
+                [
+                    "send",
+                    "same-id",
+                    "PRIVATE",
+                    "--agent",
+                    "claude",
+                    "--exact-session",
+                ],
+                [make_session("same-id-longer", agent="claude")],
+                "target_not_found",
+            ),
+            (
+                "duplicate exact target within agent",
+                [
+                    "send",
+                    "duplicate",
+                    "PRIVATE",
+                    "--agent",
+                    "claude",
+                    "--exact-session",
+                ],
+                [
+                    make_session("duplicate", agent="claude"),
+                    make_session("duplicate", agent="claude"),
+                ],
+                "ambiguous_session",
+            ),
+        )
+        for label, base_argv, sessions, expected_code in cases:
+            with self.subTest(label=label):
+                calls = []
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                code = main(
+                    base_argv + ["--allow-write", "--json"],
+                    scanner=FakeScanner(sessions),
+                    stdout=stdout,
+                    stderr=stderr,
+                    send_planner=lambda *args, **kwargs: calls.append(
+                        ("plan", args, kwargs)
+                    ),
+                    send_executor=lambda *args, **kwargs: calls.append(
+                        ("execute", args, kwargs)
+                    ),
+                )
+
+                self.assertEqual(2, code)
+                self.assertEqual(
+                    {"code": expected_code},
+                    json.loads(stdout.getvalue()),
+                )
+                self.assertNotIn("PRIVATE", stderr.getvalue())
+                self.assertEqual([], calls)
 
     def test_send_rejects_ambiguous_and_missing_prefixes_before_planning(self):
         cases = (
@@ -4721,7 +4899,11 @@ class SendCLITests(unittest.TestCase):
             self.assertTrue(callable(refresher))
             self.assertEqual([session], refresher())
             executor_calls.append((selected_plan, kwargs))
-            return self.result(session, response="done")
+            return self.result(
+                session,
+                response="done",
+                request_id=kwargs["request_id"],
+            )
 
         code = main(
             [
@@ -4771,6 +4953,280 @@ class SendCLITests(unittest.TestCase):
             ).to_dict(),
             json.loads(stdout.getvalue()),
         )
+
+    def test_kimi_exact_stdin_json_send_binds_receipt_triple(self):
+        message = "KIMI-CLI-PRIVATE"
+        session = make_session("kimi-exact-session", agent="kimi")
+        scanner = FakeScanner(
+            [
+                session,
+                make_session("kimi-exact-session-longer", agent="kimi"),
+                make_session("kimi-exact-session", agent="claude"),
+            ]
+        )
+        planned = object()
+        planner_calls = []
+        executor_calls = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def planner(selected, submitted):
+            planner_calls.append((selected, submitted))
+            return planned
+
+        def executor(plan, **kwargs):
+            refreshed = kwargs.pop("refresher")()
+            executor_calls.append((plan, kwargs, refreshed))
+            return SendResult(
+                agent="kimi",
+                session_id=session.session_id,
+                outcome="completed",
+                delivery="unknown",
+                returncode=0,
+                request_id=kwargs["request_id"],
+            )
+
+        argv = [
+            "send",
+            session.session_id,
+            "--agent",
+            "kimi",
+            "--exact-session",
+            "--message-stdin",
+            "--allow-write",
+            "--request-id",
+            "request-kimi-cli",
+            "--json",
+        ]
+        code = main(
+            argv,
+            scanner=scanner,
+            stdin=io.BytesIO(message.encode("utf-8")),
+            stdout=stdout,
+            stderr=stderr,
+            send_planner=planner,
+            send_executor=executor,
+        )
+        payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(1, code)
+        self.assertEqual([(session, message)], planner_calls)
+        self.assertEqual(
+            [
+                (
+                    planned,
+                    {
+                        "allow_write": True,
+                        "timeout": DEFAULT_SEND_TIMEOUT_SECONDS,
+                        "request_id": "request-kimi-cli",
+                    },
+                    [session],
+                )
+            ],
+            executor_calls,
+        )
+        self.assertEqual(
+            ("kimi", session.session_id, "request-kimi-cli"),
+            (
+                payload["agent"],
+                payload["session_id"],
+                payload["request_id"],
+            ),
+        )
+        self.assertEqual(("completed", "unknown"), (
+            payload["outcome"],
+            payload["delivery"],
+        ))
+        self.assertIn(
+            "completed but delivery unknown; do not retry",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("delivered", stdout.getvalue() + stderr.getvalue())
+        self.assertNotIn(message, " ".join(argv))
+
+    def test_completed_unknown_text_and_audit_replay_are_not_success(self):
+        session = make_session("kimi-unknown-replay", agent="kimi")
+        result = self.result(
+            session,
+            delivery="unknown",
+            request_id="request-kimi-replay",
+            replayed=True,
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            [
+                "send",
+                "kimi-unknown",
+                "private",
+                "--allow-write",
+                "--request-id",
+                "request-kimi-replay",
+            ],
+            scanner=FakeScanner([session]),
+            stdout=stdout,
+            stderr=stderr,
+            send_planner=lambda selected, message: object(),
+            send_executor=lambda plan, **kwargs: result,
+        )
+        rendered = stdout.getvalue() + stderr.getvalue()
+
+        self.assertEqual(1, code)
+        self.assertEqual(
+            "request_id=request-kimi-replay replayed=true\n"
+            "completed but delivery unknown for kimi:kimi-unknown-replay; "
+            "do not retry\n",
+            stdout.getvalue(),
+        )
+        self.assertIn(
+            "send: completed but delivery unknown; do not retry\n",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("delivered", rendered)
+
+    def test_claude_cleanup_unknown_remains_failure_in_json_and_text(self):
+        session = make_session("claude-cleanup", agent="claude")
+        result = self.result(
+            session,
+            outcome="failed",
+            delivery="unknown",
+            error_code="cleanup_incomplete",
+            request_id="request-claude-cleanup",
+        )
+
+        for as_json in (False, True):
+            with self.subTest(as_json=as_json):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                argv = [
+                    "send",
+                    "claude-cleanup",
+                    "private",
+                    "--allow-write",
+                    "--request-id",
+                    "request-claude-cleanup",
+                ]
+                if as_json:
+                    argv.append("--json")
+
+                code = main(
+                    argv,
+                    scanner=FakeScanner([session]),
+                    stdout=stdout,
+                    stderr=stderr,
+                    send_planner=lambda selected, message: object(),
+                    send_executor=lambda plan, **kwargs: result,
+                )
+                rendered = stdout.getvalue() + stderr.getvalue()
+
+                self.assertEqual(1, code)
+                if as_json:
+                    self.assertEqual(result.to_dict(), json.loads(stdout.getvalue()))
+                else:
+                    self.assertIn(
+                        "delivery unknown for claude:claude-cleanup (failed)",
+                        stdout.getvalue(),
+                    )
+                self.assertIn("cleanup_incomplete", stderr.getvalue())
+                self.assertNotIn("delivered", rendered)
+
+    def test_send_refresh_is_bound_to_selected_agent_and_exact_session(self):
+        original = make_session("same-id", agent="claude")
+        replacement = make_session("same-id-longer", agent="claude")
+
+        class ReplacingScanner:
+            def __init__(self):
+                self.errors = []
+                self.calls = 0
+
+            def scan(self, recent_seconds=None):
+                del recent_seconds
+                self.calls += 1
+                return [original] if self.calls == 1 else [replacement]
+
+        scanner = ReplacingScanner()
+        refreshed = []
+
+        def executor(plan, **kwargs):
+            del plan
+            refreshed.extend(kwargs["refresher"]())
+            raise SendError("session_unavailable")
+
+        stdout = io.StringIO()
+        code = main(
+            [
+                "send",
+                "same-id",
+                "PRIVATE",
+                "--agent",
+                "claude",
+                "--exact-session",
+                "--allow-write",
+                "--request-id",
+                "request-replaced",
+                "--json",
+            ],
+            scanner=scanner,
+            stdout=stdout,
+            stderr=io.StringIO(),
+            send_planner=lambda selected, message: object(),
+            send_executor=executor,
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual({"code": "session_unavailable"}, json.loads(stdout.getvalue()))
+        self.assertEqual([], refreshed)
+
+    def test_send_result_identity_mismatch_is_terminal_unknown(self):
+        selected = make_session("bound-session", agent="claude")
+        mismatches = (
+            self.result(
+                make_session("bound-session", agent="codex"),
+                request_id="request-bound",
+            ),
+            self.result(
+                make_session("replacement", agent="claude"),
+                request_id="request-bound",
+            ),
+            self.result(selected, request_id="request-other"),
+            self.result(
+                make_session("replacement", agent="claude"),
+                outcome="timed_out",
+                error_code="timeout",
+                request_id="request-bound",
+            ),
+        )
+        for result in mismatches:
+            with self.subTest(result=result):
+                stdout = io.StringIO()
+                code = main(
+                    [
+                        "send",
+                        "bound-session",
+                        "PRIVATE",
+                        "--agent",
+                        "claude",
+                        "--allow-write",
+                        "--request-id",
+                        "request-bound",
+                        "--json",
+                    ],
+                    scanner=FakeScanner([selected]),
+                    stdout=stdout,
+                    stderr=io.StringIO(),
+                    send_planner=lambda target, message: object(),
+                    send_executor=lambda plan, **kwargs: result,
+                )
+                payload = json.loads(stdout.getvalue())
+
+                self.assertEqual(1, code)
+                self.assertEqual("claude", payload["agent"])
+                self.assertEqual("bound-session", payload["session_id"])
+                self.assertEqual("request-bound", payload["request_id"])
+                self.assertEqual("unknown", payload["delivery"])
+                self.assertEqual("failed", payload["outcome"])
+                self.assertEqual("executor_error", payload["error_code"])
 
     def test_send_refreshes_directly_and_blocks_source_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -4885,12 +5341,21 @@ class SendCLITests(unittest.TestCase):
                 ascii_escaped,
             ),
             stderr="\r{} surrogate \ud800".format(message),
+            request_id="request-json-hygiene",
         )
         stdout = io.StringIO()
         stderr = io.StringIO()
 
         code = main(
-            ["send", "json", message, "--allow-write", "--json"],
+            [
+                "send",
+                "json",
+                message,
+                "--allow-write",
+                "--request-id",
+                "request-json-hygiene",
+                "--json",
+            ],
             scanner=FakeScanner([session]),
             stdout=stdout,
             stderr=stderr,
@@ -4916,12 +5381,20 @@ class SendCLITests(unittest.TestCase):
             session,
             response="answer \x1b]0;pwned\x07 " + message,
             stderr="warning \x1b[31mred\x1b[0m " + message,
+            request_id="request-human",
         )
         stdout = io.StringIO()
         stderr = io.StringIO()
 
         code = main(
-            ["send", "human", message, "--allow-write"],
+            [
+                "send",
+                "human",
+                message,
+                "--allow-write",
+                "--request-id",
+                "request-human",
+            ],
             scanner=FakeScanner([session]),
             stdout=stdout,
             stderr=stderr,
@@ -4944,6 +5417,7 @@ class SendCLITests(unittest.TestCase):
             session,
             response="answer " + message,
             stderr="warning \ud801",
+            request_id="request-surrogate",
         )
         stdout_bytes = io.BytesIO()
         stderr_bytes = io.BytesIO()
@@ -4961,7 +5435,14 @@ class SendCLITests(unittest.TestCase):
         )
 
         code = main(
-            ["send", "surrogate", message, "--allow-write"],
+            [
+                "send",
+                "surrogate",
+                message,
+                "--allow-write",
+                "--request-id",
+                "request-surrogate",
+            ],
             scanner=FakeScanner([session]),
             stdout=stdout,
             stderr=stderr,
@@ -4984,15 +5465,17 @@ class SendCLITests(unittest.TestCase):
                 "\ud800PRIVATE",
                 FakeScanner(),
                 "no session matches prefix",
+                "target_not_found",
             ),
             (
                 "unicode-session",
                 "\ud800PRIVATE",
                 FakeScanner([make_session("unicode-session")]),
                 "message must contain valid Unicode scalars",
+                "invalid_message_utf8",
             ),
         )
-        for prefix, message, scanner, expected in cases:
+        for prefix, message, scanner, expected, expected_code in cases:
             with self.subTest(expected=expected):
                 stderr_bytes = io.BytesIO()
                 stderr = io.TextIOWrapper(
@@ -5022,7 +5505,10 @@ class SendCLITests(unittest.TestCase):
                 diagnostic = stderr_bytes.getvalue().decode("utf-8")
 
                 self.assertEqual(2, code)
-                self.assertEqual("", stdout.getvalue())
+                self.assertEqual(
+                    {"code": expected_code},
+                    json.loads(stdout.getvalue()),
+                )
                 self.assertIn(expected, diagnostic)
                 self.assertNotIn("PRIVATE", diagnostic)
                 self.assertNotIn("\\ud800", diagnostic)
@@ -5045,7 +5531,10 @@ class SendCLITests(unittest.TestCase):
             stdout=stdout,
             stderr=io.StringIO(),
             send_planner=lambda selected, message: object(),
-            send_executor=lambda plan, **kwargs: self.result(session),
+            send_executor=lambda plan, **kwargs: self.result(
+                session,
+                request_id=kwargs["request_id"],
+            ),
         )
 
         self.assertEqual(0, code)
@@ -5389,13 +5878,23 @@ class SendCLITests(unittest.TestCase):
             return object()
 
         code = main(
-            ["send", "limit", "--message-stdin", "--allow-write"],
+            [
+                "send",
+                "limit",
+                "--message-stdin",
+                "--allow-write",
+                "--request-id",
+                "request-limit",
+            ],
             scanner=FakeScanner([session]),
             stdout=io.StringIO(),
             stderr=io.StringIO(),
             stdin=io.BytesIO(message.encode("utf-8")),
             send_planner=planner,
-            send_executor=lambda plan, **kwargs: self.result(session),
+            send_executor=lambda plan, **kwargs: self.result(
+                session,
+                request_id=kwargs["request_id"],
+            ),
         )
 
         self.assertEqual(0, code)

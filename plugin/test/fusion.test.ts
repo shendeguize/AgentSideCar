@@ -4,6 +4,7 @@
  * no cordis/dsh, no I/O.
  */
 
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_MAX_BUFFERED_EVENTS_PER_SESSION,
@@ -35,6 +36,8 @@ class FakeDshEvents implements DshEventFace {
   readonly created = new Set<SessionHandler>()
   readonly events = new Set<EventHandler>()
   readonly disposed = new Set<SessionHandler>()
+  readonly resident = new Map<string, DshSessionFace>()
+  readonly getCalls: string[] = []
   disposeCalls = 0
 
   on(event: 'session/event', handler: EventHandler): () => void
@@ -55,6 +58,7 @@ class FakeDshEvents implements DshEventFace {
   }
 
   emitCreated(session: DshSessionFace): void {
+    this.resident.set(session.id, session)
     for (const handler of this.created) handler(session)
   }
 
@@ -63,7 +67,18 @@ class FakeDshEvents implements DshEventFace {
   }
 
   emitDisposed(session: DshSessionFace): void {
+    this.resident.delete(session.id)
     for (const handler of this.disposed) handler(session)
+  }
+
+  /** Make a session discoverable through ctx.sessions.get without an event. */
+  seed(session: DshSessionFace): void {
+    this.resident.set(session.id, session)
+  }
+
+  get(sessionId: string): DshSessionFace | undefined {
+    this.getCalls.push(sessionId)
+    return this.resident.get(sessionId)
   }
 
   get handlerCount(): number {
@@ -500,6 +515,22 @@ describe('getSessionTimeline', () => {
     expect(page3.cursor).toBeNull()
   })
 
+  it('late-binds one resident live session on demand without a global scan', async () => {
+    const dshEvents = new FakeDshEvents()
+    const fake = makeDshSession('sess-preexisting')
+    fake.append('user/message', T0 + 1_000, { content: 'already live' })
+    dshEvents.seed(fake.session)
+    const { fusion } = makeFusion({ dshEvents })
+
+    expect(fusion.getUnifiedSessions()).toEqual([])
+    const page = await fusion.getSessionTimeline('sess-preexisting')
+
+    expect(dshEvents.getCalls).toEqual(['sess-preexisting'])
+    expect(page.entries.map((entry) => entry.kind)).toEqual(['user/message'])
+    expect(page.sourceOutcomes.liveSession).toBe('succeeded')
+    expect(fusion.getUnifiedSessions()[0]?.sessionId).toBe('sess-preexisting')
+  })
+
   it('cold-reads a non-live dsh session through sessionQuery.readSession', async () => {
     const engine = fakeEngine()
     engine.setLog([
@@ -536,6 +567,59 @@ describe('getSessionTimeline', () => {
     expect(page.entries.map((e) => e.text)).toEqual(['survivor'])
   })
 
+  it('reports a redacted partial failure while preserving successful entries', async () => {
+    const secret = 'PROMPT-SECRET /Users/private/session-id-77'
+    const engine = fakeEngine()
+    engine.setLog(new Error(`permission denied: ${secret}`))
+    const { fusion } = makeFusion({ getSessionQuery: () => engine.engine })
+    fusion.ingestSidecarEvent(sidecarEvent('sess-x', { text: 'safe survivor' }))
+
+    const page = await fusion.getSessionTimeline('sess-x')
+
+    expect(page.entries.map((entry) => entry.text)).toEqual(['safe survivor'])
+    expect(page.sourceOutcomes.sessionQuery).toBe('source_failed')
+    expect(page.sourceOutcomes.buffer).toBe('succeeded')
+    expect(page.degraded).toBe(true)
+    expect(page.reason).toBe('partial_source_failure')
+    expect(JSON.stringify(page)).not.toContain(secret)
+  })
+
+  it('distinguishes all-source failure from a healthy empty timeline', async () => {
+    const engine = fakeEngine()
+    engine.setLog(new Error('storage failed: /private/log/session-42'))
+    const failingReplay: SidecarReplayFace = {
+      replay: async () => {
+        throw new Error('socket failed for id=session-42 prompt=private')
+      },
+    }
+    const failed = await makeFusion({
+      getSessionQuery: () => engine.engine,
+      replay: failingReplay,
+    }).fusion.getSessionTimeline('sess-empty')
+    expect(failed.entries).toEqual([])
+    expect(failed.sourceOutcomes).toEqual({
+      liveSession: 'not_found',
+      sessionQuery: 'source_failed',
+      sidecarReplay: 'source_failed',
+      buffer: 'not_found',
+    })
+    expect(failed.degraded).toBe(true)
+    expect(failed.reason).toBe('all_sources_failed')
+    expect(JSON.stringify(failed)).not.toMatch(/private|session-42|prompt/i)
+
+    engine.setLog([])
+    const healthyReplay: SidecarReplayFace = { replay: async () => [] }
+    const healthy = await makeFusion({
+      getSessionQuery: () => engine.engine,
+      replay: healthyReplay,
+    }).fusion.getSessionTimeline('sess-empty')
+    expect(healthy.entries).toEqual([])
+    expect(healthy.sourceOutcomes.sessionQuery).toBe('succeeded')
+    expect(healthy.sourceOutcomes.sidecarReplay).toBe('succeeded')
+    expect(healthy.degraded).toBe(false)
+    expect(healthy.reason).toBeNull()
+  })
+
   it('prefers the replay seam and deduplicates the ring against it', async () => {
     const replayCalls: string[] = []
     const replay: SidecarReplayFace = {
@@ -569,6 +653,49 @@ describe('getSessionTimeline', () => {
       [0, 'replayed-0'],
       [1, 'replayed-1'],
     ])
+  })
+
+  it('keeps synthetic queue and steer digests on the newest page', async () => {
+    const queueMarker = 'synthetic queued marker'
+    const steerMarker = 'synthetic steered marker'
+    const digest = (text: string): string =>
+      createHash('sha256').update(text, 'utf8').digest('hex')
+    const events: SidecarEventFace[] = []
+    for (let seq = 0; seq < 106; seq += 1) {
+      events.push(sidecarEvent('sess-inject', { text: `old-${seq}`, extra: { seq } }))
+    }
+    events.push(
+      sidecarEvent('sess-inject', {
+        kind: 'user',
+        text: queueMarker,
+        extra: { seq: 106, source: { kind: 'plugin', plugin: 'agent-sidecar' } },
+      }),
+    )
+    for (let seq = 107; seq < 138; seq += 1) {
+      events.push(sidecarEvent('sess-inject', { text: `between-${seq}`, extra: { seq } }))
+    }
+    events.push(
+      sidecarEvent('sess-inject', {
+        kind: 'user',
+        text: steerMarker,
+        extra: { seq: 138, source: { kind: 'plugin', plugin: 'agent-sidecar' } },
+      }),
+    )
+    for (let seq = 139; seq < 144; seq += 1) {
+      events.push(sidecarEvent('sess-inject', { text: `tail-${seq}`, extra: { seq } }))
+    }
+    const replay: SidecarReplayFace = {
+      replay: async () => events,
+    }
+    const { fusion } = makeFusion({ replay })
+
+    const page = await fusion.getSessionTimeline('sess-inject')
+    const newestDigests = new Set(page.entries.map((entry) => digest(entry.text)))
+
+    expect(page.entries).toHaveLength(100)
+    expect(newestDigests).toContain(digest(queueMarker))
+    expect(newestDigests).toContain(digest(steerMarker))
+    expect(page.cursor?.seq).toBe(44)
   })
 
   // ------------------------------------------------------- F1 regressions
@@ -743,6 +870,14 @@ describe('getSessionTimeline', () => {
       sidecarReplay: false,
       sidecarBuffer: false,
     })
+    expect(page.sourceOutcomes).toEqual({
+      liveSession: 'not_found',
+      sessionQuery: 'unavailable',
+      sidecarReplay: 'unavailable',
+      buffer: 'not_found',
+    })
+    expect(page.degraded).toBe(false)
+    expect(page.reason).toBeNull()
   })
 })
 

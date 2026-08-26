@@ -21,6 +21,7 @@ export const en = {
   'settings.expand': 'Expand',
   'settings.collapse': 'Collapse',
   'settings.invalidNumber': 'Enter an integer no less than {min}',
+  'settings.liveEffectNote': 'Changes in this section take effect immediately after saving.',
 
   // ── daemon lifecycle ───────────────────────────────────────────────────
   'settings.sectionDaemon': 'Daemon lifecycle',
@@ -48,6 +49,8 @@ export const en = {
   'settings.daemonFailedNote':
     'Consecutive hosting failures reached the backoff limit; the board degraded to the last snapshot. Check the sidecar command, then retry.',
   'settings.daemonRetry': 'Retry',
+  'settings.daemonProfileNote':
+    'Read-only here: daemon lifecycle values come from the plugin row config in the profile cordis.patch. Settings changes do not drive the supervisor; edit the profile patch and restart DSH.',
 
   // ── sidecar invocation ─────────────────────────────────────────────────
   'settings.sectionSidecar': 'Sidecar invocation',
@@ -57,6 +60,8 @@ export const en = {
   'settings.sidecarRuntimeDirLabel': 'Runtime directory',
   'settings.sidecarRuntimeDirHint':
     'Empty uses the default ~/.agent_sidecar (honoring AGENT_SIDECAR_RUNTIME_DIR); a non-empty value is passed to spawned daemons via the environment.',
+  'settings.sidecarProfileNote':
+    'Read-only here: sidecar command and runtime directory come from the plugin row config in the profile cordis.patch. Settings changes do not drive daemon invocation; edit the profile patch and restart DSH.',
 
   // ── stream reconciliation ──────────────────────────────────────────────
   'settings.sectionStream': 'Stream reconciliation',
@@ -64,6 +69,8 @@ export const en = {
   'settings.streamActiveMsHint': 'Status snapshot cadence while any session is working.',
   'settings.streamIdleMsLabel': 'Idle cadence (ms)',
   'settings.streamIdleMsHint': 'Status snapshot cadence while no session is working.',
+  'settings.streamProfileNote':
+    'Read-only here: stream cadence values come from the plugin row config in the profile cordis.patch. Settings changes do not drive the reconciler; edit the profile patch and restart DSH.',
 
   // ── injection ──────────────────────────────────────────────────────────
   'settings.sectionInject': 'Message injection',
@@ -82,6 +89,19 @@ export const en = {
   'settings.analysisEnabledLabel': 'Enable AI bypass analysis',
   'settings.analysisEnabledHint':
     'Spins up a dsh analysis session over an observed session on demand (consumes model tokens; off by default).',
+  'settings.analysisProviderLabel': 'Analysis provider',
+  'settings.analysisProviderHint':
+    'Leave both route fields blank to use the host default; an explicit provider is used only when model is also set.',
+  'settings.analysisProviderPlaceholder': 'Host default',
+  'settings.analysisModelLabel': 'Analysis model',
+  'settings.analysisModelHint':
+    'Leave both route fields blank to use the host default; an explicit model is used only when provider is also set.',
+  'settings.analysisModelPlaceholder': 'Host default',
+  'settings.analysisRouteHostDefault':
+    'Current route: host default model (provider and model are both blank).',
+  'settings.analysisRouteExplicit': 'Current route: explicit {provider} / {model}.',
+  'settings.analysisRoutePartial':
+    'Provider and model must either both be blank or both be set. Complete the pair or clear both; Save is disabled.',
 
   // ── board UI ───────────────────────────────────────────────────────────
   'settings.sectionUi': 'Board UI',
@@ -95,6 +115,8 @@ export const en = {
   'settings.skillProvideLabel': 'Provide the skill in-process',
   'settings.skillProvideHint':
     'Provide the agent-sidecar skill to dsh via registerProvider (enabled in M4; applies after restart).',
+  'settings.skillRestartNote':
+    'skill.provide is read from the profile cordis.patch when the plugin loads. Edit the profile patch, then reload the plugin or restart DSH; Settings changes do not re-register the skill.',
 
   // ── inject panel: chrome & editor (T4.5, design §5.1 view 3) ───────────
   'inject.title': 'Inject message',
@@ -124,6 +146,18 @@ export const en = {
     'This injection is recorded in the sidecar audit log (byte size and content fingerprint; never the message plaintext).',
   'inject.prepare': 'Prepare injection',
   'inject.preparing': 'Validating…',
+  'inject.kimiTitle': 'Protected resume',
+  'inject.kimiConfirmTitle': 'Confirm protected resume',
+  'inject.kimiMessagePlaceholder':
+    'Message for protected resume (16 KiB max; never paste secrets)',
+  'inject.kimiActionLabel': 'Kimi action',
+  'inject.kimiModeLabel': 'Protected resume',
+  'inject.kimiModeHint':
+    'Starts a separate Kimi ACP process and resumes the session through it. It never attaches to or steers the existing terminal.',
+  'inject.kimiAuditNote':
+    'This protected resume is recorded in the sidecar audit log (byte size and content fingerprint; never the message plaintext).',
+  'inject.kimiPrepare': 'Prepare protected resume',
+  'inject.kimiPreparing': 'Validating…',
 
   // ── inject panel: confirm phase ──────────────────────────────────────
   'inject.planTargetLabel': 'Target snapshot',
@@ -135,6 +169,8 @@ export const en = {
   'inject.countdown': 'The confirm token expires in {seconds}s',
   'inject.confirmExecute': 'Confirm injection',
   'inject.executing': 'Injecting…',
+  'inject.kimiConfirmExecute': 'Start protected resume',
+  'inject.kimiExecuting': 'Starting protected resume…',
   'inject.cancel': 'Cancel',
   'inject.tokenExpired':
     'Confirmation timed out and the token is void; prepare the injection again.',
@@ -146,6 +182,12 @@ export const en = {
     'Outcome unknown: the message may have been delivered. Do NOT retry; check the target session before deciding anything.',
   'inject.resultReplayed':
     'Idempotent replay: this is the earlier result of the same request — no second injection happened.',
+  'inject.kimiResultUnknown':
+    'Kimi 0.38 completed this protected resume, but delivery to the resumed session cannot be proven. Do not automatically or manually retry the same content.',
+  'inject.kimiResultFailed':
+    'Rejected before the prompt was sent: no message was sent to Kimi.',
+  'inject.kimiResultReplayed':
+    'Safe replay: this is the cached result for the same request. No new Kimi ACP process was spawned and no content was sent again.',
   'inject.reprepare': 'Prepare again',
   'inject.observeListen': 'Listen for the reaction',
 
@@ -155,6 +197,16 @@ export const en = {
   'inject.errTargetNotFound':
     'The target session does not exist or left the observation window.',
   'inject.errTargetDead': 'The target session has ended (dead); it cannot be injected.',
+  'inject.errWorkingSession':
+    'This external-agent session is working; injection is available only while it is waiting or idle.',
+  'inject.kimiErrWorkingSession':
+    'This Kimi session is working; protected resume is available only while it is waiting or idle.',
+  'inject.errChildSession':
+    'External child or sidechain sessions cannot be injected from Agent Sidecar.',
+  'inject.errRemoteSession':
+    'Remote sessions cannot be injected from this local host.',
+  'inject.errInvalidSession':
+    'The host did not provide a valid target eligibility verdict; injection stays disabled. Update or restart the host and reopen this session.',
   'inject.errTooManyPending':
     'Too many injections are pending confirmation; try again later.',
   'inject.errTokenMissing': 'The confirm token is missing or was never issued; prepare again.',
@@ -168,6 +220,7 @@ export const en = {
   'inject.errAborted': 'The request was cancelled.',
   'inject.errNetwork': 'Network error; the request could not be sent.',
   'inject.errParse': 'The server response could not be parsed.',
+  'inject.errUnknown': 'The request failed for an unknown reason.',
   'inject.errGeneric': 'Request failed ({code}).',
 
   // ── board tab chrome + session board ──────────────────────────────────
@@ -213,11 +266,15 @@ export const en = {
   'board.topbar.dismiss': 'Dismiss',
   'board.topbar.showDead': 'Show finished',
   'board.topbar.timeWindow': 'Time window',
+  'board.topbar.agentFilter': 'Agent',
+  'board.topbar.agentFilterAria': 'Filter sessions by agent type',
+  'board.topbar.allAgents': 'All agents',
   'board.topbar.countWorking': '{n} working',
   'board.topbar.countWaiting': '{n} waiting',
   'board.topbar.countTotal': '{n} sessions total',
   'board.topbar.filterByStatusTitle': 'Show only sessions marked "{label}"',
   'board.topbar.clearStatusFilterTitle': 'Clear the status filter and show all sessions',
+  'board.states.loading': 'Loading the first sidecar snapshot…',
   'board.group.collapseTitle': 'Collapse this group',
   'board.group.expandTitle': 'Expand this group',
   'board.group.showAll': 'Show all {n} sessions',
@@ -269,6 +326,8 @@ export const en = {
   'detail.sources.sidecarReplay': 'sidecar replay',
   'detail.sources.sidecarBuffer': 'sidecar buffer',
   'detail.sources.none': 'Unknown source',
+  'detail.sources.healthSummary':
+    '{available} available · {unavailable} unavailable · {failed} failed',
   'detail.kind.user': 'User message',
   'detail.kind.assistant': 'Assistant reply',
   'detail.kind.thinking': 'Thinking',
@@ -293,6 +352,13 @@ export const en = {
   'detail.timeline.hiddenNotice': '{n} earlier entries collapsed to stay smooth',
   'detail.timeline.showAll': 'Show all',
   'detail.timeline.chunkRun': '{n} streaming chunks',
+  'detail.timeline.degradedPartial':
+    'Some timeline sources are unavailable. The events shown may be incomplete.',
+  'detail.timeline.degradedAll':
+    'All usable timeline sources failed for the latest request. No new events could be loaded.',
+  'detail.timeline.degradedUnverified':
+    'Timeline source status could not be verified. Events may be incomplete.',
+  'detail.timeline.degradedRetry': 'Use Refresh to try the timeline sources again.',
   'detail.states.loadingTitle': 'Loading the timeline…',
   'detail.states.emptyTitle': 'No events yet',
   'detail.states.emptyHint': 'This session has no normalized events to show yet.',
@@ -443,7 +509,7 @@ export const en = {
   'command.unknownProject': 'Unknown project',
   'command.untitled': '(untitled)',
   'command.truncated': '{n} more sessions not listed',
-  'command.boardHint': 'Open the "Sidecar" tab in the conversation view for the full board',
+  'command.boardHint': 'Open Agent Center',
   'command.unreachable': 'sidecar is not connected',
   'command.unreachableHint':
     'The state snapshot could not be fetched; check that the agent-sidecar plugin is enabled and the daemon is available, then retry.',

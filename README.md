@@ -82,9 +82,24 @@ The agent names below are also the exact values accepted by `list --agent`:
   available.
 - `copilot`: GitHub Copilot CLI `workspace.yaml` metadata only. It has no event
   source in v0.5.0 and is reported as `idle`.
-- `dsh`: DeepSeek DSH projection-cache metadata for listing and status, plus
-  compressed transcript events for watching. Listing and status work without
-  `zstd`; watching does not.
+- `dsh`: DeepSeek DSH projection-cache metadata for listing and status, with
+  bounded durable-session discovery as a fallback for cache-missing headless
+  runs, plus compressed transcript events for watching. `DSH_HOME` selects an
+  independent absolute DSH storage root. Cache-backed listing and status work
+  without `zstd`; durable fallback discovery and watching require it. Durable
+  fallback binds regular transcript files before decoding, requires canonical
+  top-level metadata with a nonempty absolute `cwd`, and fails closed on an
+  incomplete 4,096-entry scan or duplicate session identity. It decodes at
+  most 256 candidates, rejects compressed inputs over 64 MiB, and enforces a
+  3.5-second per-candidate hard limit inside one five-second whole-scan
+  deadline. Its `zstd` command is resolved and bound once per adapter instance,
+  then reused across scans: Linux launches through the fixed no-follow
+  descriptor, while macOS launches a private descriptor-sourced snapshot.
+  Replacing the resolved path therefore cannot change the program that runs.
+  The binding is explicitly closeable and has finalizer cleanup; failure to
+  create it leaves projection-cache discovery available. A bounded
+  device/inode/size/mtime/ctime header cache stores only successful or
+  deterministic-invalid decodes; transient failures are retried.
 - `kimi`: Kimi Code session index, state, and wire JSONL, including discovered
   subagents. `KIMI_CODE_HOME` is honored; otherwise `~/.kimi-code` is used.
 
@@ -444,12 +459,20 @@ agent-sidecar send <session-prefix> "Please review the latest test failure." --a
 agent-sidecar send <session-prefix> "Summarize your result." --allow-write --timeout 120 --json
 agent-sidecar send <session-prefix> "Retry-safe request." --allow-write --request-id <stable-unique-id> --json
 agent-sidecar send <session-prefix> --allow-write -- "-message beginning with a hyphen"
+agent-sidecar send <full-session-id> "Use this exact target." --agent claude --exact-session --allow-write
 printf '%s' "Keep this out of the agent-sidecar argv." | agent-sidecar send <session-prefix> --message-stdin --allow-write
+printf '%s' '<exact-message>' | agent-sidecar send '<full-kimi-session-id>' --agent kimi --exact-session --message-stdin --allow-write --request-id '<stable-unique-id>' --json
 ```
 
 Use it only when the user explicitly requests that message or action.
 `--allow-write` is mandatory because the native agent can contact its provider,
 run tools, and modify session or workspace state.
+
+`--agent NAME` limits resolution to an exact, case-insensitive agent name.
+`--exact-session` requires the complete session ID and disables prefix
+matching. Each option is independently optional; together they provide an
+exact composite agent/session binding for callers that already hold both
+identity fields. The DSH plugin always uses both for external-agent injection.
 
 `--message-stdin` reads the message from standard input instead of the
 positional argument, so the message does not appear in the `agent-sidecar`
@@ -474,6 +497,9 @@ changed target, project, or message fails with `request_conflict`. A retained
 pending reservation, including one left by a crash, replays as
 `request_pending` with delivery unknown and must never be retried
 automatically. Both human and JSON output report `request_id` and `replayed`.
+Before presenting a result, `send` verifies that the receipt's agent, full
+session ID, and request ID match the selected request; an identity mismatch
+fails closed as delivery-unknown `executor_error`.
 
 Every new send is fail-closed behind a persistent audit reservation. Before
 spawning, Sidecar writes and synchronizes a pending record to private
@@ -494,6 +520,15 @@ changes fail closed. Send therefore requires POSIX descriptor-relative,
 no-follow, and file-lock support; it is unsupported and fails closed when
 those primitives are unavailable.
 
+That binding is persistent security state. Do not delete, move, recreate, or
+replace `AGENT_SIDECAR_RUNTIME_DIR`, its audit files, or its home-anchor marker
+to work around `unsafe_lock`. That error means retained history or namespace
+identity cannot be proved; removing the marker does not make a retry safe. The
+default is to fail closed and preserve the evidence. If the operator explicitly
+starts a genuinely new request lineage, it may use a new owner-private runtime
+path and a new request ID, then must retain that namespace and its audit history
+as the new lineage. It is not a recovery or retry of the old request.
+
 Before spawning, `send` also acquires a nonblocking, hashed per-session POSIX
 lock under that retained runtime namespace, repeats the direct scan under the
 lock, and revalidates the target's identity, eligibility, and source freshness.
@@ -510,7 +545,9 @@ native target to execute. A clean no-fork completion can be reported as
 delivered. Any observed fork is conservatively reported as
 `error_code: "cleanup_incomplete"` with delivery unknown, even if the child
 work was synchronous, the native root exited zero, and a response was captured.
-Never retry that result automatically.
+Never retry that result automatically. Kimi retains the fork diagnostic but
+has the stricter durable-proof result rule described below; it is never
+reported delivered.
 
 If the required containment primitives are unsupported, send reports
 `containment_unsupported` with delivery unknown before the native target
@@ -526,17 +563,60 @@ resume or write concurrent history. Status is inferred and can lag, so do not
 send to a session that may still be open or active even when it is reported as
 `waiting`.
 
-Eligible targets are local, top-level `claude`, `codex`, or `cursor-cli`
-sessions in `waiting` or `idle`. `working`, `dead`, child, sidechain, and remote
-sessions are rejected, as are `cursor-ide`, `copilot`, `kimi`, and `dsh`.
+Eligible targets are local, top-level `claude`, `codex`, `cursor-cli`, or
+`kimi` sessions in `waiting` or `idle`. `working`, `dead`, child, sidechain,
+and remote sessions are rejected, as are `cursor-ide`, `copilot`, and `dsh`.
 Claude and Codex receive the native prompt on stdin. Cursor CLI necessarily
-receives it in the child process argv.
+receives it in the child process argv. Kimi uses the protected ACP path below.
+Claude, Codex, and Cursor retain their existing resume and result semantics.
+Direct CLI send still does not support DSH sessions; DSH injection exists only
+inside the DSH plugin.
 
-Compatibility was rechecked on 2026-08-23 without relying on machine-specific
-paths. Kimi Code 0.38 remains unsupported for send because resumed print mode
-auto-approves permissions and exposes the prompt in argv. DSH 0.1.1-rc.2
-remains unsupported because it provides neither session resume nor stdin
-prompt transport.
+**Kimi Code 0.38.0 protected resume.**
+
+Kimi support is deliberately exact-version and manual: only Kimi Code
+`0.38.0` is accepted, and one command starts one separate `kimi acp` process
+to resume the persisted root session. This is not a live inbox, does not
+attach to the existing terminal, and cannot queue or steer an in-progress
+turn. A Kimi session observed as `working` is therefore rejected.
+
+Before the prompt can be written, Sidecar binds the native root identity across
+the selected session, Kimi home, index row, state document, session directory,
+project sources, main-agent home, and root `wire.jsonl`. IDs and project
+filesystem identities must agree; required directories and files must be
+owner-safe and descriptor-anchored. The send plan also binds the Kimi package
+assets and, for the Node distribution, the Node executable and non-system
+dylib closure. Those verified bytes are copied into a private, plan-bound
+snapshot, the version and ACP initialization are reprobed from that snapshot,
+and an owner-process guard rejects another Kimi or matching Node owner in the
+same project. The bounded guard parses canonical Node file-bearing arguments,
+including supported preload/import/loader forms and later script arguments; it
+does not classify every long ordinary Node command as Kimi. Under the required
+owner-safe single-link executable binding, an ordinary relative Node command
+whose cwd has disappeared is skipped. Kimi argv hints, a direct executable
+identity match, malformed or over-budget input that carries such evidence, and
+an unsafe or changed executable identity still fail closed. These checks are
+race and ownership guards, not a claim of cryptographic request-to-turn
+binding.
+
+The bounded ACP sequence initializes with empty client capabilities, lists and
+matches the exact session/project, resumes with `mcpServers: []`, and selects
+Kimi's `default` mode before sending exactly one text prompt. Sidecar advertises
+no MCP, filesystem, or terminal capability. Permission reverse requests receive
+`cancelled`; any question/approval path is cancelled by failing closed, and an
+unsupported reverse method ends the run. The message is carried only in the
+ACP `session/prompt` NDJSON frame, never in the Sidecar or native Kimi argv.
+
+Kimi has a stricter public result boundary than Claude, Codex, and Cursor. A
+Darwin fork can remain diagnostically `cleanup_incomplete`. If ACP nevertheless
+returns rc `0`, settles at `end_turn`, and strict durable root-wire plus state
+evidence proves exactly the matching completed turn, the public result is
+`outcome: "completed"` with `delivery: "unknown"` and CLI exit `1`, never
+delivered. Without that proof the result remains `failed` (or its bounded
+timeout/overflow outcome) with delivery unknown. Do not retry the content
+automatically or manually under a fresh request ID. Reusing the same retained
+request ID may only replay the audit result with `replayed: true`; it never
+spawns another Kimi ACP process.
 
 The message must be nonblank UTF-8 without NUL and at most 16 KiB. Timeout is
 1–900 seconds and defaults to 300. Execution is bounded and Agent Sidecar
@@ -545,11 +625,12 @@ is unknown; never retry an unknown delivery because the agent may already have
 received or acted on the message.
 
 On success, human output is the final native response, or a delivery receipt
-when no response is available. `--json` emits one result object. Exit `0` means
-the native resume completed successfully and delivery is reported as
-`delivered`; exit `1` means runtime failure, timeout, or overflow with
-`delivery: "unknown"`; exit `2` is a preflight or usage rejection before a
-valid resume result; interruption exits `130` and delivery is unknown.
+when no response is available. `--json` emits one result object. For Claude,
+Codex, and Cursor, exit `0` means the native resume completed successfully and
+delivery is reported as `delivered`. Exit `1` covers runtime failure, timeout,
+overflow, and every Kimi completed-but-delivery-unknown result; exit `2` is a
+preflight or usage rejection before a valid resume result; interruption exits
+`130` and delivery is unknown.
 
 A positional message is present in the `agent-sidecar` command argv and may be
 stored in shell history or visible in process listings; `--message-stdin`
@@ -790,14 +871,109 @@ over its Unix socket and manages the daemon lifecycle with a
 probe-adopt-else-host strategy; it never installs the sidecar CLI itself.
 
 Its first-class Agent Center uses DSH's official `shell.overlay` registry and
-host Modal. The main-sidebar entry, footer widget, and `/sidecar` board action
-share an observable navigation store, so the large center opens from blank
-conversations and narrow layouts as well; the conversation `Sidecar` tab
-remains a second entry. This wiring is implemented and covered by automated
-tests. Real `dsh_web` browser acceptance also passed for light, dark, and
-responsive layouts; the shared shell overlay from the sidebar and footer;
-nested focus trapping, restoration, and inert background isolation; and clean
-operation without console or network errors.
+host Modal. The main-sidebar entry, footer widget, and `/sidecar` Agent Center
+action share an observable navigation store, so the large center opens from
+blank conversations and narrow layouts as well; the conversation `Sidecar`
+tab remains a second entry. This wiring is implemented and covered by
+automated tests. Real `dsh_web` browser acceptance also passed for light, dark,
+and responsive layouts; the shared shell overlay from the sidebar and footer;
+nested focus trapping and restoration; accessible contrast; lower-dialog
+`inert` plus `aria-hidden` isolation with exact host-attribute restoration;
+and clean operation without console or network errors. Modal isolation owns
+only the attributes it wrote, drains queued lifecycle records during HMR
+handoff, and handles a nested remove-then-reinsert race without restoring a
+stale opener; closing the reinserted layer restores its exact current opener.
+
+The session board adds an agent-type selector to the existing status,
+time-window, and dead-session filters. Before its first snapshot it shows
+localized loading copy and exposes `aria-busy`; an initial failure ends that
+busy state and remains retryable, while failures after a successful snapshot
+keep the stale cards visible with honest degraded or refresh-failure feedback.
+
+Opening detail from either the board or project view moves focus into the
+detail controls and remembers the source by its agent/session pair. Back
+navigation restores that view's clamped scroll offset and focuses the exact
+source card or row; if it disappeared or was filtered out, focus falls back to
+the source heading. A detail-internal jump to another session intentionally
+uses the same heading fallback on return instead of focusing the original
+session.
+
+Timeline pages use one canonical merge contract across live DSH events,
+late-bound `sessionQuery`, sidecar replay, and the bounded event buffer.
+Sequence-bearing entries deduplicate by sequence, kind, and text so multiple
+blocks from one native sequence remain visible; sequence-less entries use
+timestamp, kind, and text. Same-sequence sibling groups are never split across
+a page boundary, and overlapping pages converge without duplicating an entry
+that later gains normalized text. The response reports each source through
+content-free `sourceOutcomes` plus `degraded` and `reason`. A partial source
+failure keeps available entries visible with a warning; when all usable
+sources fail, the UI says that no new events were loaded and offers refresh
+instead of presenting an empty result as authoritative.
+
+Detail metadata, pagination, newest-window refreshes, and listen refetches use
+separate request generations. A newer refresh supersedes older timeline work,
+late responses cannot roll back metadata, events, health, or cursors, and a
+listen update does not reset the older-history cursor. Optional DSH query
+services are resolved again on each use, so a service mounted after the plugin
+can become available without remounting the browser surface.
+
+Injection has two independent gates: the global `inject.enabled` switch and a
+host-derived verdict for the selected session. Unsupported agents are disabled
+with an accessible localized reason. External delivery is limited to local,
+top-level `claude`, `codex`, `cursor-cli`, and `kimi` sessions in `waiting` or
+`idle`; external `working` sessions, child/sidechain sessions, and all remote,
+dead, or malformed targets are rejected. Kimi uses the protected one-shot ACP
+resume described above, not DSH queue/steer, and its completed result remains
+delivery unknown. Local DSH `working` sessions support the in-process steer
+path, while DSH `waiting`/`idle` sessions proceed through DSH live/cold
+preflight. Turning on the global switch never overrides an ineligible
+per-session verdict.
+
+DSH injection has distinct live and cold paths. An already-loaded Agent keeps
+its existing route and preset and receives the in-process queue/steer message
+without cold-resume checks. If the session is not loaded, the plugin resumes it
+with the host's current default provider and model. Persisted `waiting`,
+`idle`, or cold/no-status sessions need no session preset, but the host must
+resolve a complete current provider/model pair. Otherwise `inject.prepare`
+returns HTTP 409
+`dsh_model_unconfigured` without issuing a confirm token.
+
+The current safety policy does not support preset-bearing cold resume. A
+persisted effective preset, or an available host `agentPresets` service that
+would apply an implicit default, makes `inject.prepare` return HTTP 409
+`dsh_preset_unsupported` without a confirm token. If a stale board row names a
+session that authoritative persistence now proves missing, prepare returns
+HTTP 404 `target_not_found`. If the cold services are absent, fail, reload, or
+cannot prove either state, prepare returns HTTP 502 `executor_error`. Timeouts
+and host-service/HMR generation changes also fail closed; route and preset
+values are not exposed in responses or logs. These cold restrictions do not
+affect injection into an already-live Agent.
+
+For in-process DSH injection, `delivered` means only that the synchronous DSH
+inbox accepted or queued the message. It does not prove that the model turn
+started or succeeded; observe the target timeline or terminal turn for the
+actual result.
+
+The plugin is the only DSH injection surface: direct `agent-sidecar send` does
+not support a `dsh` target. A preset-bearing DSH cold target remains a `409`
+conflict, while an inbox-accepted result still requires timeline observation.
+Kimi has no live inbox or steer exception in the plugin; its protected resume
+uses the external send path and never returns a delivered receipt.
+
+The final real acceptance record is intentionally content-free: Kimi protected
+resume **PASS**, and DSH live steer plus nested-modal/UI behavior **PASS**. No
+private path, session identifier, transcript, prompt, or hash is recorded.
+
+The plugin route guard runs on the current cleartext loopback carrier. It
+requires one valid loopback `Host`; any valid port remains accepted. If an
+`Origin` is supplied, there must be exactly one and it must be the matching
+HTTP host/port tuple. HTTPS origins and duplicate `Host` or `Origin` fields
+fail closed, including duplicates whose values are identical.
+
+The local owner-facing UI may show a full project path because it is useful for
+distinguishing local workspaces. That path is sensitive evidence, not a public
+identifier: redact it, along with session IDs and content, before sharing
+screenshots, copied JSON, logs, or support artifacts.
 
 Install it into a dsh profile; the command delegates package resolution to
 pnpm:
@@ -827,12 +1003,18 @@ Key configuration, summarized:
   Do not enable it on multi-user hosts; see the
   [Security Policy](SECURITY.md).
 - `analysis.enabled` (default **off**) gates AI bypass analysis, which
-  consumes model tokens. `analysis.provider` and `analysis.model` optionally
-  route analysis sessions to an explicit model; when unset, the host's
-  default model selection is reused.
+  consumes model tokens. `analysis.provider` and `analysis.model` form a pair:
+  both blank reuse the host default, and both nonblank select an explicit
+  route. The Settings card reports the resolved route and blocks saving a
+  partial pair.
 - `skill.provide` (default on) embeds the agent-sidecar skill through the dsh
   skill registry; a filesystem-installed skill of the same name automatically
   takes precedence.
+
+The Settings card exposes the live inject, analysis, and UI groups for staged
+editing. Daemon lifecycle, sidecar invocation, and stream cadence are
+read-only there: change those values in the profile plugin row's
+`cordis.patch` `config` block and restart DSH.
 
 The browser UI follows the host's DSH `--dsw-*` tokens and Skin Center by
 default. Skins and plugins can customize it through stable
@@ -894,14 +1076,15 @@ runtime files, follow the sanitization requirements in the Security Policy.
 
 Version 0.5.0 provides local observation for the supported sources, Cursor CLI
 event watching, remote `list`/`status` snapshots, concurrent local and remote
-`watch --all --remote`, and experimental local send for Claude, Codex, and
-Cursor CLI. It packages the CLI for pipx and deterministic zipapp use, and adds
-explicit macOS LaunchAgent management plus private rotating daemon diagnostics.
-Remote prefix watch and remote send remain unsupported. Kimi injection remains
-deferred; `send` does not support dsh sessions, whose injection is available
-only through the dsh plugin; Cursor IDE and Copilot send are unsupported. The
-opt-in HTTP panel and read-only API remain numeric-IPv4-loopback-only and do
-not extend remote monitoring or provide a control plane.
+`watch --all --remote`, and experimental local send for Claude, Codex, Cursor
+CLI, and the exact Kimi Code 0.38.0 protected ACP path. It packages the CLI for
+pipx and deterministic zipapp use, and adds explicit macOS LaunchAgent
+management plus private rotating daemon diagnostics. Remote prefix watch and
+remote send remain unsupported. `send` does not support dsh sessions, whose
+injection is available only through the dsh plugin; Cursor IDE and Copilot send
+are unsupported. The opt-in HTTP panel and read-only API remain
+numeric-IPv4-loopback-only and do not extend remote monitoring or provide a
+control plane.
 
 ## FAQ
 

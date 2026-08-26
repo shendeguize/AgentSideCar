@@ -115,10 +115,67 @@ in shell history or process listings; `send --message-stdin` reads the message
 from standard input and keeps it out of the Sidecar command line. For Cursor
 CLI the prompt is still passed on the native child command line whichever
 source is used, because that upstream resume contract requires argv transport,
-so this residual exposure remains. Never send secrets. Private audit records
-avoid storing message and response content, but their key and logs remain
-sensitive local state. Delivery reported as unknown must not be retried
+so this residual exposure remains. Kimi's protected ACP path carries the
+message only in the `session/prompt` NDJSON frame and does not place it in
+either Sidecar's or native Kimi's argv. Never send secrets. Private audit
+records avoid storing message and response content, but their key and logs
+remain sensitive local state. Delivery reported as unknown must not be retried
 automatically because the agent may already have acted.
+
+The send-audit namespace is persistently bound to its canonical runtime inode,
+home-anchor marker, key identity, and retained history. Do not delete, move,
+recreate, or replace `AGENT_SIDECAR_RUNTIME_DIR`, the marker, or audit files to
+clear `unsafe_lock`: that result means the previous namespace history or
+identity cannot be proved. Preserve it and fail closed; deleting evidence does
+not authorize a retry. Only an explicitly new request lineage may select a new
+owner-private runtime path and new request ID, and that new namespace and its
+audit history must then be retained. It is not recovery of the old lineage.
+
+Kimi mutation is limited to the exact supported Kimi Code `0.38.0` and a
+top-level local session observed as `waiting` or `idle`. Sidecar binds and
+revalidates the selected Kimi home, project sources, session index/state
+identity, main-agent home, root session directory, and root wire. The send
+plan additionally binds a private snapshot of the package assets and, for the
+Node distribution, the Node executable plus non-system dylib closure. Version
+and ACP initialization are reprobed from the snapshot, and an owner-process
+guard rejects another Kimi or matching Node owner in the project. That bounded
+guard recognizes direct Kimi hints and executable identity and parses only
+canonical Node file arguments, including supported preload/import/loader and
+later script forms. It does not turn arbitrary long ordinary Node commands
+into blockers. The required owner-safe executable is single-link; with that
+boundary, an ordinary relative Node command with an inaccessible/deleted cwd
+is ignored. Kimi hints, identity matches, malformed or over-budget input that
+carries such evidence, and unsafe or changed executable identity still fail
+closed.
+
+Those mechanisms protect the local spawn-resume boundary against the specific
+filesystem, replacement, ownership, and concurrent-owner races they check.
+They do not cryptographically bind a request ID or audit receipt to one remote
+provider turn, and they do not turn Kimi into a sandbox. The ACP client
+advertises no MCP, filesystem, or terminal capability; it resumes with no MCP
+servers. Permission reverse requests receive `cancelled`; any question or
+approval path is cancelled by failing closed, and unsupported reverse methods
+end the run. The resumed Kimi process and provider still retain their own
+security properties.
+
+Kimi has no live inbox or steering path. `working`, child, remote, dead, and
+malformed Kimi targets fail closed. Darwin fork containment may retain a
+`cleanup_incomplete` diagnostic. Only when ACP returns rc `0`, settles at
+`end_turn`, and strict durable root-wire and state proof identifies the
+matching completed turn does the public result become `outcome: "completed"`,
+`delivery: "unknown"`, with CLI exit `1`; it is never delivered. Without that
+proof it remains failed (or the bounded timeout/overflow outcome) and unknown.
+Do not retry the same content under a new request ID. Reusing the same retained
+request ID can only replay its audit receipt and does not spawn again. Claude,
+Codex, and Cursor retain their existing send semantics.
+
+`send --agent NAME` optionally restricts selection to an exact,
+case-insensitive agent name, and `--exact-session` optionally disables prefix
+matching. The DSH plugin always combines them for external delivery, so a
+known agent and full session ID form one exact target. Both `send` and the
+plugin validate the returned agent, full session ID, and request ID against
+the selected request; an identity mismatch is delivery-unknown
+`executor_error`, never success and never an automatic retry.
 
 Agent Sidecar makes no general claim of sandboxing, process isolation, data-at-
 rest encryption, or end-to-end encryption. Platform permissions, SSH, and
@@ -133,11 +190,15 @@ The optional DSH plugin (`plugin/`, published as
 server under `/plugins/agent-sidecar/api`. The dsh web server has no
 authentication layer and its `/api` fence does not cover plugin routes, so
 the plugin carries its own guard: it refuses non-loopback peers even when dsh
-binds a wider address, requires a loopback `Host` authority, requires a
-same-origin `Origin` when one is present, refuses declared cross-site
-fetches, and forces JSON bodies on state-changing methods. The plugin reaches
-the daemon over the Unix socket only; it never reads `http.token` and never
-hands any credential to the browser.
+binds a wider address and requires exactly one loopback `Host` authority. A
+single valid loopback Host remains accepted on any valid port. On the current
+cleartext HTTP carrier, an `Origin`, when present, must also appear exactly
+once and use `http` with the same normalized host and effective port; HTTPS
+origins are rejected. Duplicate `Host` or `Origin` fields fail closed even
+when their values match. The guard also refuses declared cross-site fetches
+and forces JSON bodies on state-changing methods. The plugin reaches the
+daemon over the Unix socket only; it never reads `http.token` and never hands
+any credential to the browser.
 
 Those checks defend against browser-mediated attacks such as CSRF and DNS
 rebinding. They do not authenticate the caller: any process on the same
@@ -159,6 +220,43 @@ enable `inject.enabled` on a multi-user host, and be aware that normalized
 session-event content is readable by same-host processes while the plugin is
 mounted.
 
+The global switch does not replace per-session eligibility. External
+injection is limited to local top-level Claude, Codex, Cursor CLI, and Kimi
+sessions observed as `waiting` or `idle`; external working, child/sidechain,
+remote, dead, malformed, and unsupported targets fail closed. Kimi uses its
+protected manual spawn-resume path and never gains live queue/steer semantics.
+Local DSH working sessions can use the in-process steer path, while persisted
+DSH waiting, idle, and cold/no-status sessions enter live/cold preflight.
+Disabled controls expose a localized accessible reason instead of silently
+disappearing.
+
+For cold DSH targets, the board is only a staleable observation. If
+authoritative persistence proves the target missing, prepare returns HTTP 404
+`target_not_found`; a proved effective preset is unsupported and returns HTTP
+409 `dsh_preset_unsupported`; an absent, failed, reloaded, malformed, or
+otherwise indeterminate persistence/preset authority returns HTTP 502
+`executor_error`. None of these rejections issues a confirmation token or
+starts a resume.
+
+Cold DSH resume requires the host to resolve a complete current default
+provider/model pair; missing or partial model configuration returns HTTP 409.
+For a live DSH target, queue/steer acceptance means only that the synchronous
+inbox accepted or queued the message. It is not proof of model execution or
+success, so the operator must observe the target timeline. Direct CLI send
+does not support DSH.
+
+Nested modal isolation mutates only attributes it owns. HMR handoff drains
+queued lifecycle records, and remove/reinsert races retain the current opener
+instead of restoring stale focus. Content-free real acceptance records only
+Kimi protected-resume PASS and DSH steer/UI PASS; private paths, identifiers,
+content, and hashes are not acceptance evidence.
+
+The local owner-facing UI may display full project paths to distinguish local
+workspaces. Timeline `sourceOutcomes`, `degraded`, and `reason` are deliberately
+content-free, but timeline entries, project paths, session identifiers, and
+screenshots remain sensitive. Local visibility is not authorization to publish
+that evidence.
+
 AI bypass analysis is likewise off by default (`analysis.enabled: false`)
 because it consumes model tokens. Analysis runs in dedicated, individually
 stoppable dsh sessions with bounded input truncation, bounded turn timeouts,
@@ -177,8 +275,8 @@ Prefer a minimal reproduction with synthetic data. Before attaching any
   authorization headers, cookies, environment values, and provider data;
 - remove SSH host aliases, hostnames, IP addresses, inventory details, remote
   paths, usernames, and authentication material; and
-- review screenshots and terminal output for shell history and adjacent
-  sensitive content.
+- review screenshots and terminal output for plugin-displayed project paths,
+  shell history, and adjacent sensitive content.
 
 Do not attach raw transcripts, databases or WAL files, `http.token`,
 `audit.key`, private keys, credential files, or an unsanitized runtime

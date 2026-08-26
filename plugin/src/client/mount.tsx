@@ -16,10 +16,10 @@
  * write (it recovers by reloading host state instead).
  */
 
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
-import { Board } from './board/Board.tsx'
+import { Board, type SessionFocusTarget } from './board/Board.tsx'
 import { ProjectView } from './board/project-view.tsx'
 import { SidecarWidget } from './widget.tsx'
 import { SettingsCard, type SettingsCardValues, type SidecarDaemonStatus } from './settings-card.tsx'
@@ -47,6 +47,66 @@ import {
 /** Board-tab main views (detail is an overlay route on top of either). */
 type MainView = 'board' | 'projects'
 
+type DetailRoute = {
+  id: string
+  hint: DetailHeaderHint | null
+  returnRequest: ReturnRequest
+}
+
+type ReturnRequest = {
+  view: MainView
+  focusTarget: SessionFocusTarget | null
+}
+
+/**
+ * Reserved in-memory identity that cannot match a real adapter/session pair.
+ * It asks Board/ProjectView to take their existing missing-card fallback.
+ */
+const FALLBACK_FOCUS_TARGET = Object.freeze({
+  agent: Symbol('agent-sidecar-fallback-agent'),
+  sessionId: Symbol('agent-sidecar-fallback-session'),
+}) as unknown as SessionFocusTarget
+
+interface AnimationFrameScheduler {
+  requestAnimationFrame: (callback: FrameRequestCallback) => number
+  cancelAnimationFrame: (handle: number) => void
+}
+
+/** Clamp a remembered offset to the currently rendered scroll range. */
+export function clampScrollTop(
+  requested: number,
+  scrollHeight: number,
+  clientHeight: number,
+): number {
+  const normalized = Number.isFinite(requested) ? requested : 0
+  const maximum = Math.max(0, scrollHeight - clientHeight)
+  return Math.min(Math.max(0, normalized), maximum)
+}
+
+/**
+ * Run restoration after two animation frames and return an idempotent
+ * cancellation handle for rapid re-navigation, StrictMode, HMR, and unmount.
+ */
+export function scheduleAfterLayout(
+  scheduler: AnimationFrameScheduler,
+  callback: () => void,
+): () => void {
+  let active = true
+  let frame: number | null = scheduler.requestAnimationFrame(() => {
+    if (!active) return
+    frame = scheduler.requestAnimationFrame(() => {
+      frame = null
+      if (active) callback()
+    })
+  })
+  return () => {
+    if (!active) return
+    active = false
+    if (frame !== null) scheduler.cancelAnimationFrame(frame)
+    frame = null
+  }
+}
+
 /**
  * Project-correlation view bound to its store: refresh on entry, then
  * throttled SSE-driven refreshes for as long as the view is on screen.
@@ -54,7 +114,11 @@ type MainView = 'board' | 'projects'
 function ProjectsContainer(props: {
   controller: SidecarController
   store: ProjectsStorePort
-  onSelectSession: (sessionId: string) => void
+  onSelectSession: (target: SessionFocusTarget) => void
+  rootRef: (element: HTMLDivElement | null) => void
+  onScrollTopChange: (scrollTop: number) => void
+  returnFocusTarget: SessionFocusTarget | null
+  onReturnFocusConsumed: () => void
 }): ReactElement {
   const { controller, store } = props
   useEffect(() => {
@@ -68,6 +132,10 @@ function ProjectsContainer(props: {
       loading={state.loading}
       error={state.error === null ? null : detailErrorText(state.error)}
       onSelectSession={props.onSelectSession}
+      rootRef={props.rootRef}
+      onScrollTopChange={props.onScrollTopChange}
+      returnFocusTarget={props.returnFocusTarget}
+      onReturnFocusConsumed={props.onReturnFocusConsumed}
     />
   )
 }
@@ -99,9 +167,15 @@ function createBoardContent(
     const state = useSyncExternalStore(subscribe, getState, getState)
     const filters = useSyncExternalStore(subscribe, getFilters, getFilters)
     const [mainView, setMainView] = useState<MainView>('board')
-    const [detail, setDetail] = useState<{ id: string; hint: DetailHeaderHint | null } | null>(
-      null,
-    )
+    const [detail, setDetail] = useState<DetailRoute | null>(null)
+    const [returnFocusRequest, setReturnFocusRequest] = useState<ReturnRequest | null>(null)
+    const viewRootsRef = useRef<Record<MainView, HTMLDivElement | null>>({
+      board: null,
+      projects: null,
+    })
+    const scrollTopsRef = useRef<Record<MainView, number>>({ board: 0, projects: 0 })
+    const returnRequestRef = useRef<ReturnRequest | null>(null)
+    const pendingFocusCancelRef = useRef<(() => void) | null>(null)
     // One project store per tab mount, created lazily with the integration
     // seam; state survives board↔projects↔detail switches within the tab.
     const [projectsStore] = useState<ProjectsStorePort | null>(
@@ -109,27 +183,121 @@ function createBoardContent(
     )
     useEffect(() => () => { projectsStore?.dispose() }, [projectsStore])
 
-    const openDetail = (sessionId: string): void => {
-      if (integration === undefined) return
-      const hint =
-        findCardHint(state.sessions, sessionId) ??
-        (projectsStore !== null
-          ? findProjectSessionHint(projectsStore.getState().groups, sessionId)
-          : null)
-      setDetail({ id: sessionId, hint })
+    const cancelPendingFocus = useCallback((): void => {
+      pendingFocusCancelRef.current?.()
+      pendingFocusCancelRef.current = null
+    }, [])
+
+    const clearReturnFocus = useCallback((): void => {
+      returnRequestRef.current = null
+      setReturnFocusRequest(null)
+    }, [])
+
+    const consumeReturnFocus = useCallback((): void => {
+      setReturnFocusRequest((current) => {
+        if (current !== null && returnRequestRef.current === current) {
+          returnRequestRef.current = null
+        }
+        return null
+      })
+    }, [])
+
+    const setBoardRoot = useCallback((element: HTMLDivElement | null): void => {
+      viewRootsRef.current.board = element
+    }, [])
+    const setProjectsRoot = useCallback((element: HTMLDivElement | null): void => {
+      viewRootsRef.current.projects = element
+    }, [])
+
+    const saveVisibleScroll = (view: MainView): void => {
+      const root = viewRootsRef.current[view]
+      if (root !== null) scrollTopsRef.current[view] = root.scrollTop
     }
+
+    const detailHintFor = (sessionId: string): DetailHeaderHint | null =>
+      findCardHint(state.sessions, sessionId) ??
+      (projectsStore !== null
+        ? findProjectSessionHint(projectsStore.getState().groups, sessionId)
+        : null)
+
+    const openDetail = (target: SessionFocusTarget, source: MainView): void => {
+      if (integration === undefined) return
+      cancelPendingFocus()
+      clearReturnFocus()
+      saveVisibleScroll(source)
+      const returnRequest: ReturnRequest = { view: source, focusTarget: target }
+      setDetail({
+        id: target.sessionId,
+        hint: detailHintFor(target.sessionId),
+        returnRequest,
+      })
+    }
+
+    const switchDetailSession = (sessionId: string): void => {
+      setDetail((current) => current === null
+        ? null
+        : {
+            id: sessionId,
+            hint: detailHintFor(sessionId),
+            returnRequest: {
+              view: current.returnRequest.view,
+              focusTarget: null,
+            },
+          })
+    }
+
+    const closeDetail = (): void => {
+      if (detail === null) return
+      cancelPendingFocus()
+      returnRequestRef.current = detail.returnRequest
+      setDetail(null)
+    }
+
+    const switchMainView = (next: MainView): void => {
+      if (next === mainView) return
+      cancelPendingFocus()
+      clearReturnFocus()
+      saveVisibleScroll(mainView)
+      setMainView(next)
+    }
+
+    useEffect(() => {
+      if (detail !== null || typeof window === 'undefined') return
+      cancelPendingFocus()
+      const request = returnRequestRef.current
+      const view = request?.view ?? mainView
+      pendingFocusCancelRef.current = scheduleAfterLayout(window, () => {
+        pendingFocusCancelRef.current = null
+        if (request !== null && returnRequestRef.current !== request) return
+        const root = viewRootsRef.current[view]
+        if (root === null || !root.isConnected) return
+        root.scrollTop = clampScrollTop(
+          scrollTopsRef.current[view],
+          root.scrollHeight,
+          root.clientHeight,
+        )
+        if (request === null) return
+        setReturnFocusRequest(request)
+      })
+      return cancelPendingFocus
+    }, [cancelPendingFocus, detail, mainView])
+
+    useEffect(() => () => {
+      returnRequestRef.current = null
+      cancelPendingFocus()
+    }, [cancelPendingFocus])
 
     if (integration !== undefined && detail !== null) {
       return (
         <SidecarDetailView
           // key remounts per session: fresh stores, no state bleed on jumps.
-          key={detail.id}
+          key={`${detail.returnRequest.focusTarget?.agent ?? 'internal'}:${detail.id}`}
           sessionId={detail.id}
           hint={detail.hint}
           controller={controller}
           integration={integration.detail}
-          onClose={() => { setDetail(null) }}
-          onSelectSession={openDetail}
+          onClose={closeDetail}
+          onSelectSession={switchDetailSession}
         />
       )
     }
@@ -142,7 +310,7 @@ function createBoardContent(
             className={css['switcherButton']}
             data-active={mainView === 'board' || undefined}
             aria-pressed={mainView === 'board'}
-            onClick={() => { setMainView('board') }}
+            onClick={() => { switchMainView('board') }}
           >
             {t('board.viewBoard')}
           </button>
@@ -151,7 +319,7 @@ function createBoardContent(
             className={css['switcherButton']}
             data-active={mainView === 'projects' || undefined}
             aria-pressed={mainView === 'projects'}
-            onClick={() => { setMainView('projects') }}
+            onClick={() => { switchMainView('projects') }}
           >
             {t('board.viewProjects')}
           </button>
@@ -161,7 +329,17 @@ function createBoardContent(
             <ProjectsContainer
               controller={controller}
               store={projectsStore}
-              onSelectSession={openDetail}
+              onSelectSession={(target) => { openDetail(target, 'projects') }}
+              rootRef={setProjectsRoot}
+              onScrollTopChange={(scrollTop) => {
+                scrollTopsRef.current.projects = scrollTop
+              }}
+              returnFocusTarget={
+                returnFocusRequest?.view === 'projects'
+                  ? returnFocusRequest.focusTarget ?? FALLBACK_FOCUS_TARGET
+                  : null
+              }
+              onReturnFocusConsumed={consumeReturnFocus}
             />
           )
           : (
@@ -170,6 +348,8 @@ function createBoardContent(
               {...state.daemonDetail !== undefined ? { daemonDetail: state.daemonDetail } : {}}
               streamHealth={state.streamHealth}
               lastReconcileAtMs={state.lastReconcileAtMs}
+              hasSnapshot={state.hasSnapshot}
+              initialLoadFailed={state.initialLoadFailed}
               sessions={state.sessions}
               filters={filters}
               onFiltersChange={(next) => {
@@ -178,7 +358,17 @@ function createBoardContent(
               // Hand the promise through so the board can render the
               // in-flight state and a failure notice (UX-07).
               onRefresh={() => controller.refresh()}
-              onSelectSession={openDetail}
+              onSelectSession={(target) => { openDetail(target, 'board') }}
+              rootRef={setBoardRoot}
+              onScrollTopChange={(scrollTop) => {
+                scrollTopsRef.current.board = scrollTop
+              }}
+              returnFocusTarget={
+                returnFocusRequest?.view === 'board'
+                  ? returnFocusRequest.focusTarget ?? FALLBACK_FOCUS_TARGET
+                  : null
+              }
+              onReturnFocusConsumed={consumeReturnFocus}
             />
           )}
       </>

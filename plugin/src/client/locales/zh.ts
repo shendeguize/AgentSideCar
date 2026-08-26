@@ -49,6 +49,7 @@ export const zh = {
   'settings.expand': '展开',
   'settings.collapse': '收起',
   'settings.invalidNumber': '请输入不小于 {min} 的整数',
+  'settings.liveEffectNote': '本节设置保存后即时生效,无需重载插件或重启 DSH。',
 
   // ── daemon lifecycle ───────────────────────────────────────────────────
   'settings.sectionDaemon': 'daemon 生命周期',
@@ -75,6 +76,8 @@ export const zh = {
   'settings.daemonFailedNote':
     '连续托管失败已达熔断阈值;看板降级为最后快照。排查 sidecar 命令后可点击重试。',
   'settings.daemonRetry': '重试',
+  'settings.daemonProfileNote':
+    '此处只读:daemon 生命周期参数以 profile 的 cordis.patch 插件行 config 为准。Settings 修改不会驱动 supervisor;请编辑 profile patch 并重启 DSH。',
 
   // ── sidecar invocation ─────────────────────────────────────────────────
   'settings.sectionSidecar': 'sidecar 调用',
@@ -84,6 +87,8 @@ export const zh = {
   'settings.sidecarRuntimeDirLabel': '运行时目录',
   'settings.sidecarRuntimeDirHint':
     '留空使用默认 ~/.agent_sidecar(尊重 AGENT_SIDECAR_RUNTIME_DIR 环境变量);非空时经环境变量传给受托管的 daemon。',
+  'settings.sidecarProfileNote':
+    '此处只读:sidecar 命令与运行时目录以 profile 的 cordis.patch 插件行 config 为准。Settings 修改不会驱动 daemon 调用;请编辑 profile patch 并重启 DSH。',
 
   // ── stream reconciliation ──────────────────────────────────────────────
   'settings.sectionStream': '数据流对账',
@@ -91,6 +96,8 @@ export const zh = {
   'settings.streamActiveMsHint': '有会话工作中时的 status 快照周期。',
   'settings.streamIdleMsLabel': '空闲对账周期(毫秒)',
   'settings.streamIdleMsHint': '无会话工作时的 status 快照周期。',
+  'settings.streamProfileNote':
+    '此处只读:数据流对账周期以 profile 的 cordis.patch 插件行 config 为准。Settings 修改不会驱动 reconciler;请编辑 profile patch 并重启 DSH。',
 
   // ── injection ──────────────────────────────────────────────────────────
   'settings.sectionInject': '消息注入',
@@ -109,6 +116,18 @@ export const zh = {
   'settings.analysisEnabledLabel': '启用 AI 旁路分析',
   'settings.analysisEnabledHint':
     '按需拉起 dsh 分析会话解读被观测会话(消耗模型 token,默认关闭)。',
+  'settings.analysisProviderLabel': '分析 provider',
+  'settings.analysisProviderHint':
+    '两个路由字段都留空时使用宿主默认模型;仅当 model 也非空时才使用显式 provider。',
+  'settings.analysisProviderPlaceholder': '宿主默认',
+  'settings.analysisModelLabel': '分析 model',
+  'settings.analysisModelHint':
+    '两个路由字段都留空时使用宿主默认模型;仅当 provider 也非空时才使用显式 model。',
+  'settings.analysisModelPlaceholder': '宿主默认',
+  'settings.analysisRouteHostDefault': '当前路由:宿主默认模型(provider 与 model 均为空)。',
+  'settings.analysisRouteExplicit': '当前路由:显式 {provider} / {model}。',
+  'settings.analysisRoutePartial':
+    'provider 与 model 必须同时留空或同时填写。请补全这一对或全部清空;保存已禁用。',
 
   // ── board UI ───────────────────────────────────────────────────────────
   'settings.sectionUi': '看板界面',
@@ -122,6 +141,8 @@ export const zh = {
   'settings.skillProvideLabel': '内嵌提供 skill',
   'settings.skillProvideHint':
     '经 registerProvider 向 dsh 提供 agent-sidecar skill(M4 启用;重启后生效)。',
+  'settings.skillRestartNote':
+    'skill.provide 在插件加载时从 profile 的 cordis.patch 读取。请编辑 profile patch,然后重载插件或重启 DSH;Settings 修改不会重新注册 skill。',
 
   // ── inject panel: chrome & editor (T4.5, design §5.1 view 3) ───────────
   'inject.title': '注入消息',
@@ -148,6 +169,17 @@ export const zh = {
     '本次注入会被记入 sidecar 审计日志(含字节数与内容指纹,不含消息明文)。',
   'inject.prepare': '准备注入',
   'inject.preparing': '校验中…',
+  'inject.kimiTitle': '安全恢复',
+  'inject.kimiConfirmTitle': '确认安全恢复',
+  'inject.kimiMessagePlaceholder': '输入安全恢复消息(上限 16 KiB;请勿粘贴密钥等敏感内容)',
+  'inject.kimiActionLabel': 'Kimi 操作',
+  'inject.kimiModeLabel': '安全恢复',
+  'inject.kimiModeHint':
+    '将启动独立的 Kimi ACP 进程并通过该进程恢复会话；不会附加到现有终端，也不会 steer 现有终端。',
+  'inject.kimiAuditNote':
+    '本次安全恢复会被记入 sidecar 审计日志(含字节数与内容指纹,不含消息明文)。',
+  'inject.kimiPrepare': '准备安全恢复',
+  'inject.kimiPreparing': '校验中…',
 
   // ── inject panel: confirm phase ──────────────────────────────────────
   'inject.planTargetLabel': '目标现状',
@@ -158,6 +190,8 @@ export const zh = {
   'inject.countdown': '确认令牌 {seconds} 秒后过期',
   'inject.confirmExecute': '确认注入',
   'inject.executing': '注入中…',
+  'inject.kimiConfirmExecute': '开始安全恢复',
+  'inject.kimiExecuting': '正在启动安全恢复…',
   'inject.cancel': '取消',
   'inject.tokenExpired': '确认已超时,令牌失效;请重新准备注入。',
 
@@ -167,6 +201,11 @@ export const zh = {
   'inject.resultUnknown':
     '结果未知:消息可能已投递。请勿重试;请前往目标会话核对后再决定下一步。',
   'inject.resultReplayed': '幂等重放:返回的是此前同一请求的结果,未发生二次注入。',
+  'inject.kimiResultUnknown':
+    'Kimi 0.38 已完成本次安全恢复，但内容的送达状态无法证明。请勿自动或手工盲目重试相同内容。',
+  'inject.kimiResultFailed': '提示词发送前已拒绝：未向 Kimi 发送消息。',
+  'inject.kimiResultReplayed':
+    '安全重放：这是同一请求的缓存结果；未启动新的 Kimi ACP 进程，也未再次发送内容。',
   'inject.reprepare': '重新准备',
   'inject.observeListen': '开启监听观察反应',
 
@@ -175,6 +214,13 @@ export const zh = {
   'inject.errInvalidMessage': '消息未通过服务端校验。',
   'inject.errTargetNotFound': '目标会话不存在或已离开观测范围。',
   'inject.errTargetDead': '目标会话已结束(dead),无法注入。',
+  'inject.errWorkingSession': '该外部 agent 会话正在工作;仅 waiting 或 idle 状态可注入。',
+  'inject.kimiErrWorkingSession':
+    '该 Kimi 会话正在工作；仅 waiting 或 idle 状态可进行安全恢复。',
+  'inject.errChildSession': 'Agent Sidecar 不允许注入外部 agent 的子会话或 sidechain 会话。',
+  'inject.errRemoteSession': '远端会话不能从当前本机 host 注入。',
+  'inject.errInvalidSession':
+    'host 未提供有效的目标注入资格判定;注入保持禁用。请更新或重启 host 后重新打开该会话。',
   'inject.errTooManyPending': '待确认的注入请求过多,请稍后再试。',
   'inject.errTokenMissing': '确认令牌缺失或未被签发;请重新准备。',
   'inject.errTokenExpired': '确认令牌已过期;请重新准备。',
@@ -186,6 +232,7 @@ export const zh = {
   'inject.errAborted': '请求已取消。',
   'inject.errNetwork': '网络错误,请求未能送达。',
   'inject.errParse': '服务端响应无法解析。',
+  'inject.errUnknown': '请求因未知原因失败。',
   'inject.errGeneric': '请求失败({code})。',
 
   // ── board tab chrome + session board (design §5.1 / §5.3) ──────────────
@@ -229,11 +276,15 @@ export const zh = {
   'board.topbar.dismiss': '知道了',
   'board.topbar.showDead': '显示已结束',
   'board.topbar.timeWindow': '时间窗',
+  'board.topbar.agentFilter': 'Agent',
+  'board.topbar.agentFilterAria': '按 agent 类型过滤会话',
+  'board.topbar.allAgents': '全部 agent',
   'board.topbar.countWorking': '{n} 工作中',
   'board.topbar.countWaiting': '{n} 等待中',
   'board.topbar.countTotal': '共 {n} 个会话',
   'board.topbar.filterByStatusTitle': '只看「{label}」的会话',
   'board.topbar.clearStatusFilterTitle': '取消状态过滤,显示全部会话',
+  'board.states.loading': '正在加载首个 sidecar 快照…',
   'board.group.collapseTitle': '收起该分组',
   'board.group.expandTitle': '展开该分组',
   'board.group.showAll': '展开全部 {n} 个会话',
@@ -283,6 +334,8 @@ export const zh = {
   'detail.sources.sidecarReplay': 'sidecar 重放',
   'detail.sources.sidecarBuffer': 'sidecar 缓冲',
   'detail.sources.none': '来源未知',
+  'detail.sources.healthSummary':
+    '{available} 个可用 · {unavailable} 个不可用 · {failed} 个失败',
   'detail.kind.user': '用户消息',
   'detail.kind.assistant': '助手回复',
   'detail.kind.thinking': '思考',
@@ -306,6 +359,13 @@ export const zh = {
   'detail.timeline.hiddenNotice': '为保持流畅,较早的 {n} 条已折叠',
   'detail.timeline.showAll': '全部显示',
   'detail.timeline.chunkRun': '{n} 个流式分块',
+  'detail.timeline.degradedPartial':
+    '部分时间线来源暂不可用,当前显示的事件可能不完整。',
+  'detail.timeline.degradedAll':
+    '最近一次请求的可用时间线来源均读取失败,未能加载新事件。',
+  'detail.timeline.degradedUnverified':
+    '无法确认时间线来源状态,当前事件可能不完整。',
+  'detail.timeline.degradedRetry': '可点击「刷新」重试时间线来源。',
   'detail.states.loadingTitle': '正在加载时间线…',
   'detail.states.emptyTitle': '暂无事件',
   'detail.states.emptyHint': '该会话还没有可展示的规范化事件。',
@@ -445,7 +505,7 @@ export const zh = {
   'command.unknownProject': '未知项目',
   'command.untitled': '(无标题)',
   'command.truncated': '还有 {n} 个会话未列出',
-  'command.boardHint': '打开会话视图的「Sidecar」Tab 查看完整看板',
+  'command.boardHint': '打开 Agent Center',
   'command.unreachable': 'sidecar 未连接',
   'command.unreachableHint':
     '无法获取状态快照;请确认 agent-sidecar 插件已启用、daemon 可用后重试。',

@@ -17,10 +17,10 @@ from sidecar.adapters.base import (
     epoch_seconds,
     local_timestamp,
     read_json_object,
-    read_jsonl_tail,
     snip,
     text_content,
 )
+from sidecar.kimi_identity import read_kimi_index_metadata
 from sidecar.model import Event, Session, Status
 
 _ACTIVE_WINDOW_S = 120.0
@@ -333,7 +333,10 @@ class KimiAdapter(Adapter):
     def discover(self, home: Path) -> Iterable[Session]:
         root = _configured_home(home)
         index_path = root / "session_index.jsonl"
-        index_records = read_jsonl_tail(index_path, max_bytes=_INDEX_BYTES)
+        index_records, _index_valid = read_kimi_index_metadata(
+            index_path,
+            max_bytes=_INDEX_BYTES,
+        )
         latest: Dict[str, Mapping[str, Any]] = {}
         for record in index_records:
             session_id = record.get("sessionId")

@@ -25,9 +25,11 @@
  *
  * The skill body is a dsh-scene condensation of the canonical
  * `skills/agent-sidecar/SKILL.md` (same repo): observation flows through
- * the CLI and this plugin's web board, injection flows through the plugin
- * panel (sidecar `send` is `unsupported_dsh` for dsh sessions), and the
- * S5/S6 wording — send only on an explicit same-turn request, never retry
+ * the CLI and this plugin's web board, while injection uses either the
+ * plugin's in-process DSH path or the sidecar send boundary for supported
+ * external agents. Direct sidecar `send` remains `unsupported_dsh`; that
+ * does not make the plugin's DSH injection unsupported. The S5/S6 wording
+ * — send only on an explicit same-turn request, never retry
  * `delivery: "unknown"` — is preserved verbatim in spirit. The body is
  * embedded (not read from disk) so the npm package needs no extra assets;
  * `resourceBase` is `opaque` pointing readers at the canonical repo docs.
@@ -147,8 +149,8 @@ export const SIDECAR_SKILL_DESCRIPTION =
 /**
  * dsh-scene skill body: semantically consistent with the canonical
  * `skills/agent-sidecar/SKILL.md`, condensed for the plugin context —
- * observation goes CLI/board, injection goes the plugin panel (design §7
- * path two: "dsh 会话注入应引导走插件通路而非 send,因 unsupported_dsh").
+ * observation goes CLI/board, while mutation distinguishes protected Kimi
+ * spawn-resume, in-process DSH injection, and the external send CLI path.
  */
 export const SIDECAR_SKILL_CONTENT = `# Agent Sidecar (dsh plugin edition)
 
@@ -174,11 +176,33 @@ the default; every mutation needs an explicit user request in the same turn.
 
 ## Inject (explicit request only)
 
-- For **dsh sessions**, \`agent-sidecar send\` is unsupported
-  (\`unsupported_dsh\`: DSH has neither session resume nor stdin prompt
-  transport). Route the user to the plugin's inject panel on the Sidecar
-  board, which injects in-process (queue/steer) behind the plugin's
-  \`inject.enabled\` gate and confirmation dialog.
+- For **Kimi Code 0.38.0**, the only supported mutation is protected ACP
+  spawn-resume for a local, top-level \`waiting\` or \`idle\` session.
+  \`working\`, \`dead\`, child/sidechain, and remote Kimi sessions are
+  rejected. The plugin UI fixes the internal request mode to \`queue\`, but
+  presents this operation as **Protected resume**, not queueing or steering:
+  it starts a separate Kimi ACP process, resumes persisted state, and never
+  attaches to or steers an existing terminal.
+- Kimi receives the message in the ACP JSON-RPC NDJSON stream, never in the
+  Kimi process argv. The resumed ACP session is put in default/manual mode;
+  every permission request or question is answered \`cancelled\`, never
+  approved. Even when Kimi returns \`outcome: "completed"\`, durable delivery
+  cannot be proven: the receipt remains \`delivery: "unknown"\`. Do not
+  automatically or manually retry the same content. Replaying the same retained
+  \`request_id\` is safe: it returns the cached result without spawning
+  another ACP process. An older Sidecar may return \`unsupported_kimi\`;
+  report that as a compatibility limit, not as a claim that current Kimi
+  support is absent.
+- For **dsh sessions**, use the plugin panel. A loaded live Agent supports
+  \`queue\` via \`followup\` and \`steer\` via \`steer\`, reusing that
+  Agent's existing model route and preset. A non-live \`waiting\`/\`idle\`
+  session may use guarded cold resume. Cold resume requires a complete
+  current default provider/model pair (\`dsh_model_unconfigured\` otherwise)
+  and rejects any proven explicit or implicit preset
+  (\`dsh_preset_unsupported\`); unknown persistence, preset, or host-service
+  state fails closed. Direct \`agent-sidecar send\` still returns
+  \`unsupported_dsh\`; only that CLI path is unsupported, not DSH injection
+  through this plugin.
 - For **claude / codex / cursor-cli** sessions in \`waiting\`/\`idle\`, use
   the plugin panel, or run \`send\` only when the user explicitly requests
   the exact message or action in the same turn. Never infer consent from a
@@ -190,9 +214,11 @@ the default; every mutation needs an explicit user request in the same turn.
   agent-sidecar send <session-prefix> "<exact-message>" --allow-write --request-id "<stable-unique-id>" --json
   \`\`\`
 
-- Preserve the returned \`request_id\` and \`replayed\` fields. Never send
-  to remote, \`working\`, \`dead\`, child, or unsupported-agent sessions
-  (\`cursor-ide\`, \`copilot\`, \`kimi\`, \`dsh\`).
+- On the external \`agent-sidecar send\` path, preserve the returned
+  \`request_id\` and \`replayed\` fields. It rejects remote, \`working\`,
+  \`dead\`, child, and unsupported-agent sessions. \`cursor-ide\` and
+  \`copilot\` have no mutation path; the plugin's in-process DSH rules above
+  are separate.
 - Never retry \`failed\`, \`timed_out\`, \`request_pending\`,
   \`audit_error\`, \`cleanup_incomplete\`, or any result with
   \`delivery: "unknown"\` — the agent may already have received the
@@ -204,8 +230,8 @@ the default; every mutation needs an explicit user request in the same turn.
 
 Full schemas, exit codes, and boundaries: \`skills/agent-sidecar/SKILL.md\`
 and \`reference.md\` in the agent_sidecar repository (also installable as a
-filesystem skill via \`scripts/install-skill.sh\`; a filesystem copy under
-\`~/.dsh/skills/\` automatically shadows this plugin-provided one).`
+filesystem skill via \`scripts/install-skill.sh\`; a user-managed filesystem
+copy automatically shadows this plugin-provided one).`
 
 const RESOURCE_BASE: SkillResourceBaseFace = {
   kind: 'opaque',

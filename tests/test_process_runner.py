@@ -2,6 +2,7 @@ import dataclasses
 import json
 import os
 import select
+import selectors
 import signal
 import subprocess
 import sys
@@ -12,11 +13,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import sidecar.process_runner as process_runner_module
 from sidecar.process_runner import (
     MAX_STREAM_INPUT_BYTES,
     MAX_STREAM_LINE_BYTES,
     MAX_STREAM_STDERR_BYTES,
     MAX_TIMEOUT_SECONDS,
+    BoundedDuplexLineProcess,
+    BoundedDuplexLineProcessCancelledError,
+    BoundedDuplexLineProcessEOFError,
+    BoundedDuplexLineProcessError,
+    BoundedDuplexLineProcessOverflowError,
+    BoundedDuplexLineProcessTimeoutError,
     BoundedLineStream,
     BoundedLineStreamCancelledError,
     BoundedLineStreamEndReason,
@@ -25,6 +33,7 @@ from sidecar.process_runner import (
     BoundedLineStreamTimeoutError,
     BoundedProcessResult,
     DescendantContainmentUnsupportedError,
+    DuplexWriteBoundary,
     _DarwinKqueueDescendantTracker,
     _ProcessGroupOwnership,
     _ProcessRegistry,
@@ -38,6 +47,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def process_exists(pid):
+    if sys.platform.startswith("linux"):
+        try:
+            payload = Path("/proc/{}/stat".format(pid)).read_text(encoding="ascii")
+        except FileNotFoundError:
+            return False
+        except OSError:
+            pass
+        else:
+            suffix = payload.rsplit(")", 1)
+            fields = suffix[1].split() if len(suffix) == 2 else ()
+            if fields:
+                return fields[0] != "Z"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -47,7 +68,62 @@ def process_exists(pid):
     return True
 
 
+def read_pid_when_ready(path, deadline):
+    candidate = None
+    while time.monotonic() < deadline:
+        try:
+            payload = path.read_text(encoding="ascii")
+        except FileNotFoundError:
+            payload = ""
+        if payload.isascii() and payload.isdecimal():
+            value = int(payload)
+            if value > 0 and str(value) == payload:
+                if value == candidate:
+                    return value
+                candidate = value
+            else:
+                candidate = None
+        else:
+            candidate = None
+        time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    raise AssertionError("PID file was not ready before deadline")
+
+
 class ProcessRunnerTests(unittest.TestCase):
+    def test_process_exists_distinguishes_linux_live_and_zombie_states(self):
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=(
+                "123 (live child) S 1 2 3\n",
+                "124 (zombie child) Z 1 2 3\n",
+            ),
+        ), mock.patch.object(os, "kill") as kill:
+            self.assertTrue(process_exists(123))
+            self.assertFalse(process_exists(124))
+        kill.assert_not_called()
+
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            os,
+            "kill",
+        ) as kill:
+            self.assertTrue(process_exists(125))
+        kill.assert_called_once_with(125, 0)
+
+    def test_read_pid_when_ready_retries_missing_empty_and_partial_files(self):
+        path = mock.Mock(spec=Path)
+        path.read_text.side_effect = (
+            FileNotFoundError(),
+            "",
+            "12",
+            "123",
+            "123",
+        )
+
+        self.assertEqual(123, read_pid_when_ready(path, time.monotonic() + 1))
+        with self.assertRaises(AssertionError):
+            read_pid_when_ready(path, time.monotonic())
+
     def test_result_is_frozen_and_run_supports_input_env_and_path_cwd(self):
         code = (
             "import os,sys;"
@@ -1348,6 +1424,598 @@ class ProcessRunnerTests(unittest.TestCase):
             BoundedLineStreamEndReason.NONZERO_EXIT,
             raised.exception.result.end_reason,
         )
+
+    @unittest.skipUnless(os.name == "posix", "POSIX pipe selectors required")
+    def test_duplex_process_assembles_split_and_coalesced_lines(self):
+        code = (
+            "import os,time;"
+            "os.write(1,b'first');time.sleep(.02);"
+            "os.write(1,b'-line\\nsecond\\nthird\\n');"
+            "time.sleep(.02)"
+        )
+        with BoundedDuplexLineProcess(
+            [sys.executable, "-c", code],
+            line_limit=64,
+            stdout_limit=256,
+        ) as process:
+            deadline = time.monotonic() + 2
+            self.assertEqual(b"first-line", process.read_line(deadline=deadline))
+            self.assertEqual(b"second", process.read_line(deadline=deadline))
+            self.assertEqual(b"third", process.read_line(deadline=deadline))
+            self.assertIsNone(process.read_line(deadline=deadline))
+            process.close_stdin()
+            result = process.wait_clean(deadline=deadline)
+
+        self.assertEqual(0, result.returncode)
+        self.assertTrue(result.clean_exit)
+        self.assertTrue(result.cleanup_complete)
+        self.assertEqual(
+            len(b"first-line\nsecond\nthird\n"),
+            result.stdout_bytes_read,
+        )
+
+    def test_duplex_process_write_boundary_tracks_final_newline(self):
+        clock = {"value": 0.0}
+        real_write = os.write
+        with BoundedDuplexLineProcess(
+            [
+                sys.executable,
+                "-c",
+                "import sys,time;sys.stdin.buffer.read();time.sleep(60)",
+            ],
+            line_limit=64,
+            stdout_limit=64,
+            monotonic=lambda: (
+                time.monotonic()
+                if clock["value"] is None
+                else clock["value"]
+            ),
+        ) as process:
+            def partial_then_expire(fd, data):
+                count = real_write(fd, bytes(data[:2]))
+                clock["value"] = 2.0
+                return count
+
+            with mock.patch(
+                "sidecar.process_runner.os.write",
+                side_effect=partial_then_expire,
+            ):
+                partial = process.write_line(b"private-frame", deadline=1.0)
+            clock["value"] = None
+
+        self.assertEqual(DuplexWriteBoundary.PARTIAL, partial.boundary)
+        self.assertEqual(2, partial.bytes_written)
+        self.assertEqual(len(b"private-frame\n"), partial.bytes_total)
+        self.assertNotIn(b"private-frame", repr(partial).encode("utf-8"))
+
+        real_write = os.write
+        write_sizes = []
+
+        def short_write(fd, data):
+            count = min(2, len(data))
+            write_sizes.append(count)
+            return real_write(fd, bytes(data[:count]))
+
+        with BoundedDuplexLineProcess(
+            [
+                sys.executable,
+                "-c",
+                "import os,sys;os.write(1,sys.stdin.buffer.readline())",
+            ],
+            line_limit=64,
+            stdout_limit=64,
+        ) as process:
+            with mock.patch(
+                "sidecar.process_runner.os.write",
+                side_effect=short_write,
+            ):
+                complete = process.write_line(
+                    b"abcdef",
+                    deadline=time.monotonic() + 2,
+                )
+            self.assertEqual(
+                b"abcdef",
+                process.read_line(deadline=time.monotonic() + 2),
+            )
+            process.close_stdin()
+            result = process.wait_clean(deadline=time.monotonic() + 2)
+
+        self.assertEqual(DuplexWriteBoundary.COMPLETE, complete.boundary)
+        self.assertEqual(7, complete.bytes_written)
+        self.assertGreater(len(write_sizes), 2)
+        self.assertTrue(result.clean_exit)
+
+    def test_duplex_partial_write_boundary_survives_exception_paths(self):
+        def new_process(cancel_event=None):
+            return BoundedDuplexLineProcess(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys,time;sys.stdin.buffer.read();time.sleep(60)",
+                ],
+                line_limit=64,
+                stdout_limit=64,
+                cancel_event=cancel_event,
+            )
+
+        process = new_process()
+        try:
+            calls = {"count": 0}
+
+            def overflow_after_partial(_deadline):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    key = next(
+                        key
+                        for key in process._selector.get_map().values()
+                        if key.data[0] == "stdin"
+                    )
+                    return ((key, selectors.EVENT_WRITE),)
+                process._raise_overflow("stdout")
+
+            with mock.patch.object(
+                process,
+                "_select",
+                side_effect=overflow_after_partial,
+            ), mock.patch(
+                "sidecar.process_runner.os.write",
+                return_value=2,
+            ):
+                with self.assertRaises(
+                    BoundedDuplexLineProcessOverflowError
+                ) as raised:
+                    process.write_line(
+                        b"private-frame",
+                        deadline=time.monotonic() + 2,
+                    )
+            self.assertEqual(
+                DuplexWriteBoundary.PARTIAL,
+                raised.exception.write_result.boundary,
+            )
+            self.assertIs(raised.exception.write_result, process.write_result)
+        finally:
+            process.close()
+
+        cancel_event = threading.Event()
+        process = new_process(cancel_event)
+        try:
+            def write_then_cancel(_fd, _data):
+                cancel_event.set()
+                return 2
+
+            with mock.patch(
+                "sidecar.process_runner.os.write",
+                side_effect=write_then_cancel,
+            ):
+                with self.assertRaises(
+                    BoundedDuplexLineProcessCancelledError
+                ) as raised:
+                    process.write_line(
+                        b"private-frame",
+                        deadline=time.monotonic() + 2,
+                    )
+            self.assertEqual(
+                DuplexWriteBoundary.PARTIAL,
+                raised.exception.write_result.boundary,
+            )
+        finally:
+            process.close()
+
+        process = new_process()
+        try:
+            calls = {"count": 0}
+
+            def selector_failure(_deadline):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    key = next(
+                        key
+                        for key in process._selector.get_map().values()
+                        if key.data[0] == "stdin"
+                    )
+                    return ((key, selectors.EVENT_WRITE),)
+                raise RuntimeError("selector detail")
+
+            with mock.patch.object(
+                process,
+                "_select",
+                side_effect=selector_failure,
+            ), mock.patch(
+                "sidecar.process_runner.os.write",
+                return_value=2,
+            ):
+                with self.assertRaises(
+                    BoundedDuplexLineProcessError
+                ) as raised:
+                    process.write_line(
+                        b"private-frame",
+                        deadline=time.monotonic() + 2,
+                    )
+            self.assertEqual(
+                DuplexWriteBoundary.PARTIAL,
+                raised.exception.write_result.boundary,
+            )
+            self.assertNotIn("selector detail", str(raised.exception))
+        finally:
+            process.close()
+
+    def test_duplex_rechecks_deadline_after_selector_before_io(self):
+        clock = {"value": 0.0}
+
+        def monotonic():
+            if clock["value"] is None:
+                return time.monotonic()
+            return clock["value"]
+
+        with BoundedDuplexLineProcess(
+            [sys.executable, "-c", "import time;time.sleep(60)"],
+            line_limit=64,
+            stdout_limit=64,
+            monotonic=monotonic,
+        ) as process:
+            def write_ready_after_deadline(_deadline):
+                clock["value"] = 2.0
+                key = next(
+                    key
+                    for key in process._selector.get_map().values()
+                    if key.data[0] == "stdin"
+                )
+                return ((key, selectors.EVENT_WRITE),)
+
+            with mock.patch.object(
+                process,
+                "_select",
+                side_effect=write_ready_after_deadline,
+            ), mock.patch("sidecar.process_runner.os.write") as write:
+                result = process.write_line(b"frame", deadline=1.0)
+            self.assertEqual(DuplexWriteBoundary.NONE, result.boundary)
+            write.assert_not_called()
+            clock["value"] = None
+
+        clock["value"] = 0.0
+        with BoundedDuplexLineProcess(
+            [sys.executable, "-c", "import time;time.sleep(60)"],
+            line_limit=64,
+            stdout_limit=64,
+            monotonic=monotonic,
+        ) as process:
+            def read_ready_after_deadline(_deadline):
+                clock["value"] = 2.0
+                key = next(
+                    key
+                    for key in process._selector.get_map().values()
+                    if key.data[0] == "stdout"
+                )
+                return ((key, selectors.EVENT_READ),)
+
+            with mock.patch.object(
+                process,
+                "_select",
+                side_effect=read_ready_after_deadline,
+            ), mock.patch("sidecar.process_runner.os.read") as read:
+                with self.assertRaises(
+                    BoundedDuplexLineProcessTimeoutError
+                ):
+                    process.read_line(deadline=1.0)
+            read.assert_not_called()
+            clock["value"] = None
+
+    def test_duplex_process_absolute_deadlines_before_and_after_write(self):
+        clock = {"value": 5.0}
+        with BoundedDuplexLineProcess(
+            [sys.executable, "-c", "import time;time.sleep(60)"],
+            line_limit=64,
+            stdout_limit=64,
+            monotonic=lambda: (
+                time.monotonic()
+                if clock["value"] is None
+                else clock["value"]
+            ),
+        ) as process:
+            unwritten = process.write_line(b"frame", deadline=4.0)
+            self.assertEqual(DuplexWriteBoundary.NONE, unwritten.boundary)
+            with self.assertRaises(
+                BoundedDuplexLineProcessTimeoutError
+            ) as raised:
+                process.read_line(deadline=4.0)
+            clock["value"] = None
+
+        self.assertNotIn("frame", str(raised.exception))
+        self.assertNotIn("frame", repr(raised.exception))
+
+        with BoundedDuplexLineProcess(
+            [
+                sys.executable,
+                "-c",
+                "import sys,time;sys.stdin.buffer.readline();time.sleep(60)",
+            ],
+            line_limit=64,
+            stdout_limit=64,
+        ) as process:
+            complete = process.write_line(
+                b"private-frame",
+                deadline=time.monotonic() + 2,
+            )
+            with self.assertRaises(BoundedDuplexLineProcessTimeoutError):
+                process.read_line(deadline=time.monotonic() + 0.05)
+        self.assertEqual(DuplexWriteBoundary.COMPLETE, complete.boundary)
+
+    def test_duplex_process_line_aggregate_stderr_and_eof_are_bounded(self):
+        cases = (
+            (
+                "import os,time;os.write(1,b'x'*65+b'\\n');time.sleep(60)",
+                {"line_limit": 64, "stdout_limit": 128},
+                "stdout_line",
+            ),
+            (
+                "import os,time;os.write(1,b'a\\n'*33);time.sleep(60)",
+                {"line_limit": 8, "stdout_limit": 64},
+                "stdout",
+            ),
+            (
+                "import os,time;os.write(2,b'e'*65);time.sleep(60)",
+                {"line_limit": 64, "stdout_limit": 64, "stderr_limit": 64},
+                "stderr",
+            ),
+        )
+        for code, kwargs, expected in cases:
+            with self.subTest(expected=expected):
+                with BoundedDuplexLineProcess(
+                    [sys.executable, "-c", code],
+                    **kwargs,
+                ) as process:
+                    with self.assertRaises(
+                        BoundedDuplexLineProcessOverflowError
+                    ):
+                        process.read_line(deadline=time.monotonic() + 2)
+                    self.assertEqual(expected, process._overflow)
+                    self.assertLessEqual(len(process.stderr), 64)
+
+        with BoundedDuplexLineProcess(
+            [sys.executable, "-c", "import os;os.write(1,b'partial')"],
+            line_limit=64,
+            stdout_limit=64,
+        ) as process:
+            with self.assertRaises(BoundedDuplexLineProcessEOFError):
+                process.read_line(deadline=time.monotonic() + 2)
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_duplex_wait_then_terminate_reaps_lingering_descendant(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            child_pid_path = Path(temporary) / "child.pid"
+            child_code = (
+                "import os,sys,time;"
+                "open(sys.argv[1],'w').write(str(os.getpid()));"
+                "time.sleep(60)"
+            )
+            leader_code = (
+                "import os,subprocess,sys;"
+                "subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[1]]);"
+                "os.write(1,b'ready\\n')"
+            )
+            with BoundedDuplexLineProcess(
+                [
+                    sys.executable,
+                    "-c",
+                    leader_code,
+                    str(child_pid_path),
+                    child_code,
+                ],
+                line_limit=64,
+                stdout_limit=64,
+            ) as process:
+                self.assertEqual(
+                    b"ready",
+                    process.read_line(deadline=time.monotonic() + 2),
+                )
+                child_pid = read_pid_when_ready(
+                    child_pid_path,
+                    time.monotonic() + 2,
+                )
+                observed = process.wait_clean(deadline=time.monotonic() + 0.05)
+                self.assertFalse(observed.cleanup_complete)
+                result = process.terminate_tree(
+                    deadline=time.monotonic() + 2
+                )
+
+            self.assertIsNotNone(result.returncode)
+            self.assertTrue(result.cleanup_complete)
+            self.assertFalse(process_exists(child_pid))
+
+    @unittest.skipUnless(os.name == "posix", "process groups require POSIX")
+    def test_duplex_terminate_escalates_past_ignored_term(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_path = Path(temporary) / "pid"
+            code = (
+                "import os,signal,sys,time;"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                "open(sys.argv[1],'w').write(str(os.getpid()));"
+                "os.write(1,b'ready\\n');time.sleep(60)"
+            )
+            with BoundedDuplexLineProcess(
+                [sys.executable, "-c", code, str(pid_path)],
+                line_limit=64,
+                stdout_limit=64,
+            ) as process:
+                self.assertEqual(
+                    b"ready",
+                    process.read_line(deadline=time.monotonic() + 2),
+                )
+                pid = int(pid_path.read_text(encoding="ascii"))
+                result = process.cancel(deadline=time.monotonic() + 1)
+
+            self.assertIsNotNone(result.returncode)
+            self.assertNotEqual(0, result.returncode)
+            self.assertTrue(result.cleanup_complete)
+            self.assertFalse(process_exists(pid))
+
+    @unittest.skipUnless(
+        os.name == "posix" and hasattr(os, "fork"),
+        "forked process groups require POSIX",
+    )
+    def test_duplex_terminate_kills_forked_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_path = Path(temporary) / "fork.pid"
+            code = (
+                "import os,sys,time;"
+                "pid=os.fork();"
+                "\nif pid == 0:\n"
+                " open(sys.argv[1],'w').write(str(os.getpid()));time.sleep(60)\n"
+                "os.write(1,b'ready\\n');time.sleep(60)"
+            )
+            with BoundedDuplexLineProcess(
+                [sys.executable, "-c", code, str(pid_path)],
+                line_limit=64,
+                stdout_limit=64,
+            ) as process:
+                self.assertEqual(
+                    b"ready",
+                    process.read_line(deadline=time.monotonic() + 2),
+                )
+                fork_pid = read_pid_when_ready(
+                    pid_path,
+                    time.monotonic() + 2,
+                )
+                result = process.terminate_tree(
+                    deadline=time.monotonic() + 2
+                )
+
+            self.assertTrue(result.cleanup_complete)
+            self.assertFalse(process_exists(fork_pid))
+
+    @unittest.skipUnless(os.name == "posix", "containment lease requires POSIX")
+    def test_duplex_darwin_observer_uncertainty_is_conservative(self):
+        class UncertainObserver:
+            reliable = True
+            cleanup_incomplete = True
+
+            def __init__(self):
+                self.closed = False
+
+            def sample(self, *, force=False):
+                del force
+                return ()
+
+            def close(self):
+                self.closed = True
+
+        process = BoundedDuplexLineProcess(
+            [sys.executable, "-c", "pass"],
+            line_limit=64,
+            stdout_limit=64,
+        )
+        observer = UncertainObserver()
+        try:
+            process._started.descendant_tracker = observer
+            result = process.wait_clean(deadline=time.monotonic() + 2)
+            retried = process.terminate_tree(deadline=time.monotonic() + 1)
+
+            self.assertEqual(0, result.returncode)
+            self.assertFalse(result.cleanup_complete)
+            self.assertFalse(result.clean_exit)
+            self.assertFalse(process._closed)
+            self.assertFalse(observer.closed)
+            self.assertFalse(retried.cleanup_complete)
+            self.assertFalse(process._closed)
+            self.assertFalse(observer.closed)
+        finally:
+            process.close()
+        self.assertTrue(observer.closed)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin kqueue required")
+    def test_duplex_darwin_setsid_escape_remains_retryable_unknown(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_path = Path(temporary) / "escaped.pid"
+            code = (
+                "import os,sys,time;"
+                "pid=os.fork();"
+                "\nif pid == 0:\n"
+                " os.setsid();"
+                "open(sys.argv[1],'w').write(str(os.getpid()));"
+                "os.closerange(0,256);time.sleep(60);os._exit(0)\n"
+                "os.write(1,b'ready\\n');os._exit(0)"
+            )
+            process = BoundedDuplexLineProcess(
+                [sys.executable, "-c", code, str(pid_path)],
+                line_limit=64,
+                stdout_limit=64,
+                require_descendant_containment=True,
+            )
+            escaped_pid = None
+            try:
+                self.assertEqual(
+                    b"ready",
+                    process.read_line(deadline=time.monotonic() + 2),
+                )
+                deadline = time.monotonic() + 2
+                while not pid_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                escaped_pid = int(pid_path.read_text(encoding="ascii"))
+                observed = process.wait_clean(
+                    deadline=time.monotonic() + 1
+                )
+                retried = process.terminate_tree(
+                    deadline=time.monotonic() + 1
+                )
+
+                self.assertFalse(observed.cleanup_complete)
+                self.assertFalse(retried.cleanup_complete)
+                self.assertFalse(process._closed)
+                self.assertIsNone(process.result)
+                self.assertTrue(process_exists(escaped_pid))
+            finally:
+                if escaped_pid is not None and process_exists(escaped_pid):
+                    os.kill(escaped_pid, signal.SIGKILL)
+                    deadline = time.monotonic() + 2
+                    while process_exists(escaped_pid) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                process.close()
+
+    @unittest.skipUnless(os.name == "posix", "process cleanup requires POSIX")
+    def test_duplex_constructor_and_close_exceptions_still_reap_processes(self):
+        real_start = process_runner_module._start_bounded_process
+        started_pids = []
+
+        def capture_start(*args, **kwargs):
+            started = real_start(*args, **kwargs)
+            started_pids.append(started.process.pid)
+            return started
+
+        with mock.patch.object(
+            process_runner_module,
+            "_start_bounded_process",
+            side_effect=capture_start,
+        ), mock.patch.object(
+            BoundedDuplexLineProcess,
+            "_configure_streams",
+            side_effect=OSError("synthetic stream setup failure"),
+        ):
+            with self.assertRaises(OSError):
+                BoundedDuplexLineProcess(
+                    [sys.executable, "-c", "import time;time.sleep(60)"],
+                    line_limit=64,
+                    stdout_limit=64,
+                )
+
+        self.assertEqual(1, len(started_pids))
+        self.assertFalse(process_exists(started_pids[0]))
+
+        process = BoundedDuplexLineProcess(
+            [sys.executable, "-c", "import time;time.sleep(60)"],
+            line_limit=64,
+            stdout_limit=64,
+        )
+        pid = process.identity.pid
+        with mock.patch.object(
+            process,
+            "terminate_tree",
+            side_effect=RuntimeError("synthetic terminate failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                process.close()
+
+        self.assertTrue(process._closed)
+        self.assertFalse(process_exists(pid))
 
     @mock.patch("sidecar.process_runner.subprocess.Popen")
     def test_line_stream_validates_hard_limits_before_spawn(self, popen):

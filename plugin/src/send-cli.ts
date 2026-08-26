@@ -2,14 +2,15 @@
  * Sidecar `send` CLI executor — injection path two of design §4.d
  * (.local/tasks/make_dsh_mode/design/dsh_plugin_design.md): external agents
  * (claude / codex / cursor-cli) are reached by spawning
- * `agent-sidecar send <session_prefix> --message-stdin --allow-write --json`.
+ * `agent-sidecar send <session_id> --agent <agent> --exact-session
+ * --message-stdin --allow-write --json`.
  *
  * Contract facts verified against sidecar/cli.py and sidecar/inject.py:
  *
- * - The send subcommand takes the target as the `session_prefix` positional;
- *   there is no `--agent`, `--session`, or `--mode` flag. The queue/steer
- *   distinction only exists on the dsh in-process path — a sidecar send is
- *   always a one-shot headless resume, so `mode` is logged but not forwarded.
+ * - The send subcommand takes the exact session ID as its positional and the
+ *   token-bound agent through `--agent`. The queue/steer distinction only
+ *   exists on the dsh in-process path — a sidecar send is always a one-shot
+ *   headless resume, so `mode` is logged but not forwarded.
  * - The message NEVER enters argv: it is written to the child's stdin and the
  *   write end is closed (`--message-stdin`, S7).
  * - `--json` prints one `SendResult.to_dict()` object on stdout:
@@ -17,8 +18,9 @@
  *   error_code, request_id, replayed}` with `delivery ∈ {delivered, unknown}`.
  *   `delivery` is the authoritative signal: `delivered` → outcome 'delivered',
  *   `unknown` → outcome 'unknown' (terminal; S6 — never retried).
- * - Exit codes: 0 completed / 1 non-completed result / 2 usage (SendError) /
- *   130 interrupted. Used only as a fallback when stdout is not a receipt.
+ * - Once stdin submission starts, exit codes and process errors are never
+ *   delivery proof. Without a bound receipt or structured pre-delivery error,
+ *   every such result is terminal unknown.
  * - `--timeout` accepts 1..900 seconds (MAX_SEND_TIMEOUT_SECONDS).
  *
  * Pure DI: no cordis/dsh imports. index.ts adapts `ctx.subprocess.spawn`
@@ -28,7 +30,12 @@
  * @module
  */
 
-import type { InjectExecutionRequest, InjectExecutor, InjectResult } from './inject-gateway.ts'
+import type {
+  InjectErrorCode,
+  InjectExecutionRequest,
+  InjectExecutor,
+  InjectResult,
+} from './inject-gateway.ts'
 
 // ---------------------------------------------------------------------------
 // Spawn seam.
@@ -41,8 +48,11 @@ import type { InjectExecutionRequest, InjectExecutor, InjectResult } from './inj
  * Adapter obligations:
  * - `exited` settles with the exit code (null when signal-killed) and
  *   rejects when the process could not be started at all (ENOENT et al.).
- * - `stdin` write/end must not throw asynchronously for a dead pipe
- *   (swallow EPIPE-style errors; the failure surfaces via `exited`).
+ * - `stdin` write/end may throw synchronously. The executor records submission
+ *   as started before the first write, so partial/dead-pipe writes fail closed
+ *   as terminal unknown unless stdout contains a validated JSON envelope.
+ * - asynchronous EPIPE-style errors must be swallowed by the adapter; the
+ *   process failure surfaces via `exited`.
  */
 export interface SpawnedProcess {
   stdin: {
@@ -128,15 +138,14 @@ class BoundedCollector {
 
 interface ParsedReceipt {
   delivery: 'delivered' | 'unknown'
+  agent?: string
+  sessionId?: string
+  requestId?: string
   errorCode?: string
   replayed: boolean
 }
 
-/**
- * Parse stdout as one `send --json` receipt. Anything that is not a JSON
- * object carrying a valid `delivery` field yields null (exit-code fallback).
- */
-function parseReceipt(stdoutText: string): ParsedReceipt | null {
+function parseJsonObject(stdoutText: string): Record<string, unknown> | null {
   const trimmed = stdoutText.trim()
   if (!trimmed) return null
   let value: unknown
@@ -146,7 +155,14 @@ function parseReceipt(stdoutText: string): ParsedReceipt | null {
     return null
   }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
-  const record = value as Record<string, unknown>
+  return value as Record<string, unknown>
+}
+
+/**
+ * Parse one JSON object as a `send --json` receipt. Identity fields remain
+ * optional here so the caller can classify omissions as a binding mismatch.
+ */
+function parseReceipt(record: Record<string, unknown>): ParsedReceipt | null {
   const delivery = record['delivery']
   if (delivery !== 'delivered' && delivery !== 'unknown') return null
   const rawErrorCode = record['error_code']
@@ -154,9 +170,75 @@ function parseReceipt(stdoutText: string): ParsedReceipt | null {
     typeof rawErrorCode === 'string' && rawErrorCode !== '' ? rawErrorCode : undefined
   return {
     delivery,
+    ...(typeof record['agent'] === 'string' ? { agent: record['agent'] } : {}),
+    ...(typeof record['session_id'] === 'string' ? { sessionId: record['session_id'] } : {}),
+    ...(typeof record['request_id'] === 'string' ? { requestId: record['request_id'] } : {}),
     ...(errorCode !== undefined ? { errorCode } : {}),
     replayed: record['replayed'] === true,
   }
+}
+
+function parseCliError(record: Record<string, unknown>): string | null {
+  const keys = Object.keys(record)
+  const code = record['code']
+  return keys.length === 1 && keys[0] === 'code' && typeof code === 'string' && code !== ''
+    ? code
+    : null
+}
+
+/** Map Python preflight vocabulary onto the gateway's stable error surface. */
+function mapCliError(code: string): InjectErrorCode {
+  if (
+    code === 'working_session' ||
+    code === 'dead_session' ||
+    code === 'child_session' ||
+    code === 'remote_session' ||
+    code === 'invalid_session' ||
+    code === 'target_not_found' ||
+    code === 'unsupported_agent'
+  ) {
+    return code
+  }
+  if (code === 'session_busy') return 'working_session'
+  if (code === 'session_unavailable') return 'target_not_found'
+  if (code === 'session_changed') return 'target_changed'
+  if (
+    code === 'ambiguous_session' ||
+    code === 'invalid_session_id' ||
+    code === 'invalid_project' ||
+    code === 'invalid_plan' ||
+    code === 'request_conflict'
+  ) {
+    return 'invalid_session'
+  }
+  if (
+    code === 'unsupported_cursor_ide' ||
+    code === 'unsupported_copilot' ||
+    code === 'unsupported_kimi' ||
+    code === 'unsupported_dsh'
+  ) {
+    return 'unsupported_agent'
+  }
+  if (
+    code === 'invalid_message_type' ||
+    code === 'invalid_message_utf8' ||
+    code === 'blank_message' ||
+    code === 'message_nul' ||
+    code === 'message_too_large'
+  ) {
+    return 'invalid_message'
+  }
+  return 'executor_error'
+}
+
+/**
+ * A bound receipt with unknown delivery remains terminal/HTTP 200, but its
+ * diagnostic code still uses the stable gateway vocabulary. Timeout is kept
+ * distinct for the existing unknown-delivery UX; ACP/process/snapshot codes
+ * intentionally collapse to executor_error.
+ */
+function mapReceiptError(code: string): string {
+  return code === 'timeout' ? code : mapCliError(code)
 }
 
 function describeError(error: unknown): string {
@@ -171,6 +253,8 @@ type Settled =
   | { kind: 'exit'; code: number | null }
   | { kind: 'spawn-error'; error: unknown }
   | { kind: 'timeout' }
+
+type StdinSubmissionBoundary = 'not-started' | 'started' | 'completed'
 
 export function createSendCliExecutor(deps: {
   spawn: SpawnLike
@@ -191,7 +275,7 @@ export function createSendCliExecutor(deps: {
   return {
     kind: 'send-cli',
     async execute(req: InjectExecutionRequest): Promise<InjectResult> {
-      // Target = session_prefix positional; message deliberately absent.
+      // Target = exact session ID + exact agent binding; message absent.
       // M2 review F-4 (recorded, unchanged): the positional is not fenced
       // behind `--`, so a hypothetical '-'-leading sessionId would be read
       // as a flag — every such misparse fail-closes as a usage error
@@ -203,6 +287,9 @@ export function createSendCliExecutor(deps: {
         ...command,
         'send',
         req.target.sessionId,
+        '--agent',
+        req.target.agent,
+        '--exact-session',
         '--message-stdin',
         '--allow-write',
         '--json',
@@ -234,15 +321,30 @@ export function createSendCliExecutor(deps: {
 
       const stdout = new BoundedCollector(MAX_STDOUT_BYTES)
       const stderr = new BoundedCollector(STDERR_DETAIL_BYTES)
-      proc.onStdout((chunk) => stdout.append(chunk))
-      proc.onStderr((chunk) => stderr.append(chunk))
-
       try {
+        proc.onStdout((chunk) => stdout.append(chunk))
+        proc.onStderr((chunk) => stderr.append(chunk))
+      } catch {
+        try {
+          proc.kill()
+        } catch {
+          // Best effort: no message submission has started.
+        }
+        return { outcome: 'failed', errorCode: 'executor_error' }
+      }
+
+      let submissionBoundary: StdinSubmissionBoundary = 'not-started'
+      try {
+        // Set before invoking write: a synchronous throw may mean a partial
+        // write, so it is already beyond the safe "definitely not submitted"
+        // boundary.
+        submissionBoundary = 'started'
         proc.stdin.write(Buffer.from(req.message, 'utf8'))
         proc.stdin.end()
+        submissionBoundary = 'completed'
       } catch {
-        // A dead stdin pipe means the process is already gone; the exit /
-        // spawn-error path below reports the authoritative failure.
+        // Preserve `started`; only a validated receipt/error below may sharpen
+        // this conservative delivery-unknown state.
       }
 
       let timer: ReturnType<typeof setTimeout> | undefined
@@ -285,14 +387,21 @@ export function createSendCliExecutor(deps: {
           requestId: req.requestId,
           error: describeError(settled.error),
         })
-        return {
-          outcome: 'failed',
-          errorCode: 'cli_not_found',
-          detail: describeError(settled.error),
-        }
+        return submissionBoundary === 'not-started'
+          ? {
+              outcome: 'failed',
+              errorCode: 'cli_not_found',
+              detail: describeError(settled.error),
+            }
+          : {
+              outcome: 'unknown',
+              errorCode: 'executor_error',
+              detail: 'process startup failed after stdin submission began',
+            }
       }
 
-      const receipt = parseReceipt(stdout.text())
+      const parsedJson = parseJsonObject(stdout.text())
+      const receipt = parsedJson === null ? null : parseReceipt(parsedJson)
       log('info', 'send CLI exited', {
         requestId: req.requestId,
         agent: req.target.agent,
@@ -311,30 +420,47 @@ export function createSendCliExecutor(deps: {
       })
 
       if (receipt !== null) {
+        if (
+          receipt.agent !== req.target.agent ||
+          receipt.sessionId !== req.target.sessionId ||
+          receipt.requestId !== req.requestId
+        ) {
+          return {
+            outcome: 'unknown',
+            errorCode: 'executor_error',
+            detail: stderrText
+              ? `send CLI receipt identity mismatch; stderr: ${stderrText}`
+              : 'send CLI receipt identity mismatch',
+          }
+        }
         return {
           outcome: receipt.delivery === 'delivered' ? 'delivered' : 'unknown',
-          ...(receipt.errorCode !== undefined ? { errorCode: receipt.errorCode } : {}),
+          ...(receipt.errorCode !== undefined
+            ? { errorCode: mapReceiptError(receipt.errorCode) }
+            : {}),
           ...(receipt.replayed ? { replayed: true } : {}),
           ...(stderrText ? { detail: stderrText } : {}),
         }
       }
 
-      // stdout was empty or not a receipt: fall back to exit-code vocabulary.
-      const code = settled.code
-      if (code === 0) {
+      const cliError = parsedJson === null ? null : parseCliError(parsedJson)
+      if (settled.code !== 0 && cliError !== null) {
         return {
-          outcome: 'delivered',
-          detail: stderrText
-            ? `parse_warning: exit 0 but stdout was not a send --json receipt; stderr: ${stderrText}`
-            : 'parse_warning: exit 0 but stdout was not a send --json receipt',
+          outcome: 'failed',
+          errorCode: mapCliError(cliError),
+          ...(stderrText ? { detail: stderrText } : {}),
         }
       }
-      const base: InjectResult = { outcome: 'failed' }
-      if (code === 2) base.errorCode = 'usage_error'
-      else if (code === 130) base.errorCode = 'interrupted'
-      else if (code !== 1) base.errorCode = `exit_${code ?? 'signal'}`
-      if (stderrText) base.detail = stderrText
-      return base
+
+      // Submission started before write(), so an unstructured exit, signal,
+      // parse failure, or missing stdout can never prove non-delivery.
+      return {
+        outcome: 'unknown',
+        errorCode: settled.code === 130 ? 'interrupted' : 'executor_error',
+        detail: stderrText
+          ? `no valid bound send receipt or error; stderr: ${stderrText}`
+          : 'no valid bound send receipt or error',
+      }
     },
   }
 }

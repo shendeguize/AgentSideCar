@@ -66,6 +66,12 @@ export interface BoardFilterState {
   timeWindowHours: number
   showDead: boolean
   /**
+   * Canonical agent token selected in the toolbar. Absent means all agents.
+   * Kept as a string at this boundary so stale persisted values can be
+   * rejected safely instead of being asserted into the supported union.
+   */
+  agentFilter?: string
+  /**
    * Status-only view toggled by the top-bar count badges (UX-01). While
    * set, ONLY sessions of this status are visible — the time window and
    * showDead do not apply (the user explicitly asked for the全板 answer
@@ -214,6 +220,84 @@ const STATUS_TONE: Record<SessionStatusToken, BadgeTone> = {
 }
 
 // ---------------------------------------------------------------------------
+// Agent filtering.
+// ---------------------------------------------------------------------------
+
+/** Agent families currently understood by the installed sidecar adapters. */
+export const SUPPORTED_AGENT_FILTERS = [
+  'dsh',
+  'claude',
+  'codex',
+  'cursor',
+  'cursor-cli',
+  'cursor-ide',
+  'copilot',
+  'kimi',
+] as const
+
+export type BoardAgentFilter = (typeof SUPPORTED_AGENT_FILTERS)[number]
+
+const AGENT_DISPLAY_NAMES: Record<BoardAgentFilter, string> = {
+  dsh: 'DSH',
+  claude: 'Claude',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  'cursor-cli': 'Cursor CLI',
+  'cursor-ide': 'Cursor IDE',
+  copilot: 'GitHub Copilot',
+  kimi: 'Kimi',
+}
+
+/** Normalize a supported agent token; unknown/untrusted values become null. */
+export function normalizeAgentFilter(raw: string | undefined): BoardAgentFilter | null {
+  if (raw === undefined) return null
+  const normalized = raw.trim().toLowerCase()
+  return (SUPPORTED_AGENT_FILTERS as readonly string[]).includes(normalized)
+    ? (normalized as BoardAgentFilter)
+    : null
+}
+
+/** Stable, recognizable display name for one supported agent token. */
+export function agentDisplayName(agent: BoardAgentFilter): string {
+  return AGENT_DISPLAY_NAMES[agent]
+}
+
+/**
+ * Supported agents currently present on the board, in adapter-stable order.
+ * A still-selected supported value remains available after its last card
+ * disappears so the user can explicitly clear it. Unknown values are never
+ * reflected into labels or option values.
+ */
+export function agentFilterOptions(
+  sessions: ReadonlyArray<Pick<SessionCardVM, 'agent'>>,
+  selected?: string,
+): BoardAgentFilter[] {
+  const available = new Set<BoardAgentFilter>()
+  for (const session of sessions) {
+    const agent = normalizeAgentFilter(session.agent)
+    if (agent !== null) available.add(agent)
+  }
+  const selectedAgent = normalizeAgentFilter(selected)
+  if (selectedAgent !== null) available.add(selectedAgent)
+  return SUPPORTED_AGENT_FILTERS.filter((agent) => available.has(agent))
+}
+
+/**
+ * Apply a toolbar agent choice. Empty/unknown values mean "All agents" and
+ * clear only the agent condition, preserving every other board filter.
+ */
+export function withAgentFilter(
+  filters: BoardFilterState,
+  selected: string,
+): BoardFilterState {
+  const next = { ...filters }
+  const agent = normalizeAgentFilter(selected)
+  if (agent === null) delete next.agentFilter
+  else next.agentFilter = agent
+  return next
+}
+
+// ---------------------------------------------------------------------------
 // Time-window filtering.
 // ---------------------------------------------------------------------------
 
@@ -233,6 +317,8 @@ export function isSessionVisible(
   filters: BoardFilterState,
   nowMs: number,
 ): boolean {
+  const agentFilter = normalizeAgentFilter(filters.agentFilter)
+  if (agentFilter !== null && normalizeAgentFilter(session.agent) !== agentFilter) return false
   const status = normalizeStatus(session.status)
   if (filters.statusFilter !== undefined) return status === filters.statusFilter
   if (status === 'dead' && !filters.showDead) return false

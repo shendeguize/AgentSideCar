@@ -47,14 +47,40 @@ function unified(overrides: Partial<UnifiedSessionWire> = {}): UnifiedSessionWir
 function page(
   entries: Array<{ seq: number | null; ts: number; kind: string }>,
   nextCursor: string | null,
+  health: 'legacy' | 'healthy' | 'partial' = 'legacy',
 ): TimelinePageWire {
-  return {
+  const base = {
     sessionId: 's1',
     entries: entries.map((e) => ({ origin: 'dsh', text: '', extra: null, ...e })),
     cursor: null,
     nextCursor,
     sources: { dshLive: true, dshCold: false, sidecarReplay: false, sidecarBuffer: false },
   }
+  if (health === 'legacy') return base as TimelinePageWire
+  if (health === 'healthy') {
+    return {
+      ...base,
+      sourceOutcomes: {
+        liveSession: 'succeeded',
+        sessionQuery: 'unavailable',
+        sidecarReplay: 'not_found',
+        buffer: 'not_found',
+      },
+      degraded: false,
+      reason: null,
+    } as TimelinePageWire
+  }
+  return {
+    ...base,
+    sourceOutcomes: {
+      liveSession: 'succeeded',
+      sessionQuery: 'unavailable',
+      sidecarReplay: 'source_failed',
+      buffer: 'not_found',
+    },
+    degraded: true,
+    reason: 'partial_source_failure',
+  } as TimelinePageWire
 }
 
 function detailWire(overrides: Partial<SessionDetailWire> = {}): SessionDetailWire {
@@ -184,6 +210,80 @@ describe('DetailStore.open', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Independent SSE detail refresher.
+// ---------------------------------------------------------------------------
+
+describe('DetailStore detail refresher', () => {
+  it('invalidates old eligible detail and commits only the latest queued deny', async () => {
+    const oldEligible = deferred<SessionDetailWire>()
+    const latestDeny = deferred<SessionDetailWire>()
+    const signals: AbortSignal[] = []
+    let calls = 0
+    const store = new DetailStore('s1', {
+      hint: HINT,
+      fetchDetailFn: (_id, opts) => {
+        signals.push(opts?.signal as AbortSignal)
+        calls += 1
+        if (calls === 1) {
+          return Promise.resolve(detailWire({
+            unified: unified({ title: 'initial', status: 'idle' }),
+          }))
+        }
+        return calls === 2 ? oldEligible.promise : latestDeny.promise
+      },
+      fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
+    })
+    await store.open()
+    await settle()
+
+    // First SSE starts an eligible detail fetch. A newer deny snapshot must
+    // invalidate it synchronously, while further bursts collapse into the
+    // same one queued refresh carrying only the latest generation.
+    store.notifySnapshot({
+      agent: 'dsh', title: 'eligible card', project: '/proj', status: 'idle',
+    })
+    expect(calls).toBe(2)
+    store.notifySnapshot({
+      agent: 'dsh', title: 'deny card', project: '/proj', status: 'working',
+    })
+    store.notifySnapshot({
+      agent: 'dsh', title: 'latest deny card', project: '/proj', status: 'working',
+    })
+    expect(calls).toBe(2)
+    expect(signals[1]?.aborted).toBe(true)
+    expect(store.getState().header).toMatchObject({
+      title: 'latest deny card',
+      status: 'working',
+    })
+
+    oldEligible.resolve(detailWire({
+      unified: unified({ title: 'stale eligible response', status: 'idle' }),
+    }))
+    await settle()
+    expect(calls).toBe(3)
+    // The stale allow never publishes while the latest deny is pending.
+    expect(store.getState().header).toMatchObject({
+      title: 'latest deny card',
+      status: 'working',
+    })
+
+    latestDeny.resolve(detailWire({
+      unified: unified({ title: 'authoritative deny', status: 'working' }),
+      timeline: page([{ seq: 99, ts: 99_000, kind: 'error' }], null, 'partial'),
+    }))
+    await settle()
+    expect(store.getState().header).toMatchObject({
+      title: 'authoritative deny',
+      status: 'working',
+    })
+    // An independent detail response cannot roll back timeline ownership.
+    expect(store.getState().timeline.entries.map((entry) => entry.seq)).toEqual([2, 3])
+    expect(store.getState().timeline.nextCursor).toBe('CUR1')
+    expect(store.getState().timelineHealth.kind).toBe('healthy')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // loadMore().
 // ---------------------------------------------------------------------------
 
@@ -238,6 +338,38 @@ describe('DetailStore.loadMore', () => {
     await store.loadMore() // consumes CUR1 → no cursor left
     await store.loadMore()
     expect(cursors).toEqual(['CUR1'])
+  })
+
+  it('ignores an older loadMore settlement after a newest refresh starts', async () => {
+    const older = deferred<TimelinePageWire>()
+    const newest = deferred<TimelinePageWire>()
+    const store = new DetailStore('s1', {
+      hint: HINT,
+      fetchDetailFn: () => Promise.resolve(detailWire({
+        timeline: page(
+          [{ seq: 2, ts: 2_000, kind: 'user' }, { seq: 3, ts: 3_000, kind: 'assistant' }],
+          'CUR1',
+          'partial',
+        ),
+      })),
+      fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
+      fetchPageFn: (_id, opts) => opts?.cursor === 'CUR1' ? older.promise : newest.promise,
+    })
+    await store.open()
+    await settle()
+
+    const paging = store.loadMore()
+    const refreshing = store.refreshNewest()
+    newest.resolve(page([{ seq: 4, ts: 4_000, kind: 'assistant' }], null, 'healthy'))
+    await refreshing
+    older.resolve(page([{ seq: 1, ts: 1_000, kind: 'user' }], null, 'partial'))
+    await paging
+
+    const state = store.getState()
+    expect(state.timeline.entries.map((entry) => entry.seq)).toEqual([2, 3, 4])
+    expect(state.timeline.nextCursor).toBe('CUR1')
+    expect(state.timelineHealth.kind).toBe('healthy')
+    expect(state.loading).toBe(false)
   })
 })
 
@@ -365,16 +497,19 @@ describe('DetailStore.refreshNewest', () => {
     expect(state.timeline.entries).toHaveLength(2)
   })
 
-  it('coalesces concurrent calls and no-ops before ready', async () => {
-    const gate = deferred<TimelinePageWire>()
+  it('lets a newer refresh supersede an older out-of-order response', async () => {
+    const firstGate = deferred<TimelinePageWire>()
+    const secondGate = deferred<TimelinePageWire>()
+    const signals: AbortSignal[] = []
     let calls = 0
     const store = new DetailStore('s1', {
       hint: HINT,
       fetchDetailFn: () => Promise.resolve(detailWire()),
       fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
-      fetchPageFn: () => {
+      fetchPageFn: (_id, opts) => {
         calls += 1
-        return gate.promise
+        signals.push(opts?.signal as AbortSignal)
+        return calls === 1 ? firstGate.promise : secondGate.promise
       },
     })
     await store.refreshNewest() // before open(): dropped
@@ -382,12 +517,66 @@ describe('DetailStore.refreshNewest', () => {
     await store.open()
     await settle()
     const first = store.refreshNewest()
-    void store.refreshNewest() // while in flight: dropped, not queued
-    expect(calls).toBe(1)
-    gate.resolve(page([], null))
+    const second = store.refreshNewest()
+    expect(calls).toBe(2)
+    expect(signals[0]?.aborted).toBe(true)
+    secondGate.resolve(page([{ seq: 5, ts: 5_000, kind: 'assistant' }], null, 'healthy'))
+    await second
+    firstGate.resolve(page([{ seq: 4, ts: 4_000, kind: 'assistant' }], null, 'partial'))
     await first
-    expect(calls).toBe(1)
-    expect(store.getState().refreshing).toBe(false)
+    const state = store.getState()
+    expect(state.timeline.entries.map((entry) => entry.seq)).toEqual([2, 3, 5])
+    expect(state.timelineHealth.kind).toBe('healthy')
+    expect(state.refreshing).toBe(false)
+  })
+
+  it('aggregates degraded health across pages until an explicit healthy refresh', async () => {
+    let newestCalls = 0
+    const store = new DetailStore('s1', {
+      hint: HINT,
+      fetchDetailFn: () => Promise.resolve(detailWire({
+        timeline: page(
+          [{ seq: 3, ts: 3_000, kind: 'assistant' }],
+          'CUR1',
+          'healthy',
+        ),
+      })),
+      fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
+      fetchPageFn: (_id, opts) => {
+        if (opts?.cursor === 'CUR1') {
+          return Promise.resolve(page([{ seq: 2, ts: 2_000, kind: 'user' }], 'CUR2', 'partial'))
+        }
+        if (opts?.cursor === 'CUR2') {
+          return Promise.resolve(page([{ seq: 1, ts: 1_000, kind: 'user' }], null, 'healthy'))
+        }
+        newestCalls += 1
+        return Promise.resolve(
+          page(
+            [{ seq: 4 + newestCalls, ts: 4_000 + newestCalls, kind: 'assistant' }],
+            null,
+            newestCalls === 1 ? 'legacy' : 'healthy',
+          ),
+        )
+      },
+    })
+    await store.open()
+    await settle()
+    await store.loadMore()
+    await store.loadMore()
+
+    expect(store.getState().timeline.entries.map((entry) => entry.seq)).toEqual([1, 2, 3])
+    expect(store.getState().timelineHealth.kind).toBe('partial')
+
+    await store.refreshNewest()
+    expect(store.getState().timelineHealth.kind).toBe('partial')
+    expect(store.getState().timeline.entries.map((entry) => entry.seq)).toEqual([1, 2, 3, 5])
+
+    await store.refreshNewest()
+    expect(store.getState().timelineHealth).toMatchObject({
+      kind: 'healthy',
+      legacy: false,
+    })
+    expect(store.getState().timeline.entries.map((entry) => entry.seq)).toEqual([1, 2, 3, 5, 6])
   })
 })
 
@@ -398,17 +587,61 @@ describe('DetailStore.refreshNewest', () => {
 describe('DetailStore.dispose', () => {
   it('drops late settlements silently', async () => {
     const gate = deferred<SessionDetailWire>()
+    let signal: AbortSignal | undefined
     const store = new DetailStore('s1', {
       hint: HINT,
-      fetchDetailFn: () => gate.promise,
+      fetchDetailFn: (_id, opts) => {
+        signal = opts?.signal as AbortSignal | undefined
+        return gate.promise
+      },
       fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
     })
     const opening = store.open()
     store.dispose()
+    expect(signal?.aborted).toBe(true)
     gate.resolve(detailWire())
     await opening
     expect(store.getState().ready).toBe(false)
     expect(store.getState().timeline.entries).toHaveLength(0)
+  })
+
+  it('isolates a pending old target from the newly mounted target', async () => {
+    const oldGate = deferred<SessionDetailWire>()
+    let oldSignal: AbortSignal | undefined
+    const oldStore = new DetailStore('s1', {
+      hint: HINT,
+      fetchDetailFn: (_id, opts) => {
+        oldSignal = opts?.signal as AbortSignal | undefined
+        return oldGate.promise
+      },
+      fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
+    })
+    const oldOpening = oldStore.open()
+    oldStore.dispose()
+
+    const newStore = new DetailStore('s2', {
+      hint: { ...HINT, title: 'new target' },
+      fetchDetailFn: () => Promise.resolve(detailWire({
+        unified: unified({ sessionId: 's2', title: 'new target' }),
+        timeline: {
+          ...page([{ seq: 9, ts: 9_000, kind: 'assistant' }], null, 'healthy'),
+          sessionId: 's2',
+        },
+      })),
+      fetchLineageFn: () => Promise.resolve(LINEAGE_OK),
+    })
+    await newStore.open()
+    oldGate.resolve(detailWire({
+      timeline: page([{ seq: 1, ts: 1_000, kind: 'user' }], null, 'partial'),
+    }))
+    await oldOpening
+
+    expect(oldSignal?.aborted).toBe(true)
+    expect(oldStore.getState().ready).toBe(false)
+    expect(oldStore.getState().timeline.entries).toEqual([])
+    expect(newStore.getState().sessionId).toBe('s2')
+    expect(newStore.getState().header.title).toBe('new target')
+    expect(newStore.getState().timeline.entries.map((entry) => entry.seq)).toEqual([9])
   })
 })
 

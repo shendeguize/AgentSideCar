@@ -2,9 +2,11 @@ import hashlib
 import json
 import multiprocessing
 import os
+import queue
 import shutil
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -35,8 +37,20 @@ def _marker_path(home, runtime):
     )
 
 
-def _reserve_in_process(runtime, identity, request_id, ready, release, output):
-    ready.wait(5.0)
+def _reserve_in_process(
+    runtime,
+    identity,
+    request_id,
+    ready,
+    release,
+    output,
+    worker_ready=None,
+):
+    if worker_ready is None:
+        ready.wait(5.0)
+    else:
+        worker_ready.put(os.getpid())
+        ready.wait()
     try:
         receipt = SendAuditStore(runtime).reserve(request_id, identity)
         output.put("reserved" if receipt is None else receipt.outcome)
@@ -429,6 +443,57 @@ class SendAuditStoreTests(unittest.TestCase):
         self.assertEqual(stored, replay)
         self.assertEqual("completed", replay.outcome)
         self.assertEqual(0, replay.returncode)
+
+    def test_kimi_identity_replays_completed_unknown_without_sensitive_values(self):
+        kimi = make_audit_identity(
+            agent="kimi",
+            session_id="kimi-native-session",
+            project="/private/kimi/project",
+            executable_basename="kimi",
+            confirmation_mode="allow_write",
+            message=b"KIMI-AUDIT-PRIVATE",
+        )
+        store = SendAuditStore(self.runtime)
+        self.assertIsNone(store.reserve("request-kimi-completed-unknown", kimi))
+        store.append_terminal(
+            "request-kimi-completed-unknown",
+            kimi,
+            outcome="failed",
+            delivery="unknown",
+            error=None,
+            returncode=0,
+        )
+        completed_unknown = store.reserve("request-kimi-completed-unknown", kimi)
+
+        self.assertIsNone(store.reserve("request-kimi-unknown", kimi))
+        store.append_terminal(
+            "request-kimi-unknown",
+            kimi,
+            outcome="failed",
+            delivery="unknown",
+            error="protocol_error",
+            returncode=0,
+        )
+        unknown = store.reserve("request-kimi-unknown", kimi)
+        payload = (self.runtime / AUDIT_FILE_NAME).read_bytes()
+
+        self.assertEqual(
+            ("kimi", "failed", "unknown", None, 0),
+            (
+                completed_unknown.agent,
+                completed_unknown.outcome,
+                completed_unknown.delivery,
+                completed_unknown.error,
+                completed_unknown.returncode,
+            ),
+        )
+        self.assertEqual(("kimi", "unknown"), (unknown.agent, unknown.delivery))
+        for sensitive in (
+            b"kimi-native-session",
+            b"/private/kimi/project",
+            b"KIMI-AUDIT-PRIVATE",
+        ):
+            self.assertNotIn(sensitive, payload)
 
     def test_conflicting_target_fails_without_append(self):
         store = SendAuditStore(self.runtime)
@@ -1206,11 +1271,15 @@ class SendAuditStoreTests(unittest.TestCase):
     @unittest.skipUnless(hasattr(os, "fork"), "requires fork and flock")
     def test_fifty_process_first_use_repetitions_are_bounded(self):
         context = multiprocessing.get_context("fork")
+        test_deadline = time.monotonic() + 120.0
         for repetition in range(3):
             runtime = self.root / "first-use-{}".format(repetition)
             ready = context.Event()
             release = context.Event()
+            worker_ready = context.Queue()
             output = context.Queue()
+            ready_pids = []
+            results = []
             processes = [
                 context.Process(
                     target=_reserve_in_process,
@@ -1221,23 +1290,103 @@ class SendAuditStoreTests(unittest.TestCase):
                         ready,
                         release,
                         output,
+                        worker_ready,
                     ),
                 )
                 for _index in range(50)
             ]
-            for process in processes:
-                process.start()
-            ready.set()
-            results = [
-                output.get(timeout=15.0) for _process in processes
-            ]
-            for process in processes:
-                process.join(15.0)
-            self.assertEqual(1, results.count("reserved"))
-            self.assertEqual(49, results.count("request_pending"))
-            self.assertTrue(
-                all(process.exitcode == 0 for process in processes)
-            )
+
+            def remaining(phase):
+                value = test_deadline - time.monotonic()
+                if value <= 0:
+                    states = [
+                        (process.pid, process.exitcode, process.is_alive())
+                        for process in processes
+                    ]
+                    self.fail(
+                        "{} exceeded global deadline in repetition {}; "
+                        "ready={} results={} states={}".format(
+                            phase,
+                            repetition,
+                            len(ready_pids),
+                            len(results),
+                            states,
+                        )
+                    )
+                return value
+
+            def receive(channel, phase):
+                try:
+                    return channel.get(timeout=remaining(phase))
+                except queue.Empty:
+                    remaining(phase)
+                    self.fail("{} ended without a queue result".format(phase))
+
+            try:
+                for process in processes:
+                    process.start()
+                for _process in processes:
+                    ready_pids.append(
+                        receive(worker_ready, "worker-ready barrier")
+                    )
+                self.assertEqual(50, len(set(ready_pids)))
+                ready.set()
+                for _process in processes:
+                    results.append(receive(output, "reservation results"))
+                for process in processes:
+                    process.join(remaining("worker exit"))
+
+                alive = [
+                    process.pid for process in processes if process.is_alive()
+                ]
+                self.assertEqual([], alive)
+                self.assertEqual(50, len(results))
+                self.assertEqual(1, results.count("reserved"), results)
+                self.assertEqual(
+                    49,
+                    results.count("request_pending"),
+                    results,
+                )
+                self.assertTrue(
+                    all(process.exitcode == 0 for process in processes),
+                    [
+                        (process.pid, process.exitcode)
+                        for process in processes
+                    ],
+                )
+            finally:
+                ready.set()
+                release.set()
+                for process in processes:
+                    if process.is_alive():
+                        process.terminate()
+                cleanup_deadline = time.monotonic() + 5.0
+                for process in processes:
+                    process.join(
+                        max(0.0, cleanup_deadline - time.monotonic())
+                    )
+                for process in processes:
+                    if process.is_alive():
+                        process.kill()
+                kill_deadline = time.monotonic() + 5.0
+                for process in processes:
+                    process.join(max(0.0, kill_deadline - time.monotonic()))
+                survivors = [
+                    process.pid for process in processes if process.is_alive()
+                ]
+                worker_ready.close()
+                worker_ready.join_thread()
+                output.close()
+                output.join_thread()
+                for process in processes:
+                    if not process.is_alive():
+                        process.close()
+                if survivors:
+                    self.fail(
+                        "owned first-use workers survived cleanup: {}".format(
+                            survivors
+                        )
+                    )
 
     @unittest.skipUnless(hasattr(os, "fork"), "requires fork and flock")
     def test_active_long_send_survives_forced_rotations(self):

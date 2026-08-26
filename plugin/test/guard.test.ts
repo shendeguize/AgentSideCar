@@ -20,6 +20,7 @@ interface MockReqInit {
   url?: string
   remoteAddress?: string | undefined
   headers?: Record<string, string | string[] | undefined>
+  rawHeaders?: string[]
 }
 
 /** Baseline: a legit same-machine browser GET that must pass every layer. */
@@ -32,6 +33,7 @@ function mockReq(init: MockReqInit = {}): GuardableRequest {
     method: init.method ?? 'GET',
     url: init.url ?? '/plugins/agent-sidecar/api/state',
     headers,
+    rawHeaders: init.rawHeaders,
     socket: {
       remoteAddress: 'remoteAddress' in init ? init.remoteAddress : '127.0.0.1',
     } as IncomingMessage['socket'],
@@ -47,7 +49,10 @@ describe('isLoopbackAddress', () => {
     expect(isLoopbackAddress('127.0.0.1')).toBe(true)
     expect(isLoopbackAddress('127.255.0.7')).toBe(true)
     expect(isLoopbackAddress('::1')).toBe(true)
+    expect(isLoopbackAddress('0::1')).toBe(true)
+    expect(isLoopbackAddress('0:0:0:0:0:0:0:1')).toBe(true)
     expect(isLoopbackAddress('::ffff:127.0.0.1')).toBe(true)
+    expect(isLoopbackAddress('0:0:0:0:0:ffff:127.0.0.1')).toBe(true)
     expect(isLoopbackAddress('::FFFF:127.9.8.7')).toBe(true)
   })
 
@@ -75,6 +80,8 @@ describe('hostIsLoopback', () => {
     expect(hostIsLoopback('127.5.5.5:8080')).toBe(true)
     expect(hostIsLoopback('[::1]')).toBe(true)
     expect(hostIsLoopback('[::1]:8080')).toBe(true)
+    expect(hostIsLoopback('[0::1]:08080')).toBe(true)
+    expect(hostIsLoopback('[0:0:0:0:0:0:0:1]:8080')).toBe(true)
     expect(hostIsLoopback('[::ffff:127.0.0.1]:8080')).toBe(true)
   })
 
@@ -125,32 +132,64 @@ describe('guardRequest layer 2 — Host must be a loopback authority', () => {
   })
 
   it('allows loopback authorities: with port, without port, any case, IPv6', () => {
-    for (const host of ['127.0.0.1:3000', '127.0.0.1', 'localhost:3000', 'LocalHost:3000', '[::1]:3000']) {
+    for (const host of [
+      '127.0.0.1:3000',
+      '127.0.0.1',
+      'localhost:3000',
+      'LocalHost:3000',
+      '[::1]:3000',
+      '[0::1]:03000',
+      '[0:0:0:0:0:0:0:1]:3000',
+    ]) {
       expect(guardRequest(mockReq({ headers: { host } }))).toEqual({ ok: true })
+    }
+  })
+
+  it('counts raw Host fields case-insensitively and requires exactly one', () => {
+    for (const rawHeaders of [
+      [],
+      ['Host', '127.0.0.1:3000', 'host', '127.0.0.1:3000'],
+      ['HOST', '127.0.0.1:3000', 'Host', 'evil.example'],
+    ]) {
+      expectForbidden(
+        guardRequest(mockReq({ rawHeaders, headers: { host: '127.0.0.1:3000' } })),
+        'host_not_loopback',
+      )
+    }
+    expect(
+      guardRequest(
+        mockReq({
+          rawHeaders: ['hOsT', '127.0.0.1:3000'],
+          headers: { host: 'evil.example' },
+        }),
+      ),
+    ).toEqual({ ok: true })
+  })
+
+  it('fails closed on ambiguous normalized Host fallback values', () => {
+    for (const host of [
+      ['127.0.0.1:3000', '127.0.0.1:3000'],
+      '127.0.0.1:3000,127.0.0.1:3000',
+      '127.0.0.1:3000\r\nHost: evil.example',
+    ]) {
+      expectForbidden(guardRequest(mockReq({ headers: { host } })), 'host_not_loopback')
     }
   })
 })
 
 describe('guardRequest layer 3 — Origin / sec-fetch-site', () => {
-  it('allows a same-origin Origin (http and https schemes both fine)', () => {
+  it('allows a same-origin HTTP Origin on the cleartext carrier', () => {
     expect(
       guardRequest(mockReq({ headers: { host: '127.0.0.1:3000', origin: 'http://127.0.0.1:3000' } })),
-    ).toEqual({ ok: true })
-    expect(
-      guardRequest(mockReq({ headers: { host: '127.0.0.1:3000', origin: 'https://127.0.0.1:3000' } })),
     ).toEqual({ ok: true })
     expect(
       guardRequest(mockReq({ headers: { host: 'localhost:8080', origin: 'http://LOCALHOST:8080' } })),
     ).toEqual({ ok: true })
   })
 
-  it('normalizes default ports on both sides', () => {
-    // Host omits the port: either scheme-default origin port is same-origin.
+  it('uses effective port 80 when either HTTP authority omits its port', () => {
     expect(
       guardRequest(mockReq({ headers: { host: 'localhost', origin: 'http://localhost' } })),
-    ).toEqual({ ok: true })
-    expect(
-      guardRequest(mockReq({ headers: { host: 'localhost', origin: 'https://localhost' } })),
     ).toEqual({ ok: true })
     // Explicit :80 in Host vs elided default port in the origin, and vice versa.
     expect(
@@ -176,6 +215,24 @@ describe('guardRequest layer 3 — Origin / sec-fetch-site', () => {
         mockReq({ headers: { host: '[::1]:3000', origin: 'http://[0:0:0:0:0:0:0:1]:3000' } }),
       ),
     ).toEqual({ ok: true })
+    expect(
+      guardRequest(
+        mockReq({ headers: { host: '[0::1]:03000', origin: 'http://[::1]:3000' } }),
+      ),
+    ).toEqual({ ok: true })
+  })
+
+  it('normalizes decimal ports, including leading zeroes', () => {
+    expect(
+      guardRequest(
+        mockReq({ headers: { host: 'localhost:00003000', origin: 'http://localhost:03000' } }),
+      ),
+    ).toEqual({ ok: true })
+    expect(
+      guardRequest(
+        mockReq({ headers: { host: 'localhost:00080', origin: 'http://localhost' } }),
+      ),
+    ).toEqual({ ok: true })
   })
 
   it('rejects cross-origin, wrong-port, wrong-scheme, and opaque origins with 403', () => {
@@ -183,6 +240,8 @@ describe('guardRequest layer 3 — Origin / sec-fetch-site', () => {
       ['127.0.0.1:3000', 'http://evil.com'],
       ['127.0.0.1:3000', 'http://evil.com:3000'],
       ['127.0.0.1:3000', 'http://127.0.0.1:9999'],
+      ['127.0.0.1:3000', 'https://127.0.0.1:3000'],
+      ['localhost', 'https://localhost'],
       ['127.0.0.1:3000', 'http://localhost:3000'], // host string must match exactly
       ['127.0.0.1:3000', 'chrome-extension://abcdef'],
       ['127.0.0.1:3000', 'null'], // opaque origin (sandboxed iframe / file://)
@@ -200,6 +259,48 @@ describe('guardRequest layer 3 — Origin / sec-fetch-site', () => {
       ),
       'origin_mismatch',
     )
+  })
+
+  it('rejects duplicate Origin headers surfaced as a joined string (fail closed)', () => {
+    expectForbidden(
+      guardRequest(
+        mockReq({ headers: { origin: 'http://127.0.0.1:3000, http://127.0.0.1:3000' } }),
+      ),
+      'origin_mismatch',
+    )
+  })
+
+  it('counts raw Origin fields case-insensitively and rejects all duplicates', () => {
+    for (const rawHeaders of [
+      [
+        'Host',
+        '127.0.0.1:3000',
+        'Origin',
+        'http://127.0.0.1:3000',
+        'origin',
+        'http://127.0.0.1:3000',
+      ],
+      [
+        'HOST',
+        '127.0.0.1:3000',
+        'ORIGIN',
+        'http://127.0.0.1:3000',
+        'Origin',
+        'http://evil.example',
+      ],
+    ]) {
+      expectForbidden(guardRequest(mockReq({ rawHeaders })), 'origin_mismatch')
+    }
+  })
+
+  it('fails closed on ambiguous normalized Origin fallback values', () => {
+    for (const origin of [
+      ['http://127.0.0.1:3000', 'http://127.0.0.1:3000'],
+      'http://127.0.0.1:3000,http://127.0.0.1:3000',
+      'http://127.0.0.1:3000\r\nOrigin: http://evil.example',
+    ]) {
+      expectForbidden(guardRequest(mockReq({ headers: { origin } })), 'origin_mismatch')
+    }
   })
 
   it('allows a missing Origin (same-origin fetch and non-browser clients omit it)', () => {
@@ -222,10 +323,62 @@ describe('guardRequest layer 3 — Origin / sec-fetch-site', () => {
     )
   })
 
+  it('prioritizes sec-fetch-site: cross-site over an invalid Origin', () => {
+    expectForbidden(
+      guardRequest(
+        mockReq({ headers: { origin: 'https://127.0.0.1:3000', 'sec-fetch-site': 'cross-site' } }),
+      ),
+      'cross_site',
+    )
+    expectForbidden(
+      guardRequest(
+        mockReq({
+          headers: { 'sec-fetch-site': 'cross-site' },
+          rawHeaders: [
+            'Host',
+            '127.0.0.1:3000',
+            'Origin',
+            'http://127.0.0.1:3000',
+            'Origin',
+            'http://evil.example',
+          ],
+        }),
+      ),
+      'cross_site',
+    )
+  })
+
   it('allows non-cross-site sec-fetch-site values', () => {
     for (const value of ['same-origin', 'same-site', 'none']) {
       expect(guardRequest(mockReq({ headers: { 'sec-fetch-site': value } }))).toEqual({ ok: true })
     }
+  })
+
+  it('does not trust X-Forwarded-* when evaluating the direct HTTP request', () => {
+    expectForbidden(
+      guardRequest(
+        mockReq({
+          headers: {
+            host: 'evil.example',
+            'x-forwarded-host': '127.0.0.1:3000',
+            'x-forwarded-proto': 'http',
+          },
+        }),
+      ),
+      'host_not_loopback',
+    )
+    expect(
+      guardRequest(
+        mockReq({
+          headers: {
+            host: '127.0.0.1:3000',
+            origin: 'http://127.0.0.1:3000',
+            'x-forwarded-host': 'evil.example',
+            'x-forwarded-proto': 'https',
+          },
+        }),
+      ),
+    ).toEqual({ ok: true })
   })
 })
 

@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import z from "@deepseek-ai/schemastery";
 import { createConnection } from "node:net";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { performance } from "node:perf_hooks";
 /** Title chars kept in prompts and logs (titles are untrusted input too). */
 const MAX_TITLE_CHARS = 200;
 /** Appended to the input text when it was cut at `maxInputChars`. */
@@ -20,7 +21,7 @@ const ANALYSIS_GUIDANCE = [
 	"You are a read-only analysis assistant: provide insights (state assessment, anomalies/risks, possible next steps) based solely on the agent-session summary below.",
 	"Take no actions, call no tools, change nothing; do not assume facts beyond the summary — it may be incomplete or truncated, so state uncertainty honestly."
 ].join("\n");
-function describeError$4(error) {
+function describeError$3(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 function boundText(text, maxChars) {
@@ -156,7 +157,7 @@ var AnalysisEngine = class {
 			return this.failResult("request", entry, "create_failed", {
 				truncated: bounded.truncated,
 				startedAt,
-				detail: describeError$4(error)
+				detail: describeError$3(error)
 			});
 		}
 		entry.handle = handle;
@@ -305,7 +306,7 @@ var AnalysisEngine = class {
 		} catch (error) {
 			return {
 				status: "threw",
-				detail: describeError$4(error)
+				detail: describeError$3(error)
 			};
 		}
 		let idle;
@@ -314,7 +315,7 @@ var AnalysisEngine = class {
 		} catch (error) {
 			return {
 				status: "threw",
-				detail: describeError$4(error)
+				detail: describeError$3(error)
 			};
 		}
 		if (idle.timedOut) return { status: "timeout" };
@@ -347,7 +348,7 @@ var AnalysisEngine = class {
 				op: "cancel",
 				analysisSessionId: entry.analysisSessionId,
 				found: true,
-				detail: `cancel threw: ${describeError$4(error)}`
+				detail: `cancel threw: ${describeError$3(error)}`
 			});
 		}
 	}
@@ -360,7 +361,7 @@ var AnalysisEngine = class {
 				op: "cancel",
 				analysisSessionId: entry.analysisSessionId,
 				found: true,
-				detail: `dispose threw: ${describeError$4(error)}`
+				detail: `dispose threw: ${describeError$3(error)}`
 			});
 		}
 	}
@@ -474,6 +475,213 @@ const Config = z.object({
 	skill: z.object({ provide: z.boolean().default(true).description("是否经 registerProvider 内嵌提供 agent-sidecar skill(设计 §6 默认开;文件系统已装的同名 skill 自动优先;改动需重载插件生效)") }).description("skill 模式")
 });
 //#endregion
+//#region src/inject-eligibility.ts
+const ELIGIBLE = Object.freeze({
+	allowed: true,
+	reason: "eligible"
+});
+const REJECTED = Object.freeze({
+	unsupported_agent: Object.freeze({
+		allowed: false,
+		reason: "unsupported_agent"
+	}),
+	working_session: Object.freeze({
+		allowed: false,
+		reason: "working_session"
+	}),
+	dead_session: Object.freeze({
+		allowed: false,
+		reason: "dead_session"
+	}),
+	child_session: Object.freeze({
+		allowed: false,
+		reason: "child_session"
+	}),
+	remote_session: Object.freeze({
+		allowed: false,
+		reason: "remote_session"
+	}),
+	invalid_session: Object.freeze({
+		allowed: false,
+		reason: "invalid_session"
+	})
+});
+const EXTERNAL_AGENTS = /* @__PURE__ */ new Set([
+	"claude",
+	"codex",
+	"cursor-cli",
+	"kimi"
+]);
+const KNOWN_STATUSES = /* @__PURE__ */ new Set([.../* @__PURE__ */ new Set([
+	"working",
+	"waiting",
+	"idle"
+]), "dead"]);
+const MAX_SESSION_EXTRA_BYTES = 256 * 1024;
+const INVALID_JSON_VALUE = Symbol("invalid-json-value");
+function isRecord$1(value) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	try {
+		const prototype = Object.getPrototypeOf(value);
+		return prototype === Object.prototype || prototype === null;
+	} catch {
+		return false;
+	}
+}
+function hasOwn(record, key) {
+	return Object.prototype.hasOwnProperty.call(record, key);
+}
+/** Read an own data property without invoking a getter. */
+function ownData(record, key) {
+	try {
+		const descriptor = Object.getOwnPropertyDescriptor(record, key);
+		if (descriptor === void 0) return { present: false };
+		if (!("value" in descriptor)) return null;
+		return {
+			present: true,
+			value: descriptor.value
+		};
+	} catch {
+		return null;
+	}
+}
+function cloneBoundedJson(value, depth, budget, seen) {
+	budget.items += 1;
+	if (budget.items > 8192 || depth > 32) return INVALID_JSON_VALUE;
+	const consumeBytes = (bytes) => {
+		budget.bytes += bytes;
+		return budget.bytes <= MAX_SESSION_EXTRA_BYTES;
+	};
+	if (value === null) return consumeBytes(4) ? value : INVALID_JSON_VALUE;
+	if (typeof value === "boolean") return consumeBytes(value ? 4 : 5) ? value : INVALID_JSON_VALUE;
+	if (typeof value === "number") return Number.isFinite(value) && consumeBytes(Buffer.byteLength(String(value), "utf8")) ? value : INVALID_JSON_VALUE;
+	if (typeof value === "string") {
+		const bytes = Buffer.byteLength(value, "utf8");
+		return bytes <= 262144 && consumeBytes(bytes + 2) ? value : INVALID_JSON_VALUE;
+	}
+	if (typeof value !== "object") return INVALID_JSON_VALUE;
+	if (seen.has(value)) return INVALID_JSON_VALUE;
+	seen.add(value);
+	try {
+		if (Array.isArray(value)) {
+			if (!consumeBytes(2)) return INVALID_JSON_VALUE;
+			if (Object.getPrototypeOf(value) !== Array.prototype) return INVALID_JSON_VALUE;
+			if (Object.getOwnPropertySymbols(value).length > 0) return INVALID_JSON_VALUE;
+			const names = Object.getOwnPropertyNames(value);
+			if (names.length !== value.length + 1 || names[names.length - 1] !== "length") return INVALID_JSON_VALUE;
+			const out = [];
+			for (let index = 0; index < value.length; index += 1) {
+				if (index > 0 && !consumeBytes(1)) return INVALID_JSON_VALUE;
+				const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+				if (descriptor === void 0 || !("value" in descriptor) || !descriptor.enumerable) return INVALID_JSON_VALUE;
+				const item = cloneBoundedJson(descriptor.value, depth + 1, budget, seen);
+				if (item === INVALID_JSON_VALUE) return INVALID_JSON_VALUE;
+				out.push(item);
+			}
+			return out;
+		}
+		if (!isRecord$1(value) || Object.getOwnPropertySymbols(value).length > 0) return INVALID_JSON_VALUE;
+		if (!consumeBytes(2)) return INVALID_JSON_VALUE;
+		const out = {};
+		const keys = Object.getOwnPropertyNames(value);
+		for (let index = 0; index < keys.length; index += 1) {
+			const key = keys[index];
+			if (key === void 0) return INVALID_JSON_VALUE;
+			if (!consumeBytes(Buffer.byteLength(key, "utf8") + 3 + (index > 0 ? 1 : 0))) return INVALID_JSON_VALUE;
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (descriptor === void 0 || !("value" in descriptor) || !descriptor.enumerable) return INVALID_JSON_VALUE;
+			const item = cloneBoundedJson(descriptor.value, depth + 1, budget, seen);
+			if (item === INVALID_JSON_VALUE) return INVALID_JSON_VALUE;
+			Object.defineProperty(out, key, {
+				value: item,
+				enumerable: true,
+				configurable: true,
+				writable: true
+			});
+		}
+		return out;
+	} catch {
+		return INVALID_JSON_VALUE;
+	} finally {
+		seen.delete(value);
+	}
+}
+/**
+* Return a detached, accessor-free JSON object within the sidecar's bounds.
+* Invalid prototypes, cycles, non-JSON values, and accessors fail closed.
+*/
+function sanitizeSessionExtra(value) {
+	if (!isRecord$1(value)) return null;
+	const cloned = cloneBoundedJson(value, 1, {
+		items: 0,
+		bytes: 0
+	}, /* @__PURE__ */ new WeakSet());
+	return cloned === INVALID_JSON_VALUE || !isRecord$1(cloned) ? null : cloned;
+}
+/**
+* Match sidecar.inject's established local/remote contract exactly:
+* `extra.host` presence, `remote === true`, or `source === "remote"`, plus
+* fleet rows' top-level host and explicit remote alias/host markers.
+* Absence of a top-level host is the normal daemon-local shape.
+*/
+function remoteMarker(row, extra) {
+	const host = ownData(row, "host");
+	const remote = ownData(row, "remote");
+	const source = ownData(row, "source");
+	const remoteAlias = ownData(row, "remote_alias");
+	const remoteHost = ownData(row, "remote_host");
+	if (host === null || remote === null || source === null || remoteAlias === null || remoteHost === null) return "invalid";
+	if (host.present && (typeof host.value !== "string" || host.value === "")) return "invalid";
+	if (remote.present && typeof remote.value !== "boolean") return "invalid";
+	if (source.present && typeof source.value !== "string") return "invalid";
+	for (const marker of [remoteAlias, remoteHost]) if (marker.present && (typeof marker.value !== "string" || marker.value === "")) return "invalid";
+	for (const key of ["remote_alias", "remote_host"]) if (hasOwn(extra, key)) {
+		const value = extra[key];
+		if (typeof value !== "string" || value === "") return "invalid";
+		return "remote";
+	}
+	if (host.present && host.value !== "local" || remote.value === true || source.value === "remote" || remoteAlias.present || remoteHost.present || hasOwn(extra, "host") || extra["remote"] === true || extra["source"] === "remote") return "remote";
+	return "local";
+}
+/** Python's `extra.get("sidechain", False) is not False` contract. */
+function isSidechain(extra) {
+	return hasOwn(extra, "sidechain") && extra["sidechain"] !== false;
+}
+/**
+* Derive one stable, body-free verdict from the complete sidecar row.
+*
+* After structural validation, explicit remote provenance wins so no remote
+* row can be represented by a weaker local-state verdict.
+* Dsh deliberately skips external child/sidechain rejection; its in-process
+* preflight owns whether that topology can be resumed or steered.
+*/
+function deriveInjectEligibility(row) {
+	if (!isRecord$1(row)) return REJECTED.invalid_session;
+	const agent = ownData(row, "agent");
+	const sessionId = ownData(row, "session_id");
+	const project = ownData(row, "project");
+	const transcript = ownData(row, "transcript");
+	const updatedAt = ownData(row, "updated_at");
+	const title = ownData(row, "title");
+	const status = ownData(row, "status");
+	const rawExtra = ownData(row, "extra");
+	const parentId = ownData(row, "parent_id");
+	const invalidMarker = ownData(row, "invalid_session");
+	if (agent === null || sessionId === null || project === null || transcript === null || updatedAt === null || title === null || status === null || rawExtra === null || parentId === null || invalidMarker === null || !agent.present || typeof agent.value !== "string" || agent.value === "" || !sessionId.present || typeof sessionId.value !== "string" || sessionId.value === "" || !project.present || typeof project.value !== "string" || !transcript.present || typeof transcript.value !== "string" || !updatedAt.present || typeof updatedAt.value !== "number" || !Number.isFinite(updatedAt.value) || !title.present || typeof title.value !== "string" || !status.present || typeof status.value !== "string" || !KNOWN_STATUSES.has(status.value) || !rawExtra.present || !parentId.present || parentId.value !== null && typeof parentId.value !== "string" || invalidMarker.present && invalidMarker.value !== true) return REJECTED.invalid_session;
+	if (invalidMarker.value === true) return REJECTED.invalid_session;
+	const extra = sanitizeSessionExtra(rawExtra.value);
+	if (extra === null) return REJECTED.invalid_session;
+	const marker = remoteMarker(row, extra);
+	if (marker === "invalid") return REJECTED.invalid_session;
+	if (marker === "remote") return REJECTED.remote_session;
+	const isDsh = agent.value === "dsh";
+	if (!isDsh && !EXTERNAL_AGENTS.has(agent.value)) return REJECTED.unsupported_agent;
+	if (status.value === "dead") return REJECTED.dead_session;
+	if (!isDsh && status.value === "working") return REJECTED.working_session;
+	if (!isDsh && (parentId.value !== null || isSidechain(extra))) return REJECTED.child_session;
+	return ELIGIBLE;
+}
+//#endregion
 //#region src/bridge.ts
 /**
 * Sidecar Unix-socket bridge (host half, transport layer only).
@@ -527,8 +735,21 @@ var SidecarDaemonError = class extends Error {
 	}
 };
 function isRecord(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	try {
+		const prototype = Object.getPrototypeOf(value);
+		return prototype === Object.prototype || prototype === null;
+	} catch {
+		return false;
+	}
 }
+const SESSION_STATUSES = /* @__PURE__ */ new Set([
+	"working",
+	"waiting",
+	"idle",
+	"dead"
+]);
+const INVALID_STATUS = "<invalid>";
 function parseHttpPingInfo(value) {
 	if (value === null || value === void 0) return { enabled: false };
 	if (!isRecord(value) || typeof value["enabled"] !== "boolean") return null;
@@ -567,20 +788,57 @@ function parsePingInfo(value) {
 */
 function parseSessionRow(value) {
 	if (!isRecord(value)) return null;
+	const agent = value["agent"];
 	const sessionId = value["session_id"];
-	if (typeof sessionId !== "string" || sessionId === "") return null;
+	const project = value["project"];
+	const transcript = value["transcript"];
 	const updatedAt = value["updated_at"];
-	return {
-		agent: typeof value["agent"] === "string" ? value["agent"] : "",
+	const title = value["title"];
+	if (typeof agent !== "string" || agent === "" || typeof sessionId !== "string" || sessionId === "" || typeof project !== "string" || typeof transcript !== "string" || typeof updatedAt !== "number" || !Number.isFinite(updatedAt) || typeof title !== "string") return null;
+	let invalid = false;
+	const rawStatus = value["status"];
+	const status = typeof rawStatus === "string" ? rawStatus : INVALID_STATUS;
+	if (!SESSION_STATUSES.has(status)) invalid = true;
+	let extra = sanitizeSessionExtra(value["extra"]);
+	if (extra === null) {
+		invalid = true;
+		extra = {};
+	}
+	const rawParentId = value["parent_id"];
+	let parentId;
+	if (rawParentId === null || typeof rawParentId === "string") parentId = rawParentId;
+	else {
+		invalid = true;
+		parentId = null;
+	}
+	const row = {
+		agent,
 		session_id: sessionId,
-		project: typeof value["project"] === "string" ? value["project"] : "",
-		transcript: typeof value["transcript"] === "string" ? value["transcript"] : "",
-		updated_at: typeof updatedAt === "number" && Number.isFinite(updatedAt) ? updatedAt : 0,
-		title: typeof value["title"] === "string" ? value["title"] : "",
-		status: typeof value["status"] === "string" ? value["status"] : "idle",
-		extra: isRecord(value["extra"]) ? value["extra"] : {},
-		parent_id: typeof value["parent_id"] === "string" ? value["parent_id"] : null
+		project,
+		transcript,
+		updated_at: updatedAt,
+		title,
+		status,
+		extra,
+		parent_id: parentId
 	};
+	const copyMarker = (key, nonempty) => {
+		if (!Object.prototype.hasOwnProperty.call(value, key)) return;
+		const marker = value[key];
+		if (typeof marker !== "string" || nonempty && marker === "") {
+			invalid = true;
+			return;
+		}
+		row[key] = marker;
+	};
+	copyMarker("host", true);
+	copyMarker("source", false);
+	copyMarker("remote_alias", true);
+	copyMarker("remote_host", true);
+	if (Object.prototype.hasOwnProperty.call(value, "remote")) if (typeof value["remote"] === "boolean") row.remote = value["remote"];
+	else invalid = true;
+	if (invalid) row.invalid_session = true;
+	return row;
 }
 function parseRecordList(value) {
 	if (value === void 0) return [];
@@ -1067,70 +1325,662 @@ var Reconciler = class {
 		});
 	}
 };
+//#endregion
+//#region src/dsh-inject.ts
+/**
+* dsh in-process injection executor — injection path one of design §4.d
+* (.local/tasks/make_dsh_mode/design/dsh_plugin_design.md): native dsh
+* sessions are reached through the `ctx.agents` registry, closing the
+* sidecar send `unsupported_dsh` gap.
+*
+* API facts verified against the installed SDK
+* (`@deepseek-ai/dsh-agent@0.1.1-rc.2` d.ts, authoritative over the design
+* sketch):
+*
+* - `ctx.agents` is `AgentRegistry` (lib/types/index.d.ts:28):
+*   `get(id): Agent | undefined` (:349) and
+*   `resume({resumeSessionId,agentOptions?,signal?,setup?}): Promise<AgentHandle>` (:296)
+*   with `agentOptions.provider/model` declared in runtime-types.d.ts:21-28,
+*   and
+*   `AgentHandle = { agent; dispose() }` (:155-158).
+* - `Agent.followup(message: UserMessage): void` and
+*   `Agent.steer(message: UserMessage): void` are SYNCHRONOUS inbox splices
+*   (runtime-types.d.ts:115/:123) — the design sketch's `await` is a
+*   deviation. A sync return means the message entered the live inbox
+*   (delivered); a sync throw is the only call-site failure face.
+* - `UserMessage` = `{ id, role: 'user', content: ContentBlock[], source }`
+*   (dsh-llm message.d.ts:120-133); text content is `[{type:'text',text}]`
+*   (types.d.ts:39-42, F11) and plugin attribution is
+*   `source: { kind: 'plugin', plugin: <name> }` (message.d.ts:98-101).
+* - resume is NOT idempotent: resuming a live session throws
+*   `cannot prepare session "<id>" while it is live`
+*   (session-persistence coordinator), and resume rejects when no
+*   persistence backend is configured — so the executor MUST `get` first
+*   and only resume a miss. persistence prepare may also retry unboundedly
+*   under concurrent writers, hence the bounded resume wait here.
+*
+* queue → `followup` (own next turn), steer → `steer` (nearest step),
+* matching dsh's own `session.prompt` mode vocabulary.
+*
+* Error vocabulary is normalized with path two on the shared subset
+* `target_not_found | executor_error | timeout`; dsh-native error text is
+* never returned or logged. Log lines never carry the message body — only
+* byte size and a sha256 prefix (S8).
+*
+* Pure DI: no cordis/dsh imports. {@link AgentsServiceFace} is a minimal
+* structural face extracted from the d.ts; the real `AgentRegistry`
+* satisfies it directly (method-syntax members keep parameter checks
+* bivariant, so the SDK's branded `SessionId` / wider `UserMessage`
+* signatures remain assignable).
+*
+* @module
+*/
+/** Stable internal rejection from the unpublished setup/commit boundary. */
+var DshResumeGuardError = class extends Error {
+	errorCode;
+	constructor(errorCode) {
+		super("dsh cold resume publication guard rejected");
+		this.name = "DshResumeGuardError";
+		this.errorCode = errorCode;
+	}
+};
 /** Sha256 hex prefix length recorded in logs (matches inject-gateway). */
 const SHA_LOG_CHARS$1 = 12;
-function describeError$3(error) {
-	return error instanceof Error ? error.message : String(error);
-}
-/** Race a resume against the bounded wait; null = timed out (still pending). */
-async function resumeWithin(resume, timeoutMs) {
-	let timer;
+/**
+* Resolve and validate one complete host-default pair. The runtime validation
+* is intentional even though the port is narrow: optional/foreign services
+* can still return partial or blank data through structural casts.
+*/
+function resolveModelRoute(resolver) {
+	if (resolver === void 0) return null;
 	try {
-		return await Promise.race([resume, new Promise((resolve) => {
-			timer = setTimeout(() => resolve(null), timeoutMs);
-		})]);
-	} finally {
-		if (timer !== void 0) clearTimeout(timer);
+		const route = resolver();
+		if (route === null) return null;
+		const provider = typeof route.provider === "string" ? route.provider.trim() : "";
+		const model = typeof route.model === "string" ? route.model.trim() : "";
+		return provider !== "" && model !== "" ? {
+			provider,
+			model
+		} : null;
+	} catch {
+		return null;
+	}
+}
+const DEADLINE_TIMEOUT = Symbol("dsh-deadline-timeout");
+function createDeadline(timeoutMs, now) {
+	const controller = new AbortController();
+	const expiresAt = now() + timeoutMs;
+	let deadlineWon = false;
+	let timer;
+	return {
+		controller,
+		expiresAt,
+		timeout: new Promise((resolve) => {
+			timer = setTimeout(() => {
+				timer = void 0;
+				deadlineWon = true;
+				resolve(DEADLINE_TIMEOUT);
+				controller.abort(/* @__PURE__ */ new Error("dsh cold resume deadline exceeded"));
+			}, Math.max(0, timeoutMs));
+		}),
+		expired: () => deadlineWon || now() >= expiresAt,
+		clear: () => {
+			if (timer !== void 0) {
+				clearTimeout(timer);
+				timer = void 0;
+			}
+		}
+	};
+}
+async function settleBeforeDeadline(operation, deadline) {
+	const observed = operation.then((value) => ({
+		kind: "value",
+		value
+	}), () => ({ kind: "error" }));
+	const settled = await Promise.race([observed, deadline.timeout]);
+	return settled === DEADLINE_TIMEOUT ? { kind: "timeout" } : settled;
+}
+async function disposeQuietly(handle) {
+	try {
+		await handle.dispose();
+		return true;
+	} catch {
+		return false;
 	}
 }
 function createDshInjectExecutor(deps) {
 	const pluginName = deps.pluginName ?? "agent-sidecar";
 	const log = deps.log ?? (() => {});
 	const resumeTimeoutMs = deps.resumeTimeoutMs ?? 3e4;
+	const now = deps.now ?? performance.now.bind(performance);
+	const slots = /* @__PURE__ */ new Map();
+	const generationInvalidations = /* @__PURE__ */ new Map();
+	const fallbackGeneration = {};
+	const resolveCurrentGeneration = deps.currentColdServiceGeneration ?? (() => deps.agents.isAvailable() ? fallbackGeneration : null);
+	const currentGeneration = () => {
+		try {
+			return resolveCurrentGeneration();
+		} catch {
+			return null;
+		}
+	};
+	let unloading = false;
+	let disposePromise = null;
+	const checkCold = async (sessionId, deadline, timeoutCode) => {
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			const generation = currentGeneration();
+			if (unloading || generation === null || !deps.agents.isAvailable()) return {
+				kind: "failed",
+				errorCode: "executor_error",
+				modelRouteAvailable: false,
+				presetInspectionAvailable: false,
+				presetSupported: false
+			};
+			if (deps.resolveColdPreset === void 0) return {
+				kind: "failed",
+				errorCode: "executor_error",
+				modelRouteAvailable: false,
+				presetInspectionAvailable: false,
+				presetSupported: false
+			};
+			const inspected = await settleBeforeDeadline(Promise.resolve().then(() => deps.resolveColdPreset(sessionId, deadline.controller.signal)), deadline);
+			if (inspected.kind === "timeout") return {
+				kind: "failed",
+				errorCode: timeoutCode,
+				modelRouteAvailable: false,
+				presetInspectionAvailable: false,
+				presetSupported: false
+			};
+			if (currentGeneration() !== generation) continue;
+			let live;
+			try {
+				live = deps.agents.get(sessionId);
+			} catch {
+				return {
+					kind: "failed",
+					errorCode: "executor_error",
+					modelRouteAvailable: false,
+					presetInspectionAvailable: false,
+					presetSupported: false
+				};
+			}
+			if (live !== void 0) return {
+				kind: "live",
+				agent: live,
+				generation,
+				modelRouteAvailable: false,
+				presetInspectionAvailable: true,
+				presetSupported: inspected.kind === "value" && inspected.value.state === "absent"
+			};
+			if (inspected.kind === "error" || inspected.value.state === "unknown") return {
+				kind: "failed",
+				errorCode: "executor_error",
+				modelRouteAvailable: false,
+				presetInspectionAvailable: false,
+				presetSupported: false
+			};
+			if (inspected.value.state === "missing") return {
+				kind: "failed",
+				errorCode: "target_not_found",
+				modelRouteAvailable: false,
+				presetInspectionAvailable: true,
+				presetSupported: false
+			};
+			if (!deps.agents.isAvailable()) return {
+				kind: "failed",
+				errorCode: "executor_error",
+				modelRouteAvailable: false,
+				presetInspectionAvailable: true,
+				presetSupported: inspected.value.state === "absent"
+			};
+			if (inspected.value.state === "present") return {
+				kind: "failed",
+				errorCode: "dsh_preset_unsupported",
+				modelRouteAvailable: false,
+				presetInspectionAvailable: true,
+				presetSupported: false
+			};
+			const route = resolveModelRoute(deps.resolveHostDefaultModel);
+			if (route === null) return {
+				kind: "failed",
+				errorCode: "dsh_model_unconfigured",
+				modelRouteAvailable: false,
+				presetInspectionAvailable: true,
+				presetSupported: true
+			};
+			return {
+				kind: "ready",
+				route,
+				proof: inspected.value,
+				generation,
+				modelRouteAvailable: true,
+				presetInspectionAvailable: true,
+				presetSupported: true
+			};
+		}
+		return {
+			kind: "failed",
+			errorCode: "executor_error",
+			modelRouteAvailable: false,
+			presetInspectionAvailable: false,
+			presetSupported: false
+		};
+	};
+	const startResumeSlot = (sessionId, route, setup, generation) => {
+		const slotDeadline = createDeadline(resumeTimeoutMs, now);
+		let raw;
+		try {
+			raw = Promise.resolve(deps.agents.resume({
+				resumeSessionId: sessionId,
+				agentOptions: {
+					provider: route.provider,
+					model: route.model
+				},
+				signal: slotDeadline.controller.signal,
+				setup
+			}));
+		} catch (error) {
+			raw = Promise.reject(error);
+		}
+		let slot;
+		const operation = raw.then(async (handle) => {
+			slotDeadline.clear();
+			if (unloading) return await disposeQuietly(handle) ? {
+				kind: "failed",
+				errorCode: "executor_error"
+			} : { kind: "retire-failed" };
+			if (currentGeneration() !== generation || slots.get(sessionId) !== slot) return await disposeQuietly(handle) ? { kind: "stale" } : { kind: "retire-failed" };
+			const fulfilled = {
+				state: "fulfilled",
+				generation,
+				agent: handle.agent,
+				handle
+			};
+			slots.set(sessionId, fulfilled);
+			return {
+				kind: "agent",
+				agent: handle.agent
+			};
+		}, async (error) => {
+			if (slots.get(sessionId) === slot) slots.delete(sessionId);
+			if (unloading) {
+				slotDeadline.clear();
+				return {
+					kind: "failed",
+					errorCode: "executor_error"
+				};
+			}
+			if (currentGeneration() !== generation) {
+				slotDeadline.clear();
+				return { kind: "stale" };
+			}
+			if (error instanceof DshResumeGuardError) {
+				slotDeadline.clear();
+				return {
+					kind: "failed",
+					errorCode: error.errorCode
+				};
+			}
+			let winner;
+			try {
+				winner = deps.agents.get(sessionId);
+			} catch {
+				slotDeadline.clear();
+				return {
+					kind: "failed",
+					errorCode: "executor_error"
+				};
+			}
+			if (winner !== void 0) {
+				slotDeadline.clear();
+				return {
+					kind: "agent",
+					agent: winner
+				};
+			}
+			if (slotDeadline.expired()) {
+				slotDeadline.clear();
+				return { kind: "timeout" };
+			}
+			if (deps.resolveColdPreset !== void 0) {
+				const proof = await settleBeforeDeadline(Promise.resolve().then(() => deps.resolveColdPreset(sessionId, slotDeadline.controller.signal)), slotDeadline);
+				if (proof.kind === "timeout") {
+					slotDeadline.clear();
+					return { kind: "timeout" };
+				}
+				if (currentGeneration() !== generation) {
+					slotDeadline.clear();
+					return { kind: "stale" };
+				}
+				try {
+					winner = deps.agents.get(sessionId);
+				} catch {
+					slotDeadline.clear();
+					return {
+						kind: "failed",
+						errorCode: "executor_error"
+					};
+				}
+				if (winner !== void 0) {
+					slotDeadline.clear();
+					return {
+						kind: "agent",
+						agent: winner
+					};
+				}
+				if (proof.kind === "value") {
+					if (proof.value.state === "missing") {
+						slotDeadline.clear();
+						return {
+							kind: "failed",
+							errorCode: "target_not_found"
+						};
+					}
+					if (proof.value.state === "present") {
+						slotDeadline.clear();
+						return {
+							kind: "failed",
+							errorCode: "dsh_preset_unsupported"
+						};
+					}
+				}
+			}
+			slotDeadline.clear();
+			return {
+				kind: "failed",
+				errorCode: "executor_error"
+			};
+		});
+		slot = {
+			state: "resuming",
+			generation,
+			controller: slotDeadline.controller,
+			operation
+		};
+		slots.set(sessionId, slot);
+		return slot;
+	};
+	const waitForSlot = async (slot, deadline) => {
+		if (slot.state === "retiring") {
+			const settled = await settleBeforeDeadline(slot.settlement, deadline);
+			if (settled.kind === "timeout") return { kind: "timeout" };
+			if (settled.kind === "error" || settled.value.kind === "failed") return {
+				kind: "failed",
+				errorCode: "executor_error"
+			};
+			return { kind: "stale" };
+		}
+		if (slot.generation !== currentGeneration()) return { kind: "stale" };
+		if (slot.state === "fulfilled") return {
+			kind: "agent",
+			agent: slot.agent
+		};
+		const settled = await settleBeforeDeadline(slot.operation, deadline);
+		if (settled.kind === "timeout") return { kind: "timeout" };
+		if (settled.kind === "error") return {
+			kind: "failed",
+			errorCode: "executor_error"
+		};
+		if (settled.value.kind === "retire-failed") return {
+			kind: "failed",
+			errorCode: "executor_error"
+		};
+		if (slot.generation !== currentGeneration()) return { kind: "stale" };
+		return settled.value;
+	};
+	const beginRetirement = (sessionId, slot) => {
+		const current = slots.get(sessionId);
+		if (current !== slot && current?.state === "retiring") return current;
+		let settle;
+		const base = new Promise((resolve) => {
+			settle = resolve;
+		});
+		let tombstone;
+		const settlement = base.then((result) => {
+			if (slots.get(sessionId) === tombstone) slots.delete(sessionId);
+			return result;
+		});
+		tombstone = {
+			state: "retiring",
+			generation: slot.generation,
+			settlement
+		};
+		slots.set(sessionId, tombstone);
+		if (slot.state === "resuming") {
+			slot.controller.abort(/* @__PURE__ */ new Error("dsh cold service generation retired"));
+			slot.operation.then((outcome) => settle(outcome.kind === "retire-failed" ? { kind: "failed" } : { kind: "retired" }), () => settle({ kind: "failed" }));
+		} else disposeQuietly(slot.handle).then((disposed) => settle(disposed ? { kind: "retired" } : { kind: "failed" }));
+		return tombstone;
+	};
+	const invalidateGeneration = (generation) => {
+		const existing = generationInvalidations.get(generation);
+		if (existing !== void 0) return existing;
+		const owned = [...slots.entries()].filter(([, slot]) => slot.generation === generation);
+		const cleanup = Promise.all(owned.map(([sessionId, slot]) => slot.state === "retiring" ? slot.settlement : beginRetirement(sessionId, slot).settlement)).then(() => {});
+		generationInvalidations.set(generation, cleanup);
+		cleanup.then(() => {
+			if (generationInvalidations.get(generation) === cleanup) generationInvalidations.delete(generation);
+		});
+		return cleanup;
+	};
+	const usableSlot = (sessionId) => {
+		const slot = slots.get(sessionId);
+		if (slot === void 0) return void 0;
+		if (slot.state === "retiring") return slot;
+		if (slot.generation !== currentGeneration()) {
+			invalidateGeneration(slot.generation);
+			return slots.get(sessionId);
+		}
+		if (slot.state === "resuming") return slot;
+		try {
+			if (deps.agents.get(sessionId) === slot.agent) return slot;
+		} catch {}
+		return beginRetirement(sessionId, slot);
+	};
+	const disposeSlots = () => {
+		if (disposePromise !== null) return disposePromise;
+		unloading = true;
+		const owned = [...slots.values()];
+		for (const slot of owned) if (slot.state === "resuming") slot.controller.abort(/* @__PURE__ */ new Error("dsh injection executor unloading"));
+		disposePromise = Promise.all([...new Set(owned.map((slot) => slot.generation))].map((generation) => invalidateGeneration(generation))).then(() => {
+			slots.clear();
+		});
+		return disposePromise;
+	};
+	const timeoutFor = (req) => {
+		if (deps.requestTimeoutMs === void 0) return resumeTimeoutMs;
+		try {
+			const value = deps.requestTimeoutMs(req);
+			return Number.isFinite(value) && value >= 0 ? value : resumeTimeoutMs;
+		} catch {
+			return resumeTimeoutMs;
+		}
+	};
 	return {
 		kind: "dsh",
+		async preflight(target) {
+			if (unloading) return {
+				ok: false,
+				errorCode: "executor_error"
+			};
+			let deadline = null;
+			const existingSlot = usableSlot(target.sessionId);
+			if (existingSlot?.state === "retiring") {
+				deadline = createDeadline(resumeTimeoutMs, now);
+				const retired = await waitForSlot(existingSlot, deadline);
+				if (retired.kind === "timeout" || retired.kind === "failed") {
+					deadline.clear();
+					return {
+						ok: false,
+						errorCode: "executor_error"
+					};
+				}
+			} else if (existingSlot !== void 0) return { ok: true };
+			if (deps.agents.get(target.sessionId) !== void 0) {
+				deadline?.clear();
+				log("debug", "dsh injection preflight ready", { liveAgentAvailable: true });
+				return { ok: true };
+			}
+			deadline ??= createDeadline(resumeTimeoutMs, now);
+			const checked = await checkCold(target.sessionId, deadline, "executor_error");
+			if (checked.kind === "live") {
+				deadline.clear();
+				return { ok: true };
+			}
+			if (!deadline.expired() && deps.agents.get(target.sessionId) !== void 0) {
+				deadline.clear();
+				return { ok: true };
+			}
+			deadline.clear();
+			const ready = checked.kind === "ready";
+			const errorCode = checked.kind === "failed" && checked.errorCode !== "timeout" ? checked.errorCode : "executor_error";
+			log(ready ? "debug" : "warn", ready ? "dsh cold injection preflight ready" : "dsh cold injection preflight rejected", {
+				liveAgentAvailable: false,
+				coldServicesAvailable: deps.agents.isAvailable(),
+				routingSource: "host-default",
+				modelRouteAvailable: checked.modelRouteAvailable,
+				presetInspectionAvailable: checked.presetInspectionAvailable,
+				presetSupported: checked.presetSupported
+			});
+			return ready ? { ok: true } : {
+				ok: false,
+				errorCode
+			};
+		},
 		async execute(req) {
+			if (unloading) return {
+				outcome: "failed",
+				errorCode: "executor_error"
+			};
 			const sessionId = req.target.sessionId;
 			const messageBytes = Buffer.byteLength(req.message, "utf8");
 			const messageSha12 = createHash("sha256").update(req.message, "utf8").digest("hex").slice(0, SHA_LOG_CHARS$1);
 			const baseMeta = {
-				requestId: req.requestId,
-				sessionId,
 				mode: req.mode,
 				messageBytes,
 				messageSha12
 			};
-			let agent = deps.agents.get(sessionId);
-			const resumed = agent === void 0;
+			let agent;
+			let coldPath = false;
+			let requestDeadline = null;
+			selection: for (let generationAttempt = 0; generationAttempt < 4; generationAttempt += 1) {
+				agent = void 0;
+				coldPath = false;
+				let selectedGeneration = null;
+				let slot = usableSlot(sessionId);
+				if (slot !== void 0) {
+					coldPath = true;
+					selectedGeneration = slot.generation;
+					if (slot.state === "fulfilled") agent = slot.agent;
+					else {
+						requestDeadline ??= createDeadline(timeoutFor(req), now);
+						const outcome = await waitForSlot(slot, requestDeadline);
+						if (outcome.kind === "stale") continue selection;
+						if (outcome.kind === "timeout") return {
+							outcome: "failed",
+							errorCode: "timeout"
+						};
+						if (outcome.kind === "failed") {
+							requestDeadline.clear();
+							return {
+								outcome: "failed",
+								errorCode: outcome.errorCode
+							};
+						}
+						agent = outcome.agent;
+					}
+				} else agent = deps.agents.get(sessionId);
+				if (agent === void 0) {
+					coldPath = true;
+					requestDeadline ??= createDeadline(timeoutFor(req), now);
+					const checked = await checkCold(sessionId, requestDeadline, "timeout");
+					slot = usableSlot(sessionId);
+					if (slot !== void 0) {
+						selectedGeneration = slot.generation;
+						const outcome = await waitForSlot(slot, requestDeadline);
+						if (outcome.kind === "stale") continue selection;
+						if (outcome.kind === "timeout") return {
+							outcome: "failed",
+							errorCode: "timeout"
+						};
+						if (outcome.kind === "failed") {
+							requestDeadline.clear();
+							return {
+								outcome: "failed",
+								errorCode: outcome.errorCode
+							};
+						}
+						agent = outcome.agent;
+					} else if (checked.kind === "live") {
+						agent = checked.agent;
+						selectedGeneration = checked.generation;
+						coldPath = false;
+					} else if (!requestDeadline.expired()) agent = deps.agents.get(sessionId);
+					if (agent === void 0 && checked.kind === "failed") {
+						requestDeadline.clear();
+						log("warn", "dsh cold injection rejected", {
+							...baseMeta,
+							coldServicesAvailable: deps.agents.isAvailable(),
+							routingSource: "host-default",
+							modelRouteAvailable: checked.modelRouteAvailable,
+							presetInspectionAvailable: checked.presetInspectionAvailable,
+							presetSupported: checked.presetSupported
+						});
+						return {
+							outcome: "failed",
+							errorCode: checked.errorCode
+						};
+					}
+					if (agent === void 0 && checked.kind === "ready") {
+						if (currentGeneration() !== checked.generation) continue selection;
+						slot = usableSlot(sessionId);
+						if (slot === void 0) {
+							const live = deps.agents.get(sessionId);
+							if (live !== void 0) agent = live;
+							else slot = startResumeSlot(sessionId, checked.route, checked.proof.setup, checked.generation);
+						}
+						if (agent === void 0 && slot !== void 0) {
+							selectedGeneration = slot.generation;
+							const outcome = await waitForSlot(slot, requestDeadline);
+							if (outcome.kind === "stale") continue selection;
+							if (outcome.kind === "timeout") return {
+								outcome: "failed",
+								errorCode: "timeout"
+							};
+							if (outcome.kind === "failed") {
+								requestDeadline.clear();
+								log("warn", "dsh resume failed", {
+									...baseMeta,
+									routingSource: "host-default",
+									modelRouteAvailable: true,
+									presetSupported: outcome.errorCode !== "dsh_preset_unsupported"
+								});
+								return {
+									outcome: "failed",
+									errorCode: outcome.errorCode
+								};
+							}
+							agent = outcome.agent;
+						}
+					}
+				}
+				if (requestDeadline !== null && requestDeadline.expired()) {
+					requestDeadline.clear();
+					return {
+						outcome: "failed",
+						errorCode: "timeout"
+					};
+				}
+				if (selectedGeneration !== null && selectedGeneration !== currentGeneration()) continue selection;
+				requestDeadline?.clear();
+				if (agent !== void 0) break selection;
+			}
 			if (agent === void 0) {
-				log("debug", "dsh session not loaded; resuming", baseMeta);
-				let handle;
-				try {
-					handle = await resumeWithin(deps.agents.resume({ resumeSessionId: sessionId }), resumeTimeoutMs);
-				} catch (error) {
-					const detail = describeError$3(error);
-					log("warn", "dsh resume failed", {
-						...baseMeta,
-						error: detail
-					});
-					return {
-						outcome: "failed",
-						errorCode: "session_not_found",
-						detail
-					};
-				}
-				if (handle === null) {
-					log("warn", "dsh resume timed out", {
-						...baseMeta,
-						resumeTimeoutMs
-					});
-					return {
-						outcome: "failed",
-						errorCode: "timeout",
-						detail: `resume did not settle within ${resumeTimeoutMs}ms`
-					};
-				}
-				agent = handle.agent;
+				requestDeadline?.clear();
+				return {
+					outcome: "failed",
+					errorCode: "executor_error"
+				};
 			}
 			const message = {
 				id: `${pluginName}-${req.requestId}`,
@@ -1147,25 +1997,34 @@ function createDshInjectExecutor(deps) {
 			try {
 				if (req.mode === "steer") agent.steer(message);
 				else agent.followup(message);
-			} catch (error) {
-				const detail = describeError$3(error);
+			} catch {
 				log("warn", "dsh injection call threw", {
 					...baseMeta,
-					resumed,
-					error: detail
+					coldPath,
+					resumed: coldPath,
+					...coldPath ? {
+						routingSource: "host-default",
+						modelRouteAvailable: true
+					} : {}
 				});
 				return {
 					outcome: "failed",
-					errorCode: "executor_error",
-					detail
+					errorCode: "executor_error"
 				};
 			}
 			log("info", "dsh injection delivered", {
 				...baseMeta,
-				resumed
+				coldPath,
+				resumed: coldPath,
+				...coldPath ? {
+					routingSource: "host-default",
+					modelRouteAvailable: true
+				} : {}
 			});
 			return { outcome: "delivered" };
-		}
+		},
+		invalidateColdServiceGeneration: invalidateGeneration,
+		dispose: disposeSlots
 	};
 }
 const DSH_AGENT = "dsh";
@@ -1196,6 +2055,50 @@ function normalizeProject(project) {
 }
 function describeError$2(error) {
 	return error instanceof Error ? error.message : String(error);
+}
+const TIMELINE_FAILURE_OUTCOMES = /* @__PURE__ */ new Set(["replay_unsupported", "source_failed"]);
+/**
+* Extract only a bounded, known machine code for internal classification.
+* The returned timeline contract never includes this value or the upstream
+* message, which may contain paths, ids, prompts, or other private content.
+*/
+function knownTimelineErrorCode(error) {
+	const knownCodes = [
+		"unknown_session",
+		"not_found",
+		"SESSION_NOT_FOUND",
+		"replay_unsupported"
+	];
+	if (typeof error === "object" && error !== null) {
+		const record = error;
+		for (const key of ["code", "errorCode"]) {
+			const value = record[key];
+			if (typeof value === "string" && knownCodes.some((code) => value === code)) return value;
+		}
+	}
+	if (error instanceof Error) {
+		for (const code of knownCodes) if (error.message === code || error.message.startsWith(`${code}:`) || error.message.startsWith(`${code} `)) return code;
+	}
+	return null;
+}
+function classifySourceFailure(error) {
+	const code = knownTimelineErrorCode(error);
+	return code === "unknown_session" || code === "not_found" || code === "SESSION_NOT_FOUND" ? "not_found" : "source_failed";
+}
+function classifyReplayFailure(error) {
+	return knownTimelineErrorCode(error) === "replay_unsupported" ? "replay_unsupported" : classifySourceFailure(error);
+}
+function degradationOf(sourceOutcomes, entriesEmpty) {
+	const outcomes = Object.values(sourceOutcomes);
+	if (outcomes.filter((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome)).length === 0) return {
+		degraded: false,
+		reason: null
+	};
+	const usable = outcomes.filter((outcome) => outcome !== "unavailable" && outcome !== "not_found");
+	return {
+		degraded: true,
+		reason: entriesEmpty && usable.length > 0 && usable.every((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome)) ? "all_sources_failed" : "partial_source_failure"
+	};
 }
 /**
 * Dedup identity of one sidecar event within a single session's timeline.
@@ -1436,8 +2339,8 @@ var FusionQuery = class {
 	* event identity (seq+kind+text for seq-carrying events — same-seq
 	* sibling events from multi-block records all survive), newest window
 	* first with a backward cursor. Sources are pulled on demand; a
-	* missing/failing source silently narrows the page (provenance is
-	* reported in `sources`).
+	* missing/failing source narrows the page while `sourceOutcomes`,
+	* `degraded`, and `reason` retain content-free observability.
 	*/
 	async getSessionTimeline(sessionId, opts = {}) {
 		const limit = Math.max(1, Math.floor(opts.limit ?? 100));
@@ -1447,17 +2350,35 @@ var FusionQuery = class {
 			sidecarReplay: false,
 			sidecarBuffer: false
 		};
+		const sourceOutcomes = {
+			liveSession: this.dshEvents === null ? "unavailable" : "not_found",
+			sessionQuery: "unavailable",
+			sidecarReplay: this.replaySource === null ? "unavailable" : "not_found",
+			buffer: "not_found"
+		};
 		let dshEvents = [];
-		const liveEntry = this.live.get(sessionId);
+		let liveEntry = this.live.get(sessionId);
+		if (liveEntry === void 0 && this.dshEvents?.get !== void 0) try {
+			const session = this.dshEvents.get(sessionId);
+			if (session !== void 0) liveEntry = this.ensureLive(session);
+		} catch (error) {
+			sourceOutcomes.liveSession = classifySourceFailure(error);
+		}
 		if (liveEntry !== void 0) {
 			dshEvents = liveEntry.session.events;
 			sources.dshLive = true;
+			sourceOutcomes.liveSession = "succeeded";
 		} else {
-			const engine = this.resolveSessionQuery();
+			const resolved = this.resolveSessionQueryForTimeline();
+			const engine = resolved.engine;
+			sourceOutcomes.sessionQuery = resolved.outcome;
 			if (engine !== null) try {
 				dshEvents = (await engine.readSession(sessionId)).events;
 				sources.dshCold = true;
-			} catch {}
+				sourceOutcomes.sessionQuery = "succeeded";
+			} catch (error) {
+				sourceOutcomes.sessionQuery = classifySourceFailure(error);
+			}
 		}
 		const sidecarEvents = [];
 		const seen = /* @__PURE__ */ new Set();
@@ -1472,10 +2393,14 @@ var FusionQuery = class {
 			const replayed = await this.replaySource.replay({ sessionId });
 			for (const ev of replayed) addSidecar(ev);
 			sources.sidecarReplay = true;
-		} catch {}
+			sourceOutcomes.sidecarReplay = "succeeded";
+		} catch (error) {
+			sourceOutcomes.sidecarReplay = classifyReplayFailure(error);
+		}
 		const ring = this.buffers.get(sessionId);
 		if (ring !== void 0 && ring.length > 0) {
 			sources.sidecarBuffer = true;
+			sourceOutcomes.buffer = "succeeded";
 			for (const ev of ring) addSidecar(ev);
 		}
 		const entries = mergeTimeline(dshEvents, sidecarEvents);
@@ -1501,7 +2426,9 @@ var FusionQuery = class {
 				seq: first.seq,
 				ts: first.ts
 			} : null,
-			sources
+			sources,
+			sourceOutcomes,
+			...degradationOf(sourceOutcomes, entries.length === 0)
 		};
 	}
 	/**
@@ -1611,6 +2538,27 @@ var FusionQuery = class {
 			},
 			search: { mode: engineAvailable ? "full-text" : "filter-only" }
 		};
+	}
+	resolveSessionQueryForTimeline() {
+		if (this.getSessionQueryThunk === null) return {
+			engine: null,
+			outcome: "unavailable"
+		};
+		try {
+			const engine = this.getSessionQueryThunk() ?? null;
+			return engine === null ? {
+				engine: null,
+				outcome: "unavailable"
+			} : {
+				engine,
+				outcome: "not_found"
+			};
+		} catch (error) {
+			return {
+				engine: null,
+				outcome: classifySourceFailure(error)
+			};
+		}
 	}
 	resolveSessionQuery() {
 		if (this.getSessionQueryThunk === null) return null;
@@ -1737,10 +2685,11 @@ function fromDshLive(entry) {
 *   (5 min TTL) and replayed on repeats. `outcome: 'unknown'` is terminal:
 *   a repeated execute returns the cached unknown and NEVER re-fires the
 *   executor (S6 — no retry through the gateway).
-* - **Logging**: exactly one entry per prepare/execute carrying ts /
-*   requestId / target / mode / phase / result / errorCode / message byte
-*   size and sha256 prefix — never the message body or head plaintext
-*   (the head preview only travels in the prepare response for the UI).
+* - **Logging**: exactly one entry per prepare/execute carrying phase/result
+*   plus message byte size and sha256 prefix. Ordinary audit entries also carry
+*   request/target/mode; rejected dsh lifecycle checks redact those identities.
+*   Message bodies, previews, native Error text, paths, presets, and model
+*   values never enter the log.
 *
 * The token gate defends against browser-mediated attackers only; it does
 * not claim to stop a local process that can drive both phases itself
@@ -1771,7 +2720,8 @@ const SHA_LOG_CHARS = 12;
 const SEND_CLI_AGENTS = /* @__PURE__ */ new Set([
 	"claude",
 	"codex",
-	"cursor-cli"
+	"cursor-cli",
+	"kimi"
 ]);
 function digestMessage(message) {
 	const sha256 = createHash("sha256").update(message, "utf8").digest("hex");
@@ -1799,6 +2749,7 @@ var InjectGateway = class {
 	deps;
 	now;
 	randomId;
+	verifyTarget;
 	pending = /* @__PURE__ */ new Map();
 	results = /* @__PURE__ */ new Map();
 	logRing = [];
@@ -1806,14 +2757,23 @@ var InjectGateway = class {
 		this.deps = deps;
 		this.now = deps.now ?? Date.now;
 		this.randomId = deps.randomId ?? randomUUID;
+		this.verifyTarget = deps.verifyTarget;
+	}
+	/**
+	* Bind the authoritative SessionStore-backed verifier during route
+	* assembly. This replaces the legacy status-only projection without
+	* widening index.ts or exposing raw SessionRow topology.
+	*/
+	bindTargetVerifier(verifyTarget) {
+		this.verifyTarget = verifyTarget;
 	}
 	/**
 	* Phase one: gate, validate, re-verify, then issue a one-time
 	* confirmation bound to this exact target + mode + message.
 	*
 	* Pipeline (order per spec): allowWrite gate → message pre-validation
-	* (≤16 KiB by bytes, non-empty, no NUL) → live target re-check →
-	* injectable-agent whitelist → capacity check → token issuance.
+	* (≤16 KiB by bytes, non-empty, no NUL) → live eligibility re-check →
+	* path preflight → capacity check → token issuance.
 	*/
 	async prepare(req) {
 		this.prune(this.now());
@@ -1825,10 +2785,20 @@ var InjectGateway = class {
 			agent: req.target.agent,
 			sessionId: req.target.sessionId
 		};
-		const status = await this.deps.verifyTarget(target);
-		if (status === null) return this.rejectPrepare(req, digest, "target_not_found");
-		if (status.status === "dead") return this.rejectPrepare(req, digest, "target_dead");
-		if (this.executorFor(target.agent) === null) return this.rejectPrepare(req, digest, "unsupported_agent");
+		const verification = await this.revalidateTarget(target);
+		if (!verification.ok) return this.rejectPrepare(req, digest, verification.errorCode);
+		const status = verification.status;
+		const executor = this.executorFor(target.agent);
+		if (executor === null) return this.rejectPrepare(req, digest, "unsupported_agent");
+		if (executor.preflight !== void 0) {
+			let preflight;
+			try {
+				preflight = await executor.preflight({ ...target });
+			} catch {
+				return this.rejectPrepare(req, digest, "executor_error");
+			}
+			if (!preflight.ok) return this.rejectPrepare(req, digest, preflight.errorCode, preflight.detail, true);
+		}
 		const issuedAt = this.now();
 		if (this.inFlightCount(issuedAt) >= 32) return this.rejectPrepare(req, digest, "too_many_pending");
 		const requestId = this.randomId();
@@ -1873,9 +2843,9 @@ var InjectGateway = class {
 	* and cache the first result per requestId.
 	*
 	* Rejection order: cached replay (idempotency wins) → token missing →
-	* token reused → token expired → token/message binding mismatch →
-	* unsupported agent. Every attempt against a live token consumes it,
-	* whatever happens afterwards.
+	* token reused → token expired → token/message binding mismatch → live
+	* write/eligibility revalidation → executor. Every attempt against a live
+	* token consumes it, whatever happens afterwards.
 	*/
 	async execute(req) {
 		const now = this.now();
@@ -1903,6 +2873,9 @@ var InjectGateway = class {
 		record.consumed = true;
 		if (!tokenEquals(record.token, req.confirmToken)) return this.rejectExecute(req.requestId, record, digest, "token_mismatch");
 		if (record.messageSha256 !== digest.sha256) return this.rejectExecute(req.requestId, record, digest, "token_mismatch");
+		if (!this.deps.allowWrite()) return this.rejectExecute(req.requestId, record, digest, "inject_disabled");
+		const verification = await this.revalidateTarget(record.target);
+		if (!verification.ok) return this.rejectExecute(req.requestId, record, digest, verification.errorCode);
 		const executor = this.executorFor(record.target.agent);
 		if (executor === null) return this.rejectExecute(req.requestId, record, digest, "unsupported_agent");
 		let result;
@@ -1913,11 +2886,10 @@ var InjectGateway = class {
 				message: req.message,
 				requestId: req.requestId
 			});
-		} catch (err) {
+		} catch {
 			result = {
 				outcome: "failed",
-				errorCode: "executor_error",
-				detail: err instanceof Error ? err.message : String(err)
+				errorCode: "executor_error"
 			};
 		}
 		this.results.set(req.requestId, {
@@ -1937,6 +2909,46 @@ var InjectGateway = class {
 		if (SEND_CLI_AGENTS.has(agent)) return this.deps.executors.sendCli;
 		return null;
 	}
+	/**
+	* Resolve one authoritative, already-derived verdict. Missing/malformed
+	* projections fail closed with static vocabulary and no raw row details.
+	*/
+	async revalidateTarget(target) {
+		let status;
+		try {
+			status = await this.verifyTarget({ ...target });
+		} catch {
+			return {
+				ok: false,
+				errorCode: "invalid_session"
+			};
+		}
+		if (status === null) return {
+			ok: false,
+			errorCode: "target_not_found"
+		};
+		if (status.agent !== target.agent || status.sessionId !== target.sessionId) return {
+			ok: false,
+			errorCode: "invalid_session"
+		};
+		const eligibility = status.inject_eligibility;
+		if (eligibility === void 0) return {
+			ok: false,
+			errorCode: "invalid_session"
+		};
+		if (!eligibility.allowed) return {
+			ok: false,
+			errorCode: eligibility.reason
+		};
+		if (eligibility.reason !== "eligible") return {
+			ok: false,
+			errorCode: "invalid_session"
+		};
+		return {
+			ok: true,
+			status
+		};
+	}
 	/** Issued-but-unconsumed-and-unexpired tokens count toward the cap. */
 	inFlightCount(now) {
 		let count = 0;
@@ -1952,16 +2964,16 @@ var InjectGateway = class {
 		for (const [id, record] of this.pending) if (record.expiresAt + 3e5 <= now) this.pending.delete(id);
 		for (const [id, cached] of this.results) if (cached.expiresAt <= now) this.results.delete(id);
 	}
-	rejectPrepare(req, digest, errorCode, detail) {
+	rejectPrepare(req, digest, errorCode, detail, redactIdentity = false) {
 		this.record({
 			ts: this.now(),
 			phase: "prepare",
 			requestId: null,
-			target: {
+			target: redactIdentity ? null : {
 				agent: req.target.agent,
 				sessionId: req.target.sessionId
 			},
-			mode: req.mode,
+			mode: redactIdentity ? null : req.mode,
 			ok: false,
 			errorCode,
 			messageBytes: digest.bytes,
@@ -1977,12 +2989,13 @@ var InjectGateway = class {
 		};
 	}
 	rejectExecute(requestId, record, digest, errorCode) {
+		const redactIdentity = record?.target.agent === "dsh";
 		this.record({
 			ts: this.now(),
 			phase: "execute",
-			requestId,
-			target: record === null ? null : { ...record.target },
-			mode: record === null ? null : record.mode,
+			requestId: redactIdentity ? null : requestId,
+			target: record === null || redactIdentity ? null : { ...record.target },
+			mode: record === null || redactIdentity ? null : record.mode,
 			ok: false,
 			outcome: "failed",
 			errorCode,
@@ -1995,12 +3008,13 @@ var InjectGateway = class {
 		};
 	}
 	logExecuteResult(requestId, record, digest, result) {
+		const redactIdentity = record?.target.agent === "dsh" && result.outcome === "failed";
 		this.record({
 			ts: this.now(),
 			phase: "execute",
-			requestId,
-			target: record === null ? null : { ...record.target },
-			mode: record === null ? null : record.mode,
+			requestId: redactIdentity ? null : requestId,
+			target: record === null || redactIdentity ? null : { ...record.target },
+			mode: record === null || redactIdentity ? null : record.mode,
 			ok: result.outcome === "delivered",
 			outcome: result.outcome,
 			...result.errorCode !== void 0 ? { errorCode: result.errorCode } : {},
@@ -2041,10 +3055,10 @@ const BODY_METHODS = /* @__PURE__ */ new Set([
 */
 function isLoopbackAddress(addr) {
 	if (!addr) return false;
-	let candidate = addr.trim().toLowerCase();
-	if (candidate.startsWith("::ffff:")) candidate = candidate.slice(7);
-	if (candidate === "::1") return true;
-	return isLoopbackIpv4(candidate);
+	const candidate = addr.trim().toLowerCase();
+	if (isLoopbackIpv4(candidate)) return true;
+	const canonical = canonicalizeIpv6(candidate);
+	return canonical !== void 0 && canonicalIpv6IsLoopback(canonical);
 }
 /** Strict dotted-quad check for `127.0.0.0/8`. */
 function isLoopbackIpv4(candidate) {
@@ -2054,13 +3068,36 @@ function isLoopbackIpv4(candidate) {
 	return parts[0] === "127";
 }
 /**
+* Canonicalize an IPv6 literal using Node's WHATWG URL parser. The returned
+* value has no brackets (for example long-form loopback becomes `::1`).
+*/
+function canonicalizeIpv6(candidate) {
+	try {
+		const hostname = new URL(`http://[${candidate}]/`).hostname.toLowerCase();
+		if (!hostname.startsWith("[") || !hostname.endsWith("]")) return void 0;
+		return hostname.slice(1, -1);
+	} catch {
+		return;
+	}
+}
+/** True for canonical `::1` and the existing IPv4-mapped loopback contract. */
+function canonicalIpv6IsLoopback(candidate) {
+	if (candidate === "::1") return true;
+	const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(candidate);
+	if (mapped === null) return false;
+	return Number.parseInt(mapped[1], 16) >>> 8 === 127;
+}
+/** Commas, arrays and line breaks make a normalized-header fallback ambiguous. */
+function headerValueIsAmbiguous(value) {
+	return value.includes(",") || /[\r\n]/.test(value);
+}
+/**
 * Parse an authority string (`Host` header shape). Returns undefined for
 * anything malformed: empty, bad brackets, non-numeric or out-of-range port,
-* stray colons. Node keeps only the first `Host` header on duplicates, so a
-* single string is the full input space here.
+* stray colons, or list/newline ambiguity.
 */
 function parseAuthority(raw) {
-	if (typeof raw !== "string") return void 0;
+	if (typeof raw !== "string" || headerValueIsAmbiguous(raw)) return void 0;
 	const value = raw.trim().toLowerCase();
 	if (!value) return void 0;
 	let host;
@@ -2068,7 +3105,9 @@ function parseAuthority(raw) {
 	if (value.startsWith("[")) {
 		const close = value.indexOf("]");
 		if (close <= 1) return void 0;
-		host = value.slice(0, close + 1);
+		const canonical = canonicalizeIpv6(value.slice(1, close));
+		if (canonical === void 0) return void 0;
+		host = `[${canonical}]`;
 		const rest = value.slice(close + 1);
 		if (rest) {
 			if (!rest.startsWith(":")) return void 0;
@@ -2083,59 +3122,90 @@ function parseAuthority(raw) {
 			if (portPart.includes(":")) return void 0;
 		}
 		if (!host || /[\s/@#?\\]/.test(host)) return void 0;
+		if (isLoopbackIpv4(host)) host = host.split(".").map((part) => String(Number(part))).join(".");
 	}
+	let port;
 	if (portPart !== void 0) {
-		if (!/^\d{1,5}$/.test(portPart)) return void 0;
-		const num = Number(portPart);
-		if (num < 1 || num > 65535) return void 0;
+		if (!/^\d+$/.test(portPart)) return void 0;
+		const significant = portPart.replace(/^0+/, "") || "0";
+		if (significant.length > 5) return void 0;
+		port = Number(significant);
+		if (port < 1 || port > 65535) return void 0;
 	}
 	return {
 		host,
-		port: portPart
+		port
 	};
 }
 /** True when a parsed authority host names loopback. */
 function authorityIsLoopback(host) {
 	if (host === "localhost") return true;
-	if (host.startsWith("[") && host.endsWith("]")) return isLoopbackAddress(host.slice(1, -1));
+	if (host.startsWith("[") && host.endsWith("]")) return canonicalIpv6IsLoopback(host.slice(1, -1));
 	return isLoopbackIpv4(host);
 }
 /**
-* Same-origin check between an `Origin` header value and the request's
-* `Host` authority. Scheme may be http or https; host must match exactly
+* Same-origin check between an `Origin` header value and the cleartext HTTP
+* request's `Host` authority. The scheme must be http; host must match exactly
 * (WHATWG-normalized: lowercase, IPv6 canonical bracketed form) and the
-* effective ports must agree. A `Host` without a port accepts either
-* scheme-default origin port (80/443), covering default-port elision.
+* effective ports must agree. A portless `Host` has effective port 80.
 */
 function originMatchesAuthority(origin, authority) {
+	if (headerValueIsAmbiguous(origin)) return false;
 	let url;
 	try {
 		url = new URL(origin);
 	} catch {
 		return false;
 	}
-	if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+	if (url.protocol !== "http:") return false;
 	if (url.hostname.toLowerCase() !== authority.host) return false;
-	const originPort = url.port || (url.protocol === "https:" ? "443" : "80");
-	if (authority.port !== void 0) return originPort === authority.port;
-	return originPort === "80" || originPort === "443";
+	const originPort = url.port === "" ? 80 : Number(url.port);
+	if (!Number.isInteger(originPort) || originPort < 1 || originPort > 65535) return false;
+	return originPort === (authority.port ?? 80);
 }
 /** Reject when any (possibly `, `-joined multi-value) entry is `cross-site`. */
 function declaresCrossSite(secFetchSite) {
 	if (secFetchSite === void 0) return false;
 	return (Array.isArray(secFetchSite) ? secFetchSite : [secFetchSite]).some((value) => value.split(",").some((entry) => entry.trim().toLowerCase() === "cross-site"));
 }
+/** Return all case-insensitive raw-header values, or null for a malformed list. */
+function rawHeaderValues(rawHeaders, wantedName) {
+	if (rawHeaders.length % 2 !== 0) return null;
+	const values = [];
+	for (let index = 0; index < rawHeaders.length; index += 2) {
+		const name = rawHeaders[index];
+		const value = rawHeaders[index + 1];
+		if (name === void 0 || value === void 0) return null;
+		if (name.toLowerCase() === wantedName) values.push(value);
+	}
+	return values;
+}
 /** Layers 1-3: remote loopback, Host authority, Origin/sec-fetch-site. */
 function guardReachability(req) {
 	if (!isLoopbackAddress(req.socket?.remoteAddress ?? void 0)) return forbid("remote_not_loopback");
-	const hostHeader = req.headers.host;
-	const authority = typeof hostHeader === "string" ? parseAuthority(hostHeader) : void 0;
-	if (!authority || !authorityIsLoopback(authority.host)) return forbid("host_not_loopback");
-	const origin = req.headers.origin;
-	if (origin !== void 0) {
-		if (Array.isArray(origin) || !originMatchesAuthority(origin, authority)) return forbid("origin_mismatch");
+	let hostHeader;
+	if (req.rawHeaders !== void 0) {
+		const values = rawHeaderValues(req.rawHeaders, "host");
+		if (values === null || values.length !== 1) return forbid("host_not_loopback");
+		hostHeader = values[0];
+	} else {
+		const normalized = req.headers.host;
+		hostHeader = typeof normalized === "string" && !headerValueIsAmbiguous(normalized) ? normalized : void 0;
 	}
+	const authority = parseAuthority(hostHeader);
+	if (!authority || !authorityIsLoopback(authority.host)) return forbid("host_not_loopback");
 	if (declaresCrossSite(req.headers["sec-fetch-site"])) return forbid("cross_site");
+	let origin;
+	if (req.rawHeaders !== void 0) {
+		const values = rawHeaderValues(req.rawHeaders, "origin");
+		if (values === null || values.length > 1) return forbid("origin_mismatch");
+		origin = values[0];
+	} else {
+		const normalized = req.headers.origin;
+		if (Array.isArray(normalized)) return forbid("origin_mismatch");
+		origin = normalized;
+	}
+	if (origin !== void 0 && !originMatchesAuthority(origin, authority)) return forbid("origin_mismatch");
 	return OK;
 }
 /**
@@ -2197,7 +3267,16 @@ const PREPARE_ERROR_STATUS = {
 	inject_disabled: 403,
 	invalid_message: 422,
 	target_not_found: 404,
+	target_changed: 409,
 	target_dead: 409,
+	working_session: 409,
+	dead_session: 409,
+	child_session: 422,
+	remote_session: 422,
+	invalid_session: 422,
+	dsh_model_unconfigured: 409,
+	dsh_preset_unsupported: 409,
+	executor_error: 502,
 	too_many_pending: 429,
 	unsupported_agent: 422
 };
@@ -2206,10 +3285,21 @@ const PREPARE_ERROR_STATUS = {
 * (executor-native vocab) and codeless failures fall back to 502.
 */
 const EXECUTE_ERROR_STATUS = {
+	inject_disabled: 403,
+	target_not_found: 404,
+	target_changed: 409,
+	target_dead: 409,
+	working_session: 409,
+	dead_session: 409,
+	child_session: 422,
+	remote_session: 422,
+	invalid_session: 422,
 	token_missing: 401,
 	token_expired: 401,
 	token_reused: 409,
 	token_mismatch: 409,
+	dsh_model_unconfigured: 409,
+	dsh_preset_unsupported: 409,
 	unsupported_agent: 422,
 	executor_error: 502
 };
@@ -2326,8 +3416,15 @@ function timelineBody(page) {
 		entries: page.entries,
 		cursor: page.cursor,
 		nextCursor: page.cursor === null ? null : encodeCursor(page.cursor),
-		sources: page.sources
+		sources: page.sources,
+		sourceOutcomes: page.sourceOutcomes,
+		degraded: page.degraded,
+		reason: page.reason
 	};
+}
+/** A successful source consultation is positive evidence that the target exists. */
+function timelineConfirmsTarget(page) {
+	return Object.values(page.sourceOutcomes).some((outcome) => outcome === "succeeded");
 }
 /** `event: <name>` + single-line JSON data (JSON.stringify never emits raw newlines). */
 function sseFrame(event, data) {
@@ -2373,6 +3470,18 @@ function createRoutes(deps, opts = {}) {
 	const maxSseClients = opts.maxSseClients ?? DEFAULT_MAX_SSE_CLIENTS;
 	const sseHeartbeatMs = opts.sseHeartbeatMs ?? DEFAULT_SSE_HEARTBEAT_MS;
 	const sseBufferLimit = opts.sseBufferLimit ?? DEFAULT_SSE_BUFFER_LIMIT;
+	deps.injectGateway?.bindTargetVerifier?.(async (target) => {
+		const view = deps.store.getSession(target.agent, target.sessionId);
+		if (view === null) return null;
+		return {
+			agent: view.agent,
+			sessionId: view.session_id,
+			status: view.status,
+			title: view.title,
+			project: view.project,
+			inject_eligibility: view.inject_eligibility
+		};
+	});
 	const clients = /* @__PURE__ */ new Set();
 	let disposed = false;
 	const buildSnapshot = () => ({
@@ -2477,12 +3586,13 @@ function createRoutes(deps, opts = {}) {
 			});
 			return;
 		}
-		const unified = fusion.getUnifiedSessions().find((s) => s.sessionId === id) ?? null;
-		if (view === void 0 && unified === null) {
+		let unified = fusion.getUnifiedSessions().find((s) => s.sessionId === id) ?? null;
+		const page = await fusion.getSessionTimeline(id);
+		if (unified === null) unified = fusion.getUnifiedSessions().find((s) => s.sessionId === id) ?? null;
+		if (view === void 0 && unified === null && !timelineConfirmsTarget(page)) {
 			writeJson(res, 404, { reason: "session_not_found" });
 			return;
 		}
-		const page = await fusion.getSessionTimeline(id);
 		writeJson(res, 200, {
 			session: view ?? null,
 			unified,
@@ -2515,7 +3625,7 @@ function createRoutes(deps, opts = {}) {
 			before,
 			limit
 		});
-		if (!(page.sources.dshLive || page.sources.dshCold || page.sources.sidecarReplay || page.sources.sidecarBuffer) && page.entries.length === 0) {
+		if (!timelineConfirmsTarget(page)) {
 			if (!(deps.store.getBoardState().sessions.some((s) => s.session_id === id) || fusion.getUnifiedSessions().some((s) => s.sessionId === id))) {
 				writeJson(res, 404, { reason: "session_not_found" });
 				return;
@@ -2806,7 +3916,13 @@ function createRoutes(deps, opts = {}) {
 			writeJson(res, 503, { reason: "shutting_down" });
 			return;
 		}
-		const verdict = guardRequest(req, deps.guardOptions);
+		const verdict = guardRequest({
+			method: req.method,
+			url: req.url,
+			headers: req.headers,
+			rawHeaders: req.rawHeaders,
+			socket: req.socket
+		}, deps.guardOptions);
 		const method = (req.method ?? "").toUpperCase();
 		const subpath = subpathOf(req.url);
 		if (!(verdict.ok && subpath === "action" && method === "POST" && deps.injectGateway !== void 0) && (method === "POST" || method === "PUT" || method === "PATCH")) req.resume();
@@ -2917,11 +4033,7 @@ var BoundedCollector = class {
 		return Buffer.concat(this.chunks).toString("utf8");
 	}
 };
-/**
-* Parse stdout as one `send --json` receipt. Anything that is not a JSON
-* object carrying a valid `delivery` field yields null (exit-code fallback).
-*/
-function parseReceipt(stdoutText) {
+function parseJsonObject(stdoutText) {
 	const trimmed = stdoutText.trim();
 	if (!trimmed) return null;
 	let value;
@@ -2931,16 +4043,50 @@ function parseReceipt(stdoutText) {
 		return null;
 	}
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-	const record = value;
+	return value;
+}
+/**
+* Parse one JSON object as a `send --json` receipt. Identity fields remain
+* optional here so the caller can classify omissions as a binding mismatch.
+*/
+function parseReceipt(record) {
 	const delivery = record["delivery"];
 	if (delivery !== "delivered" && delivery !== "unknown") return null;
 	const rawErrorCode = record["error_code"];
 	const errorCode = typeof rawErrorCode === "string" && rawErrorCode !== "" ? rawErrorCode : void 0;
 	return {
 		delivery,
+		...typeof record["agent"] === "string" ? { agent: record["agent"] } : {},
+		...typeof record["session_id"] === "string" ? { sessionId: record["session_id"] } : {},
+		...typeof record["request_id"] === "string" ? { requestId: record["request_id"] } : {},
 		...errorCode !== void 0 ? { errorCode } : {},
 		replayed: record["replayed"] === true
 	};
+}
+function parseCliError(record) {
+	const keys = Object.keys(record);
+	const code = record["code"];
+	return keys.length === 1 && keys[0] === "code" && typeof code === "string" && code !== "" ? code : null;
+}
+/** Map Python preflight vocabulary onto the gateway's stable error surface. */
+function mapCliError(code) {
+	if (code === "working_session" || code === "dead_session" || code === "child_session" || code === "remote_session" || code === "invalid_session" || code === "target_not_found" || code === "unsupported_agent") return code;
+	if (code === "session_busy") return "working_session";
+	if (code === "session_unavailable") return "target_not_found";
+	if (code === "session_changed") return "target_changed";
+	if (code === "ambiguous_session" || code === "invalid_session_id" || code === "invalid_project" || code === "invalid_plan" || code === "request_conflict") return "invalid_session";
+	if (code === "unsupported_cursor_ide" || code === "unsupported_copilot" || code === "unsupported_kimi" || code === "unsupported_dsh") return "unsupported_agent";
+	if (code === "invalid_message_type" || code === "invalid_message_utf8" || code === "blank_message" || code === "message_nul" || code === "message_too_large") return "invalid_message";
+	return "executor_error";
+}
+/**
+* A bound receipt with unknown delivery remains terminal/HTTP 200, but its
+* diagnostic code still uses the stable gateway vocabulary. Timeout is kept
+* distinct for the existing unknown-delivery UX; ACP/process/snapshot codes
+* intentionally collapse to executor_error.
+*/
+function mapReceiptError(code) {
+	return code === "timeout" ? code : mapCliError(code);
 }
 function describeError$1(error) {
 	return error instanceof Error ? error.message : String(error);
@@ -2959,6 +4105,9 @@ function createSendCliExecutor(deps) {
 				...command,
 				"send",
 				req.target.sessionId,
+				"--agent",
+				req.target.agent,
+				"--exact-session",
 				"--message-stdin",
 				"--allow-write",
 				"--json",
@@ -2990,11 +4139,24 @@ function createSendCliExecutor(deps) {
 			}
 			const stdout = new BoundedCollector(MAX_STDOUT_BYTES);
 			const stderr = new BoundedCollector(STDERR_DETAIL_BYTES);
-			proc.onStdout((chunk) => stdout.append(chunk));
-			proc.onStderr((chunk) => stderr.append(chunk));
 			try {
+				proc.onStdout((chunk) => stdout.append(chunk));
+				proc.onStderr((chunk) => stderr.append(chunk));
+			} catch {
+				try {
+					proc.kill();
+				} catch {}
+				return {
+					outcome: "failed",
+					errorCode: "executor_error"
+				};
+			}
+			let submissionBoundary = "not-started";
+			try {
+				submissionBoundary = "started";
 				proc.stdin.write(Buffer.from(req.message, "utf8"));
 				proc.stdin.end();
+				submissionBoundary = "completed";
 			} catch {}
 			let timer;
 			const settled = await Promise.race([proc.exited.then((code) => ({
@@ -3027,13 +4189,18 @@ function createSendCliExecutor(deps) {
 					requestId: req.requestId,
 					error: describeError$1(settled.error)
 				});
-				return {
+				return submissionBoundary === "not-started" ? {
 					outcome: "failed",
 					errorCode: "cli_not_found",
 					detail: describeError$1(settled.error)
+				} : {
+					outcome: "unknown",
+					errorCode: "executor_error",
+					detail: "process startup failed after stdin submission began"
 				};
 			}
-			const receipt = parseReceipt(stdout.text());
+			const parsedJson = parseJsonObject(stdout.text());
+			const receipt = parsedJson === null ? null : parseReceipt(parsedJson);
 			log("info", "send CLI exited", {
 				requestId: req.requestId,
 				agent: req.target.agent,
@@ -3048,23 +4215,30 @@ function createSendCliExecutor(deps) {
 				stdoutBytes: stdout.bytes,
 				stderrBytes: stderr.bytes
 			});
-			if (receipt !== null) return {
-				outcome: receipt.delivery === "delivered" ? "delivered" : "unknown",
-				...receipt.errorCode !== void 0 ? { errorCode: receipt.errorCode } : {},
-				...receipt.replayed ? { replayed: true } : {},
+			if (receipt !== null) {
+				if (receipt.agent !== req.target.agent || receipt.sessionId !== req.target.sessionId || receipt.requestId !== req.requestId) return {
+					outcome: "unknown",
+					errorCode: "executor_error",
+					detail: stderrText ? `send CLI receipt identity mismatch; stderr: ${stderrText}` : "send CLI receipt identity mismatch"
+				};
+				return {
+					outcome: receipt.delivery === "delivered" ? "delivered" : "unknown",
+					...receipt.errorCode !== void 0 ? { errorCode: mapReceiptError(receipt.errorCode) } : {},
+					...receipt.replayed ? { replayed: true } : {},
+					...stderrText ? { detail: stderrText } : {}
+				};
+			}
+			const cliError = parsedJson === null ? null : parseCliError(parsedJson);
+			if (settled.code !== 0 && cliError !== null) return {
+				outcome: "failed",
+				errorCode: mapCliError(cliError),
 				...stderrText ? { detail: stderrText } : {}
 			};
-			const code = settled.code;
-			if (code === 0) return {
-				outcome: "delivered",
-				detail: stderrText ? `parse_warning: exit 0 but stdout was not a send --json receipt; stderr: ${stderrText}` : "parse_warning: exit 0 but stdout was not a send --json receipt"
+			return {
+				outcome: "unknown",
+				errorCode: settled.code === 130 ? "interrupted" : "executor_error",
+				detail: stderrText ? `no valid bound send receipt or error; stderr: ${stderrText}` : "no valid bound send receipt or error"
 			};
-			const base = { outcome: "failed" };
-			if (code === 2) base.errorCode = "usage_error";
-			else if (code === 130) base.errorCode = "interrupted";
-			else if (code !== 1) base.errorCode = `exit_${code ?? "signal"}`;
-			if (stderrText) base.detail = stderrText;
-			return base;
 		}
 	};
 }
@@ -3072,6 +4246,42 @@ function createSendCliExecutor(deps) {
 //#region src/session-store.ts
 /** Bound for the last-event text summary kept per session. */
 const EVENT_TEXT_LIMIT = 160;
+const INVALID_PROPERTY = Symbol("invalid-property");
+function ownValue(record, key) {
+	try {
+		const descriptor = Object.getOwnPropertyDescriptor(record, key);
+		return descriptor !== void 0 && "value" in descriptor ? descriptor.value : INVALID_PROPERTY;
+	} catch {
+		return INVALID_PROPERTY;
+	}
+}
+/**
+* Copy only accessor-free board fields. Runtime callers are not allowed to
+* smuggle a forged prototype/getter into the long-lived board cache.
+*/
+function snapshotProjection(row) {
+	try {
+		const prototype = Object.getPrototypeOf(row);
+		if (prototype !== Object.prototype && prototype !== null) return null;
+	} catch {
+		return null;
+	}
+	const agent = ownValue(row, "agent");
+	const sessionId = ownValue(row, "session_id");
+	const status = ownValue(row, "status");
+	const title = ownValue(row, "title");
+	const project = ownValue(row, "project");
+	const updatedAt = ownValue(row, "updated_at");
+	if (typeof agent !== "string" || agent === "" || typeof sessionId !== "string" || sessionId === "" || typeof status !== "string" || typeof title !== "string" || typeof project !== "string" || typeof updatedAt !== "number" || !Number.isFinite(updatedAt)) return null;
+	return {
+		agent,
+		session_id: sessionId,
+		status,
+		title,
+		project,
+		updated_at: updatedAt
+	};
+}
 function sessionKey(agent, sessionId) {
 	return `${agent}\u0000${sessionId}`;
 }
@@ -3099,8 +4309,13 @@ var SessionStore = class {
 	applySnapshot(rows) {
 		const next = /* @__PURE__ */ new Map();
 		for (const row of rows) {
-			if (typeof row.session_id !== "string" || row.session_id === "") continue;
-			next.set(sessionKey(row.agent, row.session_id), row);
+			const projection = snapshotProjection(row);
+			if (projection === null) continue;
+			const injectEligibility = deriveInjectEligibility(row);
+			next.set(sessionKey(projection.agent, projection.session_id), {
+				...projection,
+				inject_eligibility: injectEligibility
+			});
 		}
 		this.rows = next;
 		const staleKeys = [];
@@ -3145,21 +4360,16 @@ var SessionStore = class {
 		for (const row of this.rows.values()) if (row.status === "working") return true;
 		return false;
 	}
+	/** Return one sanitized live target projection, or null when absent. */
+	getSession(agent, sessionId) {
+		const key = sessionKey(agent, sessionId);
+		const row = this.rows.get(key);
+		if (row === void 0) return null;
+		return this.toView(key, row);
+	}
 	getBoardState() {
 		const sessions = [];
-		for (const [key, row] of this.rows) {
-			const state = this.eventState.get(key);
-			sessions.push({
-				agent: row.agent,
-				session_id: row.session_id,
-				status: row.status,
-				title: row.title,
-				project: row.project,
-				updated_at: row.updated_at,
-				last_event: state?.lastEvent ?? null,
-				gap: state?.gap ?? false
-			});
-		}
+		for (const [key, row] of this.rows) sessions.push(this.toView(key, row));
 		sessions.sort((a, b) => b.updated_at - a.updated_at || a.session_id.localeCompare(b.session_id));
 		return {
 			sessions,
@@ -3172,6 +4382,20 @@ var SessionStore = class {
 		this.listeners.add(cb);
 		return () => {
 			this.listeners.delete(cb);
+		};
+	}
+	toView(key, row) {
+		const state = this.eventState.get(key);
+		return {
+			agent: row.agent,
+			session_id: row.session_id,
+			status: row.status,
+			title: row.title,
+			project: row.project,
+			updated_at: row.updated_at,
+			last_event: state?.lastEvent ?? null,
+			gap: state?.gap ?? false,
+			inject_eligibility: row.inject_eligibility
 		};
 	}
 	notify() {
@@ -3189,8 +4413,8 @@ const SIDECAR_SKILL_DESCRIPTION = "Monitors readonly local AI agent sessions (cl
 /**
 * dsh-scene skill body: semantically consistent with the canonical
 * `skills/agent-sidecar/SKILL.md`, condensed for the plugin context —
-* observation goes CLI/board, injection goes the plugin panel (design §7
-* path two: "dsh 会话注入应引导走插件通路而非 send,因 unsupported_dsh").
+* observation goes CLI/board, while mutation distinguishes protected Kimi
+* spawn-resume, in-process DSH injection, and the external send CLI path.
 */
 const SIDECAR_SKILL_CONTENT = `# Agent Sidecar (dsh plugin edition)
 
@@ -3216,11 +4440,33 @@ the default; every mutation needs an explicit user request in the same turn.
 
 ## Inject (explicit request only)
 
-- For **dsh sessions**, \`agent-sidecar send\` is unsupported
-  (\`unsupported_dsh\`: DSH has neither session resume nor stdin prompt
-  transport). Route the user to the plugin's inject panel on the Sidecar
-  board, which injects in-process (queue/steer) behind the plugin's
-  \`inject.enabled\` gate and confirmation dialog.
+- For **Kimi Code 0.38.0**, the only supported mutation is protected ACP
+  spawn-resume for a local, top-level \`waiting\` or \`idle\` session.
+  \`working\`, \`dead\`, child/sidechain, and remote Kimi sessions are
+  rejected. The plugin UI fixes the internal request mode to \`queue\`, but
+  presents this operation as **Protected resume**, not queueing or steering:
+  it starts a separate Kimi ACP process, resumes persisted state, and never
+  attaches to or steers an existing terminal.
+- Kimi receives the message in the ACP JSON-RPC NDJSON stream, never in the
+  Kimi process argv. The resumed ACP session is put in default/manual mode;
+  every permission request or question is answered \`cancelled\`, never
+  approved. Even when Kimi returns \`outcome: "completed"\`, durable delivery
+  cannot be proven: the receipt remains \`delivery: "unknown"\`. Do not
+  automatically or manually retry the same content. Replaying the same retained
+  \`request_id\` is safe: it returns the cached result without spawning
+  another ACP process. An older Sidecar may return \`unsupported_kimi\`;
+  report that as a compatibility limit, not as a claim that current Kimi
+  support is absent.
+- For **dsh sessions**, use the plugin panel. A loaded live Agent supports
+  \`queue\` via \`followup\` and \`steer\` via \`steer\`, reusing that
+  Agent's existing model route and preset. A non-live \`waiting\`/\`idle\`
+  session may use guarded cold resume. Cold resume requires a complete
+  current default provider/model pair (\`dsh_model_unconfigured\` otherwise)
+  and rejects any proven explicit or implicit preset
+  (\`dsh_preset_unsupported\`); unknown persistence, preset, or host-service
+  state fails closed. Direct \`agent-sidecar send\` still returns
+  \`unsupported_dsh\`; only that CLI path is unsupported, not DSH injection
+  through this plugin.
 - For **claude / codex / cursor-cli** sessions in \`waiting\`/\`idle\`, use
   the plugin panel, or run \`send\` only when the user explicitly requests
   the exact message or action in the same turn. Never infer consent from a
@@ -3232,9 +4478,11 @@ the default; every mutation needs an explicit user request in the same turn.
   agent-sidecar send <session-prefix> "<exact-message>" --allow-write --request-id "<stable-unique-id>" --json
   \`\`\`
 
-- Preserve the returned \`request_id\` and \`replayed\` fields. Never send
-  to remote, \`working\`, \`dead\`, child, or unsupported-agent sessions
-  (\`cursor-ide\`, \`copilot\`, \`kimi\`, \`dsh\`).
+- On the external \`agent-sidecar send\` path, preserve the returned
+  \`request_id\` and \`replayed\` fields. It rejects remote, \`working\`,
+  \`dead\`, child, and unsupported-agent sessions. \`cursor-ide\` and
+  \`copilot\` have no mutation path; the plugin's in-process DSH rules above
+  are separate.
 - Never retry \`failed\`, \`timed_out\`, \`request_pending\`,
   \`audit_error\`, \`cleanup_incomplete\`, or any result with
   \`delivery: "unknown"\` — the agent may already have received the
@@ -3246,8 +4494,8 @@ the default; every mutation needs an explicit user request in the same turn.
 
 Full schemas, exit codes, and boundaries: \`skills/agent-sidecar/SKILL.md\`
 and \`reference.md\` in the agent_sidecar repository (also installable as a
-filesystem skill via \`scripts/install-skill.sh\`; a filesystem copy under
-\`~/.dsh/skills/\` automatically shadows this plugin-provided one).`;
+filesystem skill via \`scripts/install-skill.sh\`; a user-managed filesystem
+copy automatically shadows this plugin-provided one).`;
 const RESOURCE_BASE = {
 	kind: "opaque",
 	description: "Self-contained skill provided by the dsh-agent-sidecar plugin; the canonical long-form reference (SKILL.md + reference.md) lives in the agent_sidecar repository under skills/agent-sidecar/."
@@ -3708,6 +4956,40 @@ function normalizeAnalysisProject(project) {
 	}
 	return project;
 }
+/**
+* Fail-closed structural equivalent of public `resolveSessionPreset` for the
+* only policy decision this plugin needs: newest selected event wins, then
+* header fallback. Unknown event/header schema is never treated as absence.
+*/
+function classifyStoredPreset(inspection) {
+	if (typeof inspection.meta !== "object" || inspection.meta === null || !Array.isArray(inspection.events)) return "unknown";
+	for (let index = inspection.events.length - 1; index >= 0; index -= 1) {
+		const raw = inspection.events[index];
+		if (typeof raw !== "object" || raw === null) return "unknown";
+		const event = raw;
+		if (typeof event.type !== "string") return "unknown";
+		if (event.type !== "agent-preset/selected") continue;
+		if (typeof event.data !== "object" || event.data === null) return "unknown";
+		const preset = event.data.agentPreset;
+		return typeof preset === "string" && preset.trim() !== "" ? "present" : "unknown";
+	}
+	const header = inspection.meta;
+	if (!Object.prototype.hasOwnProperty.call(header, "agentPreset")) return "absent";
+	if (header.agentPreset === void 0) return "absent";
+	return typeof header.agentPreset === "string" && header.agentPreset.trim() !== "" ? "present" : "unknown";
+}
+/** Fail closed when a foreign persistence service violates the public list shape. */
+function classifyListedSession(listed, sessionId) {
+	if (!Array.isArray(listed)) return "unknown";
+	let present = false;
+	for (const raw of listed) {
+		if (typeof raw !== "object" || raw === null) return "unknown";
+		const id = raw.id;
+		if (typeof id !== "string" || id.trim() === "") return "unknown";
+		if (id === sessionId) present = true;
+	}
+	return present ? "present" : "missing";
+}
 /** One unified-session line in a project / cross-agent overview. */
 function describeUnifiedSession(session) {
 	const title = session.title !== "" ? clampAnalysisText(session.title) : "(untitled)";
@@ -3865,11 +5147,124 @@ function apply(ctx, config) {
 	let effective = config;
 	const guardOptions = { allowWriteActions: () => effective.inject.enabled };
 	let liveAgents = null;
+	let coldServices = null;
+	let hostServiceGeneration = 0;
+	let liveAgentPresets = null;
+	let liveAgentDefaultModel = null;
+	const agentsFace = {
+		isAvailable: () => coldServices !== null,
+		get: (sessionId) => (liveAgents ?? coldServices?.agents)?.get(sessionId),
+		resume: (options) => coldServices === null ? Promise.reject(/* @__PURE__ */ new Error("dsh cold resume services are unavailable")) : coldServices.agents.resume(options)
+	};
+	/**
+	* Resolve the host's current default Agent route through the optional
+	* reflect service. This is shared by cold dsh resume and analysis fallback;
+	* only a trimmed, complete pair crosses the port. Missing, throwing,
+	* partial, and blank services all read as unavailable.
+	*/
+	const resolveHostDefaultModel = () => {
+		const getter = ctx.get;
+		if (typeof getter !== "function") return null;
+		const service = getter.call(ctx, "agentDefaultModel");
+		if (service === void 0 || service === null) return null;
+		try {
+			const selection = service.currentSelection();
+			const provider = typeof selection?.provider === "string" ? selection.provider.trim() : "";
+			const model = typeof selection?.model === "string" ? selection.model.trim() : "";
+			return provider !== "" && model !== "" ? {
+				provider,
+				model
+			} : null;
+		} catch {
+			return null;
+		}
+	};
+	/**
+	* Establish an authoritative cold-session proof without parsing Error text:
+	* list proves materialized existence, inspect classifies the stored preset,
+	* and a second list after inspect failure distinguishes concurrent deletion
+	* from corruption/read failure. Every operation shares the executor deadline.
+	*/
+	const resolveColdPreset = async (sessionId, signal) => {
+		const services = coldServices;
+		if (services === null) return { state: "unknown" };
+		const listedState = async () => {
+			let listed;
+			try {
+				listed = await services.persistence.list(signal);
+			} catch {
+				return "unknown";
+			}
+			if (signal.aborted || coldServices !== services) return "unknown";
+			return classifyListedSession(listed, sessionId);
+		};
+		const liveState = () => {
+			if (signal.aborted || coldServices !== services) return "unknown";
+			try {
+				return services.agents.get(sessionId) === void 0 ? "missing" : "live";
+			} catch {
+				return "unknown";
+			}
+		};
+		const firstListing = await listedState();
+		if (firstListing === "unknown") return { state: "unknown" };
+		if (liveState() !== "missing") return { state: "unknown" };
+		if (firstListing === "missing") return { state: "missing" };
+		let inspection;
+		try {
+			inspection = await services.persistence.inspect(sessionId, signal);
+		} catch {
+			if (signal.aborted || coldServices !== services) return { state: "unknown" };
+			if (await listedState() !== "missing") return { state: "unknown" };
+			return liveState() === "missing" ? { state: "missing" } : { state: "unknown" };
+		}
+		if (signal.aborted || coldServices !== services) return { state: "unknown" };
+		const stored = classifyStoredPreset(inspection);
+		if (stored !== "absent") return { state: stored };
+		const getter = ctx.get;
+		if (typeof getter !== "function") return { state: "unknown" };
+		let modelService;
+		try {
+			const presets = getter.call(ctx, "agentPresets");
+			if (presets !== void 0) return { state: presets === null ? "unknown" : "present" };
+			modelService = getter.call(ctx, "agentDefaultModel");
+		} catch {
+			return { state: "unknown" };
+		}
+		const proofGeneration = hostServiceGeneration;
+		const assertPublicationProof = () => {
+			let currentPresets;
+			let currentModelService;
+			try {
+				currentPresets = getter.call(ctx, "agentPresets");
+				currentModelService = getter.call(ctx, "agentDefaultModel");
+			} catch {
+				throw new DshResumeGuardError("executor_error");
+			}
+			if (currentPresets !== void 0 || liveAgentPresets !== null) throw new DshResumeGuardError("dsh_preset_unsupported");
+			if (hostServiceGeneration !== proofGeneration || coldServices !== services || currentModelService !== modelService) throw new DshResumeGuardError("executor_error");
+		};
+		return {
+			state: "absent",
+			setup: (agentContext) => {
+				const session = agentContext.agent?.session;
+				if (session === void 0) throw new DshResumeGuardError("executor_error");
+				const actual = classifyStoredPreset({
+					meta: session.header,
+					events: session.events
+				});
+				if (actual === "present") throw new DshResumeGuardError("dsh_preset_unsupported");
+				if (actual === "unknown") throw new DshResumeGuardError("executor_error");
+				assertPublicationProof();
+				return { commit: assertPublicationProof };
+			}
+		};
+	};
 	const dshExecutor = createDshInjectExecutor({
-		agents: {
-			get: (sessionId) => liveAgents?.get(sessionId),
-			resume: (options) => liveAgents === null ? Promise.reject(/* @__PURE__ */ new Error("dsh agents service is not available in this composition")) : liveAgents.resume(options)
-		},
+		agents: agentsFace,
+		resolveHostDefaultModel,
+		resolveColdPreset,
+		currentColdServiceGeneration: () => coldServices,
 		log,
 		pluginName: name
 	});
@@ -3951,18 +5346,7 @@ function apply(ctx, config) {
 			provider,
 			model
 		};
-		const getter = ctx.get;
-		if (typeof getter !== "function") return null;
-		const service = getter.call(ctx, "agentDefaultModel");
-		if (service === void 0 || service === null) return null;
-		try {
-			const selection = service.currentSelection();
-			if (typeof selection?.provider === "string" && selection.provider !== "" && typeof selection.model === "string" && selection.model !== "") return {
-				provider: selection.provider,
-				model: selection.model
-			};
-		} catch {}
-		return null;
+		return resolveHostDefaultModel();
 	};
 	const createAnalysisAgent = async (options) => {
 		const agents = liveAgents;
@@ -4103,21 +5487,46 @@ function apply(ctx, config) {
 			offStateChange();
 			await supervisor.stop();
 			reconciler.stop();
+			await dshExecutor.dispose();
 			await Promise.all([...liveAnalysisSessions].map((handle) => handle.dispose().catch(() => {})));
 			routes.dispose();
 			removeRoute();
 			fusionHolder.current.stop();
 		};
 	}, "agent-sidecar: host assembly (route + reconciler + supervisor + fusion + analysis)");
+	let dshFeedGeneration = 0;
 	ctx.inject(["sessions"], (injected) => {
 		const sctx = injected;
+		const bindingGeneration = ++dshFeedGeneration;
+		let bindingActive = true;
 		const bus = sctx;
-		const withFeed = buildFusion({ on: (event, handler) => bus.on(event, handler) });
+		const withFeed = buildFusion({
+			on: (event, handler) => bus.on(event, handler),
+			get: (sessionId) => {
+				if (!bindingActive || bindingGeneration !== dshFeedGeneration) return;
+				try {
+					const direct = sctx.sessions;
+					if (direct !== void 0 && typeof direct.get === "function") return direct.get(sessionId);
+					const getter = sctx.get;
+					if (typeof getter !== "function") return void 0;
+					const current = getter.call(sctx, "sessions");
+					return current !== void 0 && current !== null && typeof current.get === "function" ? current.get(sessionId) : void 0;
+				} catch {
+					return;
+				}
+			}
+		});
 		withFeed.start();
 		const previous = fusionHolder.current;
 		fusionHolder.current = withFeed;
 		previous.stop();
 		sctx.effect(() => () => {
+			bindingActive = false;
+			if (bindingGeneration !== dshFeedGeneration || fusionHolder.current !== withFeed) {
+				withFeed.stop();
+				return;
+			}
+			dshFeedGeneration += 1;
 			const downgraded = buildFusion(null);
 			downgraded.start();
 			fusionHolder.current = downgraded;
@@ -4125,13 +5534,53 @@ function apply(ctx, config) {
 		}, "agent-sidecar: fusion dsh feed release");
 		log("debug", "fusion dsh event feed online (sessions service bound)");
 	});
+	ctx.inject(["agents", "sessionPersistence"], (injected) => {
+		const cctx = injected;
+		const bound = {
+			agents: cctx.agents,
+			persistence: cctx.sessionPersistence
+		};
+		const previous = coldServices;
+		if (previous !== null && previous !== bound) dshExecutor.invalidateColdServiceGeneration(previous);
+		hostServiceGeneration += 1;
+		coldServices = bound;
+		cctx.effect(() => async () => {
+			hostServiceGeneration += 1;
+			if (coldServices === bound) coldServices = null;
+			await dshExecutor.invalidateColdServiceGeneration(bound);
+		}, "agent-sidecar: cold dsh resume services release");
+		log("debug", "cold dsh resume services online", {
+			agentsAvailable: true,
+			persistenceAvailable: true
+		});
+	});
+	ctx.inject(["agentPresets"], (injected) => {
+		const pctx = injected;
+		const bound = pctx.agentPresets;
+		hostServiceGeneration += 1;
+		liveAgentPresets = bound;
+		pctx.effect(() => () => {
+			hostServiceGeneration += 1;
+			if (liveAgentPresets === bound) liveAgentPresets = null;
+		}, "agent-sidecar: agent presets generation release");
+	});
+	ctx.inject(["agentDefaultModel"], (injected) => {
+		const mctx = injected;
+		const bound = mctx.agentDefaultModel;
+		hostServiceGeneration += 1;
+		liveAgentDefaultModel = bound;
+		mctx.effect(() => () => {
+			hostServiceGeneration += 1;
+			if (liveAgentDefaultModel === bound) liveAgentDefaultModel = null;
+		}, "agent-sidecar: default model generation release");
+	});
 	ctx.inject(["agents"], (injected) => {
 		const actx = injected;
 		liveAgents = actx.agents;
 		actx.effect(() => () => {
 			liveAgents = null;
 		}, "agent-sidecar: agents binding release");
-		log("debug", "dsh inject + analysis paths online (agents service bound)");
+		log("debug", "dsh live inject + analysis paths online (agents service bound)");
 	});
 	ctx.inject(["skills"], (injected) => {
 		registerSidecarSkillProvider({

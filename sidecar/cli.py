@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, List, Mapping, Optional, Sequence, TextIO
 
@@ -354,6 +354,17 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         help="message delivered to the resumed agent",
+    )
+    send_parser.add_argument(
+        "--agent",
+        default=None,
+        metavar="NAME",
+        help="limit resolution to an exact agent name (case-insensitive)",
+    )
+    send_parser.add_argument(
+        "--exact-session",
+        action="store_true",
+        help="require the full session ID; never fall back to prefix matching",
     )
     send_parser.add_argument(
         "--message-stdin",
@@ -774,6 +785,29 @@ def resolve_session_prefix(sessions: Sequence[Session], prefix: str) -> Session:
                 prefix,
                 len(matches),
                 candidates,
+            )
+        )
+    return matches[0]
+
+
+def _resolve_exact_session(
+    sessions: Sequence[Session],
+    session_id: str,
+) -> Session:
+    """Resolve exactly one full session ID without prefix fallback."""
+
+    matches = [
+        session for session in sessions if session.session_id == session_id
+    ]
+    if not matches:
+        raise LookupError(
+            "no session exactly matches ID {!r}".format(session_id)
+        )
+    if len(matches) != 1:
+        raise ValueError(
+            "ambiguous exact session ID {!r} ({} matches)".format(
+                session_id,
+                len(matches),
             )
         )
     return matches[0]
@@ -2217,6 +2251,20 @@ def _report_send_error(error: object, message: str, stderr: TextIO) -> None:
     stderr.flush()
 
 
+def _write_send_error(
+    error: object,
+    code: str,
+    *,
+    as_json: bool,
+    message: str,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> None:
+    if as_json:
+        _write_json({"code": code}, stdout)
+    _report_send_error(error, message, stderr)
+
+
 def _report_native_send_stderr(
     result: SendResult,
     message: str,
@@ -2236,6 +2284,7 @@ def _write_send_result(
     stdout: TextIO,
     stderr: TextIO,
 ) -> int:
+    delivered = result.delivery == "delivered"
     if as_json:
         payload = result.to_dict()
         payload["response"] = _redacted_send_text(payload.get("response"), message)
@@ -2248,7 +2297,7 @@ def _write_send_result(
                 "true" if result.replayed else "false",
             )
         )
-        if result.outcome == "completed":
+        if delivered:
             response = _safe_send_text(result.response, message)
             if response:
                 stdout.write(response + "\n")
@@ -2259,6 +2308,13 @@ def _write_send_result(
                         sanitize_terminal_text(result.session_id),
                     )
                 )
+        elif result.outcome == "completed":
+            stdout.write(
+                "completed but delivery unknown for {}:{}; do not retry\n".format(
+                    sanitize_terminal_text(result.agent),
+                    sanitize_terminal_text(result.session_id),
+                )
+            )
         else:
             stdout.write(
                 "delivery unknown for {}:{} ({})\n".format(
@@ -2269,14 +2325,17 @@ def _write_send_result(
             )
         stdout.flush()
 
-    if result.outcome == "completed":
+    if delivered:
         if not as_json:
             _report_native_send_stderr(result, message, stderr)
         return 0
 
-    diagnostic = "delivery status is unknown after {}".format(
-        sanitize_terminal_text(result.outcome)
-    )
+    if result.outcome == "completed":
+        diagnostic = "completed but delivery unknown; do not retry"
+    else:
+        diagnostic = "delivery status is unknown after {}".format(
+            sanitize_terminal_text(result.outcome)
+        )
     if result.error_code:
         diagnostic += " ({})".format(sanitize_terminal_text(result.error_code))
     stderr.write("send: {}\n".format(diagnostic))
@@ -2362,17 +2421,47 @@ def _run_send(
             stderr.flush()
             return 130
         except SendError as error:
-            _report_send_error(error, "", stderr)
+            _write_send_error(
+                error,
+                error.code,
+                as_json=args.json,
+                message="",
+                stdout=stdout,
+                stderr=stderr,
+            )
             return 2
     else:
         message = args.message
 
     active_scanner = Scanner() if scanner is None else scanner
     sessions = _scan_sessions(active_scanner, stderr, None)
+    if args.agent is not None:
+        sessions = _filter_agent_rows(sessions, (args.agent,))
     try:
-        selected = resolve_session_prefix(sessions, args.session_prefix)
-    except (LookupError, ValueError) as error:
-        _report_send_error(error, message, stderr)
+        selected = (
+            _resolve_exact_session(sessions, args.session_prefix)
+            if args.exact_session
+            else resolve_session_prefix(sessions, args.session_prefix)
+        )
+    except LookupError as error:
+        _write_send_error(
+            error,
+            "target_not_found",
+            as_json=args.json,
+            message=message,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        return 2
+    except ValueError as error:
+        _write_send_error(
+            error,
+            "ambiguous_session",
+            as_json=args.json,
+            message=message,
+            stdout=stdout,
+            stderr=stderr,
+        )
         return 2
 
     plan_builder = build_send_plan if planner is None else planner
@@ -2380,7 +2469,13 @@ def _run_send(
     request_id = args.request_id or generate_request_id()
 
     def refresh_selected_session() -> List[Session]:
-        return _scan_sessions(active_scanner, stderr, None)
+        return [
+            session
+            for session in _scan_sessions(active_scanner, stderr, None)
+            if isinstance(session, Session)
+            and session.agent == selected.agent
+            and session.session_id == selected.session_id
+        ]
 
     try:
         plan = plan_builder(selected, message)
@@ -2391,10 +2486,28 @@ def _run_send(
             refresher=refresh_selected_session,
             request_id=request_id,
         )
-        if result.request_id != request_id:
-            result = replace(result, request_id=request_id)
+        if (
+            result.agent != selected.agent
+            or result.session_id != selected.session_id
+            or result.request_id != request_id
+        ):
+            result = SendResult(
+                agent=selected.agent,
+                session_id=selected.session_id,
+                outcome="failed",
+                delivery="unknown",
+                error_code="executor_error",
+                request_id=request_id,
+            )
     except SendError as error:
-        _report_send_error(error, message, stderr)
+        _write_send_error(
+            error,
+            error.code,
+            as_json=args.json,
+            message=message,
+            stdout=stdout,
+            stderr=stderr,
+        )
         return 2
     except KeyboardInterrupt:
         result = SendResult(

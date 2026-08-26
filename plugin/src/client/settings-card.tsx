@@ -8,12 +8,11 @@
  * decides which namespaces to dispatch and stacks what comes back"
  * (harness `packages/client/ui-settings-plugins/src/client/slot-contract.ts`;
  * unclaimed namespaces render nothing per the adding-a-settings-card
- * cookbook). This card therefore carries the form UI for the key items of
- * the host Config (src/config.ts): daemon.policy/backoffLimit,
- * sidecar.command/runtimeDir, stream.reconcileActiveMs/IdleMs,
- * inject.enabled/defaultMode, analysis.enabled, ui.timeWindowHours/showDead,
- * skill.provide — plus the daemon status/retry row and the injection safety
- * note the design doc (§4.a/§5.3/§6) puts on the settings surface.
+ * cookbook). This card therefore draws the live form UI for
+ * inject.enabled/defaultMode, analysis enabled/provider/model and
+ * ui.timeWindowHours/showDead, plus read-only deployment guidance for the
+ * profile-owned daemon/sidecar/stream/skill groups, daemon status/retry, and
+ * the injection safety note.
  *
  * WIRING CONTRACT (T2.4): the card is fully controlled and presentational.
  * `values` is the staged draft owned by the wiring controller; every edit
@@ -24,6 +23,12 @@
  * settings namespace) also belongs to the wiring half — this module exports
  * the component and its props contract only.
  *
+ * Runtime ownership is deliberately explicit: daemon/sidecar/stream values
+ * and skill.provide are read from the profile cordis.patch config when the
+ * plugin is applied, so this card shows those groups as read-only guidance.
+ * inject/analysis/ui remain editable because their effective settings are
+ * consumed live.
+ *
  * The card renders as an `<li>` because the plugin-configuration tab stacks
  * cards in a list (shipped PluginCard precedent). Chrome (disclosure
  * header, unsaved pill, save/discard footer) mirrors the shipped card so
@@ -33,16 +38,16 @@
 import {
   Button,
   IconChevronDownOutline14,
+  Input,
   Pill,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { t as defaultT } from './locales/index.ts'
 import type { SidecarLocaleKey } from './locales/index.ts'
 import {
   NumberField,
   SelectField,
-  TextField,
   ToggleField,
 } from './settings-fields.tsx'
 import { surfaceProps } from './theme/parts.ts'
@@ -84,8 +89,8 @@ export interface SettingsCardValues {
   /** daemon.backoffLimit (integer ≥ 1) */
   daemonBackoffLimit: number
   /**
-   * sidecar.command, displayed and edited as one whitespace-joined line;
-   * argv splitting/joining is the wiring controller's concern.
+   * sidecar.command, carried as one whitespace-joined line so existing
+   * settings documents still round-trip without loss.
    */
   sidecarCommand: string
   /** sidecar.runtimeDir ('' = default ~/.agent_sidecar) */
@@ -103,8 +108,8 @@ export interface SettingsCardValues {
   /**
    * analysis.provider / analysis.model ('' = reuse the host default model).
    * Carried through the staged values for save round-trip fidelity (a group
-   * write is a COMPLETE analysis object — dropping them here would wipe an
-   * explicit configuration); not yet rendered as form fields.
+   * write is a COMPLETE analysis object — dropping either would wipe an
+   * explicit configuration). The UI accepts only both blank or both non-blank.
    */
   analysisProvider: string
   analysisModel: string
@@ -154,6 +159,8 @@ export interface SettingsCardProps {
   docsUrl?: string
   /** Locale seat override; defaults to the module-local table. */
   t?: SettingsTranslate
+  /** Initial disclosure state; omitted keeps the production card collapsed. */
+  defaultOpen?: boolean
 }
 
 const DAEMON_STATE_KEY: Record<SidecarDaemonState, SidecarLocaleKey> = {
@@ -188,17 +195,96 @@ function Section(props: SectionProps): ReactNode {
   )
 }
 
+export type AnalysisRouteKind = 'host-default' | 'explicit' | 'partial'
+
+export interface AnalysisRouteResolution {
+  kind: AnalysisRouteKind
+  provider: string
+  model: string
+}
+
+/** Trim one edited route token exactly as the host does before resolving it. */
+export function normalizeAnalysisRouteField(value: string): string {
+  return value.trim()
+}
+
+/**
+ * Resolve the analysis route contract shared with the host:
+ * both blank means host default, both set means explicit, and a partial pair
+ * is invalid settings UI input (the runtime would otherwise silently fall
+ * back to the host default).
+ */
+export function resolveAnalysisRoute(
+  provider: string,
+  model: string,
+): AnalysisRouteResolution {
+  const normalizedProvider = normalizeAnalysisRouteField(provider)
+  const normalizedModel = normalizeAnalysisRouteField(model)
+  const hasProvider = normalizedProvider !== ''
+  const hasModel = normalizedModel !== ''
+  return {
+    kind: hasProvider === hasModel
+      ? hasProvider ? 'explicit' : 'host-default'
+      : 'partial',
+    provider: normalizedProvider,
+    model: normalizedModel,
+  }
+}
+
+interface AnalysisRouteFieldProps {
+  label: string
+  hint: string
+  value: string
+  placeholder: string
+  disabled: boolean
+  invalid: boolean
+  onCommit: (value: string) => void
+}
+
+function AnalysisRouteField(props: AnalysisRouteFieldProps): ReactNode {
+  const id = useId()
+  return (
+    <div className={css['field']}>
+      <label className={css['label']} htmlFor={id}>{props.label}</label>
+      <Input
+        id={id}
+        className={`${css['input']} ${props.invalid ? css['inputInvalid'] : ''}`}
+        type="text"
+        value={props.value}
+        placeholder={props.placeholder}
+        disabled={props.disabled}
+        {...props.invalid ? { 'aria-invalid': true } : {}}
+        onChange={(event) => { props.onCommit(normalizeAnalysisRouteField(event.target.value)) }}
+      />
+      <p className={css['hint']}>{props.hint}</p>
+    </div>
+  )
+}
+
 /**
  * Render the Agent Sidecar settings card.
  * @param props - staged values, form state, and the wiring callbacks.
  * @returns the card.
  */
 export function SettingsCard(props: SettingsCardProps): ReactNode {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(props.defaultOpen ?? false)
   const t = props.t ?? defaultT
   const { values } = props
   const disabled = !props.writable || props.saving
   const title = t('settings.cardTitle')
+  const analysisRoute = resolveAnalysisRoute(
+    values.analysisProvider,
+    values.analysisModel,
+  )
+  const analysisRouteInvalid = analysisRoute.kind === 'partial'
+  const analysisRouteStatus = analysisRoute.kind === 'host-default'
+    ? t('settings.analysisRouteHostDefault')
+    : analysisRoute.kind === 'explicit'
+      ? t('settings.analysisRouteExplicit', {
+          provider: analysisRoute.provider,
+          model: analysisRoute.model,
+        })
+      : t('settings.analysisRoutePartial')
 
   const daemonNote = props.daemon?.state === 'defer'
     ? t('settings.daemonDeferNote')
@@ -272,72 +358,19 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
                   </div>
                 )
                 : null}
-              <SelectField
-                label={t('settings.daemonPolicyLabel')}
-                hint={t('settings.daemonPolicyHint')}
-                value={values.daemonPolicy}
-                disabled={disabled}
-                options={[
-                  { value: 'adopt-or-host', label: t('settings.daemonPolicyAdoptOrHost') },
-                  { value: 'adopt-only', label: t('settings.daemonPolicyAdoptOnly') },
-                  { value: 'off', label: t('settings.daemonPolicyOff') },
-                ]}
-                onCommit={(value) => {
-                  props.onChange('daemonPolicy', value as SettingsCardValues['daemonPolicy'])
-                }}
-              />
-              <NumberField
-                label={t('settings.daemonBackoffLimitLabel')}
-                hint={t('settings.daemonBackoffLimitHint')}
-                invalidHint={t('settings.invalidNumber', { min: 1 })}
-                min={1}
-                value={values.daemonBackoffLimit}
-                disabled={disabled}
-                onCommit={(value) => { props.onChange('daemonBackoffLimit', value) }}
-              />
+              <p className={css['note']}>{t('settings.daemonProfileNote')}</p>
             </Section>
 
             <Section title={t('settings.sectionSidecar')}>
-              <TextField
-                label={t('settings.sidecarCommandLabel')}
-                hint={t('settings.sidecarCommandHint')}
-                value={values.sidecarCommand}
-                placeholder="agent-sidecar"
-                disabled={disabled}
-                onCommit={(value) => { props.onChange('sidecarCommand', value) }}
-              />
-              <TextField
-                label={t('settings.sidecarRuntimeDirLabel')}
-                hint={t('settings.sidecarRuntimeDirHint')}
-                value={values.sidecarRuntimeDir}
-                placeholder="~/.agent_sidecar"
-                disabled={disabled}
-                onCommit={(value) => { props.onChange('sidecarRuntimeDir', value) }}
-              />
+              <p className={css['note']}>{t('settings.sidecarProfileNote')}</p>
             </Section>
 
             <Section title={t('settings.sectionStream')}>
-              <NumberField
-                label={t('settings.streamActiveMsLabel')}
-                hint={t('settings.streamActiveMsHint')}
-                invalidHint={t('settings.invalidNumber', { min: 100 })}
-                min={100}
-                value={values.streamReconcileActiveMs}
-                disabled={disabled}
-                onCommit={(value) => { props.onChange('streamReconcileActiveMs', value) }}
-              />
-              <NumberField
-                label={t('settings.streamIdleMsLabel')}
-                hint={t('settings.streamIdleMsHint')}
-                invalidHint={t('settings.invalidNumber', { min: 100 })}
-                min={100}
-                value={values.streamReconcileIdleMs}
-                disabled={disabled}
-                onCommit={(value) => { props.onChange('streamReconcileIdleMs', value) }}
-              />
+              <p className={css['note']}>{t('settings.streamProfileNote')}</p>
             </Section>
 
             <Section title={t('settings.sectionInject')}>
+              <p className={css['note']}>{t('settings.liveEffectNote')}</p>
               <p className={css['note']}>{t('settings.injectSafetyNote')}</p>
               <ToggleField
                 label={t('settings.injectEnabledLabel')}
@@ -362,6 +395,7 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
             </Section>
 
             <Section title={t('settings.sectionAnalysis')}>
+              <p className={css['note']}>{t('settings.liveEffectNote')}</p>
               <ToggleField
                 label={t('settings.analysisEnabledLabel')}
                 hint={t('settings.analysisEnabledHint')}
@@ -369,9 +403,34 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
                 disabled={disabled}
                 onCommit={(checked) => { props.onChange('analysisEnabled', checked) }}
               />
+              <AnalysisRouteField
+                label={t('settings.analysisProviderLabel')}
+                hint={t('settings.analysisProviderHint')}
+                value={values.analysisProvider}
+                placeholder={t('settings.analysisProviderPlaceholder')}
+                disabled={disabled}
+                invalid={analysisRouteInvalid && analysisRoute.provider === ''}
+                onCommit={(value) => { props.onChange('analysisProvider', value) }}
+              />
+              <AnalysisRouteField
+                label={t('settings.analysisModelLabel')}
+                hint={t('settings.analysisModelHint')}
+                value={values.analysisModel}
+                placeholder={t('settings.analysisModelPlaceholder')}
+                disabled={disabled}
+                invalid={analysisRouteInvalid && analysisRoute.model === ''}
+                onCommit={(value) => { props.onChange('analysisModel', value) }}
+              />
+              <p
+                className={analysisRouteInvalid ? css['invalidHint'] : css['note']}
+                {...analysisRouteInvalid ? { role: 'alert' } : {}}
+              >
+                {analysisRouteStatus}
+              </p>
             </Section>
 
             <Section title={t('settings.sectionUi')}>
+              <p className={css['note']}>{t('settings.liveEffectNote')}</p>
               <NumberField
                 label={t('settings.uiTimeWindowHoursLabel')}
                 hint={t('settings.uiTimeWindowHoursHint')}
@@ -391,13 +450,7 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
             </Section>
 
             <Section title={t('settings.sectionSkill')}>
-              <ToggleField
-                label={t('settings.skillProvideLabel')}
-                hint={t('settings.skillProvideHint')}
-                checked={values.skillProvide}
-                disabled={disabled}
-                onCommit={(checked) => { props.onChange('skillProvide', checked) }}
-              />
+              <p className={css['note']}>{t('settings.skillRestartNote')}</p>
             </Section>
 
             <div className={css['footer']}>
@@ -429,8 +482,10 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
                 type="button"
                 size="sm"
                 variant="primary"
-                disabled={!props.dirty || props.saving || !props.writable}
-                onClick={props.onSave}
+                disabled={!props.dirty || props.saving || !props.writable || analysisRouteInvalid}
+                onClick={() => {
+                  if (!analysisRouteInvalid) props.onSave()
+                }}
               >
                 {t(props.saving ? 'settings.saving' : 'settings.save')}
               </Button>

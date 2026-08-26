@@ -143,13 +143,22 @@ required to use `--allow-write`; do not ask for a second confirmation. Never
 construct or add `--allow-write` without that explicit send request, and pass
 the requested message without embellishment.
 
-Before sending, use readonly discovery if needed to resolve the target. Then
-choose a fresh stable, unique, opaque request ID that can be retained by the
-calling workflow, and run exactly one command:
+Before sending, use readonly discovery if needed to resolve the full target
+identity. Then choose a fresh stable, unique, opaque request ID that can be
+retained by the calling workflow. Although `--agent`, `--exact-session`, and
+`--request-id` are optional CLI conveniences, agent integrations should always
+bind writes to the exact agent, full session ID, and request ID, and should
+keep the message out of the Sidecar argv:
 
 ```sh
-agent-sidecar send <session-prefix> "<exact-message>" --allow-write --request-id "<stable-unique-id>" --json
+printf '%s' '<exact-message>' | agent-sidecar send '<full-session-id>' --agent '<agent-name>' --exact-session --message-stdin --allow-write --request-id '<unique-request-id>' --json
 ```
+
+`--agent` restricts resolution to that exact agent name, case-insensitively.
+`--exact-session` requires a full session-ID match and disables prefix
+fallback. `--message-stdin` and a positional message are mutually exclusive;
+use `printf '%s'` so no unintended trailing newline changes the message or
+audit fingerprint.
 
 `--request-id` is optional and Sidecar generates a cryptographically random ID
 when it is omitted, but callers should supply a stable unique ID for safe
@@ -159,17 +168,58 @@ same target, project, and exact message returns a replayed receipt without
 spawning. A changed target, project, or message returns `request_conflict`.
 Never recycle an ID for unrelated work.
 
-The only eligible targets are local, top-level `claude`, `codex`, and
-`cursor-cli` sessions in `waiting` or `idle`. Never send to a remote,
-`working`, `dead`, child, or sidechain session. Never send to `cursor-ide`,
-`copilot`, `kimi`, `dsh`, or another unsupported agent. `send` performs its own
-direct local scan; it does not use the daemon or remote aggregation.
+Accept a JSON receipt only when its `agent`, full `session_id`, and
+`request_id` exactly match the requested triple. A missing or mismatched
+identity field, or exit `0` without a valid bound receipt, is terminal
+`delivery: "unknown"` even if other output looks successful. Never retry an
+unknown result.
 
-Compatibility was rechecked on 2026-08-23: Kimi Code 0.38 remains unsupported
-because resumed print mode auto-approves permissions and exposes the prompt in
-argv. DSH 0.1.1-rc.2 remains unsupported because it has neither session resume
-nor stdin prompt transport. Do not substitute machine-specific executable
-paths for this compatibility rule.
+The eligible targets are local, top-level `claude`, `codex`, `cursor-cli`, and
+`kimi` sessions in `waiting` or `idle`. Never send to a remote, `working`,
+`dead`, child, or sidechain session. Never send to `cursor-ide`, `copilot`,
+`dsh`, or another unsupported agent. Kimi child/remote/dead targets are
+invalid, not candidates for fallback. `send` performs its own direct local
+scan; it does not use the daemon or remote aggregation. Claude, Codex, and
+Cursor keep their existing send semantics. Direct CLI send does not support
+DSH; use the DSH plugin for DSH injection.
+
+Kimi is an exact-version special case. For Kimi Code `0.38.0`, always use the
+protected manual spawn-resume form:
+
+```sh
+printf '%s' '<exact-message>' | agent-sidecar send '<full-kimi-session-id>' --agent kimi --exact-session --message-stdin --allow-write --request-id '<unique-request-id>' --json
+```
+
+This starts one bounded `kimi acp` process; it does not attach to a live Kimi
+terminal and provides no inbox, queue, or steer path. The plan binds and
+revalidates Kimi home/project/session/root-wire identity, owner-safe
+descriptor-anchored sources, and a private snapshot of the Kimi package plus
+the Node executable and non-system dylib closure when applicable. Version and
+ACP initialization are reprobed from the snapshot, and the project
+owner-process guard must be clear. That guard boundedly parses canonical Node
+file arguments, including supported preload/import/loader options and later
+script arguments. Do not treat every long ordinary Node command as Kimi. The
+bound executable must be owner-safe and single-link; under that boundary an
+ordinary relative Node command with a deleted/inaccessible cwd is skipped.
+Direct Kimi hints or executable identity, malformed or over-budget input that
+carries such evidence, and unsafe or changed identity still fail closed.
+
+The ACP client uses Kimi's `default` mode, resumes with no MCP servers,
+advertises no MCP/filesystem/terminal capabilities, answers permission reverse
+requests with `cancelled`, and cancels any question/approval path by failing
+closed. Unsupported reverse methods end the run. The message is sent only in
+the ACP prompt frame and is absent from both Sidecar's and native Kimi's argv.
+These guards do not prove a cryptographic binding between the request and a
+provider turn.
+
+A Darwin fork may remain diagnostically `cleanup_incomplete`. Report Kimi as
+`outcome: "completed"`, `delivery: "unknown"`, and CLI exit `1` only when ACP
+returned rc `0`, settled at `end_turn`, and strict durable root-wire plus state
+evidence proves the matching completed turn. It is never delivered. Without
+that proof report failed (or the bounded timeout/overflow outcome) and unknown.
+Never retry the same content under a new request ID; reusing the same retained
+ID may only replay the audit result with `replayed: true` and will not spawn
+again.
 
 `waiting` and `idle` are inferred and can lag; they do not prove that no native
 process is using the session. Do not send to a session that may still be open or
@@ -192,7 +242,9 @@ completion can be delivered. Any observed fork is conservatively returned as
 work was synchronous, the native process exited zero, or response text was
 captured. State plainly that delivery is unknown; do not describe the send,
 response, or tool work as successfully delivered, and never retry it
-automatically.
+automatically. For Kimi, strict durable proof can still produce
+`outcome: "completed"` while retaining unknown delivery; it never produces
+delivered.
 
 On platforms without the required containment primitives, send returns
 `containment_unsupported` with delivery unknown before the native target
@@ -213,25 +265,36 @@ configured home rather than trusting `HOME`; unsafe path, ownership, mode,
 inode, or key changes fail closed. Send requires the necessary POSIX
 descriptor-relative, no-follow, and locking primitives.
 
+Treat that namespace as persistent security state. Never delete, move, recreate,
+or replace `AGENT_SIDECAR_RUNTIME_DIR`, audit files, or the home-anchor marker
+to bypass `unsafe_lock`; it means retained history or identity cannot be
+proved. Preserve the evidence and do not retry. Only when the user explicitly
+starts a genuinely new request lineage may a new owner-private runtime path and
+new request ID be used; retain that namespace and its audit history thereafter.
+Do not present this as recovery of the old lineage.
+
 An audit failure before spawn fails closed and no native process runs. An audit
 failure after spawn reports `audit_error` with delivery unknown. A replayed
 `request_pending` means a prior process may have crashed after reservation; it
 is delivery unknown and must not spawn or retry automatically.
 
 Never retry `failed`, `timed_out`, `overflow`, `request_pending`,
-`audit_error`, `cleanup_incomplete`, an interrupted command, or any result
-with `delivery: "unknown"`. The agent may already have received or acted on the
-message. Report the unknown state plainly and ask the user what to do next.
+`audit_error`, `cleanup_incomplete`, an interrupted command, an identity
+mismatch, a missing bound receipt, or any result with `delivery: "unknown"`.
+The agent may already have received or acted on the message. Report the
+unknown state plainly and ask the user what to do next.
 
-The message is a positional argument in the sidecar command, so it can appear
-in shell history and process listings. Claude and Codex pass the native prompt
-through stdin, but Cursor CLI necessarily includes it in the child argv too.
-Warn against sending secrets through this command.
+A positional message can appear in shell history and process listings. Prefer
+`--message-stdin`, which keeps it out of the Sidecar command line. Claude and
+Codex also receive the native prompt through stdin, but Cursor CLI necessarily
+includes it in the child argv. Warn against sending secrets through either
+form.
 
 Never invoke `agent-sidecar audit reset` automatically, including in response
-to `audit_corrupt`, `audit_error`, or `unsafe_lock`. It is the only recovery
-operation and must run only when the user explicitly requests that destructive
-recovery in the current turn:
+to `audit_corrupt`, `audit_error`, or `unsafe_lock`. In particular, reset must
+not be used to bypass `unsafe_lock` or justify retrying its request. It is a
+destructive recovery operation and must run only when the user explicitly
+requests it in the current turn:
 
 ```sh
 agent-sidecar audit reset --allow-write --confirm CLEAR-SEND-AUDIT
@@ -261,7 +324,58 @@ its per-injection confirmation. A direct send to a `dsh` session is
 impossible regardless: DSH has neither session resume nor a stdin prompt
 transport, so `send` rejects it as unsupported. If the plugin is not
 installed, `dsh` sessions remain observation-only, and external `claude`,
-`codex`, and `cursor-cli` targets keep the explicit send workflow above.
+`codex`, `cursor-cli`, and `kimi` targets keep the explicit send workflow
+above. Kimi still uses protected resume and never gains live queue/steer.
+
+Treat the plugin's host-provided `inject_eligibility` as the per-target source
+of truth; never infer eligibility in the browser or from status alone. Local
+DSH targets may be eligible while `working`, `waiting`, or `idle`. Local
+external `claude`, `codex`, `cursor-cli`, and `kimi` targets are eligible only
+when top-level, non-sidechain, and `waiting` or `idle`. DSH deliberately
+defers child/sidechain topology to its live/cold preflight. Remote, dead,
+malformed, and unsupported-agent targets are ineligible. The server
+revalidates the same verdict during both `inject.prepare` and
+`inject.execute`.
+
+For DSH, a registry-resident live Agent keeps its existing model route and
+preset: `queue` calls `followup` for its next turn, while `steer` calls
+`steer` for the nearest in-progress step. This is why a genuinely live,
+`working` DSH target can support steer; the exception never applies to an
+external working session. If the DSH Agent is not live, the plugin uses a
+bounded cold resume instead. Cold resume requires a persisted session, a
+complete current host-default provider/model pair, available host services,
+and no effective or implicit preset. A persisted `waiting`, `idle`, or
+cold/no-status session does not need a preselected route, but a present preset
+still returns `409`. It does not promise steering of a turn that was already
+running; only after resume does the selected queue/steer inbox splice occur.
+Missing model configuration also returns `409`; missing target returns `404`;
+unavailable, changing, or unverifiable host services fail closed with `502`.
+`delivery: "delivered"` means only inbox accepted/queued; observe the target
+timeline for the model result.
+
+The nested plugin modal owns only the `inert`/`aria-hidden` attributes it
+writes, drains pending lifecycle records on HMR handoff, and preserves the
+exact current opener across remove/reinsert races. Treat the content-free real
+acceptance labels—Kimi protected resume PASS and DSH live steer/UI PASS—as
+compatibility evidence only; never copy private paths, identifiers, transcript
+content, prompts, or hashes into a report.
+
+For the plugin action endpoint, interpret `404` as target absence,
+`409` as a target-state, token-state, or supported DSH cold-resume conflict,
+and `502` as a fail-closed executor/host-service failure. An
+`inject.execute` body with `outcome: "unknown"` is intentionally returned as
+HTTP `200` because it is a terminal delivery fact, not permission to retry.
+Never retry it automatically.
+
+If consuming the plugin's session/timeline HTTP contract, preserve its
+content-free source health fields. Each timeline page includes
+`sourceOutcomes` for `liveSession`, `sessionQuery`, `sidecarReplay`, and
+`buffer`; each value is one of `succeeded`, `unavailable`, `not_found`,
+`replay_unsupported`, or `source_failed`. It also includes `degraded` and
+`reason`, where the reason is `partial_source_failure`,
+`all_sources_failed`, or `null`. A known session can therefore return HTTP
+`200` with an empty, degraded page; do not reinterpret that as a `404`, hide
+surviving entries, expose upstream details, or invent an agent-level retry.
 
 ## Interpretation limits
 

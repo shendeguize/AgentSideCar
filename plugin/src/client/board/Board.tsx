@@ -22,10 +22,14 @@ import { Button, Pill, StateDot, type StateDotState } from '@deepseek-ai/dsh-cli
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 import {
+  agentDisplayName,
+  agentFilterOptions,
   buildBoardViewModel,
   formatTemplate,
+  normalizeAgentFilter,
   sliceCardsForDisplay,
   timeWindowLabel,
+  withAgentFilter,
   GROUP_CARD_LIMIT,
   type BoardFilterState,
   type BoardStatusFilter,
@@ -36,11 +40,28 @@ import {
   type StreamHealthToken,
 } from './logic.ts'
 import { BOARD_STRINGS } from './strings.ts'
+import { t } from '../locales/index.ts'
 import { surfaceProps } from '../theme/parts.ts'
 import styles from './board.module.css'
 
 /** Time-window choices offered by the top bar (hours). */
 export const TIME_WINDOW_OPTIONS: readonly number[] = [6, 12, 24, 48, 168]
+
+/** In-memory identity used to restore focus without serializing it into DOM attributes. */
+export interface SessionFocusTarget {
+  agent: string
+  sessionId: string
+}
+
+/** Exact identity comparison; session ids are only unique within an agent. */
+export function matchesSessionFocusTarget(
+  candidate: SessionFocusTarget,
+  target: SessionFocusTarget | null,
+): boolean {
+  return target !== null
+    && candidate.agent === target.agent
+    && candidate.sessionId === target.sessionId
+}
 
 export interface BoardProps {
   daemonState: DaemonStateToken
@@ -49,6 +70,10 @@ export interface BoardProps {
   streamHealth: StreamHealthToken
   /** Epoch ms of the last authoritative snapshot reconcile, or null. */
   lastReconcileAtMs: number | null
+  /** False only while the first snapshot/error outcome is still pending. */
+  hasSnapshot: boolean
+  /** The initial load settled without a snapshot; retry remains available. */
+  initialLoadFailed: boolean
   sessions: SessionCardVM[]
   /** Controlled filter state (owner persists it to the settings namespace). */
   filters: BoardFilterState
@@ -59,7 +84,15 @@ export interface BoardProps {
    * failure notice; a void return keeps the button fire-and-forget.
    */
   onRefresh: () => void | Promise<boolean>
-  onSelectSession: (sessionId: string) => void
+  onSelectSession: (target: SessionFocusTarget) => void
+  /** Composite in-memory identity awaiting return-focus restoration. */
+  returnFocusTarget: SessionFocusTarget | null
+  /** Called only after the matching card or fallback heading has been focused. */
+  onReturnFocusConsumed: () => void
+  /** Current mounted scroll container; null on route/view unmount. */
+  rootRef: (element: HTMLDivElement | null) => void
+  /** Persist this view's independent scroll position in the route owner. */
+  onScrollTopChange: (scrollTop: number) => void
   /** Clock injection for deterministic rendering; defaults to Date.now(). */
   nowMs?: number
 }
@@ -72,13 +105,17 @@ function sessionDotState(status: DerivedSessionCardVM['badge']['status']): State
 
 function SessionCard(props: {
   card: DerivedSessionCardVM
-  onSelect: (sessionId: string) => void
+  onSelect: (target: SessionFocusTarget) => void
+  returnFocusTarget: SessionFocusTarget | null
+  onReturnFocusConsumed: () => void
 }): ReactElement {
   const { card, onSelect } = props
   const [copied, setCopied] = useState(false)
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const copyAliveRef = useRef(true)
+  const openerRef = useRef<HTMLButtonElement>(null)
   const dotState = sessionDotState(card.badge.status)
+  const isReturnFocusTarget = matchesSessionFocusTarget(card, props.returnFocusTarget)
 
   useEffect(() => {
     copyAliveRef.current = true
@@ -90,6 +127,14 @@ function SessionCard(props: {
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (!isReturnFocusTarget) return
+    const opener = openerRef.current
+    if (opener === null) return
+    opener.focus({ preventScroll: true })
+    props.onReturnFocusConsumed()
+  }, [isReturnFocusTarget, props.onReturnFocusConsumed])
 
   // UX-17: opening and copying are sibling buttons inside a semantic card,
   // so both actions are independently keyboard reachable.
@@ -118,9 +163,10 @@ function SessionCard(props: {
       data-testid="agent-sidecar-card"
     >
       <button
+        ref={openerRef}
         type="button"
         className={styles['cardOpen']}
-        onClick={() => onSelect(card.sessionId)}
+        onClick={() => onSelect({ agent: card.agent, sessionId: card.sessionId })}
       >
         <span className={styles['cardHead']}>
           <span className={styles['agent']}>
@@ -170,12 +216,20 @@ function SessionCard(props: {
 
 function ProjectGroup(props: {
   group: ProjectGroupVM<DerivedSessionCardVM>
-  onSelect: (sessionId: string) => void
+  onSelect: (target: SessionFocusTarget) => void
+  returnFocusTarget: SessionFocusTarget | null
+  onReturnFocusConsumed: () => void
 }): ReactElement {
   const { group, onSelect } = props
   // UX-02: collapse + truncation are per-group ephemeral view state.
   const [collapsed, setCollapsed] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const returnTargetIndex = props.returnFocusTarget === null
+    ? -1
+    : group.cards.findIndex((card) => matchesSessionFocusTarget(card, props.returnFocusTarget))
+  useEffect(() => {
+    if (returnTargetIndex >= GROUP_CARD_LIMIT && !expanded) setExpanded(true)
+  }, [expanded, returnTargetIndex])
   const { shown, hiddenCount } = sliceCardsForDisplay(group.cards, GROUP_CARD_LIMIT, expanded)
   // Honesty guard: a collapsed group must not silently hide waiting
   // sessions, so the header keeps a waiting counter while folded.
@@ -211,7 +265,13 @@ function ProjectGroup(props: {
         <>
           <div className={styles['grid']}>
             {shown.map((card) => (
-              <SessionCard key={`${card.agent}:${card.sessionId}`} card={card} onSelect={onSelect} />
+              <SessionCard
+                key={`${card.agent}:${card.sessionId}`}
+                card={card}
+                onSelect={onSelect}
+                returnFocusTarget={props.returnFocusTarget}
+                onReturnFocusConsumed={props.onReturnFocusConsumed}
+              />
             ))}
           </div>
           {hiddenCount > 0 && (
@@ -256,6 +316,13 @@ export function Board(props: BoardProps): ReactElement {
   const windowOptions = TIME_WINDOW_OPTIONS.includes(props.filters.timeWindowHours)
     ? TIME_WINDOW_OPTIONS
     : [...TIME_WINDOW_OPTIONS, props.filters.timeWindowHours].sort((a, b) => a - b)
+  const selectedAgent = normalizeAgentFilter(props.filters.agentFilter)
+  const availableAgents = agentFilterOptions(props.sessions, props.filters.agentFilter)
+  const fallbackFocusRef = useRef<HTMLSpanElement>(null)
+  const returnTargetVisible = props.returnFocusTarget !== null
+    && vm.groups.some((group) =>
+      group.cards.some((card) => matchesSessionFocusTarget(card, props.returnFocusTarget)),
+    )
 
   // UX-07: manual-refresh feedback (in-flight + dismissible failure line).
   const [refreshing, setRefreshing] = useState(false)
@@ -297,10 +364,32 @@ export function Board(props: BoardProps): ReactElement {
   const streamDotState: StateDotState =
     props.streamHealth === 'ok' ? 'done' : props.streamHealth === 'degraded' ? 'warning' : 'ongoing'
 
+  useEffect(() => {
+    if (props.returnFocusTarget === null || returnTargetVisible) return
+    const fallback = fallbackFocusRef.current
+    if (fallback === null) return
+    fallback.focus({ preventScroll: true })
+    props.onReturnFocusConsumed()
+  }, [props.onReturnFocusConsumed, props.returnFocusTarget, returnTargetVisible])
+
   return (
-    <div {...surfaceProps('board', styles['root'])} data-testid="agent-sidecar-board">
+    <div
+      {...surfaceProps('board', styles['root'])}
+      ref={props.rootRef}
+      onScroll={(event) => { props.onScrollTopChange(event.currentTarget.scrollTop) }}
+      data-testid="agent-sidecar-board"
+      aria-busy={!props.hasSnapshot}
+    >
       <header {...surfaceProps('board-toolbar', styles['topbar'])}>
-        <span className={styles['title']}>{BOARD_STRINGS.topbar.title}</span>
+        <span
+          ref={fallbackFocusRef}
+          className={styles['title']}
+          role="heading"
+          aria-level={1}
+          tabIndex={-1}
+        >
+          {BOARD_STRINGS.topbar.title}
+        </span>
         <span title={props.daemonDetail}>
           <Pill>
             <StateDot state={daemonDotState} size={8} />
@@ -342,6 +431,25 @@ export function Board(props: BoardProps): ReactElement {
         </span>
         <span className={styles['spacer']} />
         <label className={styles['control']}>
+          {t('board.topbar.agentFilter')}
+          <select
+            className={styles['select']}
+            aria-label={t('board.topbar.agentFilterAria')}
+            value={selectedAgent ?? ''}
+            onChange={(ev) => {
+              props.onFiltersChange(withAgentFilter(props.filters, ev.target.value))
+            }}
+            data-testid="agent-sidecar-agent-filter"
+          >
+            <option value="">{t('board.topbar.allAgents')}</option>
+            {availableAgents.map((agent) => (
+              <option key={agent} value={agent}>
+                {agentDisplayName(agent)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className={styles['control']}>
           {BOARD_STRINGS.topbar.timeWindow}
           <select
             className={styles['select']}
@@ -382,7 +490,7 @@ export function Board(props: BoardProps): ReactElement {
         </Button>
       </header>
 
-      {refreshFailed && (
+      {props.hasSnapshot && !props.initialLoadFailed && refreshFailed && (
         <div className={styles['banner']} data-tone="warn" role="status">
           {BOARD_STRINGS.topbar.refreshFailed}
           <Button
@@ -396,13 +504,25 @@ export function Board(props: BoardProps): ReactElement {
         </div>
       )}
 
-      {vm.banner !== null && (
+      {props.hasSnapshot && vm.banner !== null && (
         <div className={styles['banner']} data-tone={vm.banner.tone} role="status">
           {vm.banner.text}
         </div>
       )}
 
-      {vm.emptyState !== null ? (
+      {!props.hasSnapshot ? (
+        <div
+          className={styles['empty']}
+          role="status"
+          data-testid="agent-sidecar-board-loading"
+        >
+          {t('board.states.loading')}
+        </div>
+      ) : props.initialLoadFailed ? (
+        <div className={styles['empty']} data-kind="error" role="alert">
+          <div className={styles['emptyTitle']}>{BOARD_STRINGS.topbar.refreshFailed}</div>
+        </div>
+      ) : vm.emptyState !== null ? (
         <div className={styles['empty']} data-kind={vm.emptyState.kind}>
           <div className={styles['emptyTitle']}>{vm.emptyState.title}</div>
           <div className={styles['emptyHint']}>{vm.emptyState.hint}</div>
@@ -413,6 +533,8 @@ export function Board(props: BoardProps): ReactElement {
             key={group.key === '' ? '\u0000unknown' : group.key}
             group={group}
             onSelect={props.onSelectSession}
+            returnFocusTarget={props.returnFocusTarget}
+            onReturnFocusConsumed={props.onReturnFocusConsumed}
           />
         ))
       )}

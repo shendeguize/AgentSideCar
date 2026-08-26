@@ -251,20 +251,131 @@ interface DshAgentFace {
   followup(message: DshUserMessageFace): void;
   steer(message: DshUserMessageFace): void;
 }
-/** `AgentHandle` face (index.d.ts:155-158). `dispose` is deliberately absent:
- * the executor never tears down an agent it resumed — disposal would unload
- * the session and cancel the just-queued work. */
+/** `AgentHandle` face (index.d.ts:155-158), including late-timeout cleanup. */
 interface DshAgentHandleFace {
   readonly agent: DshAgentFace;
+  dispose(): Promise<void>;
 }
+/** Complete route required to start a cold resumed Agent. */
+interface DshModelRoute {
+  readonly provider: string;
+  readonly model: string;
+}
+/** Synchronous publication commit returned by the rc.2 AgentSetup contract. */
+interface DshAgentSetupCommitFace {
+  commit(): void;
+}
+/** Unpublished setup context exposes the exact restored Agent + Session. */
+interface AgentSetupContextFace {
+  readonly agent?: {
+    readonly session?: {
+      readonly header: unknown;
+      readonly events: readonly unknown[];
+    };
+  };
+}
+/** Setup accepted by `agents.resume`; the cold proof always supplies a sync one. */
+type DshAgentSetupFace = (agentContext: AgentSetupContextFace) => DshAgentSetupCommitFace | Promise<DshAgentSetupCommitFace | void> | void;
 /** Minimal `ctx.agents` (`AgentRegistry`) face: locate + resume. */
 interface AgentsServiceFace {
+  /** Whether the cold resume owner binding (agents + persistence) is live. */
+  isAvailable(): boolean;
   /** Live lookup (index.d.ts:349); undefined = session not loaded. */
   get(sessionId: string): DshAgentFace | undefined;
   /** Load a persisted session and start an agent on it (index.d.ts:296). */
   resume(options: {
     readonly resumeSessionId: string;
+    readonly agentOptions?: DshModelRoute;
+    readonly signal?: AbortSignal;
+    readonly setup?: DshAgentSetupFace;
   }): Promise<DshAgentHandleFace>;
+}
+//#endregion
+//#region src/fusion.d.ts
+/**
+ * FusionQuery — bypass-analysis data-fusion layer of the host half
+ * (design §4.e / M3, T5.1): merges the in-process dsh session-event feed
+ * with sidecar socket data into one cross-agent query surface.
+ *
+ * API facts verified against the installed SDK (authoritative over the
+ * design sketch; both design assumptions CONFIRMED):
+ *
+ * - In-process dsh event feed: `@deepseek-ai/dsh-session` augments the
+ *   cordis `Events` map with `'session/event'(session, event)`
+ *   (lib/types/index.d.ts:66 — post-commit, fire-and-forget append feed),
+ *   plus `'session/created'` (:44) and `'session/disposed'` (:54). A
+ *   root-scoped listener receives all sessions (scope filtering only
+ *   narrows agent-scoped listeners). `Session` exposes `id` (:122),
+ *   `header` (:120 — `cwd?`/`parentSession?`/`createdAt`,
+ *   types.d.ts:40-78) and the on-demand immutable log snapshot `events`
+ *   (:174). `SessionEvent` is `{type, seq, time(epoch ms), data}`
+ *   (types.d.ts:425-457). Titles are NOT header fields: they are
+ *   log-only `'session/title'` events with `{title: string}` data
+ *   (`@deepseek-ai/dsh-session-title` lib/types/index.d.ts:37-45,73),
+ *   folded latest-wins here.
+ * - Deep-query service: `@deepseek-ai/dsh-session-query` augments
+ *   `Context` with `sessionQuery: SessionQueryEngine`
+ *   (lib/types/index.d.ts:19-23). Methods used: `traceSession` (:123 →
+ *   `SessionLineageTrace`, types.d.ts:59-76), `readSession` (:62 → full
+ *   raw log) and `searchSessions` (:42 → `SessionSearchPage
+ *   <SessionSearchHit>`, types.d.ts:224-235/:255-258). Headless or
+ *   trimmed compositions may not mount it, so it is resolved lazily on
+ *   every use and every capability degrades instead of throwing.
+ * - Sidecar side: session rows come from the SessionStore board state
+ *   (`plugin/src/session-store.ts`); `updated_at` is epoch SECONDS
+ *   (sidecar/model.py:50) while dsh `time` is epoch ms, normalized here
+ *   to ms. The dsh adapter reuses the raw dsh session id as
+ *   `session_id` (sidecar/adapters/dsh.py:311-372), which is what makes
+ *   `session_id` a valid dedup key, and conditionally mirrors the native
+ *   seq into `extra.seq` (dsh.py:263-269). One dsh record may normalize
+ *   into several events sharing that seq (content blocks), so timeline
+ *   dedup identity is seq+kind+text, never seq alone (F1).
+ *   `SessionView` today drops `extra` and
+ *   `parent_id`; the store face marks them optional so the extra
+ *   supplement activates when the wiring supplies fuller rows.
+ *
+ * Fusion rules (design §4.e):
+ * - Same `session_id` dsh session: the in-process feed is the
+ *   authoritative primary source (real-time); the sidecar row only
+ *   supplements fields the feed lacks (status estimate, `extra`
+ *   stats/plan, normalized last-event summary) and serves as the cold
+ *   fallback when the session is not live in this dsh process. Non-dsh
+ *   agents only ever have the sidecar source.
+ * - Cross-agent correlation key: normalized project path + time window
+ *   (`getProjectGroups`).
+ * - No bulk event retention: dsh timelines are read on demand from the
+ *   live session's own log snapshot (or `readSession` when cold);
+ *   sidecar events are kept only in a small bounded per-session ring
+ *   fed by the wiring, and {@link SidecarReplayFace} is the seam for the
+ *   daemon `replay` op (T5.2 provides, T5.3 consumes).
+ *
+ * Pure DI: no cordis/dsh imports. All faces are minimal structural
+ * shapes extracted from the d.ts; method-syntax members keep parameter
+ * checks bivariant, so the SDK's branded `SessionId` and wider request
+ * types remain assignable (same pattern as dsh-inject.ts).
+ *
+ * @module
+ */
+/** `SessionHeader` subset (dsh-session types.d.ts:40-78). */
+interface DshSessionHeaderFace {
+  readonly createdAt: number;
+  readonly cwd?: string;
+  readonly parentSession?: string;
+}
+/** `SessionEvent` subset (dsh-session types.d.ts:425-457). */
+interface DshSessionEventFace {
+  readonly type: string;
+  /** Monotonic sequence number within the session. */
+  readonly seq: number;
+  /** Unix epoch milliseconds. */
+  readonly time: number;
+  readonly data: unknown;
+}
+/** `Session` subset: identity, header, on-demand log snapshot (index.d.ts:106-174). */
+interface DshSessionFace {
+  readonly id: string;
+  readonly header: DshSessionHeaderFace;
+  readonly events: readonly DshSessionEventFace[];
 }
 //#endregion
 //#region src/index.d.ts
@@ -357,7 +468,7 @@ interface SettingsServiceFace {
  * consumes `create` (analysis.ts's {@link AnalysisAgentFace}). One lazy
  * binding serves both paths — and gates both degradations.
  */
-type AgentsRegistryFace = AgentsServiceFace & Pick<AnalysisAgentFace, 'create'>;
+type AgentsRegistryFace = Omit<AgentsServiceFace, 'isAvailable'> & Pick<AnalysisAgentFace, 'create'>;
 /**
  * `ctx.agentDefaultModel` face (dsh-agent-default-model index.d.ts:40-56):
  * the host's default model selection — the SAME source dsh's own entry
@@ -372,6 +483,20 @@ interface AgentDefaultModelFace {
     provider: string;
     model: string;
   };
+}
+/** Public `sessionPersistence.list`/`inspect` slice used for cold authority. */
+interface SessionPersistenceFace {
+  list(signal?: AbortSignal): Promise<ReadonlyArray<{
+    readonly id: string;
+  }>>;
+  inspect(sessionId: string, signal?: AbortSignal): Promise<{
+    readonly meta: unknown;
+    readonly events: readonly unknown[];
+  }>;
+}
+/** `ctx.sessions` direct live-session lookup used by fusion on demand. */
+interface SessionsServiceFace {
+  get(sessionId: string): DshSessionFace | undefined;
 }
 /** The plugin context with the two hard-injected services visible. */
 type HostContext = Context & {
@@ -393,4 +518,4 @@ type HostContext = Context & {
  */
 declare function apply(ctx: HostContext, config: Config): void;
 //#endregion
-export { AgentDefaultModelFace, AgentsRegistryFace, Config, HostContext, SettingsScopeFace, SettingsServiceFace, SubprocessCollectSpec, SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessService, SubprocessSpawnSpec, WebServerService, apply, inject, name };
+export { AgentDefaultModelFace, AgentsRegistryFace, Config, HostContext, SessionPersistenceFace, SessionsServiceFace, SettingsScopeFace, SettingsServiceFace, SubprocessCollectSpec, SubprocessHandle, SubprocessOutcome, SubprocessOutputReader, SubprocessService, SubprocessSpawnSpec, WebServerService, apply, inject, name };

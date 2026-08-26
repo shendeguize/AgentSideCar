@@ -41,7 +41,7 @@
  *   (SIGTERM → graceMs → SIGKILL) and `waitForExit()`
  *   (@deepseek-ai/dsh-subprocess lib/types/types.d.ts).
  * - `ctx.agents` is dsh-agent's AgentRegistry (`get(id)` live lookup,
- *   `resume({resumeSessionId})` → AgentHandle); the structural
+ *   `resume({resumeSessionId,agentOptions?})` → AgentHandle); the structural
  *   {@link AgentsServiceFace} in dsh-inject.ts is satisfied directly.
  * The faces below are structural on purpose: the plugin's type surface
  * stays on the two devDependency SDKs (cordis, schemastery) while the
@@ -65,10 +65,17 @@ import {
 } from './analysis.ts'
 import { Config } from './config.ts'
 import { Reconciler, SidecarSocketClient } from './bridge.ts'
-import { createDshInjectExecutor, type AgentsServiceFace } from './dsh-inject.ts'
+import {
+  createDshInjectExecutor,
+  type AgentsServiceFace,
+  type DshColdPresetProof,
+  type DshModelRoute,
+  DshResumeGuardError,
+} from './dsh-inject.ts'
 import {
   FusionQuery,
   type DshEventFace,
+  type DshSessionFace,
   type SessionQueryFace,
   type SidecarEventFace,
   type SidecarReplayFace,
@@ -193,7 +200,8 @@ export interface SettingsServiceFace {
  * consumes `create` (analysis.ts's {@link AnalysisAgentFace}). One lazy
  * binding serves both paths — and gates both degradations.
  */
-export type AgentsRegistryFace = AgentsServiceFace & Pick<AnalysisAgentFace, 'create'>
+export type AgentsRegistryFace = Omit<AgentsServiceFace, 'isAvailable'> &
+  Pick<AnalysisAgentFace, 'create'>
 
 /**
  * `ctx.agentDefaultModel` face (dsh-agent-default-model index.d.ts:40-56):
@@ -206,6 +214,23 @@ export type AgentsRegistryFace = AgentsServiceFace & Pick<AnalysisAgentFace, 'cr
  */
 export interface AgentDefaultModelFace {
   currentSelection(): { provider: string; model: string }
+}
+
+/** Public `sessionPersistence.list`/`inspect` slice used for cold authority. */
+export interface SessionPersistenceFace {
+  list(signal?: AbortSignal): Promise<ReadonlyArray<{ readonly id: string }>>
+  inspect(
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    readonly meta: unknown
+    readonly events: readonly unknown[]
+  }>
+}
+
+/** `ctx.sessions` direct live-session lookup used by fusion on demand. */
+export interface SessionsServiceFace {
+  get(sessionId: string): DshSessionFace | undefined
 }
 
 /** The plugin context with the two hard-injected services visible. */
@@ -299,6 +324,60 @@ function normalizeAnalysisProject(project: string): string {
     return stripped === '' ? '/' : stripped
   }
   return project
+}
+
+/**
+ * Fail-closed structural equivalent of public `resolveSessionPreset` for the
+ * only policy decision this plugin needs: newest selected event wins, then
+ * header fallback. Unknown event/header schema is never treated as absence.
+ */
+function classifyStoredPreset(inspection: {
+  readonly meta: unknown
+  readonly events: readonly unknown[]
+}): 'absent' | 'present' | 'unknown' {
+  if (
+    typeof inspection.meta !== 'object' ||
+    inspection.meta === null ||
+    !Array.isArray(inspection.events)
+  ) {
+    return 'unknown'
+  }
+  for (let index = inspection.events.length - 1; index >= 0; index -= 1) {
+    const raw = inspection.events[index]
+    if (typeof raw !== 'object' || raw === null) return 'unknown'
+    const event = raw as { readonly type?: unknown; readonly data?: unknown }
+    if (typeof event.type !== 'string') return 'unknown'
+    if (event.type !== 'agent-preset/selected') continue
+    if (typeof event.data !== 'object' || event.data === null) return 'unknown'
+    const preset = (event.data as { readonly agentPreset?: unknown }).agentPreset
+    return typeof preset === 'string' && preset.trim() !== ''
+      ? 'present'
+      : 'unknown'
+  }
+
+  const header = inspection.meta as { readonly agentPreset?: unknown }
+  if (!Object.prototype.hasOwnProperty.call(header, 'agentPreset')) return 'absent'
+  if (header.agentPreset === undefined) return 'absent'
+  return typeof header.agentPreset === 'string' &&
+    header.agentPreset.trim() !== ''
+    ? 'present'
+    : 'unknown'
+}
+
+/** Fail closed when a foreign persistence service violates the public list shape. */
+function classifyListedSession(
+  listed: unknown,
+  sessionId: string,
+): 'present' | 'missing' | 'unknown' {
+  if (!Array.isArray(listed)) return 'unknown'
+  let present = false
+  for (const raw of listed) {
+    if (typeof raw !== 'object' || raw === null) return 'unknown'
+    const id = (raw as { readonly id?: unknown }).id
+    if (typeof id !== 'string' || id.trim() === '') return 'unknown'
+    if (id === sessionId) present = true
+  }
+  return present ? 'present' : 'missing'
 }
 
 /** One unified-session line in a project / cross-agent overview. */
@@ -503,17 +582,173 @@ export function apply(ctx: HostContext, config: Config): void {
   // and the executor surfaces an honest failure while send-cli keeps working.
   // The same binding carries `create` for the M3 analysis engine.
   let liveAgents: AgentsRegistryFace | null = null
+  let coldServices: {
+    readonly agents: AgentsRegistryFace
+    readonly persistence: SessionPersistenceFace
+  } | null = null
+  let hostServiceGeneration = 0
+  let liveAgentPresets: unknown | null = null
+  let liveAgentDefaultModel: AgentDefaultModelFace | null = null
   const agentsFace: AgentsServiceFace = {
-    get: (sessionId) => liveAgents?.get(sessionId),
+    isAvailable: () => coldServices !== null,
+    get: (sessionId) =>
+      (liveAgents ?? coldServices?.agents)?.get(sessionId),
     resume: (options) =>
-      liveAgents === null
+      coldServices === null
         ? Promise.reject(
-            new Error('dsh agents service is not available in this composition'),
+            new Error('dsh cold resume services are unavailable'),
           )
-        : liveAgents.resume(options),
+        : coldServices.agents.resume(options),
   }
+
+  /**
+   * Resolve the host's current default Agent route through the optional
+   * reflect service. This is shared by cold dsh resume and analysis fallback;
+   * only a trimmed, complete pair crosses the port. Missing, throwing,
+   * partial, and blank services all read as unavailable.
+   */
+  const resolveHostDefaultModel = (): DshModelRoute | null => {
+    const getter = (ctx as { get?: (name: string) => unknown }).get
+    if (typeof getter !== 'function') return null
+    const service = getter.call(ctx, 'agentDefaultModel') as
+      | AgentDefaultModelFace
+      | undefined
+      | null
+    if (service === undefined || service === null) return null
+    try {
+      const selection = service.currentSelection()
+      const provider =
+        typeof selection?.provider === 'string' ? selection.provider.trim() : ''
+      const model =
+        typeof selection?.model === 'string' ? selection.model.trim() : ''
+      return provider !== '' && model !== '' ? { provider, model } : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Establish an authoritative cold-session proof without parsing Error text:
+   * list proves materialized existence, inspect classifies the stored preset,
+   * and a second list after inspect failure distinguishes concurrent deletion
+   * from corruption/read failure. Every operation shares the executor deadline.
+   */
+  const resolveColdPreset = async (
+    sessionId: string,
+    signal: AbortSignal,
+  ): Promise<DshColdPresetProof> => {
+    const services = coldServices
+    if (services === null) return { state: 'unknown' }
+
+    const listedState = async (): Promise<'present' | 'missing' | 'unknown'> => {
+      let listed: unknown
+      try {
+        listed = await services.persistence.list(signal)
+      } catch {
+        return 'unknown'
+      }
+      if (signal.aborted || coldServices !== services) return 'unknown'
+      return classifyListedSession(listed, sessionId)
+    }
+
+    const liveState = (): 'live' | 'missing' | 'unknown' => {
+      if (signal.aborted || coldServices !== services) return 'unknown'
+      try {
+        return services.agents.get(sessionId) === undefined ? 'missing' : 'live'
+      } catch {
+        return 'unknown'
+      }
+    }
+
+    const firstListing = await listedState()
+    if (firstListing === 'unknown') return { state: 'unknown' }
+    const afterListing = liveState()
+    if (afterListing !== 'missing') return { state: 'unknown' }
+    if (firstListing === 'missing') return { state: 'missing' }
+
+    let inspection: Awaited<ReturnType<SessionPersistenceFace['inspect']>>
+    try {
+      inspection = await services.persistence.inspect(sessionId, signal)
+    } catch {
+      if (signal.aborted || coldServices !== services) return { state: 'unknown' }
+      const secondListing = await listedState()
+      if (secondListing !== 'missing') return { state: 'unknown' }
+      return liveState() === 'missing'
+        ? { state: 'missing' }
+        : { state: 'unknown' }
+    }
+    if (signal.aborted || coldServices !== services) {
+      return { state: 'unknown' }
+    }
+
+    const stored = classifyStoredPreset(inspection)
+    if (stored !== 'absent') return { state: stored }
+    const getter = (ctx as { get?: (name: string) => unknown }).get
+    if (typeof getter !== 'function') return { state: 'unknown' }
+    let modelService: unknown
+    try {
+      const presets = getter.call(ctx, 'agentPresets')
+      if (presets !== undefined) {
+        return { state: presets === null ? 'unknown' : 'present' }
+      }
+      modelService = getter.call(ctx, 'agentDefaultModel')
+    } catch {
+      return { state: 'unknown' }
+    }
+
+    const proofGeneration = hostServiceGeneration
+    const assertPublicationProof = (): void => {
+      let currentPresets: unknown
+      let currentModelService: unknown
+      try {
+        currentPresets = getter.call(ctx, 'agentPresets')
+        currentModelService = getter.call(ctx, 'agentDefaultModel')
+      } catch {
+        throw new DshResumeGuardError('executor_error')
+      }
+      if (currentPresets !== undefined || liveAgentPresets !== null) {
+        throw new DshResumeGuardError('dsh_preset_unsupported')
+      }
+      if (
+        hostServiceGeneration !== proofGeneration ||
+        coldServices !== services ||
+        currentModelService !== modelService
+      ) {
+        throw new DshResumeGuardError('executor_error')
+      }
+    }
+
+    return {
+      state: 'absent',
+      // Deliberately synchronous: setup validates while the Agent is still
+      // unpublished, then returns rc.2's sync publication commit to close the
+      // final no-await boundary immediately before registry publication.
+      setup: (agentContext) => {
+        const session = agentContext.agent?.session
+        if (session === undefined) {
+          throw new DshResumeGuardError('executor_error')
+        }
+        const actual = classifyStoredPreset({
+          meta: session.header,
+          events: session.events,
+        })
+        if (actual === 'present') {
+          throw new DshResumeGuardError('dsh_preset_unsupported')
+        }
+        if (actual === 'unknown') {
+          throw new DshResumeGuardError('executor_error')
+        }
+        assertPublicationProof()
+        return { commit: assertPublicationProof }
+      },
+    }
+  }
+
   const dshExecutor = createDshInjectExecutor({
     agents: agentsFace,
+    resolveHostDefaultModel,
+    resolveColdPreset,
+    currentColdServiceGeneration: () => coldServices,
     log,
     pluginName: name,
   })
@@ -614,28 +849,7 @@ export function apply(ctx: HostContext, config: Config): void {
     const provider = effective.analysis.provider.trim()
     const model = effective.analysis.model.trim()
     if (provider !== '' && model !== '') return { provider, model }
-    const getter = (ctx as { get?: (name: string) => unknown }).get
-    if (typeof getter !== 'function') return null
-    const service = getter.call(ctx, 'agentDefaultModel') as
-      | AgentDefaultModelFace
-      | undefined
-      | null
-    if (service === undefined || service === null) return null
-    try {
-      const selection = service.currentSelection()
-      if (
-        typeof selection?.provider === 'string' &&
-        selection.provider !== '' &&
-        typeof selection.model === 'string' &&
-        selection.model !== ''
-      ) {
-        return { provider: selection.provider, model: selection.model }
-      }
-    } catch {
-      // A throwing selection reads as "no default available" — the routes'
-      // pre-check turns that into an honest analysis_model_unconfigured.
-    }
-    return null
+    return resolveHostDefaultModel()
   }
 
   const createAnalysisAgent: AnalysisAgentFace['create'] = async (options) => {
@@ -817,6 +1031,9 @@ export function apply(ctx: HostContext, config: Config): void {
       offStateChange()
       await supervisor.stop()
       reconciler.stop()
+      // DSH cold-resume slots own every handle they publish. Request waiters
+      // only borrow Agents, so plugin teardown is the one explicit owner drain.
+      await dshExecutor.dispose()
       // In-flight analysis sessions die with the plugin: dispose() stops
       // the agent loop and removes the session (the UI "stop" semantics),
       // bounding token burn across plugin reloads (§7-B / design risk 12).
@@ -838,8 +1055,11 @@ export function apply(ctx: HostContext, config: Config): void {
   // keeps `getCapabilities().dshEvents.available` honest). Compositions
   // without dsh-session simply never run this: fusion stays sidecar-only
   // and every route keeps working (degradation, not failure).
+  let dshFeedGeneration = 0
   ctx.inject(['sessions'], (injected) => {
-    const sctx = injected as HostContext
+    const sctx = injected as HostContext & { sessions?: SessionsServiceFace }
+    const bindingGeneration = ++dshFeedGeneration
+    let bindingActive = true
     // 'session/*' keys live in dsh-session's Events augmentation, which
     // this package deliberately does not import (structural-faces rule);
     // the cast keeps the listener registration honest at runtime.
@@ -848,6 +1068,35 @@ export function apply(ctx: HostContext, config: Config): void {
     }
     const feed: DshEventFace = {
       on: (event: string, handler: (...args: never[]) => void) => bus.on(event, handler),
+      // Resolve the service on every lookup. The injected property is the
+      // production ctx.sessions face; reflect `get` is a late-binding
+      // fallback for hosts that expose the current generation only there.
+      // A departed/replaced generation and any foreign service exception
+      // degrade to "not found" instead of escaping through the HTTP route.
+      get: (sessionId) => {
+        if (!bindingActive || bindingGeneration !== dshFeedGeneration) {
+          return undefined
+        }
+        try {
+          const direct = sctx.sessions
+          if (direct !== undefined && typeof direct.get === 'function') {
+            return direct.get(sessionId)
+          }
+          const getter = (sctx as { get?: (name: string) => unknown }).get
+          if (typeof getter !== 'function') return undefined
+          const current = getter.call(sctx, 'sessions') as
+            | SessionsServiceFace
+            | undefined
+            | null
+          return current !== undefined &&
+            current !== null &&
+            typeof current.get === 'function'
+            ? current.get(sessionId)
+            : undefined
+        } catch {
+          return undefined
+        }
+      },
     }
     const withFeed = buildFusion(feed)
     withFeed.start()
@@ -855,6 +1104,16 @@ export function apply(ctx: HostContext, config: Config): void {
     fusionHolder.current = withFeed
     previous.stop()
     sctx.effect(() => () => {
+      bindingActive = false
+      // A stale disposer must never downgrade a newer sessions generation.
+      if (
+        bindingGeneration !== dshFeedGeneration ||
+        fusionHolder.current !== withFeed
+      ) {
+        withFeed.stop()
+        return
+      }
+      dshFeedGeneration += 1
       // Service departing: swap back to a sidecar-only fusion so queries
       // keep answering (and capabilities report the feed as gone).
       const downgraded = buildFusion(null)
@@ -865,7 +1124,63 @@ export function apply(ctx: HostContext, config: Config): void {
     log('debug', 'fusion dsh event feed online (sessions service bound)')
   })
 
-  // dsh injection + analysis path binding (M2/M3). Lazy inject, same
+  // Cold dsh resume authority. The joint lazy binding is required: prepare
+  // may issue a token only while both the AgentRegistry owner and authoritative
+  // persistence inspection service are live. Capturing proxies from this fiber
+  // also gives resume handles the correct lifecycle owner.
+  ctx.inject(['agents', 'sessionPersistence'], (injected) => {
+    const cctx = injected as HostContext & {
+      agents: AgentsRegistryFace
+      sessionPersistence: SessionPersistenceFace
+    }
+    const bound = {
+      agents: cctx.agents,
+      persistence: cctx.sessionPersistence,
+    }
+    const previous = coldServices
+    if (previous !== null && previous !== bound) {
+      void dshExecutor.invalidateColdServiceGeneration(previous)
+    }
+    hostServiceGeneration += 1
+    coldServices = bound
+    cctx.effect(() => async () => {
+      hostServiceGeneration += 1
+      if (coldServices === bound) coldServices = null
+      await dshExecutor.invalidateColdServiceGeneration(bound)
+    }, 'agent-sidecar: cold dsh resume services release')
+    log('debug', 'cold dsh resume services online', {
+      agentsAvailable: true,
+      persistenceAvailable: true,
+    })
+  })
+
+  // Optional host services participate in the same generation witness used by
+  // cold-resume publication proofs. Their callbacks remain lazy, so profiles
+  // without either service still load normally.
+  ctx.inject(['agentPresets'], (injected) => {
+    const pctx = injected as HostContext & { agentPresets: unknown }
+    const bound = pctx.agentPresets
+    hostServiceGeneration += 1
+    liveAgentPresets = bound
+    pctx.effect(() => () => {
+      hostServiceGeneration += 1
+      if (liveAgentPresets === bound) liveAgentPresets = null
+    }, 'agent-sidecar: agent presets generation release')
+  })
+  ctx.inject(['agentDefaultModel'], (injected) => {
+    const mctx = injected as HostContext & {
+      agentDefaultModel: AgentDefaultModelFace
+    }
+    const bound = mctx.agentDefaultModel
+    hostServiceGeneration += 1
+    liveAgentDefaultModel = bound
+    mctx.effect(() => () => {
+      hostServiceGeneration += 1
+      if (liveAgentDefaultModel === bound) liveAgentDefaultModel = null
+    }, 'agent-sidecar: default model generation release')
+  })
+
+  // dsh live injection + analysis path binding (M2/M3). Lazy inject, same
   // pattern as settings below: `agents` (dsh-agent AgentRegistry) is
   // present in every dsh-base composition, but a top-level hard inject
   // would pend the whole fiber in agent-less compositions (see module
@@ -881,7 +1196,7 @@ export function apply(ctx: HostContext, config: Config): void {
     actx.effect(() => () => {
       liveAgents = null
     }, 'agent-sidecar: agents binding release')
-    log('debug', 'dsh inject + analysis paths online (agents service bound)')
+    log('debug', 'dsh live inject + analysis paths online (agents service bound)')
   })
 
   // Skill path two (T6.2, design §7): register the embedded agent-sidecar

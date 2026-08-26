@@ -9,20 +9,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A first-class dsh Agent Center through the official `shell.overlay`
+- A first-class dsh Agent Center (plugin 0.3.0) through the official `shell.overlay`
   registry, shared by the main sidebar, footer widget, and `/sidecar`, plus a
   public theming contract for host tokens, stable parts, and `--agsc-*`
   overrides. The conversation tab and optional better-sidebar summary remain
   secondary surfaces.
+- An agent-type filter on the Agent Center session board, composed with the
+  existing status, time-window, and dead-session filters.
+- Optional `send --agent NAME --exact-session` selectors for an exact
+  agent/session composite binding. The DSH plugin always uses both selectors
+  for external injection and treats a mismatched agent, session, or request ID
+  in the CLI receipt as delivery-unknown `executor_error`.
+- Exact-version Kimi Code 0.38.0 protected ACP spawn-resume for local top-level
+  `waiting`/`idle` sessions. It binds Kimi home/project/root-wire identity and
+  a plan-private package, Node, and non-system dylib snapshot; reprobes version
+  and ACP initialization; guards project owner processes; runs Kimi's default
+  mode with no MCP/filesystem/terminal capabilities; cancels permission
+  requests and fail-closes question/approval paths; and carries the prompt in
+  ACP rather than argv.
 
 ### Changed
 
 - Reworked the browser surfaces around DSH UI primitives, semantic host theme
-  tokens, and the host English/Chinese locale service. Real `dsh_web`
-  acceptance passed light, dark, and responsive layouts, shared sidebar/footer
-  overlay access, and nested focus and inert behavior, with no console or
-  network errors; locale switching remains covered by automated tests rather
-  than this browser pass.
+  tokens, accessible contrast, and the host English/Chinese locale service.
+  Real `dsh_web` acceptance passed light, dark, and responsive layouts, shared
+  sidebar/footer overlay access, and nested focus and inert behavior, with no
+  console or network errors; locale switching remains covered by automated
+  tests rather than this browser pass.
+- The Settings card now presents `analysis.provider` and `analysis.model` as
+  one paired route: both blank selects the host default, both populated selects
+  an explicit route, and a partial pair cannot be saved. The non-live
+  daemon/sidecar/stream groups are read-only there and direct operators to the
+  profile `cordis.patch` plus a DSH restart. `/sidecar` now labels its
+  navigation action as Agent Center.
+- Injection availability is now a host-derived per-session contract, separate
+  from the global `inject.enabled` gate. Unsupported agents are visibly
+  disabled; external injection is limited to local top-level
+  Claude/Codex/Cursor CLI/Kimi sessions in `waiting` or `idle`; local DSH
+  `working` sessions support in-process steering and persisted DSH
+  `waiting`/`idle`/cold sessions proceed through no-preset live/cold preflight
+  with the host's complete current model route. Remote, dead, malformed, and
+  unsupported targets fail closed with localized, accessible reasons.
+- Kimi injection is a manual protected resume, never live inbox queue/steer.
+  An rc-0 settled turn with strict durable wire/state completion proof is
+  intentionally reported as `outcome: completed`, `delivery: unknown`, and
+  CLI exit `1`, including when Darwin fork containment remains diagnostically
+  `cleanup_incomplete`; without proof it remains failed and unknown. The same
+  retained request ID only replays the audit result, while blind retries under
+  a new ID are forbidden. Claude, Codex, and Cursor retain their prior send
+  semantics, and direct CLI send remains unsupported for DSH.
+- The Kimi owner guard now boundedly parses canonical Node file arguments,
+  including supported option values and later script arguments. Ordinary long
+  Node commands and, under the owner-safe single-link executable boundary,
+  ordinary relative Node commands with a deleted cwd no longer become global
+  blockers; Kimi hints, identity matches, malformed/over-budget input carrying
+  that evidence, and unsafe executable identity still fail closed.
+- Timeline pages now expose canonical merged entries plus content-free
+  `sourceOutcomes`, `degraded`, and `reason` fields. Same-sequence sibling
+  blocks survive deduplication and pagination; partial source failures retain
+  available events with a warning, while total source failure is reported
+  explicitly. Late-bound DSH services are re-resolved on use, and
+  generation-scoped detail, pagination, refresh, and listen requests prevent
+  stale settlements from rolling back entries, health, metadata, or cursors.
+
+### Fixed
+
+- The board now exposes localized first-snapshot loading with `aria-busy`,
+  settles a failed initial load into a retryable error, and preserves the last
+  successful snapshot when a later refresh or stream update fails.
+- Board/project-to-detail navigation now moves focus into detail, remembers
+  source rows by the composite agent/session identity, restores each view's
+  clamped scroll offset, and returns focus to the exact source or its heading
+  fallback. Detail-internal session jumps deliberately use that fallback.
+- Nested host modals now make every lower dialog both `inert` and
+  `aria-hidden`, then restore prior focus and the exact pre-existing host
+  attributes as layers close, unload, or hand over across reloads. Ownership
+  tracking now drains queued records at HMR handoff and handles nested
+  remove/reinsert races without restoring a stale opener.
+- Real DSH end-to-end testing exposed and fixed headless discovery gaps.
+  Discovery now follows an independent absolute `DSH_HOME` and boundedly falls
+  back to validated durable session headers, so headless sessions remain
+  visible when no Web projection-cache row exists. Durable fallback now drains
+  fast-exit decoder output, binds no-follow regular-file descriptors before
+  decoding, detects duplicate identities before its candidate cutoff, enforces
+  one total deadline, reuses one fixed-identity `zstd` binding per adapter
+  (a Linux descriptor or private macOS descriptor snapshot) with explicit and
+  finalizer cleanup, and caches deterministic headers by
+  device/inode/size/mtime/ctime without suppressing retries after transient
+  decoder failures or decoding projection-cache-covered sessions. Binding
+  failure degrades to projection-cache-only discovery. The bounded
+  per-candidate decoder timeout is 3.5 seconds within the five-second
+  whole-scan hard deadline.
+- Real DSH end-to-end testing also exposed and fixed the cold injection
+  route/preset lifecycle. Cold injection now resumes with the host's current
+  complete default provider/model route; `inject.prepare` rejects a missing or
+  partial route with HTTP 409 `dsh_model_unconfigured` and no confirm token.
+  A stale board target that authoritative persistence proves missing returns
+  HTTP 404 `target_not_found`; a proved effective preset remains unsupported
+  and returns HTTP 409 `dsh_preset_unsupported`; unavailable, failed, or
+  indeterminate cold services return HTTP 502 `executor_error`. Already-live
+  Agent injection remains unaffected. Timeouts and host-service reload races
+  fail closed without exposing route or preset values. For in-process DSH
+  injection, `delivered` means only that the DSH inbox accepted/queued the
+  message, not that a model turn succeeded.
+- Final content-free real acceptance recorded Kimi protected-resume PASS and
+  DSH live-steer/UI PASS. No private path, session identifier, transcript,
+  prompt, or hash is included.
+
+### Security
+
+- Documented the exact Kimi filesystem/runtime/process checks without claiming
+  cryptographic request-to-provider-turn binding. Kimi advertises no MCP,
+  filesystem, or terminal capability, and its message is absent from both the
+  Sidecar and native Kimi argv.
+- Persistently bound runtime audit namespaces must not be deleted, recreated,
+  or replaced to bypass `unsafe_lock`; that error means retained history or
+  identity cannot be proved. A new owner-private runtime is only for an
+  explicitly new request lineage and must retain its own audit history.
+- Hardened the DSH plugin's current cleartext loopback guard: a supplied
+  `Origin` must be the matching HTTP host/port tuple, HTTPS origins are
+  rejected, and duplicate `Host` or `Origin` fields fail closed even when
+  values match. A single valid loopback `Host` remains accepted on any valid
+  port.
+- Clarified that the local owner-facing plugin UI may display full project
+  paths, while screenshots, JSON, logs, and other evidence shared outside that
+  local UI must redact project paths and other stable identifiers.
 
 ## [0.5.0] - 2026-08-25
 

@@ -4,14 +4,14 @@
 
 ## 能力(当前已交付,M1-M3 + skill/sidebar)
 
-- **一等 Agent Center overlay**:通过 dsh 官方 `shell.overlay` 注册 `agent-sidecar-center`(`order: 30`),由可观察导航状态驱动官方 Modal 内的大尺寸中心。dsh 主侧栏入口、footer 状态小件与 `/sidecar` 看板项共享此入口,空白会话和窄屏下也可打开;会话区「Sidecar」Tab 保留为第二入口。
-- **跨 agent 会话看板**:Agent Center overlay 与会话区「Sidecar」Tab 展示本机受支持 agent(cursor IDE/CLI、claude、codex、copilot、dsh、kimi)的会话卡片与状态徽标(`working` / `waiting` / `idle` / `dead`;状态为从持久化数据推断的观察值,可能滞后)。
-- **会话详情视图**:统一时间线(融合 sidecar 规范化事件与 dsh 进程内实时事件,分页回溯历史,事件缺口如实标注);dsh 会话专属谱系树与全文检索(经 `sessionQuery`,该服务缺席时优雅降级——检索退化为标题/项目过滤,谱系显示不可用提示);项目分组视图(同一项目下跨 agent 会话并排呈现)。
-- **消息注入(默认关)**:`inject.enabled` 开启后,对 waiting/idle 目标经两阶段确认(服务端签发一次性 confirmToken)注入消息——dsh 会话走进程内 queue/steer(`ctx.agents` followup/steer),外部 agent(claude/codex/cursor-cli)经 `agent-sidecar send --message-stdin --allow-write --json` 子进程执行(消息经 stdin 传输,绝不进 sidecar argv)。`delivery: unknown` 回执不提供重试按钮;copilot/kimi/cursor-ide 无注入通道,入口置灰。
+- **一等 Agent Center overlay**:通过 dsh 官方 `shell.overlay` 注册 `agent-sidecar-center`(`order: 30`),由可观察导航状态驱动官方 Modal 内的大尺寸中心。dsh 主侧栏入口、footer 状态小件与 `/sidecar` 的 Agent Center 动作共享此入口,空白会话和窄屏下也可打开;会话区「Sidecar」Tab 保留为第二入口。嵌套 Modal 会把每个下层 dialog 同时标为 `inert` 与 `aria-hidden`,逐层关闭或卸载时精确恢复此前的宿主属性和焦点。
+- **跨 agent 会话看板**:Agent Center overlay 与会话区「Sidecar」Tab 展示本机受支持 agent(cursor IDE/CLI、claude、codex、copilot、dsh、kimi)的会话卡片与状态徽标(`working` / `waiting` / `idle` / `dead`;状态为从持久化数据推断的观察值,可能滞后),并可按 agent 类型过滤。首个快照前显示本地化 loading 且根节点为 `aria-busy`;首载失败结束 busy 并允许手动重试,后续刷新或流失败则保留最后成功快照并如实提示 stale/degraded 状态。
+- **会话详情视图**:统一时间线(融合 sidecar 规范化事件与 dsh 进程内实时事件,分页回溯历史,事件缺口如实标注,并公开不含正文的来源结果/降级状态);dsh 会话专属谱系树与全文检索(经 `sessionQuery`,该服务缺席时优雅降级——检索退化为标题/项目过滤,谱系显示不可用提示);项目分组视图(同一项目下跨 agent 会话并排呈现)。从看板/项目进入详情时焦点移入详情控件;返回时按 agent+session 组合身份恢复精确来源及各视图独立的有界滚动位置,来源消失或被过滤时回退到视图标题。详情内跳转到另一会话会清除原来源身份,返回时同样走标题 fallback。
+- **消息注入(默认关)**:`inject.enabled` 是独立全局门,会话是否可注入另由 host 按目标派生。普通外部 agent 仅允许本机顶层 `claude`/`codex`/`cursor-cli` 的 waiting/idle 会话;Kimi Code 仅允许经 0.38.0 ACP 受保护 spawn-resume 的本机顶层 waiting/idle 会话。两者都经 `agent-sidecar send <full-session-id> --agent <agent> --exact-session --message-stdin --allow-write --json` 执行,消息不进入 Sidecar argv,Kimi 提示词也只进入 ACP NDJSON 而不进入 Kimi argv。本机 DSH working 可走进程内 steer,waiting/idle 进入 live/cold 预检。unsupported/remote/dead/invalid 目标置灰并显示可访问原因。`delivery: unknown` 不提供重试按钮。
 - **AI 旁路分析(默认关)**:`analysis.enabled` 开启后,可对被观测会话/项目拉起专用 dsh 分析会话(有界摘要注入 + 增量追问 + 随时停止);模型路由见配置表 `analysis.provider` / `analysis.model`。分析正文绝不写入插件日志。
 - **footer 状态小件**:侧边栏底部常驻连接状态点(sidecar 连接态 + 速览),点击打开 Agent Center。
-- **`/sidecar` 斜杠命令**:会话输入框内的只读状态速览(daemon 状态、连接健康度、working/waiting 计数、按项目分组的活跃会话);选择末尾的看板项可打开 Agent Center。
-- **设置卡**:dsh 设置页出现「Agent Sidecar」卡片(设置命名空间 `agent-sidecar`)。
+- **`/sidecar` 斜杠命令**:会话输入框内的只读状态速览(daemon 状态、连接健康度、working/waiting 计数、按项目分组的活跃会话);选择末尾的「Agent Center」动作可打开 Agent Center。
+- **设置卡**:dsh 设置页出现「Agent Sidecar」卡片(设置命名空间 `agent-sidecar`)。`analysis.provider` / `analysis.model` 以成对路由呈现:双空表示宿主默认,双非空表示显式路由,partial pair 不能保存;非 live 的 daemon/sidecar/stream 组只显示 profile patch + 重启说明。
 - **daemon 托管**:探测-领养-否则托管(probe-adopt-else-host)策略管理 sidecar daemon 生命周期,详见[下文](#daemon-托管策略)。
 - **实时数据面**:host 半区经 Unix socket 消费 daemon(`status` 快照对账 + `subscribe` 事件触发),浏览器经同源 SSE 实时刷新。
 - **skill 内嵌提供**:`skill.provide`(默认开)经 dsh skill 注册表提供 agent-sidecar skill,装插件即得、无需运行安装脚本;文件系统已安装的同名 skill 自动优先(dsh 注册表按名合并,文件系统层胜出,无需探测)。
@@ -51,7 +51,7 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 
 1. dsh 主侧栏 → 一等「Agent Center」入口,打开官方 Modal 承载的 Agent Center overlay;
 2. 侧边栏 footer → 可点击的状态小件,打开同一 overlay;
-3. 会话输入框 `/sidecar` → 只读摘要及打开同一 overlay 的看板项;
+3. 会话输入框 `/sidecar` → 只读摘要及打开同一 overlay 的「Agent Center」动作;
 4. 会话页顶部 Tab 环 → 保留的「Sidecar」第二入口;
 5. 设置页插件区 →「Agent Sidecar」设置卡。
 
@@ -59,12 +59,72 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 
 命令行验证:`curl http://127.0.0.1:<port>/plugins/agent-sidecar/api/state` 应返回含 `daemon` / `board` / `capabilities` 的 JSON 快照;`GET …/api/stream` 为 SSE 流;`GET …/api/session/<id>` 为单会话详情(含融合时间线首页),`GET …/api/session/<id>/timeline?cursor=&limit=` 分页回溯历史;`GET …/api/lineage/<id>`、`GET …/api/search?q=`、`GET …/api/projects` 为 M3 读面;`POST …/api/action` 为幂等动作信封(`inject.prepare` / `inject.execute` / `analysis.*` / `daemon.retry`)。
 
+## 时间线公共合同
+
+- **规范条目与排序**:host 融合 DSH live 事件、按次晚绑定的 `sessionQuery`、sidecar replay 与有界事件缓冲。带 seq 的条目按 `seq + kind + text` 去重,因此同一原生 seq 的多个内容块不会被误删;无 seq 条目按 `ts + kind + text` 去重。seq 域严格按 seq 排序,同 seq 内 DSH 条目在前、兄弟块保留稳定顺序,再与无 seq 条目按时间交错。
+- **分页收敛**:同 seq 兄弟组不会跨分页边界拆分。重叠页按同一身份去重;后续页面若为既有 DSH 条目补到规范文本,client 会升级空文本条目而不是复制一条。`nextCursor` 只随历史分页前移;listen 的最新窗口不会重置历史游标。
+- **来源与降级**:每页除兼容性的 `sources` 外,还返回不含内容的 `sourceOutcomes`(`liveSession` / `sessionQuery` / `sidecarReplay` / `buffer`,取值为 `succeeded` / `unavailable` / `not_found` / `replay_unsupported` / `source_failed`)以及 `degraded`、`reason`。部分来源失败时保留现有/可用事件并显示降级提示;全部可用来源失败且没有新条目时明确提示「未能加载新事件」并给出刷新入口。未知或不一致的新字段关闭失败为「来源状态无法确认」,不会把上游错误文本、路径或会话内容带到 UI。
+- **晚绑定与请求代际**:`sessionQuery` 每次使用时重新解析,后挂载的服务无需重载 client 即可生效。详情元数据与时间线各自有代际;新的最新窗口刷新会取消并取代旧分页/listen/刷新任务,晚到响应不能回滚条目、来源健康、header 或游标。已显示的 partial 警告只会被新代际中经过验证的健康页清除。
+
+## 注入资格矩阵
+
+资格判定由 host 在仍持有完整只读会话行时派生,浏览器只接收 `{allowed, reason}`;原始 `extra`、远端标记、parent ID 与私有路径不跨该边界。
+
+- `inject.enabled=false`:全局门关闭,所有写动作服务端 403;这是独立于下列单会话资格的总开关。开启它不会把不合格会话变为合格。
+- `claude` / `codex` / `cursor-cli`:仅本机、顶层、`waiting` 或 `idle` 合格。`working`、child/sidechain、remote、dead 与结构无效行拒绝。
+- `kimi`:仅本机、顶层、`waiting` 或 `idle` 合格,执行器只接受精确验证的 Kimi Code 0.38.0 ACP。`working`、child/sidechain、remote、dead 与结构无效行拒绝。
+- `dsh`:本机 `working` 可走 live Agent 的进程内 steer;本机 `waiting` / `idle` 进入 DSH live/cold preflight,其中 live 复用现有 Agent,cold 才尝试持久化恢复。DSH child/sidechain 拓扑由该原生 preflight 判定,不套用外部 Agent 的静态 child 拒绝。
+- `cursor-ide` / `copilot` 及未知 Agent:没有注入执行器,入口置灰。
+
+禁用按钮和面板都会通过本地化文案与 `aria-describedby` 暴露原因;缺失、过期或身份不匹配的 verdict 按 `invalid_session` 关闭失败,client 不根据 agent/status 自行猜测放行。
+
+## Kimi 0.38.0 受保护恢复契约
+
+Kimi 通路是**受保护 spawn-resume**,不是对现有终端的 followup 或 steer:
+
+- 插件只支持精确版本 Kimi Code 0.38.0。每次执行启动独立的 `kimi acp` 进程,通过 ACP `session/resume` 恢复已持久化会话;不附着、不控制现有 Kimi 终端。旧版 Agent Sidecar 仍可能返回兼容错误 `unsupported_kimi`;这表示已安装的 Sidecar 过旧或版本验证未通过,不表示当前插件合同把 Kimi 整体列为不支持。
+- UI 内部固定提交 `queue`,但用户界面只称「受保护恢复」并明确标注 non-steer;不会把它描述为下一轮排队或中途转向。
+- 插件调用 Sidecar 时使用 `--message-stdin`;Sidecar 再把消息写入 ACP JSON-RPC NDJSON 的 `session/prompt` 帧。消息不进入 `agent-sidecar` argv,也不进入 Kimi 子进程 argv。
+- ACP 恢复后固定进入 default/manual mode。所有 permission 或 question 请求一律回复 `cancelled`,绝不自动批准权限、回答问题或绕过交互门。
+- 只有本机、顶层、`waiting` / `idle` 会话可执行;`working`、child/sidechain、remote、dead 一律在提示词写入前拒绝。
+- 即使 Kimi turn 正常 completed,目前仍无法证明提示词已持久投递到恢复会话,所以结果保持 `delivery: "unknown"`。同一内容不得自动或手工盲目重试。使用同一 `request_id` 重放是安全的:Sidecar 返回已缓存回执且不再 spawn ACP 进程、不重复发送内容。
+
+## DSH 注入的 live/cold 契约
+
+DSH 进程内注入在 prepare 阶段先区分目标是否已经加载:
+
+- **live Agent**:`ctx.agents.get(sessionId)` 命中时,插件直接复用该 Agent 既有的模型路由与 preset,不解析、不覆盖其配置,也不触发 cold resume 的路由/preset 限制。queue/steer 分别调用该实例的 `followup` / `steer`。
+- **cold session**:未命中 live Agent 时,插件才通过宿主 `agentDefaultModel.currentSelection()` 读取**当前默认** provider/model,并在恢复时把这个完整 pair 作为 `agentOptions`。pair 缺失、空白或不完整时,`inject.prepare` 返回 HTTP 409:
+
+  ```json
+  {"reason":"dsh_model_unconfigured"}
+  ```
+
+  此时不会创建 requestId/confirmToken,不会调用 resume,也不消耗模型 token。
+- **陈旧看板与权威持久化**:看板行只是观察快照。若 cold 检查时权威 `sessionPersistence.list` 已证明目标不存在,prepare 返回 HTTP 404 `{"reason":"target_not_found"}`,即使卡片仍在也不会尝试 resume 或签发 token。
+- **cold preset 当前不受支持**:插件检查持久化 header 与最新有效 `agent-preset/selected` 事件得到 effective preset;只要 preset 被证明存在,prepare 就返回 HTTP 409 `{"reason":"dsh_preset_unsupported"}`。即使持久化状态没有显式 preset,只要宿主挂载了 `agentPresets`,原生恢复会施加隐式默认 preset,因此同样以 409 拒绝且不签发 confirmToken。本文档不承诺 preset cold resume;该限制不影响上述 live Agent 路径。
+- **未知状态关闭失败**:权威持久化/preset 服务缺席、读取失败、返回不合法形状、检查超时或无法证明 missing/present/absent 时,prepare 以 HTTP 502 `executor_error` 拒绝且不签发 token。prepare 与 execute 之间若发生服务 HMR/代际切换,或恢复发布前的实际会话/preset 与检查结果不一致,执行也会关闭失败并撤销未发布的恢复。响应和日志只给稳定错误码与布尔诊断,绝不输出 provider/model、preset 值、消息正文或私有持久化路径。
+
+`inject.execute` 返回 `{"outcome":"delivered"}` 时,对 DSH 通路只表示同步
+`followup`/`steer` 调用已经把消息交给目标 inbox(接受或排队)。它**不表示**模型 turn
+已经开始或成功,也不保证工具执行结果;请继续观察详情 timeline 的新事件,或直接查看
+目标终端 turn。`unknown` 仍是禁止重试的终态。
+
+以上 DSH 能力全部来自插件进程内通路。直接运行 `agent-sidecar send` 指向 DSH
+会话仍返回 `unsupported_dsh`;这只表示 Sidecar CLI 没有 DSH stock headless
+resume,不得据此声称 DSH 注入整体不受支持。
+
+外部 Agent 通路总是使用 `--agent <agent> --exact-session`,把完整会话 ID 与精确 Agent
+组成复合目标,不允许退回前缀或跨 Agent 命中。插件还会校验 JSON 回执中的 Agent、
+完整 session ID 与 request ID;任一不匹配都按投递未知的 `executor_error` 处理,
+绝不展示为成功或自动重试。
+
 ## 配置
 
 配置走双轨:
 
 - **组合配置**(profile 的 `cordis.patch.yml` 中对 `id: agent-sidecar` 行加 `config:` 块):schemastery 校验,所有字段带默认值,零配置即可挂载。层叠对 `config` 是**整块替换**而非深度合并,覆写时请写全所需字段组。
-- **设置卡**(dsh 设置页,命名空间 `agent-sidecar`):同一张表,可视化编辑并持久化到 dsh 设置文档。
+- **设置卡**(dsh 设置页,命名空间 `agent-sidecar`):可视化暂存并持久化 live 的 inject/analysis/ui 组;daemon/sidecar/stream 当前只读展示,直接说明应修改 profile patch 并重启 DSH。
 
 组合配置示例:
 
@@ -88,8 +148,8 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 | **`inject.enabled`** | `boolean` | **`false`(默认关)** | **注入总开关**:关闭时看板隐藏全部注入入口,写接口在服务端同步拒绝(403)。多用户主机不建议开启 |
 | `inject.defaultMode` | `'queue'` \| `'steer'` | `queue` | 注入面板默认模式:`queue` 排队下一轮,`steer` 中途注入 |
 | `analysis.enabled` | `boolean` | `false` | AI 旁路分析开关(消耗模型 token,默认关闭) |
-| `analysis.provider` | `string` | `''` | 分析代理的 provider 路由:留空(默认)复用宿主默认模型(`agentDefaultModel` 服务,与 dsh 自身入口同源);与 `analysis.model` 同时非空才生效 |
-| `analysis.model` | `string` | `''` | 分析代理的模型 id:留空(默认)复用宿主默认模型;与 `analysis.provider` 同时非空才生效。两者留空且宿主无默认模型时,`analysis.request` 被拒为 `analysis_model_unconfigured` |
+| `analysis.provider` | `string` | `''` | 分析代理 provider。与 `analysis.model` 构成 pair:双空时复用宿主默认模型(`agentDefaultModel` 服务,与 dsh 自身入口同源),双非空时使用显式路由;设置卡会标出 partial pair 并阻止保存 |
+| `analysis.model` | `string` | `''` | 分析代理模型 id。pair 规则同上;双空且宿主无默认模型时,`analysis.request` 被拒为 `analysis_model_unconfigured` |
 | `ui.timeWindowHours` | 自然数(≥1) | `24` | 看板会话时间窗(小时) |
 | `ui.showDead` | `boolean` | `false` | 是否显示 dead 会话 |
 | `skill.provide` | `boolean` | **`true`(默认开)** | 是否经 registerProvider 内嵌提供 agent-sidecar skill;文件系统已安装的同名 skill 自动优先;装配时读取,改动需重载插件生效 |
@@ -100,7 +160,7 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 - `analysis.*`:**即时生效**(开关与 provider/model 均按次实时读取)。
 - `ui.*`:**即时生效**(浏览器侧实时读取,作为看板筛选默认值;用户手动筛选后以用户选择为准)。
 - `skill.provide`:**装配时读取**(重启语义)——改动需重载插件生效。
-- `daemon.*` / `stream.*` / `sidecar.*`:当前**以组合配置(patch 的 `config:` 块)为准**,在插件装配时烘焙定型;设置卡内对这三组的修改暂不驱动运行时(完整的重启重读接线属后续里程碑)。要改这三组,请改 profile patch 后重启 dsh。
+- `daemon.*` / `stream.*` / `sidecar.*`:当前**以组合配置(patch 的 `config:` 块)为准**,在插件装配时烘焙定型;设置卡对这三组只显示只读说明,不提供会被误解为即时生效的编辑控件。要改这三组,请改 profile patch 后重启 DSH。
 
 <a id="theming"></a>
 
@@ -163,11 +223,12 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 ## 安全与信任姿态
 
 - 插件自开路由 `/plugins/agent-sidecar/api` 不在 dsh `/api` 栅栏覆盖内,故自带五层守卫;**即使 dsh 以 `--host 0.0.0.0` 启动,本插件路由对非回环请求一律 403**。
-- 五层守卫:① 对端地址必须为 loopback;② `Host` 必须为回环权威(防 DNS rebinding);③ `Origin`(出现时)必须与 Host 同源,显式 `sec-fetch-site: cross-site` 拒绝;④ POST/PUT/PATCH 强制 `Content-Type: application/json`(否则 415,阻断跨站简单请求);⑤ 写动作门——`inject.enabled` 默认关,关闭时服务端直接 403。
+- 五层守卫:① 对端地址必须为 loopback;② 必须恰有一个合法回环 `Host`(防 DNS rebinding),既有任意合法端口合同不变;③ 当前载体是明文 HTTP,`Origin` 出现时必须恰有一个且其 HTTP host/有效端口与 `Host` 匹配,HTTPS Origin 拒绝,重复 `Host`/`Origin` 即使同值也关闭失败,显式 `sec-fetch-site: cross-site` 拒绝;④ POST/PUT/PATCH 强制 `Content-Type: application/json`(否则 415,阻断跨站简单请求);⑤ 写动作门——`inject.enabled` 默认关,关闭时服务端直接 403。
 - 在写门之上还有逐次确认:每次注入必经服务端签发一次性短时效 confirmToken 的两阶段流程(`inject.prepare` → 确认对话框 → `inject.execute`),无批量/定时注入;`delivery: "unknown"` 一律不自动重试、UI 不提供重发按钮。
-- 外部 agent 注入的消息经 `send --message-stdin` 走 stdin,不进 sidecar argv;cursor-cli 的原生子进程 argv 暴露为其上游恢复契约,确认框如实警示(见主仓 [SECURITY.md](../SECURITY.md))。
+- 外部 agent 注入总是经 `send --agent <agent> --exact-session --message-stdin` 走精确复合绑定;消息经 stdin,不进 sidecar argv。Kimi 0.38.0 的提示词只进入 ACP NDJSON,不进 Kimi 子进程 argv;cursor-cli 的原生子进程 argv 暴露为其上游恢复契约,确认框如实警示(见主仓 [SECURITY.md](../SECURITY.md))。回执身份不匹配按 delivery unknown 关闭失败。
 - AI 旁路分析默认关(消耗模型 token);分析会话有界(输入截断、回合超时、并发上限)、可随时停止,无自动/周期分析;分析正文(摘要、追问、模型回复)绝不写入插件日志。
 - **诚实边界**:五层守卫防御的是浏览器介导攻击(CSRF、DNS rebinding、跨站请求),**不防**能直接连 loopback 的本机任意进程——这与 dsh 自身 `/api` 的无认证信任水位持平,弱于 sidecar 自身两面(Unix socket 靠同 UID 0600 文件权限,HTTP 读面要求 Bearer token),属显式声明的权衡而非沉默继承。因此多用户主机不建议开启 `inject.enabled`,读面(会话事件数据)对本机进程可见这一事实请知悉;confirmToken 对直连 loopback 的本机进程不设防,「用户同回合明确请求」在此信道上退化为 UX 约定。
+- **本地路径与外发证据**:面向本机 owner 的看板、项目视图、详情和 `/sidecar` 摘要可以显示完整项目路径,用于区分本地工作区;这不表示该路径适合公开。对外发送截图、JSON、日志或支持材料前,必须脱敏项目/转录路径、会话/请求 ID 与正文。
 - host 经 Unix socket(同 UID、socket 0600)直连 daemon,不读也绝不外泄 sidecar 的 `http.token`;浏览器永不直连 sidecar HTTP。
 - sidecar 本体(CLI/daemon)的威胁模型与红线见主仓 [SECURITY.md](../SECURITY.md)。
 
@@ -187,7 +248,9 @@ pnpm test        # vitest
 
 - 亮色、暗色与窄屏响应式布局;
 - 主侧栏与 footer 打开同一个 `shell.overlay` 宿主 Modal;
-- 外层及嵌套对话框的初始焦点、焦点约束与恢复,以及背景 `inert` 隔离;
+- 外层及嵌套对话框的初始焦点、焦点约束与恢复,每个下层 dialog 的
+  `inert` + `aria-hidden` 隔离,以及原有宿主属性的精确恢复;
+- 文字、禁用态、状态徽标与焦点指示的可访问对比度;
 - 无 console error/warning、页面错误、失败请求或非 2xx 响应。
 
 宿主 locale 桥及语言变更订阅有自动化测试覆盖;此次真实浏览器验收未操作可靠的宿主

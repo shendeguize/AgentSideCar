@@ -5,6 +5,13 @@
 
 import { describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
+import type { SessionRow } from '../src/bridge.ts'
+import {
+  deriveInjectEligibility,
+  MAX_SESSION_EXTRA_BYTES,
+  MAX_SESSION_EXTRA_DEPTH,
+  MAX_SESSION_EXTRA_ITEMS,
+} from '../src/inject-eligibility.ts'
 import {
   InjectGateway,
   MAX_MESSAGE_BYTES,
@@ -14,6 +21,7 @@ import {
   type InjectExecutionRequest,
   type InjectExecutor,
   type InjectLogEntry,
+  type InjectPreflightResult,
   type InjectResult,
   type InjectTarget,
   type TargetStatus,
@@ -23,34 +31,68 @@ const T0 = 1_700_000_000_000
 
 const TARGET_DSH: InjectTarget = { agent: 'dsh', sessionId: 'sess-dsh-1' }
 const TARGET_CLAUDE: InjectTarget = { agent: 'claude', sessionId: 'sess-claude-1' }
+const TARGET_KIMI: InjectTarget = { agent: 'kimi', sessionId: 'sess-kimi-1' }
+
+function sessionRow(overrides: Partial<SessionRow> = {}): SessionRow {
+  return {
+    agent: 'claude',
+    session_id: 'session-1',
+    project: '/local/project',
+    transcript: '/local/project/session.jsonl',
+    updated_at: 1,
+    title: 'session',
+    status: 'waiting',
+    extra: {},
+    parent_id: null,
+    ...overrides,
+  }
+}
 
 interface FakeExecutor {
   executor: InjectExecutor
+  preflightCalls: InjectTarget[]
   calls: InjectExecutionRequest[]
+  setPreflight(result: InjectPreflightResult): void
   setResult(result: InjectResult): void
   setError(message: string): void
 }
 
-function fakeExecutor(kind: 'dsh' | 'send-cli'): FakeExecutor {
+function fakeExecutor(
+  kind: 'dsh' | 'send-cli',
+  withPreflight = false,
+): FakeExecutor {
+  const preflightCalls: InjectTarget[] = []
   const calls: InjectExecutionRequest[] = []
+  let preflightResult: InjectPreflightResult = { ok: true }
   let result: InjectResult = { outcome: 'delivered' }
   let error: string | null = null
+  const executor: InjectExecutor = {
+    kind,
+    async execute(req) {
+      calls.push(req)
+      if (error !== null) throw new Error(error)
+      return { ...result }
+    },
+  }
+  if (withPreflight) {
+    executor.preflight = async (target) => {
+      preflightCalls.push(target)
+      return { ...preflightResult }
+    }
+  }
   return {
+    executor,
+    preflightCalls,
     calls,
+    setPreflight(next) {
+      preflightResult = next
+    },
     setResult(next) {
       result = next
       error = null
     },
     setError(message) {
       error = message
-    },
-    executor: {
-      kind,
-      async execute(req) {
-        calls.push(req)
-        if (error !== null) throw new Error(error)
-        return { ...result }
-      },
     },
   }
 }
@@ -76,10 +118,11 @@ function makeHarness(): Harness {
     agent: target.agent,
     sessionId: target.sessionId,
     status: 'waiting',
+    inject_eligibility: { allowed: true, reason: 'eligible' },
   })
   const logs: InjectLogEntry[] = []
   const verifyCalls: InjectTarget[] = []
-  const dsh = fakeExecutor('dsh')
+  const dsh = fakeExecutor('dsh', true)
   const sendCli = fakeExecutor('send-cli')
   const gateway = new InjectGateway({
     executors: { dsh: dsh.executor, sendCli: sendCli.executor },
@@ -128,6 +171,220 @@ function sha12(message: string): string {
 
 // ---------------------------------------------------------------------------
 
+describe('deriveInjectEligibility', () => {
+  it.each(['cursor-ide', 'copilot', 'unknown'])(
+    'rejects unsupported agent %s',
+    (agent) => {
+      expect(deriveInjectEligibility(sessionRow({ agent }))).toEqual({
+        allowed: false,
+        reason: 'unsupported_agent',
+      })
+    },
+  )
+
+  it.each(['claude', 'codex', 'cursor-cli', 'kimi'])(
+    'allows local top-level waiting/idle external agent %s',
+    (agent) => {
+      for (const status of ['waiting', 'idle']) {
+        expect(deriveInjectEligibility(sessionRow({ agent, status }))).toEqual({
+          allowed: true,
+          reason: 'eligible',
+        })
+      }
+    },
+  )
+
+  it.each([
+    ['working', { status: 'working' }, 'working_session'],
+    ['dead', { status: 'dead' }, 'dead_session'],
+    ['unknown status', { status: 'paused' }, 'invalid_session'],
+    ['child', { parent_id: 'parent-secret' }, 'child_session'],
+    ['sidechain', { extra: { sidechain: true } }, 'child_session'],
+    ['remote flag', { extra: { remote: true } }, 'remote_session'],
+    ['remote source', { extra: { source: 'remote' } }, 'remote_session'],
+    ['remote host', { extra: { host: 'private-edge' } }, 'remote_session'],
+  ] as const)('rejects external %s with a stable reason', (_name, overrides, reason) => {
+    expect(deriveInjectEligibility(sessionRow(overrides))).toEqual({
+      allowed: false,
+      reason,
+    })
+  })
+
+  it.each([
+    ['working', { status: 'working' }, 'working_session'],
+    ['dead', { status: 'dead' }, 'dead_session'],
+    ['child', { parent_id: 'parent-secret' }, 'child_session'],
+    ['sidechain', { extra: { sidechain: true } }, 'child_session'],
+    ['remote', { extra: { source: 'remote' } }, 'remote_session'],
+    ['invalid', { status: 'paused' }, 'invalid_session'],
+  ] as const)('fails Kimi %s closed', (_name, overrides, reason) => {
+    expect(deriveInjectEligibility(sessionRow({ agent: 'kimi', ...overrides }))).toEqual({
+      allowed: false,
+      reason,
+    })
+  })
+
+  it('keeps the existing local default for absent or non-matching remote markers', () => {
+    for (const extra of [{}, { remote: false }, { remote: 'unknown', source: 'cli' }]) {
+      expect(deriveInjectEligibility(sessionRow({ extra }))).toEqual({
+        allowed: true,
+        reason: 'eligible',
+      })
+    }
+  })
+
+  it.each([
+    ['top-level host', { host: 'edge-a' }],
+    ['top-level remote', { remote: true }],
+    ['top-level source', { source: 'remote' }],
+    ['top-level alias', { remote_alias: 'edge-a' }],
+    ['top-level remote host', { remote_host: 'edge-a' }],
+    ['extra alias', { extra: { remote_alias: 'edge-a' } }],
+    ['extra remote host', { extra: { remote_host: 'edge-a' } }],
+  ] as const)('rejects authoritative %s provenance', (_name, overrides) => {
+    expect(deriveInjectEligibility(sessionRow(overrides))).toEqual({
+      allowed: false,
+      reason: 'remote_session',
+    })
+  })
+
+  it('keeps explicit remote provenance authoritative over local state/topology', () => {
+    expect(
+      deriveInjectEligibility(
+        sessionRow({
+          status: 'working',
+          parent_id: 'parent',
+          host: 'edge-a',
+        }),
+      ),
+    ).toEqual({ allowed: false, reason: 'remote_session' })
+  })
+
+  it('does not infer remote from an absent host or host=local', () => {
+    expect(deriveInjectEligibility(sessionRow())).toEqual({
+      allowed: true,
+      reason: 'eligible',
+    })
+    expect(deriveInjectEligibility(sessionRow({ host: 'local' }))).toEqual({
+      allowed: true,
+      reason: 'eligible',
+    })
+  })
+
+  it.each([
+    ['non-string status', { status: 7 }],
+    ['array extra', { extra: [] }],
+    ['non-string parent', { parent_id: { id: 'parent' } }],
+    ['malformed top host', { host: null }],
+    ['malformed remote alias', { remote_alias: 7 }],
+  ] as const)('fails closed for malformed %s', (_name, overrides) => {
+    expect(
+      deriveInjectEligibility({
+        ...sessionRow(),
+        ...overrides,
+      } as unknown as SessionRow),
+    ).toEqual({ allowed: false, reason: 'invalid_session' })
+  })
+
+  it('rejects accessor and custom-prototype extra without invoking getters', () => {
+    let getterReads = 0
+    const accessorExtra: Record<string, unknown> = {}
+    Object.defineProperty(accessorExtra, 'remote', {
+      enumerable: true,
+      get() {
+        getterReads += 1
+        return true
+      },
+    })
+    const inheritedExtra = Object.assign(Object.create({ remote: false }), { safe: true })
+
+    expect(deriveInjectEligibility(sessionRow({ extra: accessorExtra }))).toEqual({
+      allowed: false,
+      reason: 'invalid_session',
+    })
+    expect(deriveInjectEligibility(sessionRow({ extra: inheritedExtra }))).toEqual({
+      allowed: false,
+      reason: 'invalid_session',
+    })
+    expect(getterReads).toBe(0)
+  })
+
+  it('enforces sidecar depth, item, and aggregate bounds for extra', () => {
+    const nested = (depth: number): Record<string, unknown> => {
+      const root: Record<string, unknown> = {}
+      let cursor = root
+      for (let level = 1; level < depth; level += 1) {
+        const child: Record<string, unknown> = {}
+        cursor['next'] = child
+        cursor = child
+      }
+      return root
+    }
+    const itemObject = (items: number): Record<string, unknown> =>
+      Object.fromEntries(Array.from({ length: items }, (_, index) => [`k${index}`, null]))
+
+    expect(
+      deriveInjectEligibility(sessionRow({ extra: nested(MAX_SESSION_EXTRA_DEPTH) })),
+    ).toEqual({ allowed: true, reason: 'eligible' })
+    expect(
+      deriveInjectEligibility(sessionRow({ extra: nested(MAX_SESSION_EXTRA_DEPTH + 1) })),
+    ).toEqual({ allowed: false, reason: 'invalid_session' })
+    expect(
+      deriveInjectEligibility(
+        sessionRow({ extra: itemObject(MAX_SESSION_EXTRA_ITEMS - 1) }),
+      ),
+    ).toEqual({ allowed: true, reason: 'eligible' })
+    expect(
+      deriveInjectEligibility(sessionRow({ extra: itemObject(MAX_SESSION_EXTRA_ITEMS) })),
+    ).toEqual({ allowed: false, reason: 'invalid_session' })
+    expect(
+      deriveInjectEligibility(
+        sessionRow({ extra: { value: 'x'.repeat(MAX_SESSION_EXTRA_BYTES - 32) } }),
+      ),
+    ).toEqual({ allowed: true, reason: 'eligible' })
+    expect(
+      deriveInjectEligibility(
+        sessionRow({ extra: { value: 'x'.repeat(MAX_SESSION_EXTRA_BYTES) } }),
+      ),
+    ).toEqual({ allowed: false, reason: 'invalid_session' })
+  })
+
+  it.each(['working', 'waiting', 'idle'])(
+    'allows local dsh %s, including child/sidechain topology',
+    (status) => {
+      expect(
+        deriveInjectEligibility(
+          sessionRow({
+            agent: 'dsh',
+            status,
+            parent_id: 'dsh-parent',
+            extra: { sidechain: true },
+          }),
+        ),
+      ).toEqual({ allowed: true, reason: 'eligible' })
+    },
+  )
+
+  it.each([
+    ['dead', { status: 'dead' }, 'dead_session'],
+    ['remote', { extra: { source: 'remote' } }, 'remote_session'],
+    ['invalid status', { status: 'paused' }, 'invalid_session'],
+  ] as const)('rejects dsh %s', (_name, overrides, reason) => {
+    expect(
+      deriveInjectEligibility(sessionRow({ agent: 'dsh', ...overrides })),
+    ).toEqual({ allowed: false, reason })
+  })
+
+  it('returns only static verdict vocabulary, never sensitive marker values', () => {
+    const secret = 'PRIVATE-HOST-parent-token'
+    const verdict = deriveInjectEligibility(
+      sessionRow({ extra: { host: secret }, parent_id: secret }),
+    )
+    expect(verdict).toEqual({ allowed: false, reason: 'remote_session' })
+    expect(JSON.stringify(verdict)).not.toContain(secret)
+  })
+})
+
 describe('prepare', () => {
   it('issues requestId + 128-bit confirmToken with 60s TTL and a body-free plan', async () => {
     const h = makeHarness()
@@ -144,6 +401,7 @@ describe('prepare', () => {
       agent: 'claude',
       sessionId: 'sess-claude-1',
       status: 'waiting',
+      inject_eligibility: { allowed: true, reason: 'eligible' },
     })
     expect(prep.plan.messagePreview).toEqual({
       bytes: Buffer.byteLength(message, 'utf8'),
@@ -203,15 +461,117 @@ describe('prepare', () => {
     expect(prep).toMatchObject({ ok: false, errorCode: 'invalid_message' })
   })
 
-  it('rejects unknown targets (target_not_found) and dead targets (target_dead)', async () => {
+  it('rejects unknown and dead targets with stable eligibility reasons', async () => {
     const h = makeHarness()
     h.setVerify(async () => null)
     const missing = await h.gateway.prepare({ target: TARGET_CLAUDE, mode: 'queue', message: 'hi' })
     expect(missing).toMatchObject({ ok: false, errorCode: 'target_not_found' })
 
-    h.setVerify(async (t) => ({ agent: t.agent, sessionId: t.sessionId, status: 'dead' }))
+    h.setVerify(async (t) => ({
+      agent: t.agent,
+      sessionId: t.sessionId,
+      status: 'dead',
+      inject_eligibility: { allowed: false, reason: 'dead_session' },
+    }))
     const dead = await h.gateway.prepare({ target: TARGET_CLAUDE, mode: 'queue', message: 'hi' })
-    expect(dead).toMatchObject({ ok: false, errorCode: 'target_dead' })
+    expect(dead).toMatchObject({ ok: false, errorCode: 'dead_session' })
+  })
+
+  it('fails closed on an eligibility rejection before preflight or token issuance', async () => {
+    const h = makeHarness()
+    h.setVerify(async (target) => ({
+      agent: target.agent,
+      sessionId: target.sessionId,
+      status: 'working',
+      inject_eligibility: { allowed: false, reason: 'working_session' },
+    }))
+
+    const rejected = await h.gateway.prepare({
+      target: TARGET_CLAUDE,
+      mode: 'queue',
+      message: 'hi',
+    })
+    expect(rejected).toEqual({ ok: false, errorCode: 'working_session' })
+    expect(h.dsh.preflightCalls).toHaveLength(0)
+    expect(h.logs.at(-1)).toMatchObject({
+      phase: 'prepare',
+      requestId: null,
+      errorCode: 'working_session',
+    })
+  })
+
+  it('issues no token and dispatches nothing for a working Kimi target', async () => {
+    const h = makeHarness()
+    h.setVerify(async (target) => ({
+      agent: target.agent,
+      sessionId: target.sessionId,
+      status: 'working',
+      inject_eligibility: { allowed: false, reason: 'working_session' },
+    }))
+
+    expect(await h.gateway.prepare({
+      target: TARGET_KIMI,
+      mode: 'queue',
+      message: 'do not dispatch',
+    })).toEqual({ ok: false, errorCode: 'working_session' })
+    expect(h.logs.at(-1)).toMatchObject({
+      phase: 'prepare',
+      requestId: null,
+      target: TARGET_KIMI,
+      errorCode: 'working_session',
+    })
+    expect(h.sendCli.calls).toHaveLength(0)
+    expect(h.dsh.calls).toHaveLength(0)
+  })
+
+  it('runs dsh preflight before issuance and rejects modelless cold targets without a token', async () => {
+    const h = makeHarness()
+    h.dsh.setPreflight({
+      ok: false,
+      errorCode: 'dsh_model_unconfigured',
+    })
+
+    const rejected = await h.gateway.prepare({
+      target: TARGET_DSH,
+      mode: 'queue',
+      message: 'hi',
+    })
+    expect(rejected).toEqual({
+      ok: false,
+      errorCode: 'dsh_model_unconfigured',
+    })
+    expect(h.dsh.preflightCalls).toEqual([TARGET_DSH])
+    expect(h.dsh.calls).toHaveLength(0)
+    expect(h.logs.at(-1)).toMatchObject({
+      phase: 'prepare',
+      requestId: null,
+      target: null,
+      mode: null,
+      errorCode: 'dsh_model_unconfigured',
+    })
+
+    // Rejection consumed neither an id nor token capacity.
+    const accepted = await h.gateway.prepare({
+      target: TARGET_CLAUDE,
+      mode: 'queue',
+      message: 'still available',
+    })
+    expect(accepted).toMatchObject({ ok: true, requestId: 'req-1' })
+  })
+
+  it('leaves send-cli agent prepare behavior unchanged without a preflight hook', async () => {
+    const h = makeHarness()
+    expect(h.sendCli.executor.preflight).toBeUndefined()
+
+    for (const agent of ['claude', 'codex', 'cursor-cli', 'kimi']) {
+      const prep = await h.gateway.prepare({
+        target: { agent, sessionId: `sess-${agent}` },
+        mode: 'queue',
+        message: `for ${agent}`,
+      })
+      expect(prep.ok).toBe(true)
+    }
+    expect(h.dsh.preflightCalls).toHaveLength(0)
   })
 
   it('caps in-flight tokens; consumption and expiry both free capacity', async () => {
@@ -322,11 +682,33 @@ describe('execute token checks (three rejections + anti-swap)', () => {
     expect(result).toEqual({ outcome: 'failed', errorCode: 'token_mismatch' })
     expect(h.dsh.calls).toHaveLength(0)
   })
+
+  it('revalidates the same eligibility verdict at execute and blocks stale targets', async () => {
+    const h = makeHarness()
+    const { requestId, confirmToken } = await prepared(h, TARGET_CLAUDE, 'hi')
+    h.setVerify(async (target) => ({
+      agent: target.agent,
+      sessionId: target.sessionId,
+      status: 'waiting',
+      inject_eligibility: { allowed: false, reason: 'remote_session' },
+    }))
+
+    const result = await h.gateway.execute({ requestId, confirmToken, message: 'hi' })
+    expect(result).toEqual({ outcome: 'failed', errorCode: 'remote_session' })
+    expect(h.verifyCalls).toEqual([TARGET_CLAUDE, TARGET_CLAUDE])
+    expect(h.sendCli.calls).toHaveLength(0)
+  })
 })
 
 describe('dispatch', () => {
   it('routes agent=dsh to the dsh executor with the full execution request', async () => {
     const h = makeHarness()
+    h.setVerify(async (target) => ({
+      agent: target.agent,
+      sessionId: target.sessionId,
+      status: 'working',
+      inject_eligibility: { allowed: true, reason: 'eligible' },
+    }))
     const { requestId, confirmToken } = await prepared(h, TARGET_DSH, 'hello dsh', 'steer')
     const result = await h.gateway.execute({ requestId, confirmToken, message: 'hello dsh' })
     expect(result.outcome).toBe('delivered')
@@ -336,9 +718,9 @@ describe('dispatch', () => {
     ])
   })
 
-  it('routes claude/codex/cursor-cli to the send-cli executor', async () => {
+  it('routes external spawn-resume agents, including Kimi, to send-cli', async () => {
     const h = makeHarness()
-    for (const agent of ['claude', 'codex', 'cursor-cli']) {
+    for (const agent of ['claude', 'codex', 'cursor-cli', 'kimi']) {
       const target: InjectTarget = { agent, sessionId: `sess-${agent}` }
       const { requestId, confirmToken } = await prepared(h, target, `for ${agent}`)
       const result = await h.gateway.execute({ requestId, confirmToken, message: `for ${agent}` })
@@ -348,6 +730,7 @@ describe('dispatch', () => {
       'claude',
       'codex',
       'cursor-cli',
+      'kimi',
     ])
     expect(h.dsh.calls).toHaveLength(0)
   })
@@ -356,7 +739,7 @@ describe('dispatch', () => {
     const h = makeHarness()
     // verifyTarget answers for any target here, so the rejection below can
     // only come from the whitelist check, not from target_not_found.
-    for (const agent of ['copilot', 'kimi', 'cursor-ide']) {
+    for (const agent of ['copilot', 'cursor-ide']) {
       const prep = await h.gateway.prepare({
         target: { agent, sessionId: `sess-${agent}` },
         mode: 'queue',
@@ -409,20 +792,61 @@ describe('idempotency', () => {
     expect(h.sendCli.calls).toHaveLength(1)
   })
 
-  it('an executor throw maps to executor_error and is cached like any result', async () => {
+  it('keeps Kimi completed-but-unknown terminal and does not dispatch its replay', async () => {
     const h = makeHarness()
-    h.dsh.setError('boom')
+    h.sendCli.setResult({ outcome: 'unknown' })
+    const { requestId, confirmToken } = await prepared(h, TARGET_KIMI, 'kimi resume')
+
+    expect(await h.gateway.execute({
+      requestId,
+      confirmToken,
+      message: 'kimi resume',
+    })).toEqual({ outcome: 'unknown' })
+    expect(await h.gateway.execute({
+      requestId,
+      confirmToken,
+      message: 'kimi resume',
+    })).toEqual({ outcome: 'unknown', replayed: true })
+    expect(h.sendCli.calls).toEqual([
+      {
+        target: TARGET_KIMI,
+        mode: 'queue',
+        message: 'kimi resume',
+        requestId,
+      },
+    ])
+    expect(h.dsh.calls).toHaveLength(0)
+  })
+
+  it('sanitizes an executor throw, caches it, and redacts failed dsh identities', async () => {
+    const h = makeHarness()
+    const secret = '/SECRET/session-id/preset/model'
+    h.dsh.setError(secret)
     const { requestId, confirmToken } = await prepared(h, TARGET_DSH, 'hi')
     const first = await h.gateway.execute({ requestId, confirmToken, message: 'hi' })
-    expect(first).toEqual({ outcome: 'failed', errorCode: 'executor_error', detail: 'boom' })
+    expect(first).toEqual({ outcome: 'failed', errorCode: 'executor_error' })
     const second = await h.gateway.execute({ requestId, confirmToken, message: 'hi' })
     expect(second).toEqual({
       outcome: 'failed',
       errorCode: 'executor_error',
-      detail: 'boom',
       replayed: true,
     })
     expect(h.dsh.calls).toHaveLength(1)
+    expect(JSON.stringify([first, second, ...h.logs])).not.toContain(secret)
+    expect(h.logs.slice(-2)).toEqual([
+      expect.objectContaining({
+        phase: 'execute',
+        requestId: null,
+        target: null,
+        mode: null,
+      }),
+      expect.objectContaining({
+        phase: 'execute',
+        requestId: null,
+        target: null,
+        mode: null,
+      }),
+    ])
   })
 
   it('a replay with a swapped message is refused (anti-swap on the cache path)', async () => {

@@ -35,10 +35,18 @@ interface FakeCtx {
   routes: RecordedRoute[]
   removedRoutes: string[]
   spawns: SubprocessSpawnSpec[]
+  logs: string[]
   /** Fire one cordis event to every `ctx.on` listener (M3 dsh feed tests). */
   emit(event: string, ...args: unknown[]): void
   /** Run collected effect disposers in reverse registration order. */
   disposeAll(): Promise<void>
+  /** Dispose one labeled lazy binding to simulate a host service generation. */
+  disposeEffect(label: string): unknown
+  /** Re-run agents-related lazy bindings with a replacement service identity. */
+  remountAgentServices(services: {
+    agents: unknown
+    sessionPersistence: unknown
+  }): void
 }
 
 /**
@@ -57,22 +65,48 @@ function createFakeCtx(
   const routes: RecordedRoute[] = []
   const removedRoutes: string[] = []
   const spawns: SubprocessSpawnSpec[] = []
+  const logs: string[] = []
+  const effectsByLabel = new Map<string, () => unknown>()
+  const injections: Array<{
+    deps: string[]
+    callback: (ctx: unknown) => void
+  }> = []
   const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
   const noop = (): void => {}
+  const recordLog = (...args: unknown[]): void => {
+    logs.push(
+      args
+        .map((arg) =>
+          typeof arg === 'string' ? arg : JSON.stringify(arg),
+        )
+        .join(' '),
+    )
+  }
   const logger = Object.assign(() => logger, {
-    info: noop,
-    warn: noop,
-    error: noop,
-    debug: noop,
+    info: recordLog,
+    warn: recordLog,
+    error: recordLog,
+    debug: recordLog,
   })
   const ctx = {
     logger,
-    effect(execute: () => () => unknown, _label?: string) {
-      const disposer = execute()
+    effect(execute: () => () => unknown, label?: string) {
+      const rawDisposer = execute()
+      let active = true
+      const disposer = (): unknown => {
+        if (!active) return undefined
+        active = false
+        if (label !== undefined && effectsByLabel.get(label) === disposer) {
+          effectsByLabel.delete(label)
+        }
+        return rawDisposer()
+      }
       disposers.push(disposer)
+      if (label !== undefined) effectsByLabel.set(label, disposer)
       return disposer
     },
     inject(deps: string[], callback: (ctx: unknown) => void) {
+      injections.push({ deps, callback })
       if (!deps.every((dep) => dep in services)) return undefined
       const injected = Object.assign(Object.create(ctx as object), services)
       callback(injected)
@@ -121,6 +155,7 @@ function createFakeCtx(
     routes,
     removedRoutes,
     spawns,
+    logs,
     emit: (event, ...args) => {
       for (const handler of listeners.get(event) ?? []) handler(...args)
     },
@@ -129,6 +164,17 @@ function createFakeCtx(
         await disposer()
       }
       disposers.length = 0
+    },
+    disposeEffect: (label) => effectsByLabel.get(label)?.(),
+    remountAgentServices: (replacement) => {
+      services.agents = replacement.agents
+      services.sessionPersistence = replacement.sessionPersistence
+      for (const injection of injections) {
+        const key = injection.deps.join(',')
+        if (key !== 'agents' && key !== 'agents,sessionPersistence') continue
+        const injected = Object.assign(Object.create(ctx as object), services)
+        injection.callback(injected)
+      }
     },
   }
 }
@@ -519,6 +565,77 @@ const DSH_SESSION_ROW = {
   parent_id: null,
 }
 
+const absentPresetPersistence = {
+  list: async () => [{ id: 'sess-dsh-1' }],
+  inspect: async () => ({ meta: {}, events: [] }),
+}
+
+interface FakeResumeOptions {
+  resumeSessionId: string
+  agentOptions?: { provider?: string; model?: string }
+  signal?: AbortSignal
+  setup?: (
+    ctx: unknown,
+  ) => { commit(): void } | Promise<{ commit(): void } | void> | void
+}
+
+function runSetupSynchronously(
+  options: FakeResumeOptions,
+  session: { readonly header: unknown; readonly events: readonly unknown[] } = {
+    header: {},
+    events: [],
+  },
+): void {
+  const setupResult = options.setup?.({ agent: { session } })
+  expect(setupResult).not.toBeInstanceOf(Promise)
+  if (setupResult !== undefined && !('then' in setupResult)) {
+    setupResult.commit()
+  }
+}
+
+async function prepareColdDsh(
+  services: Record<string, unknown>,
+  message = 'cold lifecycle probe',
+): Promise<{
+  fake: FakeCtx
+  prepared: Awaited<ReturnType<typeof postAction>>
+}> {
+  const fake = createFakeCtx(services)
+  const runtimeDir = await tempRuntimeDir()
+  const server = await startMiniDaemon(join(runtimeDir, 'daemon.sock'), [
+    DSH_SESSION_ROW,
+  ])
+  cleanups.push(
+    () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve())
+      }),
+  )
+  apply(
+    fake.ctx,
+    Config({
+      daemon: { policy: 'adopt-only' },
+      sidecar: { runtimeDir },
+      inject: { enabled: true },
+    }),
+  )
+  cleanups.push(() => fake.disposeAll())
+  await vi.waitFor(
+    async () => {
+      const { json } = await fetchState(fake.routes[0]!)
+      expect(json.board.sessions).toHaveLength(1)
+    },
+    { timeout: 3000, interval: 25 },
+  )
+  const prepared = await postAction(fake.routes[0]!, {
+    type: 'inject.prepare',
+    target: { agent: 'dsh', sessionId: 'sess-dsh-1' },
+    mode: 'queue',
+    message,
+  })
+  return { fake, prepared }
+}
+
 describe('M2 injection wiring', () => {
   it('dispatches inject.prepare through the wired gateway, not the M1 placeholder', async () => {
     const fake = createFakeCtx()
@@ -557,7 +674,7 @@ describe('M2 injection wiring', () => {
     expect(json.reason).toBe('inject_disabled')
   })
 
-  it('loads without the agents service and degrades the dsh path honestly', async () => {
+  it('loads without optional model/agents services and rejects cold prepare without a token', async () => {
     // Default fake ctx = composition without dsh-agent: the lazy inject
     // callback never runs. The fiber must not pend — M1 reads and the
     // prepare surface stay fully available (send-cli path unaffected).
@@ -589,28 +706,134 @@ describe('M2 injection wiring', () => {
       { timeout: 3000, interval: 25 },
     )
 
-    // prepare is store-backed (agents-free) and still issues a confirmation…
+    // The target is cold and no host default model service exists: reject
+    // before confirmation rather than issue a token for a modelless resume.
     const prepared = await postAction(fake.routes[0]!, {
       type: 'inject.prepare',
       target: { agent: 'dsh', sessionId: 'sess-dsh-1' },
       mode: 'queue',
       message: 'ping',
     })
-    expect(prepared.status).toBe(200)
-    expect(typeof prepared.json.confirmToken).toBe('string')
+    expect(prepared.status).toBe(502)
+    expect(prepared.json).toEqual({ reason: 'executor_error' })
+    expect(prepared.json.confirmToken).toBeUndefined()
+  })
 
-    // …and a dsh-target execute fails honestly (agents unavailable → resume
-    // rejects) instead of pending or crashing the route.
+  it('maps a stale board row with no persisted session to target_not_found without a token', async () => {
+    const inspect = vi.fn(async () => ({ meta: {}, events: [] }))
+    const resume = vi.fn(async (): Promise<never> => {
+      throw new Error('resume must not be called')
+    })
+    const model = 'SECRET-MISSING-MODEL'
+    const { fake, prepared } = await prepareColdDsh({
+      agents: { get: () => undefined, resume },
+      sessionPersistence: {
+        list: async () => [],
+        inspect,
+      },
+      agentDefaultModel: {
+        currentSelection: () => ({ provider: 'SECRET-MISSING-PROVIDER', model }),
+      },
+    }, 'SECRET-MISSING-MESSAGE')
+
+    expect(prepared.status).toBe(404)
+    expect(prepared.json).toEqual({ reason: 'target_not_found' })
+    expect(prepared.json.confirmToken).toBeUndefined()
+    expect(inspect).not.toHaveBeenCalled()
+    expect(resume).not.toHaveBeenCalled()
+    const external = `${JSON.stringify(prepared.json)}${fake.logs.join('\n')}`
+    expect(external).not.toContain('sess-dsh-1')
+    expect(external).not.toContain(model)
+  })
+
+  it('adopts a live agent created after list without inspect, model lookup, or resume', async () => {
+    const followup = vi.fn()
+    const steer = vi.fn()
+    let live: { followup: typeof followup; steer: typeof steer } | undefined
+    const inspect = vi.fn(async () => ({ meta: {}, events: [] }))
+    const list = vi.fn(async () => {
+      live = { followup, steer }
+      return []
+    })
+    const resume = vi.fn(async (): Promise<never> => {
+      throw new Error('resume must not be called')
+    })
+    const currentSelection = vi.fn(() => {
+      throw new Error('live agent must not resolve a model')
+    })
+    const { fake, prepared } = await prepareColdDsh({
+      agents: {
+        get: () => live,
+        resume,
+      },
+      sessionPersistence: { list, inspect },
+      agentDefaultModel: { currentSelection },
+    }, 'concurrent live message')
+
+    expect(prepared.status).toBe(200)
     const executed = await postAction(fake.routes[0]!, {
       type: 'inject.execute',
       requestId: prepared.json.requestId,
       confirmToken: prepared.json.confirmToken,
-      message: 'ping',
+      message: 'concurrent live message',
     })
-    expect(executed.status).toBe(502)
-    expect(executed.json.outcome).toBe('failed')
-    expect(executed.json.errorCode).toBe('session_not_found')
-    expect(String(executed.json.detail)).toContain('not available')
+    expect(executed.status).toBe(200)
+    expect(executed.json).toEqual({ outcome: 'delivered' })
+    expect(list).toHaveBeenCalledTimes(1)
+    expect(inspect).not.toHaveBeenCalled()
+    expect(currentSelection).not.toHaveBeenCalled()
+    expect(resume).not.toHaveBeenCalled()
+    expect(followup).toHaveBeenCalledTimes(1)
+  })
+
+  it('maps deletion during execute inspection to a stable 404 without resume or splice', async () => {
+    const followup = vi.fn()
+    let deleteOnInspect = false
+    let persisted = true
+    const inspect = vi.fn(async () => {
+      if (deleteOnInspect) {
+        persisted = false
+        throw new Error('/SECRET/deleted/session/path')
+      }
+      return { meta: {}, events: [] }
+    })
+    const list = vi.fn(async () =>
+      persisted ? [{ id: 'sess-dsh-1' }] : [],
+    )
+    const resume = vi.fn(async (): Promise<never> => {
+      throw new Error('resume must not be called')
+    })
+    const { fake, prepared } = await prepareColdDsh({
+      agents: { get: () => undefined, resume },
+      sessionPersistence: { list, inspect },
+      agentDefaultModel: {
+        currentSelection: () => ({ provider: 'provider', model: 'model' }),
+      },
+    }, 'delete race message')
+    expect(prepared.status).toBe(200)
+
+    const logsBeforeExecute = fake.logs.length
+    deleteOnInspect = true
+    const executed = await postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: prepared.json.requestId,
+      confirmToken: prepared.json.confirmToken,
+      message: 'delete race message',
+    })
+
+    expect(executed.status).toBe(404)
+    expect(executed.json).toEqual({
+      outcome: 'failed',
+      errorCode: 'target_not_found',
+    })
+    expect(list).toHaveBeenCalledTimes(3)
+    expect(inspect).toHaveBeenCalledTimes(2)
+    expect(resume).not.toHaveBeenCalled()
+    expect(followup).not.toHaveBeenCalled()
+    const external =
+      `${JSON.stringify(executed.json)}${fake.logs.slice(logsBeforeExecute).join('\n')}`
+    expect(external).not.toContain('/SECRET/deleted/session/path')
+    expect(external).not.toContain('sess-dsh-1')
   })
 
   it('delivers a dsh queue injection end-to-end once agents resolves', async () => {
@@ -623,7 +846,15 @@ describe('M2 injection wiring', () => {
         throw new Error('resume must not be called for a live session')
       },
     }
-    const fake = createFakeCtx({ agents })
+    const currentSelection = vi.fn(() => ({
+      provider: 'must-not-read-live-provider',
+      model: 'must-not-read-live-model',
+    }))
+    const fake = createFakeCtx({
+      agents,
+      agentDefaultModel: { currentSelection },
+      sessionPersistence: absentPresetPersistence,
+    })
     const runtimeDir = await tempRuntimeDir()
     const server = await startMiniDaemon(join(runtimeDir, 'daemon.sock'), [DSH_SESSION_ROW])
     cleanups.push(
@@ -677,7 +908,616 @@ describe('M2 injection wiring', () => {
     expect(message.content).toEqual([{ type: 'text', text: 'hello from the board' }])
     expect(message.source).toEqual({ kind: 'plugin', plugin: 'agent-sidecar' })
     expect(steer).not.toHaveBeenCalled()
+    expect(currentSelection).not.toHaveBeenCalled()
   })
+
+  it('cold-resumes with complete host-default agentOptions before reporting inbox acceptance', async () => {
+    const followup = vi.fn()
+    const steer = vi.fn()
+    const resume = vi.fn(
+      async (options: FakeResumeOptions) => {
+        runSetupSynchronously(options)
+        return {
+          agent: { followup, steer },
+          dispose: async () => {},
+          options,
+        }
+      },
+    )
+    const agents = {
+      get: () => undefined,
+      resume,
+    }
+    const route = {
+      provider: 'cold-host-provider',
+      model: 'cold-host-model',
+    }
+    const currentSelection = vi.fn(() => ({ ...route }))
+    const fake = createFakeCtx({
+      agents,
+      agentDefaultModel: { currentSelection },
+      sessionPersistence: absentPresetPersistence,
+    })
+    const runtimeDir = await tempRuntimeDir()
+    const server = await startMiniDaemon(join(runtimeDir, 'daemon.sock'), [DSH_SESSION_ROW])
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve())
+        }),
+    )
+    apply(
+      fake.ctx,
+      Config({
+        daemon: { policy: 'adopt-only' },
+        sidecar: { runtimeDir },
+        inject: { enabled: true },
+      }),
+    )
+    cleanups.push(() => fake.disposeAll())
+
+    await vi.waitFor(
+      async () => {
+        const { json } = await fetchState(fake.routes[0]!)
+        expect(json.board.sessions).toHaveLength(1)
+      },
+      { timeout: 3000, interval: 25 },
+    )
+
+    const prepared = await postAction(fake.routes[0]!, {
+      type: 'inject.prepare',
+      target: { agent: 'dsh', sessionId: 'sess-dsh-1' },
+      mode: 'queue',
+      message: 'cold accepted turn',
+    })
+    expect(prepared.status).toBe(200)
+
+    const executed = await postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: prepared.json.requestId,
+      confirmToken: prepared.json.confirmToken,
+      message: 'cold accepted turn',
+    })
+    expect(executed.status).toBe(200)
+    expect(executed.json).toEqual({ outcome: 'delivered' })
+    expect(currentSelection).toHaveBeenCalledTimes(2)
+    expect(resume).toHaveBeenCalledTimes(1)
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({
+      resumeSessionId: 'sess-dsh-1',
+      agentOptions: {
+        provider: route.provider,
+        model: route.model,
+      },
+      signal: expect.any(AbortSignal),
+      setup: expect.any(Function),
+    }))
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(followup.mock.calls[0]![0]).toMatchObject({
+      content: [{ type: 'text', text: 'cold accepted turn' }],
+    })
+    expect(steer).not.toHaveBeenCalled()
+  })
+
+  it('rolls back when agentPresets appears between inspect and unpublished setup', async () => {
+    const followup = vi.fn()
+    let published = false
+    const services: Record<string, unknown> = {}
+    const resume = vi.fn(async (options: FakeResumeOptions) => {
+      services['agentPresets'] = {}
+      runSetupSynchronously(options)
+      published = true
+      return {
+        agent: { followup, steer: vi.fn() },
+        dispose: async () => {},
+      }
+    })
+    Object.assign(services, {
+      agents: { get: () => undefined, resume },
+      sessionPersistence: absentPresetPersistence,
+      agentDefaultModel: {
+        currentSelection: () => ({ provider: 'provider', model: 'model' }),
+      },
+    })
+    const { fake, prepared } = await prepareColdDsh(services)
+    expect(prepared.status).toBe(200)
+
+    const executed = await postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: prepared.json.requestId,
+      confirmToken: prepared.json.confirmToken,
+      message: 'cold lifecycle probe',
+    })
+
+    expect(executed.status).toBe(409)
+    expect(executed.json).toEqual({
+      outcome: 'failed',
+      errorCode: 'dsh_preset_unsupported',
+    })
+    expect(published).toBe(false)
+    expect(followup).not.toHaveBeenCalled()
+  })
+
+  it('rolls back when the cold host binding generation changes before setup', async () => {
+    const followup = vi.fn()
+    let published = false
+    let fake: FakeCtx | undefined
+    const resume = vi.fn(async (options: FakeResumeOptions) => {
+      fake!.disposeEffect('agent-sidecar: cold dsh resume services release')
+      runSetupSynchronously(options)
+      published = true
+      return {
+        agent: { followup, steer: vi.fn() },
+        dispose: async () => {},
+      }
+    })
+    const preparedResult = await prepareColdDsh({
+      agents: { get: () => undefined, resume },
+      sessionPersistence: absentPresetPersistence,
+      agentDefaultModel: {
+        currentSelection: () => ({ provider: 'provider', model: 'model' }),
+      },
+    })
+    fake = preparedResult.fake
+    expect(preparedResult.prepared.status).toBe(200)
+
+    const executed = await postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: preparedResult.prepared.json.requestId,
+      confirmToken: preparedResult.prepared.json.confirmToken,
+      message: 'cold lifecycle probe',
+    })
+
+    expect(executed.status).toBe(502)
+    expect(executed.json).toEqual({
+      outcome: 'failed',
+      errorCode: 'executor_error',
+    })
+    expect(published).toBe(false)
+    expect(followup).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      label: 'header preset',
+      session: {
+        header: { agentPreset: 'SECRET-ACTUAL-HEADER-PRESET' },
+        events: [],
+      },
+      status: 409,
+      errorCode: 'dsh_preset_unsupported',
+    },
+    {
+      label: 'late selected preset',
+      session: {
+        header: {},
+        events: [
+          {
+            type: 'agent-preset/selected',
+            data: { agentPreset: 'SECRET-ACTUAL-LATE-PRESET' },
+          },
+        ],
+      },
+      status: 409,
+      errorCode: 'dsh_preset_unsupported',
+    },
+    {
+      label: 'unknown selected schema',
+      session: {
+        header: {},
+        events: [{ type: 'agent-preset/selected', data: {} }],
+      },
+      status: 502,
+      errorCode: 'executor_error',
+    },
+  ])(
+    'rejects actual unpublished session $label despite absent inspect proof',
+    async ({ session, status, errorCode }) => {
+      const followup = vi.fn()
+      let published = false
+      const resume = vi.fn(async (options: FakeResumeOptions) => {
+        runSetupSynchronously(options, session)
+        published = true
+        return {
+          agent: { followup, steer: vi.fn() },
+          dispose: async () => {},
+        }
+      })
+      const { fake, prepared } = await prepareColdDsh({
+        agents: { get: () => undefined, resume },
+        sessionPersistence: absentPresetPersistence,
+        agentDefaultModel: {
+          currentSelection: () => ({ provider: 'provider', model: 'model' }),
+        },
+      })
+      expect(prepared.status).toBe(200)
+
+      const executed = await postAction(fake.routes[0]!, {
+        type: 'inject.execute',
+        requestId: prepared.json.requestId,
+        confirmToken: prepared.json.confirmToken,
+        message: 'cold lifecycle probe',
+      })
+
+      expect(executed.status).toBe(status)
+      expect(executed.json).toEqual({
+        outcome: 'failed',
+        errorCode,
+      })
+      expect(published).toBe(false)
+      expect(followup).not.toHaveBeenCalled()
+      const external = `${JSON.stringify(executed.json)}${fake.logs.join('\n')}`
+      expect(external).not.toContain('SECRET-ACTUAL')
+    },
+  )
+
+  it('disposes a fulfilled cold-resume slot when the plugin unloads', async () => {
+    const followup = vi.fn()
+    const disposeHandle = vi.fn(async () => {})
+    const resume = vi.fn(async (options: FakeResumeOptions) => {
+      runSetupSynchronously(options)
+      return {
+        agent: { followup, steer: vi.fn() },
+        dispose: disposeHandle,
+      }
+    })
+    const { fake, prepared } = await prepareColdDsh({
+      agents: { get: () => undefined, resume },
+      sessionPersistence: absentPresetPersistence,
+      agentDefaultModel: {
+        currentSelection: () => ({ provider: 'provider', model: 'model' }),
+      },
+    })
+    const executed = await postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: prepared.json.requestId,
+      confirmToken: prepared.json.confirmToken,
+      message: 'cold lifecycle probe',
+    })
+    expect(executed.json).toEqual({ outcome: 'delivered' })
+    expect(disposeHandle).not.toHaveBeenCalled()
+
+    await fake.disposeAll()
+    expect(disposeHandle).toHaveBeenCalledTimes(1)
+  })
+
+  it('retires a fulfilled old-generation slot and resumes on the replacement binding', async () => {
+    const oldFollowup = vi.fn()
+    const oldDispose = vi.fn(async () => {})
+    const oldResume = vi.fn(async (options: FakeResumeOptions) => {
+      runSetupSynchronously(options)
+      return {
+        agent: { followup: oldFollowup, steer: vi.fn() },
+        dispose: oldDispose,
+      }
+    })
+    const { fake, prepared } = await prepareColdDsh({
+      agents: { get: () => undefined, resume: oldResume },
+      sessionPersistence: absentPresetPersistence,
+      agentDefaultModel: {
+        currentSelection: () => ({ provider: 'provider', model: 'model' }),
+      },
+    })
+    const first = await postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: prepared.json.requestId,
+      confirmToken: prepared.json.confirmToken,
+      message: 'cold lifecycle probe',
+    })
+    expect(first.json).toEqual({ outcome: 'delivered' })
+    expect(oldFollowup).toHaveBeenCalledTimes(1)
+
+    await fake.disposeEffect('agent-sidecar: cold dsh resume services release')
+    await fake.disposeEffect('agent-sidecar: agents binding release')
+    expect(oldDispose).toHaveBeenCalledTimes(1)
+
+    const newFollowup = vi.fn()
+    const newResume = vi.fn(async (options: FakeResumeOptions) => {
+      runSetupSynchronously(options)
+      return {
+        agent: { followup: newFollowup, steer: vi.fn() },
+        dispose: async () => {},
+      }
+    })
+    fake.remountAgentServices({
+      agents: { get: () => undefined, resume: newResume },
+      sessionPersistence: absentPresetPersistence,
+    })
+    const preparedAgain = await postAction(fake.routes[0]!, {
+      type: 'inject.prepare',
+      target: { agent: 'dsh', sessionId: 'sess-dsh-1' },
+      mode: 'queue',
+      message: 'new generation message',
+    })
+    const executedAgain = await postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: preparedAgain.json.requestId,
+      confirmToken: preparedAgain.json.confirmToken,
+      message: 'new generation message',
+    })
+
+    expect(executedAgain.json).toEqual({ outcome: 'delivered' })
+    expect(oldResume).toHaveBeenCalledTimes(1)
+    expect(oldFollowup).toHaveBeenCalledTimes(1)
+    expect(newResume).toHaveBeenCalledTimes(1)
+    expect(newFollowup).toHaveBeenCalledTimes(1)
+  })
+
+  it('prevents a pending old generation from overwriting the replacement slot', async () => {
+    const oldFollowup = vi.fn()
+    const oldDispose = vi.fn(async () => {})
+    let settleOld!: (handle: {
+      agent: { followup: typeof oldFollowup; steer: ReturnType<typeof vi.fn> }
+      dispose: typeof oldDispose
+    }) => void
+    const oldPending = new Promise<{
+      agent: { followup: typeof oldFollowup; steer: ReturnType<typeof vi.fn> }
+      dispose: typeof oldDispose
+    }>((resolve) => {
+      settleOld = resolve
+    })
+    const oldResume = vi.fn((_options: FakeResumeOptions) => oldPending)
+    const { fake, prepared } = await prepareColdDsh(
+      {
+        agents: { get: () => undefined, resume: oldResume },
+        sessionPersistence: absentPresetPersistence,
+        agentDefaultModel: {
+          currentSelection: () => ({ provider: 'provider', model: 'model' }),
+        },
+      },
+      'old pending request',
+    )
+    const preparedNew = await postAction(fake.routes[0]!, {
+      type: 'inject.prepare',
+      target: { agent: 'dsh', sessionId: 'sess-dsh-1' },
+      mode: 'queue',
+      message: 'new request',
+    })
+    const oldExecution = postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: prepared.json.requestId,
+      confirmToken: prepared.json.confirmToken,
+      message: 'old pending request',
+    })
+    await vi.waitFor(() => expect(oldResume).toHaveBeenCalledTimes(1))
+    const oldSignal = (
+      oldResume.mock.calls[0]![0] as FakeResumeOptions
+    ).signal
+
+    const releasing = Promise.resolve(
+      fake.disposeEffect('agent-sidecar: cold dsh resume services release'),
+    )
+    await fake.disposeEffect('agent-sidecar: agents binding release')
+    expect(oldSignal?.aborted).toBe(true)
+
+    const newFollowup = vi.fn()
+    let newLoaded:
+      | { followup: typeof newFollowup; steer: ReturnType<typeof vi.fn> }
+      | undefined
+    const newResume = vi.fn(async (options: FakeResumeOptions) => {
+      runSetupSynchronously(options)
+      newLoaded = { followup: newFollowup, steer: vi.fn() }
+      return {
+        agent: newLoaded,
+        dispose: async () => {},
+      }
+    })
+    fake.remountAgentServices({
+      agents: { get: () => newLoaded, resume: newResume },
+      sessionPersistence: absentPresetPersistence,
+    })
+    const newExecution = postAction(fake.routes[0]!, {
+      type: 'inject.execute',
+      requestId: preparedNew.json.requestId,
+      confirmToken: preparedNew.json.confirmToken,
+      message: 'new request',
+    })
+    await new Promise<void>((resolve) => setTimeout(resolve, 20))
+    expect(newResume).not.toHaveBeenCalled()
+    expect(newFollowup).not.toHaveBeenCalled()
+    expect(oldFollowup).not.toHaveBeenCalled()
+
+    settleOld({
+      agent: { followup: oldFollowup, steer: vi.fn() },
+      dispose: oldDispose,
+    })
+    await releasing
+    await expect(newExecution).resolves.toMatchObject({
+      json: { outcome: 'delivered' },
+    })
+    await expect(oldExecution).resolves.toMatchObject({
+      json: { outcome: 'delivered' },
+    })
+
+    expect(oldDispose).toHaveBeenCalledTimes(1)
+    expect(oldFollowup).not.toHaveBeenCalled()
+    expect(oldResume).toHaveBeenCalledTimes(1)
+    expect(newResume).toHaveBeenCalledTimes(1)
+    expect(newFollowup).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    {
+      label: 'header preset',
+      inspect: async () => ({
+        meta: { agentPreset: 'SECRET-HEADER-PRESET' },
+        events: [],
+      }),
+      agentPresets: false,
+      status: 409,
+      reason: 'dsh_preset_unsupported',
+    },
+    {
+      label: 'latest preset selection',
+      inspect: async () => ({
+        meta: {},
+        events: [
+          { type: 'agent-preset/selected', data: {} },
+          {
+            type: 'agent-preset/selected',
+            data: { agentPreset: 'SECRET-LATEST-PRESET' },
+          },
+        ],
+      }),
+      agentPresets: false,
+      status: 409,
+      reason: 'dsh_preset_unsupported',
+    },
+    {
+      label: 'implicit default preset',
+      inspect: async () => ({ meta: {}, events: [] }),
+      agentPresets: true,
+      status: 409,
+      reason: 'dsh_preset_unsupported',
+    },
+    {
+      label: 'unknown selected-event schema',
+      inspect: async () => ({
+        meta: {},
+        events: [{ type: 'agent-preset/selected', data: {} }],
+      }),
+      agentPresets: false,
+      status: 502,
+      reason: 'executor_error',
+    },
+    {
+      label: 'failed persistence inspection',
+      inspect: async (): Promise<never> => {
+        throw new Error('/SECRET/private/session/path')
+      },
+      agentPresets: false,
+      status: 502,
+      reason: 'executor_error',
+    },
+  ])(
+    'fails closed for cold $label without leaking lifecycle secrets',
+    async ({ inspect, agentPresets, status, reason }) => {
+      const resume = vi.fn(async (): Promise<never> => {
+        throw new Error('resume must not be called')
+      })
+      const services: Record<string, unknown> = {
+        agents: { get: () => undefined, resume },
+        sessionPersistence: {
+          list: async () => [{ id: 'sess-dsh-1' }],
+          inspect,
+        },
+        agentDefaultModel: {
+          currentSelection: () => ({
+            provider: 'SECRET-PROVIDER',
+            model: 'SECRET-MODEL',
+          }),
+        },
+      }
+      if (agentPresets) services['agentPresets'] = {}
+
+      const message = 'SECRET-MESSAGE-BODY'
+      const { fake, prepared } = await prepareColdDsh(services, message)
+
+      expect(prepared.status).toBe(status)
+      expect(prepared.json).toEqual({ reason })
+      expect(prepared.json.confirmToken).toBeUndefined()
+      expect(resume).not.toHaveBeenCalled()
+      const external = `${JSON.stringify(prepared.json)}${fake.logs.join('\n')}`
+      for (const secret of [
+        'SECRET-HEADER-PRESET',
+        'SECRET-LATEST-PRESET',
+        '/SECRET/private/session/path',
+        'SECRET-PROVIDER',
+        'SECRET-MODEL',
+        message,
+      ]) {
+        expect(external).not.toContain(secret)
+      }
+    },
+  )
+
+  it.each(['agents', 'sessionPersistence'] as const)(
+    'rejects cold prepare with missing %s before issuing a token',
+    async (missing) => {
+      const resume = vi.fn(async (): Promise<never> => {
+        throw new Error('resume must not be called')
+      })
+      const services: Record<string, unknown> = {
+        agentDefaultModel: {
+          currentSelection: () => ({ provider: 'provider', model: 'model' }),
+        },
+      }
+      if (missing !== 'agents') {
+        services['agents'] = { get: () => undefined, resume }
+      }
+      if (missing !== 'sessionPersistence') {
+        services['sessionPersistence'] = absentPresetPersistence
+      }
+
+      const { prepared } = await prepareColdDsh(services)
+      expect(prepared.status).toBe(502)
+      expect(prepared.json).toEqual({ reason: 'executor_error' })
+      expect(prepared.json.confirmToken).toBeUndefined()
+      expect(resume).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([
+    ['absent', null],
+    [
+      'throwing',
+      {
+        currentSelection: () => {
+          throw new Error('default selection unavailable')
+        },
+      },
+    ],
+    ['partial', { currentSelection: () => ({ provider: 'provider-only' }) }],
+    ['blank', { currentSelection: () => ({ provider: '   ', model: '\t' }) }],
+  ] as const)(
+    'rejects a cold target with %s host-default service before issuing a token',
+    async (_case, modelService) => {
+      const resume = vi.fn(async (): Promise<never> => {
+        throw new Error('resume must not be called')
+      })
+      const services: Record<string, unknown> = {
+        agents: { get: () => undefined, resume },
+        sessionPersistence: absentPresetPersistence,
+      }
+      if (modelService !== null) services['agentDefaultModel'] = modelService
+      const fake = createFakeCtx(services)
+      const runtimeDir = await tempRuntimeDir()
+      const server = await startMiniDaemon(join(runtimeDir, 'daemon.sock'), [DSH_SESSION_ROW])
+      cleanups.push(
+        () =>
+          new Promise<void>((resolve) => {
+            server.close(() => resolve())
+          }),
+      )
+      apply(
+        fake.ctx,
+        Config({
+          daemon: { policy: 'adopt-only' },
+          sidecar: { runtimeDir },
+          inject: { enabled: true },
+        }),
+      )
+      cleanups.push(() => fake.disposeAll())
+
+      await vi.waitFor(
+        async () => {
+          const { json } = await fetchState(fake.routes[0]!)
+          expect(json.board.sessions).toHaveLength(1)
+        },
+        { timeout: 3000, interval: 25 },
+      )
+
+      const prepared = await postAction(fake.routes[0]!, {
+        type: 'inject.prepare',
+        target: { agent: 'dsh', sessionId: 'sess-dsh-1' },
+        mode: 'queue',
+        message: 'must not receive a token',
+      })
+      expect(prepared.status).toBe(409)
+      expect(prepared.json).toEqual({ reason: 'dsh_model_unconfigured' })
+      expect(prepared.json.confirmToken).toBeUndefined()
+      expect(resume).not.toHaveBeenCalled()
+    },
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -834,6 +1674,48 @@ describe('M3 fusion wiring', () => {
     }
     expect(timeline.entries.map((e) => e.kind)).toEqual(['message/user'])
     expect(timeline.sources.dshLive).toBe(true)
+  })
+
+  it('uses production sessions.get for pre-subscription live sessions and degrades safely', async () => {
+    const live = {
+      id: 'already-live-1',
+      header: { createdAt: Date.now(), cwd: '/tmp/already-live' },
+      events: [{ type: 'message/user', seq: 7, time: Date.now(), data: { text: 'ready' } }],
+    }
+    let serviceThrows = false
+    const get = vi.fn((sessionId: string) => {
+      if (serviceThrows) throw new Error('sessions service generation departed')
+      return sessionId === live.id ? live : undefined
+    })
+    const fake = createFakeCtx({ sessions: { get } })
+    const runtimeDir = await tempRuntimeDir()
+    apply(fake.ctx, Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir } }))
+    cleanups.push(() => fake.disposeAll())
+
+    // No synthetic session/created event: this traverses apply → route →
+    // FusionQuery → the production DshEventFace.get assembly.
+    const detail = await fetchPath(fake.routes[0]!, `session/${live.id}`)
+    expect(detail.status).toBe(200)
+    expect(get).toHaveBeenCalledWith(live.id)
+    expect((detail.json.unified as { live: boolean }).live).toBe(true)
+    expect(
+      (detail.json.timeline as { entries: Array<{ seq: number }> }).entries.map(
+        (entry) => entry.seq,
+      ),
+    ).toEqual([7])
+
+    // A throwing/unavailable service never escapes through the route.
+    serviceThrows = true
+    const unavailable = await fetchPath(fake.routes[0]!, 'session/unavailable-live')
+    expect(unavailable.status).toBe(404)
+
+    // Once the lazy binding is disposed, its captured service is no longer
+    // consulted and the holder continues with a sidecar-only generation.
+    await fake.disposeEffect('agent-sidecar: fusion dsh feed release')
+    const callsAfterDispose = get.mock.calls.length
+    const afterDispose = await fetchPath(fake.routes[0]!, 'session/after-dispose')
+    expect(afterDispose.status).toBe(404)
+    expect(get).toHaveBeenCalledTimes(callsAfterDispose)
   })
 
   it('without the sessions service, dsh in-process events are simply not observed (no crash)', async () => {
