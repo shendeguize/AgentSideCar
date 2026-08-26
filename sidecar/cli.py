@@ -57,6 +57,7 @@ from sidecar.remote import (
     RemoteWatchEvent,
     RemoteWatchFailure,
     RemoteWatchReady,
+    validate_remote_python_executable,
     watch_remote,
 )
 from sidecar.release import (
@@ -94,6 +95,7 @@ WATCH_HOST_WIDTH = 16
 WATCH_PRODUCER_JOIN_SECONDS = 1.0
 WATCH_QUEUE_ITEMS = 256
 WATCH_QUEUE_POLL_SECONDS = 0.05
+REMOTE_PYTHON_ENV = "AGENT_SIDECAR_REMOTE_PYTHON"
 _EVENT_FIELDS = ("ts", "agent", "session_id", "kind", "text", "extra")
 _SESSION_LINE = (
     "{branch}{agent:<11} {status:<7} {session:<16} {age:>4}"
@@ -287,6 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ALIAS",
         help="select an eligible remote host (repeatable; requires --remote)",
     )
+    list_parser.add_argument(
+        "--remote-python",
+        default=None,
+        metavar="PATH",
+        help="pin an absolute Python path on every remote host (requires --remote)",
+    )
 
     ps_parser = commands.add_parser("ps", help="list running agent processes")
     ps_parser.add_argument("--json", action="store_true", help="emit a JSON array")
@@ -304,6 +312,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="ALIAS",
         help="select an eligible remote host (repeatable; requires --remote)",
+    )
+    status_parser.add_argument(
+        "--remote-python",
+        default=None,
+        metavar="PATH",
+        help="pin an absolute Python path on every remote host (requires --remote)",
     )
 
     watch_parser = commands.add_parser("watch", help="follow normalized session events")
@@ -331,6 +345,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="ALIAS",
         help="select an eligible remote host (repeatable; requires --remote)",
+    )
+    watch_parser.add_argument(
+        "--remote-python",
+        default=None,
+        metavar="PATH",
+        help="pin an absolute Python path on every remote host (requires --remote)",
     )
 
     send_parser = commands.add_parser(
@@ -1010,6 +1030,40 @@ def _report_remote_failures(failures: Iterable[object], stderr: TextIO) -> None:
     stderr.flush()
 
 
+def _python_too_old_host_count(failures: Iterable[object]) -> int:
+    hosts = {
+        str(_aggregate_value(failure, "host", "")).casefold()
+        for failure in failures
+        if _aggregate_value(failure, "code", "") == "python_too_old"
+    }
+    return len(hosts)
+
+
+def _report_remote_python_hint(
+    host_count: int,
+    *,
+    explicit: bool,
+    stderr: TextIO,
+) -> None:
+    if host_count <= 0:
+        return
+    if explicit:
+        stderr.write(
+            "remote: the interpreter set via "
+            "--remote-python/AGENT_SIDECAR_REMOTE_PYTHON is missing or "
+            "older than 3.8 on {} host(s)\n".format(host_count)
+        )
+    else:
+        stderr.write(
+            "remote: no Python >= 3.8 found among bounded candidates on "
+            "{} host(s); use --remote-python <absolute-path> or "
+            "AGENT_SIDECAR_REMOTE_PYTHON to pin an interpreter\n".format(
+                host_count
+            )
+        )
+    stderr.flush()
+
+
 def _report_empty_remote_fleet(stderr: TextIO) -> None:
     stderr.write("remote: no eligible hosts; showing local sessions only\n")
     stderr.flush()
@@ -1077,6 +1131,14 @@ def _run_remote_snapshot(
                 command,
                 args,
             )
+        if args.remote_python_candidates is not None:
+            if not _accepts_keyword_argument(provider, "python_candidates"):
+                raise TypeError(
+                    "remote aggregator does not accept python_candidates"
+                )
+            provider_arguments["python_candidates"] = (
+                args.remote_python_candidates
+            )
         result = provider(command, **provider_arguments)
     except RemoteInventoryError:
         control_error = "remote: inventory\n"
@@ -1098,6 +1160,11 @@ def _run_remote_snapshot(
         _report_remote_failures(
             failure_values,
             stderr,
+        )
+        _report_remote_python_hint(
+            _python_too_old_host_count(failure_values),
+            explicit=args.remote_python_candidates is not None,
+            stderr=stderr,
         )
         remote_rows_value = _aggregate_value(result, "rows", ())
         remote_row_values = (
@@ -2027,7 +2094,26 @@ def _open_remote_watch(
     }
     if _accepts_keyword_argument(provider, "cancel_event"):
         arguments["cancel_event"] = cancel_event
+    if args.remote_python_candidates is not None:
+        if not _accepts_keyword_argument(provider, "python_candidates"):
+            raise TypeError(
+                "remote watch provider does not accept python_candidates"
+            )
+        arguments["python_candidates"] = args.remote_python_candidates
     return provider(**arguments)
+
+
+def _remote_watch_expected_hosts(session: object) -> Optional[set]:
+    try:
+        hosts = getattr(session, "hosts", None)
+        if hosts is None or isinstance(hosts, (str, bytes, Mapping)):
+            return None
+        values = tuple(hosts)
+    except Exception:
+        return None
+    if any(not isinstance(host, str) or not host for host in values):
+        return None
+    return {host.casefold() for host in values}
 
 
 def _run_remote_watch(
@@ -2047,6 +2133,26 @@ def _run_remote_watch(
     remote_queue = _new_watch_queue(remote_watch_queue)
     remote_session = None
     producers: List[threading.Thread] = []
+    remote_expected_hosts = None
+    remote_startup_hosts = set()
+    python_too_old_hosts = set()
+    python_hint_reported = False
+
+    def report_remote_python_hint_if_ready(*, force: bool = False) -> None:
+        nonlocal python_hint_reported
+        if python_hint_reported or not python_too_old_hosts:
+            return
+        if not force and (
+            remote_expected_hosts is None
+            or not remote_expected_hosts.issubset(remote_startup_hosts)
+        ):
+            return
+        _report_remote_python_hint(
+            len(python_too_old_hosts),
+            explicit=args.remote_python_candidates is not None,
+            stderr=stderr,
+        )
+        python_hint_reported = True
 
     try:
         with bounded_execution_signal_guard():
@@ -2070,6 +2176,9 @@ def _run_remote_watch(
                     stderr.flush()
                     return 2
 
+                remote_expected_hosts = _remote_watch_expected_hosts(
+                    remote_session
+                )
                 active_scanner = Scanner() if scanner is None else scanner
                 local_mode = "direct"
                 local_selected: List[Session] = []
@@ -2194,11 +2303,17 @@ def _run_remote_watch(
                     if isinstance(item, RemoteWatchReady):
                         remote_state.ready = True
                         remote_state.ready_hosts.add(item.host)
+                        remote_startup_hosts.add(item.host.casefold())
+                        report_remote_python_hint_if_ready()
                         continue
                     if isinstance(item, RemoteWatchFailure):
                         remote_state.failed = True
                         remote_state.failed_hosts.add(item.host)
                         _report_remote_watch_failure(item, stderr)
+                        remote_startup_hosts.add(item.host.casefold())
+                        if item.code == "python_too_old":
+                            python_too_old_hosts.add(item.host.casefold())
+                        report_remote_python_hint_if_ready()
                         continue
                     if isinstance(item, RemoteWatchEvent):
                         _write_remote_event(
@@ -2210,6 +2325,8 @@ def _run_remote_watch(
                         remote_state.ready = True
                         remote_state.ready_hosts.add(item.host)
                         remote_state.events += 1
+                        remote_startup_hosts.add(item.host.casefold())
+                        report_remote_python_hint_if_ready()
                         continue
                     raise RuntimeError("invalid remote watch item")
 
@@ -2226,11 +2343,17 @@ def _run_remote_watch(
             except (BrokenPipeError, OSError, ValueError):
                 return 1
             finally:
-                _cleanup_watch_producers(
-                    cancel_event,
-                    remote_session,
-                    producers,
-                )
+                try:
+                    try:
+                        report_remote_python_hint_if_ready(force=True)
+                    except (BrokenPipeError, OSError, ValueError):
+                        pass
+                finally:
+                    _cleanup_watch_producers(
+                        cancel_event,
+                        remote_session,
+                        producers,
+                    )
     except KeyboardInterrupt:
         _cleanup_watch_producers(cancel_event, remote_session, producers)
         return 130
@@ -2636,6 +2759,42 @@ def main(
     output = sys.stdout if stdout is None else stdout
     errors = sys.stderr if stderr is None else stderr
     args = build_parser().parse_args(argv)
+
+    if (
+        args.command in ("list", "status", "watch")
+        and args.remote_python is not None
+        and not args.remote
+    ):
+        errors.write(
+            "{}: --remote-python requires --remote\n".format(args.command)
+        )
+        errors.flush()
+        return 2
+
+    args.remote_python_candidates = None
+    if (
+        args.command in ("list", "status", "watch")
+        and args.remote
+    ):
+        remote_python = args.remote_python
+        if remote_python is None and REMOTE_PYTHON_ENV in os.environ:
+            remote_python = os.environ[REMOTE_PYTHON_ENV]
+        if remote_python is not None:
+            try:
+                validated_remote_python = (
+                    validate_remote_python_executable(remote_python)
+                )
+            except ValueError:
+                errors.write(
+                    "{}: --remote-python/{} must be a valid absolute "
+                    "executable path\n".format(
+                        args.command,
+                        REMOTE_PYTHON_ENV,
+                    )
+                )
+                errors.flush()
+                return 2
+            args.remote_python_candidates = (validated_remote_python,)
 
     if (
         args.command in ("list", "status")

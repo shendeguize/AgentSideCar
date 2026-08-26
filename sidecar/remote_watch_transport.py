@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shlex
 import threading
-from typing import Any, Callable, Iterator, Optional, Tuple
+from typing import Any, Callable, Iterator, Optional, Sequence, Tuple
 
 from sidecar.json_limits import JSONLimitError, JSONLimits, JSONSyntaxError, parse_json
 from sidecar.process_runner import (
@@ -16,9 +16,12 @@ from sidecar.process_runner import (
     BoundedLineStreamTimeoutError,
 )
 from sidecar.remote_transport import (
+    REMOTE_PYTHON_CANDIDATES,
+    _bootstrap_python_executable,
     _failure_code,
     _ssh_command_argv,
     _validated_command_executable,
+    _validated_probe_candidates,
     probe_remote_python,
 )
 from sidecar.remote_types import (
@@ -616,6 +619,7 @@ def open_remote_watch_host(
     artifact: bytes,
     *,
     from_start: bool = False,
+    python_candidates: Sequence[str] = REMOTE_PYTHON_CANDIDATES,
     runner: Optional[Callable[..., object]] = None,
     stream_factory: Optional[Callable[..., object]] = None,
     cancel_event: Optional[threading.Event] = None,
@@ -636,8 +640,10 @@ def open_remote_watch_host(
         raise ValueError("invalid zipapp artifact")
     if type(from_start) is not bool:
         raise TypeError("from_start must be bool")
+    probe_candidates = _validated_probe_candidates(python_candidates)
     hit, failure = probe_remote_python(
         host,
+        candidates=probe_candidates,
         runner=runner,
         timeout=PROBE_TIMEOUT_SECONDS,
         cancel_event=cancel_event,
@@ -646,6 +652,7 @@ def open_remote_watch_host(
         return None, failure
     if hit is None:
         return None, RemoteFailure(host.alias, "protocol")
+    bootstrap_executable = _bootstrap_python_executable(probe_candidates, hit)
     if cancel_event is not None and cancel_event.is_set():
         return None, RemoteFailure(host.alias, "timeout")
 
@@ -655,7 +662,7 @@ def open_remote_watch_host(
             remote_watch_ssh_argv(
                 host.alias,
                 from_start=from_start,
-                python_executable=hit.executable,
+                python_executable=bootstrap_executable,
             ),
             artifact,
             line_limit=MAX_WATCH_LINE_BYTES,

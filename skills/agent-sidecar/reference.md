@@ -299,11 +299,24 @@ persisted session.
 
 ## Remote snapshots
 
+```text
+agent-sidecar list --remote --remote-python /usr/bin/python3.11 --json
+agent-sidecar status --remote --remote-python /usr/bin/python3.11 --json
+```
+
 `list --remote` and `status --remote` merge local sessions with snapshots from
 eligible DSH Center hosts. `--host <host-alias>` is repeatable and
 case-insensitive, requires `--remote`, and limits only the remote targets.
 Human output adds a `HOST` column. Remote `list` applies the same 48-hour
 default as local `list`; `--all` requests the full available history.
+
+`--remote-python <absolute-path>` requires `--remote` and pins the same path on
+every selected host for the invocation. It is fleet-wide; no per-host
+interpreter configuration exists. `AGENT_SIDECAR_REMOTE_PYTHON` supplies the
+same fleet-wide value only when the option is absent. Strict selection
+precedence is CLI option, environment variable, then bounded default
+candidates. The environment variable is read only for remote-enabled `list`,
+`status`, and `watch`; all other invocations ignore it.
 
 Inventory comes from `dshc ls --json`, or from the DSH Center config and state
 files under `DSHC_HOME` or `~/.dsh_center` when that command is unavailable.
@@ -320,18 +333,40 @@ differ from an interactive login's.
 The probe uses `sh -c` only to give its inner candidate loop fixed POSIX
 syntax. The outer command string remains subject to parsing by the remote login
 shell. The existing multiline bootstrap already establishes this boundary, so
-this is not a shell-independence guarantee. The resolved executable path is
-passed to the bootstrap only within that same host session. Every invocation
-probes afresh; no result or path is cached or persisted locally or remotely.
-If the bounded candidates are exhausted, the host reports the existing
-`python_too_old` code. The error-code set is unchanged. Remote hosts do not
-need Agent Sidecar or third-party Python packages installed. Host keys must
-already be trusted and noninteractive authentication must already work.
+this is not a shell-independence guarantee. Under bounded default discovery,
+the validated executable path returned by the qualifying interpreter is passed
+to the bootstrap only within that same host session. Every invocation probes
+afresh; no result or path is cached or persisted locally or remotely. If the
+bounded candidates are exhausted, the host reports the existing
+`python_too_old` code. The error-code set is unchanged. Remote hosts do not need
+Agent Sidecar or third-party Python packages installed. Host keys must already
+be trusted and noninteractive authentication must already work.
+
+An explicit value must be a nonempty absolute path of at most 1024 characters,
+contain only `[A-Za-z0-9._+/-]`, and have no `..` path segment. Invalid option
+or environment values are rejected locally with exit `2` before any SSH
+connection. A valid path replaces the defaults with a one-element probe
+sequence. It is passed as a separate argv token to the unchanged fixed probe
+script and bootstrap command, never inserted into script text. The bootstrap
+uses that operator token verbatim. All probe response fields remain validated,
+but a differing returned executable cannot replace the explicit pin. If that
+path is missing, non-executable, or reports Python older than 3.8 on a host,
+the host reports `python_too_old`; no default candidate or bare `python3`
+fallback is attempted.
 
 Host failures are isolated and reported on stderr using one of `host_key`,
 `auth`, `timeout`, `unreachable`, `python_too_old`, `resource_limit`,
 `protocol`, or `remote`. `resource_limit` identifies a bounded-data violation.
 Successful and local rows remain available during partial failure.
+
+After all per-host `python_too_old` lines, the CLI emits at most one aggregate
+hint generated locally. Default-candidate exhaustion uses
+`remote: no Python >= 3.8 found among bounded candidates on {n} host(s); use
+--remote-python <absolute-path> or AGENT_SIDECAR_REMOTE_PYTHON to pin an
+interpreter`. An unsatisfied explicit option or environment pin uses
+`remote: the interpreter set via
+--remote-python/AGENT_SIDECAR_REMOTE_PYTHON is missing or older than 3.8 on {n}
+host(s)`.
 
 - Exit `0`: at least one requested remote host succeeded, including a partial
   fleet success, or the eligible fleet was empty. The empty case reports a
@@ -349,26 +384,31 @@ Remote snapshots do not include `tui`, daemon aggregation, or `send`.
 agent-sidecar watch --all --remote
 agent-sidecar watch --all --remote --host <host-alias>
 agent-sidecar watch --all --remote --from-start --json
+agent-sidecar watch --all --remote --remote-python /usr/bin/python3.11 --json
 ```
 
 Remote watch requires `--all` and follows local sessions and eligible remote
 hosts concurrently. `--host <host-alias>` is repeatable, case-insensitive, and
 limits only the remote hosts; local observation remains enabled. `--from-start`
 replays available history on both sides before following new events. A remote
-session prefix is unsupported.
+session prefix is unsupported. Its `--remote-python` option, environment
+precedence, fleet-wide scope, local validation, one-element probe, fail-closed
+errors, and aggregate hint are identical to remote snapshots.
 
 Inventory and eligibility match remote snapshots: DSH Center hosts must be
 enabled, nonlocal, non-orphaned, and in the `ready` or `no_dsh` phase. Each
 selected host uses the remote-snapshot probe contract: `python3` first, then
 `python3.14` down through `python3.8`, selecting the first available Python
 3.8+ interpreter from the noninteractive SSH shell's `PATH`. The selected
-executable path is bound only to the bootstrap in that host session; each
-invocation probes again without a local or remote cache. `sh -c` fixes only the
-inner POSIX syntax, while the remote login shell still parses the outer command
-and the existing multiline bootstrap. Candidate exhaustion remains
-`python_too_old`. Agent Sidecar uses strict, noninteractive SSH, streams a
-bounded deterministic zipapp built from the active installed `sidecar`
-package, writes it to a private temporary remote file, preflights and runs it
+executable path from bounded default discovery is bound only to the bootstrap
+in that host session; an explicit pin instead retains the exact operator token
+as described above. Each invocation probes again without a local or remote
+cache. `sh -c` fixes only the inner POSIX syntax, while the remote login shell
+still parses the outer command and the existing multiline bootstrap. Candidate
+exhaustion remains `python_too_old`. Agent Sidecar uses strict, noninteractive
+SSH, streams a bounded deterministic zipapp built from the active installed
+`sidecar` package, writes it to a private temporary remote file, preflights and
+runs it
 in isolated Python mode, then removes it during cleanup. The active package is
 checkout source, installed site-packages, or an embedded zipapp package as
 applicable; nothing is installed remotely.

@@ -7,16 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Remote `list`, `status`, and `watch` now accept
+  `--remote-python <absolute-path>` and `AGENT_SIDECAR_REMOTE_PYTHON` as a
+  fleet-wide interpreter pin, with CLI-over-environment precedence, local
+  validation, and fail-closed per-host diagnostics without silent fallback.
+  Bootstrap preserves that explicit operator token verbatim; a differing
+  validated executable in the probe response cannot replace it.
+
 ### Changed
 
 - Remote observation now accepts Python 3.8+ on SSH targets instead of 3.9+;
   local installation and tooling continue to require Python 3.9+.
 - Remote observation now probes the bounded candidate order `python3`, then
   `python3.14` through `python3.8`, and uses the first available interpreter
-  meeting the Python 3.8+ target floor. The probe reports the resolved
-  executable path, which is reused only by the bootstrap in the same host
-  session; every invocation probes afresh without local or remote persistence.
-  Exhausting the candidates retains the existing `python_too_old` code.
+  meeting the Python 3.8+ target floor. In bounded default discovery, the probe
+  reports the resolved executable path, which is reused only by the bootstrap
+  in the same host session; every invocation probes afresh without local or
+  remote persistence. Exhausting the candidates retains the existing
+  `python_too_old` code.
 
 ## [0.6.0] - 2026-08-26
 

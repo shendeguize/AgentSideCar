@@ -120,7 +120,7 @@ class ProbeResult:
             )
         ):
             raise ValueError("invalid remote Python version")
-        _validate_python_executable(self.executable)
+        validate_remote_python_executable(self.executable)
 
 
 @dataclass(frozen=True)
@@ -205,7 +205,9 @@ def _validate_alias(alias: object) -> str:
     return alias
 
 
-def _validate_python_executable(value: object) -> str:
+def validate_remote_python_executable(value: object) -> str:
+    """Validate one absolute remote Python executable path."""
+
     if (
         not isinstance(value, str)
         or not value
@@ -216,6 +218,9 @@ def _validate_python_executable(value: object) -> str:
     ):
         raise ValueError("invalid remote Python executable")
     return value
+
+
+_validate_python_executable = validate_remote_python_executable
 
 
 def _validate_recent_seconds(value: object) -> float:

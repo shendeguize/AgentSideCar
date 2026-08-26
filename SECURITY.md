@@ -94,13 +94,27 @@ SSH configuration, pre-trusted host keys, and noninteractive authentication;
 it does not enroll host keys, manage credentials, or establish an additional
 application-layer encryption boundary.
 
-The remote-produced interpreter executable path is validated locally before
-reuse: it must be a nonempty absolute path of at most 1024 characters, contain
-only `[A-Za-z0-9._+/-]`, and have no `..` path segment. It is then inserted as
-a separate token through `shlex.join`. Probe and bootstrap use separate SSH
-connections, so replacement at that path remains possible between them,
-equivalent to the prior bare-Python re-resolution window. This is session-local
-path reuse, not inode or file-descriptor binding.
+`--remote-python` and `AGENT_SIDECAR_REMOTE_PYTHON` are operator-controlled
+inputs at the local-to-remote execution boundary. The value must be a nonempty
+absolute path of at most 1024 characters, contain only
+`[A-Za-z0-9._+/-]`, and have no `..` path segment; invalid values are rejected
+locally before any SSH connection. A valid value is passed through
+`shlex.join` as one argv token to the fixed probe script and bootstrap command,
+never interpolated into script text. The probe uses only that one candidate.
+If it is missing, non-executable, or older than Python 3.8 on a host, that host
+fails closed with `python_too_old`; Agent Sidecar does not fall back to another
+candidate or bare `python3`. The bootstrap uses the same validated operator
+token verbatim. Probe response fields remain fully validated, but a differing
+returned executable cannot replace an explicit pin.
+
+For bounded default discovery, the remote-produced interpreter executable path
+is validated locally before reuse: it must be a nonempty absolute path of at
+most 1024 characters, contain only `[A-Za-z0-9._+/-]`, and have no `..` path
+segment. It is then inserted as a separate token through `shlex.join`. Probe
+and bootstrap use separate SSH connections, so replacement at the selected
+bootstrap path remains possible between them, equivalent to the prior
+bare-Python re-resolution window. This is session-local path reuse, not inode
+or file-descriptor binding.
 
 The active Agent Sidecar package is streamed as a bounded temporary zipapp,
 executed with remote Python, and removed during cleanup. Remote data is then
