@@ -16,7 +16,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, Callable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from sidecar import __version__
 from sidecar.json_limits import JSONLimitError, JSONLimits, JSONSyntaxError, parse_json
@@ -83,6 +83,7 @@ _CALLBACK_ERROR_CODES = frozenset(
         "session_unavailable",
     )
 )
+_KIMI_CHILD_ENV_PREFIXES = ("DYLD_", "NODE_")
 _TOOL_KINDS = frozenset(
     (
         "read",
@@ -179,6 +180,16 @@ class _DriverFailure(Exception):
         super().__init__("Kimi ACP attempt failed")
         self.code = code
         self.busy = busy
+
+
+def build_kimi_child_env() -> Dict[str, str]:
+    """Return a fresh host environment without Node or dyld injection hooks."""
+
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(_KIMI_CHILD_ENV_PREFIXES)
+    }
 
 
 def _prompt_boundary(value: DuplexWriteBoundary) -> PromptWriteBoundary:
@@ -1330,6 +1341,7 @@ def run_kimi_acp(
             stdout_limit=ACP_STDOUT_BYTES,
             stderr_limit=ACP_STDERR_BYTES,
             cwd=validated.cwd,
+            env=build_kimi_child_env(),
             require_descendant_containment=True,
             monotonic=monotonic,
         )
@@ -1532,5 +1544,6 @@ __all__ = [
     "KimiAcpRequest",
     "KimiAcpResult",
     "PromptWriteBoundary",
+    "build_kimi_child_env",
     "run_kimi_acp",
 ]

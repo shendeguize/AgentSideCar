@@ -118,6 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Sanitized Node and macOS dyld injection variables from every bound Kimi child
+  environment while preserving normal user, Kimi home, and locale settings.
 - Documented the exact Kimi filesystem/runtime/process checks without claiming
   cryptographic request-to-provider-turn binding. Kimi advertises no MCP,
   filesystem, or terminal capability, and its message is absent from both the

@@ -31,6 +31,7 @@ from sidecar.kimi_acp import (
     AcpPhase,
     KimiAcpResult,
     PromptWriteBoundary,
+    build_kimi_child_env,
     run_kimi_acp,
 )
 from sidecar.model import Session, Status
@@ -2398,19 +2399,32 @@ class KimiSendIntegrationTests(unittest.TestCase):
                     "NODE_OPTIONS": "--require=/definitely/missing.js",
                     "NODE_PATH": "/definitely/missing",
                     "DYLD_INSERT_LIBRARIES": "/definitely/missing.dylib",
+                    "DYLD_FRAMEWORK_PATH": "/definitely/missing-frameworks",
+                    "DYLD_FALLBACK_FRAMEWORK_PATH": "/definitely/fallback-frameworks",
+                    "DYLD_FALLBACK_LIBRARY_PATH": "/definitely/fallback-libraries",
+                    "DYLD_LIBRARY_PATH": "/definitely/missing-libraries",
                 },
                 clear=False,
             ):
                 inject_module._probe_bound_kimi_version(bound, run_bounded)
                 inject_module._probe_bound_kimi_initialize(bound)
             self.assertEqual(0o500, bound_path.stat().st_mode & 0o777)
-            process = BoundedDuplexLineProcess(
-                (bound.executable, "acp"),
-                line_limit=256 * 1024,
-                stdout_limit=1024 * 1024,
-                stderr_limit=64 * 1024,
-                require_descendant_containment=False,
-            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "NODE_OPTIONS": "--require=/definitely/missing.js",
+                    "DYLD_INSERT_LIBRARIES": "/definitely/missing.dylib",
+                },
+                clear=False,
+            ):
+                process = BoundedDuplexLineProcess(
+                    (bound.executable, "acp"),
+                    line_limit=256 * 1024,
+                    stdout_limit=1024 * 1024,
+                    stderr_limit=64 * 1024,
+                    env=build_kimi_child_env(),
+                    require_descendant_containment=False,
+                )
             deadline = time.monotonic() + 30
             process.write_line(
                 json.dumps(
@@ -2967,6 +2981,89 @@ class KimiSendIntegrationTests(unittest.TestCase):
         self.assertEqual("unsupported_kimi", raised.exception.code)
         process.terminate_tree.assert_called_once()
         process.close.assert_called_once_with()
+
+    def test_kimi_probes_receive_sanitized_preserving_environments(self):
+        manifest = inject_module._capture_kimi_runtime_manifest(
+            str(self.executable),
+            inject_module._executable_identity(str(self.executable)),
+        )
+        manifest = dataclasses.replace(
+            manifest,
+            node=dataclasses.replace(
+                manifest.package_assets[0],
+                relative_path="bin/node",
+            ),
+        )
+        bound = mock.Mock(manifest=manifest, executable=str(self.executable))
+        version_runner = mock.Mock(
+            return_value=BoundedProcessResult(
+                args=(str(self.executable), "--version"),
+                returncode=0,
+                stdout=(KIMI_SUPPORTED_VERSION + "\n").encode("ascii"),
+                stderr=b"",
+            )
+        )
+        initialize_process = mock.Mock()
+        initialize_process.read_line.return_value = json.dumps(
+            {
+                "id": 1,
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {
+                        "loadSession": True,
+                        "sessionCapabilities": {"list": {}, "resume": {}},
+                    },
+                },
+            }
+        ).encode("utf-8")
+        initialize_process.terminate_tree.return_value = mock.Mock(
+            cleanup_complete=True
+        )
+        hostile = {
+            "NODE_OPTIONS": "--require=/hostile.js",
+            "NODE_PATH": "/hostile/node",
+            "NODE_ENV": "hostile",
+            "DYLD_INSERT_LIBRARIES": "/hostile/insert.dylib",
+            "DYLD_FRAMEWORK_PATH": "/hostile/frameworks",
+            "DYLD_FALLBACK_FRAMEWORK_PATH": "/hostile/fallback-frameworks",
+            "DYLD_FALLBACK_LIBRARY_PATH": "/hostile/fallback-libraries",
+            "DYLD_LIBRARY_PATH": "/hostile/libraries",
+            "DYLD_PRINT_LIBRARIES": "1",
+        }
+        preserved = {
+            "HOME": "/safe/home",
+            "KIMI_CODE_HOME": "/safe/kimi",
+            "LANG": "C",
+            "BENIGN_MARKER": "preserved",
+        }
+
+        with mock.patch.dict(
+            os.environ,
+            {**hostile, **preserved},
+            clear=True,
+        ), mock.patch.object(
+            inject_module,
+            "BoundedDuplexLineProcess",
+            return_value=initialize_process,
+        ) as initialize_factory:
+            inject_module._probe_bound_kimi_version(bound, version_runner)
+            inject_module._probe_bound_kimi_initialize(bound)
+
+        version_env = version_runner.call_args.kwargs["env"]
+        initialize_env = initialize_factory.call_args.kwargs["env"]
+        self.assertEqual(version_env, initialize_env)
+        self.assertIsNot(version_env, initialize_env)
+        for child_env in (version_env, initialize_env):
+            self.assertFalse(
+                any(
+                    name.startswith(("NODE_", "DYLD_"))
+                    for name in child_env
+                )
+            )
+            for name, value in preserved.items():
+                self.assertEqual(value, child_env[name])
+        initialize_process.terminate_tree.assert_called_once()
+        initialize_process.close.assert_called_once_with()
 
     def test_kimi_completed_is_unknown_even_with_durable_unique_turn(self):
         plan = self.plan("durable private")

@@ -15,6 +15,7 @@ from sidecar.kimi_acp import (
     AcpPhase,
     KimiAcpRequest,
     PromptWriteBoundary,
+    build_kimi_child_env,
     run_kimi_acp,
 )
 from sidecar.process_runner import (
@@ -344,6 +345,59 @@ class KimiAcpTests(unittest.TestCase):
         self.assertNotIn(SECRET_MESSAGE, repr(result))
         self.assertEqual(PromptWriteBoundary.COMPLETE, result.prompt_write)
         self.assertEqual(AcpPhase.PROMPT_SETTLED, result.phase)
+
+    def test_actual_process_factory_receives_fresh_sanitized_environment(self):
+        holder = {}
+        hostile = {
+            "NODE_OPTIONS": "--require=/hostile.js",
+            "NODE_PATH": "/hostile/node",
+            "NODE_ENV": "hostile",
+            "DYLD_INSERT_LIBRARIES": "/hostile/insert.dylib",
+            "DYLD_FRAMEWORK_PATH": "/hostile/frameworks",
+            "DYLD_FALLBACK_FRAMEWORK_PATH": "/hostile/fallback-frameworks",
+            "DYLD_FALLBACK_LIBRARY_PATH": "/hostile/fallback-libraries",
+            "DYLD_LIBRARY_PATH": "/hostile/libraries",
+            "DYLD_PRINT_LIBRARIES": "1",
+        }
+        preserved = {
+            "HOME": "/safe/home",
+            "KIMI_CODE_HOME": "/safe/kimi",
+            "LC_ALL": "C",
+            "BENIGN_MARKER": "preserved",
+        }
+
+        def factory(argv, **kwargs):
+            process = ScriptedProcess(
+                argv,
+                lifecycle_responses(self.cwd),
+                **kwargs,
+            )
+            holder["process"] = process
+            return process
+
+        with mock.patch.dict(os.environ, {**hostile, **preserved}, clear=True):
+            first = build_kimi_child_env()
+            second = build_kimi_child_env()
+            first["BENIGN_MARKER"] = "changed"
+            self.assertEqual("preserved", second["BENIGN_MARKER"])
+            self.assertEqual(hostile, {name: os.environ[name] for name in hostile})
+            result = run_kimi_acp(
+                self.request,
+                before_prompt=lambda _identity: None,
+                process_factory=factory,
+            )
+
+        child_env = holder["process"].kwargs["env"]
+        self.assertIsNone(result.error_code)
+        self.assertIsNot(child_env, os.environ)
+        self.assertFalse(
+            any(
+                name.startswith(("NODE_", "DYLD_"))
+                for name in child_env
+            )
+        )
+        for name, value in preserved.items():
+            self.assertEqual(value, child_env[name])
 
     def test_valid_split_coalesced_and_interleaved_updates(self):
         for scenario in ("valid", "split", "coalesced"):
