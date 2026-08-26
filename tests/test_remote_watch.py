@@ -66,6 +66,20 @@ def completed(argv, version=(3, 11, 0), returncode=0, stderr=b""):
 
 
 def process_exists(pid):
+    if sys.platform.startswith("linux"):
+        try:
+            payload = Path("/proc/{}/stat".format(pid)).read_text(encoding="ascii")
+        except FileNotFoundError:
+            return False
+        except OSError:
+            pass
+        else:
+            suffix = payload.rsplit(")", 1)
+            fields = suffix[1].split() if len(suffix) == 2 else ()
+            if fields:
+                # A killed non-child can remain a zombie under non-reaping PID 1.
+                # It is terminated even though kill(pid, 0) still reports existence.
+                return fields[0] != "Z"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -73,6 +87,28 @@ def process_exists(pid):
     except PermissionError:
         return True
     return True
+
+
+class ProcessLivenessTests(unittest.TestCase):
+    def test_process_exists_distinguishes_linux_live_and_zombie_states(self):
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=(
+                "123 (live child) S 1 2 3\n",
+                "124 (zombie child) Z 1 2 3\n",
+            ),
+        ), mock.patch.object(os, "kill") as kill:
+            self.assertTrue(process_exists(123))
+            self.assertFalse(process_exists(124))
+        kill.assert_not_called()
+
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            os,
+            "kill",
+        ) as kill:
+            self.assertTrue(process_exists(125))
+        kill.assert_called_once_with(125, 0)
 
 
 class FakeLineStream:

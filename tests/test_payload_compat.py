@@ -355,6 +355,15 @@ class _KnownPython39HazardScanner(ast.NodeVisitor):
                         ", ".join(unsupported)
                     ),
                 )
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "shutdown"
+            and "cancel_futures" in {keyword.arg for keyword in node.keywords}
+        ):
+            self._report(
+                node,
+                "known Python 3.9 shutdown keyword: cancel_futures",
+            )
         self.generic_visit(node)
 
     def _visit_function_decorators(self, node):
@@ -439,6 +448,17 @@ class RemotePayloadCompatibilityTests(unittest.TestCase):
                 "\n".join(findings)
             ),
         )
+
+    def test_known_hazard_scanner_detects_executor_cancel_futures(self):
+        source = "worker.shutdown(wait=True, cancel_futures=True)"
+        self.assertEqual(
+            [(1, "known Python 3.9 shutdown keyword: cancel_futures")],
+            _known_hazards(_parse(source, "<incompatible>")),
+        )
+
+    def test_known_hazard_scanner_allows_shutdown_without_cancel_futures(self):
+        source = "worker.shutdown(wait=True)"
+        self.assertEqual([], _known_hazards(_parse(source, "<compatible>")))
 
 
 if __name__ == "__main__":

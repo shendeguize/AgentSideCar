@@ -143,6 +143,20 @@ def _row_sort_key(row: Mapping[str, Any]) -> Tuple[str, str, str, str]:
     )
 
 
+def _cancel_pending_futures(
+    futures: Iterable[concurrent.futures.Future],
+) -> None:
+    """Cancel submitted work that has not started.
+
+    This is the Python 3.8-compatible equivalent of the pending-work portion
+    of ``Executor.shutdown(cancel_futures=True)``. Running work cannot be
+    force-cancelled here, so callers must signal it separately before cleanup.
+    """
+
+    for future in futures:
+        future.cancel()
+
+
 def watch_remote(
     *,
     hosts: Optional[Sequence[RemoteHost]] = None,
@@ -359,9 +373,9 @@ def aggregate_remote(
                     if future.done():
                         consume(future, futures.pop(future))
                 cancel_event.set()
-                for future, host in futures.items():
-                    future.cancel()
+                for host in futures.values():
                     failures.append(RemoteFailure(host.alias, "timeout"))
+                _cancel_pending_futures(tuple(futures))
                 for host in targets[next_target:]:
                     failures.append(RemoteFailure(host.alias, "timeout"))
                 cleanup_remaining = max(0.0, wall_deadline - monotonic())
@@ -372,15 +386,15 @@ def aggregate_remote(
                     )
         except BaseException:
             cancel_event.set()
-            for future in futures:
-                future.cancel()
+            _cancel_pending_futures(tuple(futures))
             process_registry.kill_all()
-            executor.shutdown(wait=True, cancel_futures=True)
+            executor.shutdown(wait=True)
             raise
 
+    # Deadline cancellation happens before the reserved cleanup wait so queued
+    # work cannot begin while running workers are observing ``cancel_event``.
     executor.shutdown(
-        wait=not deadline_expired or all(future.done() for future in futures),
-        cancel_futures=deadline_expired,
+        wait=not deadline_expired or all(future.done() for future in futures)
     )
 
     if aggregate_overflow:

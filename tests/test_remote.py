@@ -1,3 +1,4 @@
+import concurrent.futures
 import dataclasses
 import hashlib
 import io
@@ -107,6 +108,20 @@ def minimal_session_row(session_id="s"):
 
 
 def process_exists(pid):
+    if sys.platform.startswith("linux"):
+        try:
+            payload = Path("/proc/{}/stat".format(pid)).read_text(encoding="ascii")
+        except FileNotFoundError:
+            return False
+        except OSError:
+            pass
+        else:
+            suffix = payload.rsplit(")", 1)
+            fields = suffix[1].split() if len(suffix) == 2 else ()
+            if fields:
+                # A killed non-child can remain a zombie under non-reaping PID 1.
+                # It is terminated even though kill(pid, 0) still reports existence.
+                return fields[0] != "Z"
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -114,6 +129,55 @@ def process_exists(pid):
     except PermissionError:
         return True
     return True
+
+
+class ProcessLivenessTests(unittest.TestCase):
+    def test_process_exists_distinguishes_linux_live_and_zombie_states(self):
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            Path,
+            "read_text",
+            side_effect=(
+                "123 (live child) S 1 2 3\n",
+                "124 (zombie child) Z 1 2 3\n",
+            ),
+        ), mock.patch.object(os, "kill") as kill:
+            self.assertTrue(process_exists(123))
+            self.assertFalse(process_exists(124))
+        kill.assert_not_called()
+
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            os,
+            "kill",
+        ) as kill:
+            self.assertTrue(process_exists(125))
+        kill.assert_called_once_with(125, 0)
+
+
+class TrackingFuture(concurrent.futures.Future):
+    def __init__(self):
+        super().__init__()
+        self.cancel_calls = 0
+
+    def cancel(self):
+        self.cancel_calls += 1
+        return super().cancel()
+
+
+class Python38StyleExecutor:
+    """Controlled executor whose shutdown accepts only Python 3.8 arguments."""
+
+    def __init__(self, *futures):
+        self._futures = iter(futures)
+        self.cancel_events = []
+        self.shutdown_calls = []
+
+    def submit(self, function, *args, **kwargs):
+        del function, args
+        self.cancel_events.append(kwargs["cancel_event"])
+        return next(self._futures)
+
+    def shutdown(self, wait=True):
+        self.shutdown_calls.append(wait)
 
 
 class RemoteDataModelTests(unittest.TestCase):
@@ -1724,6 +1788,90 @@ class AggregationTests(unittest.TestCase):
         for exit_signal in (signal.SIGTERM, signal.SIGHUP):
             with self.subTest(exit_signal=exit_signal):
                 self._assert_worker_signal_cleanup(exit_signal)
+
+    def test_python38_shutdown_signature_preserves_normal_completion(self):
+        future = TrackingFuture()
+        future.set_result(((), None))
+        executor = Python38StyleExecutor(future)
+
+        with mock.patch.object(
+            remote.concurrent.futures,
+            "ThreadPoolExecutor",
+            return_value=executor,
+        ):
+            result = remote.aggregate_remote(
+                "status",
+                hosts=(remote.RemoteHost("edge", "ready"),),
+                artifact=b"zipapp",
+            )
+
+        self.assertEqual(("edge",), result.succeeded)
+        self.assertEqual(0, future.cancel_calls)
+        self.assertEqual([True], executor.shutdown_calls)
+        self.assertFalse(executor.cancel_events[0].is_set())
+
+    def test_python38_shutdown_signature_cancels_pending_work_on_deadline(self):
+        running = TrackingFuture()
+        self.assertTrue(running.set_running_or_notify_cancel())
+        pending = TrackingFuture()
+        executor = Python38StyleExecutor(running, pending)
+        monotonic = iter((0.0, 0.0, 0.0, 1.0, 1.0)).__next__
+        hosts = (
+            remote.RemoteHost("running", "ready"),
+            remote.RemoteHost("pending", "ready"),
+        )
+
+        with mock.patch.object(
+            remote.concurrent.futures,
+            "ThreadPoolExecutor",
+            return_value=executor,
+        ):
+            result = remote.aggregate_remote(
+                "status",
+                hosts=hosts,
+                max_workers=2,
+                artifact=b"zipapp",
+                fleet_timeout=0.1,
+                monotonic=monotonic,
+            )
+
+        self.assertFalse(running.cancelled())
+        self.assertTrue(pending.cancelled())
+        self.assertEqual(1, running.cancel_calls)
+        self.assertEqual(1, pending.cancel_calls)
+        self.assertEqual([False], executor.shutdown_calls)
+        self.assertTrue(all(event.is_set() for event in executor.cancel_events))
+        self.assertEqual(
+            [("pending", "timeout"), ("running", "timeout")],
+            [(failure.host, failure.code) for failure in result.failures],
+        )
+
+    def test_python38_shutdown_signature_cancels_pending_work_on_exception(self):
+        pending = TrackingFuture()
+        executor = Python38StyleExecutor(pending)
+
+        with mock.patch.object(
+            remote.concurrent.futures,
+            "ThreadPoolExecutor",
+            return_value=executor,
+        ):
+            with mock.patch.object(
+                remote.concurrent.futures,
+                "wait",
+                side_effect=RuntimeError("wait failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "wait failed"):
+                    remote.aggregate_remote(
+                        "status",
+                        hosts=(remote.RemoteHost("edge", "ready"),),
+                        artifact=b"zipapp",
+                        monotonic=lambda: 0.0,
+                    )
+
+        self.assertTrue(pending.cancelled())
+        self.assertEqual(1, pending.cancel_calls)
+        self.assertEqual([True], executor.shutdown_calls)
+        self.assertTrue(executor.cancel_events[0].is_set())
 
     def test_partial_fleet_preserves_success_and_sorts_deterministically(self):
         hosts = (
