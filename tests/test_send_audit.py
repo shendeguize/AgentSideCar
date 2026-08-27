@@ -1220,6 +1220,155 @@ class SendAuditStoreTests(unittest.TestCase):
         self.assertIsNotNone(replay)
         self.assertEqual("request_pending", replay.outcome)
 
+    def test_terminal_lifecycle_rejects_unknown_conflict_and_duplicate(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-terminal", self.identity)
+        different = make_audit_identity(
+            agent="claude",
+            session_id="different-session",
+            project="/project/sensitive",
+            executable_basename="claude",
+            confirmation_mode="allow_write",
+            message=b"message-sensitive",
+        )
+        with store.open_namespace() as namespace:
+            with self.assertRaises(AuditError) as raised:
+                namespace.append_terminal(
+                    "unknown-request",
+                    self.identity,
+                    outcome="completed",
+                    delivery="delivered",
+                    error=None,
+                    returncode=0,
+                )
+            self.assertEqual("audit_corrupt", raised.exception.code)
+            with self.assertRaises(AuditError) as raised:
+                namespace.append_terminal(
+                    "request-terminal",
+                    different,
+                    outcome="completed",
+                    delivery="delivered",
+                    error=None,
+                    returncode=0,
+                )
+            self.assertEqual("request_conflict", raised.exception.code)
+            receipt = namespace.append_terminal(
+                "request-terminal",
+                self.identity,
+                outcome="completed",
+                delivery="delivered",
+                error=None,
+                returncode=0,
+            )
+            self.assertEqual("completed", receipt.outcome)
+            with self.assertRaises(AuditError) as raised:
+                namespace.append_terminal(
+                    "request-terminal",
+                    self.identity,
+                    outcome="completed",
+                    delivery="delivered",
+                    error=None,
+                    returncode=0,
+                )
+            self.assertEqual("audit_corrupt", raised.exception.code)
+
+    def test_terminal_only_history_is_corrupt(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-history", self.identity)
+        with store.open_namespace() as namespace:
+            namespace.append_terminal(
+                "request-history",
+                self.identity,
+                outcome="completed",
+                delivery="delivered",
+                error=None,
+                returncode=0,
+            )
+        audit_path = self.runtime / AUDIT_FILE_NAME
+        lines = audit_path.read_text(encoding="utf-8").splitlines()
+        terminal_only = [
+            line
+            for line in lines
+            if json.loads(line)["outcome"] != "pending"
+        ]
+        audit_path.write_text("\n".join(terminal_only) + "\n", encoding="utf-8")
+        audit_path.chmod(0o600)
+        with self.assertRaises(AuditError) as raised:
+            store.reserve("request-history-next", self.identity)
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+    def test_short_and_missing_key_are_corrupt(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-key-shape", self.identity)
+        key_path = self.runtime / AUDIT_KEY_NAME
+        original = key_path.read_bytes()
+        key_path.write_bytes(original[:31])
+        key_path.chmod(0o600)
+        with self.assertRaises(AuditError) as raised:
+            store.reserve("request-key-short", self.identity)
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+        key_path.write_bytes(original)
+        key_path.chmod(0o600)
+        key_path.unlink()
+        with self.assertRaises(AuditError) as raised:
+            store.reserve("request-key-missing", self.identity)
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+    def test_missing_marker_with_retained_audit_is_corrupt(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-marker-missing", self.identity)
+        _marker_path(self.home, self.runtime).unlink()
+        with self.assertRaises(AuditError) as raised:
+            store.reserve("request-marker-missing-next", self.identity)
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+    def test_orphan_next_file_is_corrupt(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-orphan-next", self.identity)
+        (self.runtime / AUDIT_FILE_NAME).unlink()
+        next_path = self.runtime / audit_module.AUDIT_NEXT_FILE_NAME
+        next_path.write_bytes(b"")
+        next_path.chmod(0o600)
+        with self.assertRaises(AuditError) as raised:
+            store.reserve("request-orphan-next-2", self.identity)
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+    def test_archive_child_regular_file_is_unsafe(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-archive-regular", self.identity)
+        archive = Path(store.reset())
+        rogue = archive.parent / "archive-2026-01-01T0000-deadbeef"
+        rogue.write_bytes(b"not-a-directory")
+        rogue.chmod(0o600)
+        store.reserve("request-archive-regular-2", self.identity)
+        with self.assertRaises(AuditError) as raised:
+            store.reset()
+        self.assertEqual("unsafe_audit", raised.exception.code)
+
+    def test_invalid_terminal_record_does_not_poison_followup(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-invalid-terminal", self.identity)
+        with store.open_namespace() as namespace:
+            with self.assertRaises(AuditError):
+                namespace.append_terminal(
+                    "request-invalid-terminal",
+                    self.identity,
+                    outcome="invalid",
+                    delivery="delivered",
+                    error=None,
+                    returncode=0,
+                )
+            receipt = namespace.append_terminal(
+                "request-invalid-terminal",
+                self.identity,
+                outcome="failed",
+                delivery="unknown",
+                error="send_failed",
+                returncode=1,
+            )
+            self.assertEqual("failed", receipt.outcome)
+
     def test_rebind_rejects_missing_marker(self):
         store = SendAuditStore(self.runtime)
         store.reserve("request-rebind-invalid", self.identity)
