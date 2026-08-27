@@ -38,6 +38,8 @@ AUDIT_KEY_NAME = "audit.key"
 AUDIT_LOCK_NAME = "audit.lock"
 AUDIT_NEXT_FILE_NAME = "audit.jsonl.next"
 AUDIT_ROTATED_FILE_NAME = "audit.jsonl.1"
+AUDIT_ARCHIVE_DIR_NAME = "audit-archive"
+MAX_AUDIT_ARCHIVES = 8
 AUDIT_SCHEMA_VERSION = 1
 NAMESPACE_ANCHOR_NAME = ".agent_sidecar-namespaces"
 NAMESPACE_TRANSACTION_SUFFIX = ".audit-lock"
@@ -57,6 +59,17 @@ _AGENT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _ERROR_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _EPOCH_RE = re.compile(r"^e_[A-Za-z0-9_-]{32,64}$")
+_ARCHIVE_NAME_RE = re.compile(r"^archive-[0-9TZ-]{16}-[0-9a-f]{8}$")
+_ARCHIVE_FILE_NAMES = frozenset(
+    (
+        AUDIT_FILE_NAME,
+        AUDIT_ROTATED_FILE_NAME,
+        AUDIT_NEXT_FILE_NAME,
+        AUDIT_KEY_NAME,
+        AUDIT_LOCK_NAME,
+        "namespace.marker",
+    )
+)
 _TERMINAL_OUTCOMES = frozenset(
     ("completed", "failed", "timed_out", "overflow")
 )
@@ -88,16 +101,23 @@ class AuditError(RuntimeError):
         "invalid_request_id": "request ID must be conservative ASCII and at most 128 bytes",
         "request_conflict": "request ID was already used for a different target",
         "unsafe_audit": "send audit path is unsafe",
+        "audit_archive_full": "send audit archive limit has been reached",
     }
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: Optional[str] = None) -> None:
         if code not in self._MESSAGES:
             raise ValueError("invalid audit error code")
+        if detail is not None and _ERROR_RE.fullmatch(detail) is None:
+            raise ValueError("invalid audit error detail")
         self.code = code
+        self.detail = detail
         super().__init__(self._MESSAGES[code])
 
     def to_dict(self) -> Dict[str, str]:
-        return {"code": self.code}
+        payload = {"code": self.code}
+        if self.detail is not None:
+            payload["detail"] = self.detail
+        return payload
 
 
 @dataclass(frozen=True, repr=False)
@@ -612,6 +632,29 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         offset += written
 
 
+def _private_regular(details: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(details.st_mode)
+        and details.st_uid == os.geteuid()
+        and stat.S_IMODE(details.st_mode) == 0o600
+    )
+
+
+def _private_directory(details: os.stat_result) -> bool:
+    return (
+        stat.S_ISDIR(details.st_mode)
+        and details.st_uid == os.geteuid()
+        and stat.S_IMODE(details.st_mode) == 0o700
+    )
+
+
+def _archive_entry_name() -> str:
+    return "archive-{}-{}".format(
+        time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
+        secrets.token_hex(4),
+    )
+
+
 def _receipt(record: Mapping[str, Any]) -> AuditReceipt:
     if record["outcome"] == "pending":
         return AuditReceipt(
@@ -794,12 +837,16 @@ class AuditNamespace:
                 or _file_signature(key_details) != self.key_signature
                 or hashlib.sha256(key_payload).hexdigest()
                 != self.marker["key_fingerprint"]
-                or (key_details.st_dev, key_details.st_ino)
-                != (self.marker["key_dev"], self.marker["key_ino"])
-                or (os.fstat(self.runtime_fd).st_dev, os.fstat(self.runtime_fd).st_ino)
-                != (self.marker["runtime_dev"], self.marker["runtime_ino"])
             ):
                 raise AuditError("audit_corrupt")
+            runtime_details = os.fstat(self.runtime_fd)
+            if (
+                (key_details.st_dev, key_details.st_ino)
+                != (self.marker["key_dev"], self.marker["key_ino"])
+                or (runtime_details.st_dev, runtime_details.st_ino)
+                != (self.marker["runtime_dev"], self.marker["runtime_ino"])
+            ):
+                raise AuditError("audit_corrupt", detail="namespace_moved")
         except AuditError:
             raise
         except BaseException as error:
@@ -1090,15 +1137,15 @@ class SendAuditStore:
                     marker,
                 )
             else:
+                if hashlib.sha256(key).hexdigest() != marker["key_fingerprint"]:
+                    raise AuditError("audit_corrupt")
                 if (
                     (runtime_details.st_dev, runtime_details.st_ino)
                     != (marker["runtime_dev"], marker["runtime_ino"])
                     or (key_details.st_dev, key_details.st_ino)
                     != (marker["key_dev"], marker["key_ino"])
-                    or hashlib.sha256(key).hexdigest()
-                    != marker["key_fingerprint"]
                 ):
-                    raise AuditError("audit_corrupt")
+                    raise AuditError("audit_corrupt", detail="namespace_moved")
                 marker_signature = _file_signature(os.fstat(marker_fd))
             namespace = AuditNamespace(
                 self,
@@ -1242,8 +1289,162 @@ class SendAuditStore:
                 os.close(descriptor)
             raise
 
-    def reset(self) -> None:
-        """Exclusively clear this runtime's send-audit namespace."""
+    @staticmethod
+    def _archive_files(
+        source_fd: int,
+        destination_fd: int,
+        names: Sequence[str],
+    ) -> None:
+        for name in names:
+            try:
+                before = os.stat(
+                    name,
+                    dir_fd=source_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                continue
+            if not _private_regular(before):
+                raise AuditError("unsafe_audit")
+            try:
+                os.link(
+                    name,
+                    name,
+                    src_dir_fd=source_fd,
+                    dst_dir_fd=destination_fd,
+                    follow_symlinks=False,
+                )
+                linked = os.stat(
+                    name,
+                    dir_fd=destination_fd,
+                    follow_symlinks=False,
+                )
+                current = os.stat(
+                    name,
+                    dir_fd=source_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    (linked.st_dev, linked.st_ino)
+                    != (before.st_dev, before.st_ino)
+                    or (current.st_dev, current.st_ino)
+                    != (before.st_dev, before.st_ino)
+                ):
+                    raise AuditError("unsafe_audit")
+                os.unlink(name, dir_fd=source_fd)
+            except FileExistsError as error:
+                raise AuditError("audit_error") from error
+            except AuditError:
+                try:
+                    os.unlink(name, dir_fd=destination_fd)
+                except OSError:
+                    pass
+                raise
+            except OSError as error:
+                try:
+                    os.unlink(name, dir_fd=destination_fd)
+                except OSError:
+                    pass
+                raise _translate_filesystem_error(error) from error
+
+    @staticmethod
+    def _purge_directory(directory_fd: int) -> None:
+        try:
+            names = os.listdir(directory_fd)
+        except OSError as error:
+            raise _translate_filesystem_error(error) from error
+        for name in names:
+            try:
+                details = os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise _translate_filesystem_error(error) from error
+            if _private_regular(details):
+                os.unlink(name, dir_fd=directory_fd)
+            elif _private_directory(details):
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | os.O_NOFOLLOW,
+                    dir_fd=directory_fd,
+                )
+                try:
+                    SendAuditStore._purge_directory(child_fd)
+                finally:
+                    os.close(child_fd)
+                os.rmdir(name, dir_fd=directory_fd)
+            else:
+                raise AuditError("unsafe_audit")
+
+    @staticmethod
+    def _validate_archive_entry(directory_fd: int) -> None:
+        try:
+            names = os.listdir(directory_fd)
+        except OSError as error:
+            raise _translate_filesystem_error(error) from error
+        if len(names) > len(_ARCHIVE_FILE_NAMES):
+            raise AuditError("unsafe_audit")
+        for name in names:
+            if name not in _ARCHIVE_FILE_NAMES:
+                raise AuditError("unsafe_audit")
+            try:
+                details = os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as error:
+                raise _translate_filesystem_error(error) from error
+            if not _private_regular(details):
+                raise AuditError("unsafe_audit")
+
+    def _open_archive_directory(
+        self,
+        helpers: Any,
+        runtime_fd: int,
+        *,
+        create: bool,
+    ) -> Tuple[int, bool]:
+        try:
+            archive_fd = os.open(
+                AUDIT_ARCHIVE_DIR_NAME,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | os.O_NOFOLLOW,
+                dir_fd=runtime_fd,
+            )
+            details = os.fstat(archive_fd)
+            if not _private_directory(details):
+                os.close(archive_fd)
+                raise AuditError("unsafe_audit")
+            return archive_fd, False
+        except FileNotFoundError:
+            if not create:
+                raise
+            try:
+                os.mkdir(
+                    AUDIT_ARCHIVE_DIR_NAME,
+                    0o700,
+                    dir_fd=runtime_fd,
+                )
+            except FileExistsError:
+                pass
+            archive_fd, _link = helpers._open_directory_at(
+                runtime_fd,
+                AUDIT_ARCHIVE_DIR_NAME,
+                create=False,
+                private=True,
+            )
+            return archive_fd, True
+        except OSError as error:
+            raise _translate_filesystem_error(error) from error
+
+    def reset(self, *, purge: bool = False) -> Optional[str]:
+        """Archive or purge this runtime's send-audit namespace."""
 
         if fcntl is None or os.name != "posix":
             raise AuditError("unsafe_audit")
@@ -1251,8 +1452,11 @@ class SendAuditStore:
         directory_fds: List[int] = []
         marker_fd: Optional[int] = None
         transaction_fd: Optional[int] = None
+        archive_fd: Optional[int] = None
+        archive_item_fd: Optional[int] = None
         marker_locked = False
         transaction_locked = False
+        archive_name: Optional[str] = None
         try:
             (
                 directory_fds,
@@ -1271,10 +1475,7 @@ class SendAuditStore:
             if marker_created:
                 os.fsync(anchor_fd)
             try:
-                fcntl.flock(
-                    marker_fd,
-                    fcntl.LOCK_EX | fcntl.LOCK_NB,
-                )
+                fcntl.flock(marker_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as error:
                 if error.errno in (errno.EACCES, errno.EAGAIN):
                     raise AuditError("audit_busy") from error
@@ -1289,10 +1490,7 @@ class SendAuditStore:
             if transaction_created:
                 os.fsync(anchor_fd)
             try:
-                fcntl.flock(
-                    transaction_fd,
-                    fcntl.LOCK_EX | fcntl.LOCK_NB,
-                )
+                fcntl.flock(transaction_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as error:
                 if error.errno in (errno.EACCES, errno.EAGAIN):
                     raise AuditError("audit_busy") from error
@@ -1303,7 +1501,10 @@ class SendAuditStore:
             )
             directory_fds.extend(runtime_fds)
             links.extend(runtime_links)
-            removable: List[str] = []
+            for link in links:
+                helpers._verify_directory_link(link)
+            _validate_named_file(anchor_fd, marker_name, marker_fd)
+            existing: List[str] = []
             if runtime_fd is not None:
                 for name in (
                     AUDIT_FILE_NAME,
@@ -1320,22 +1521,85 @@ class SendAuditStore:
                         )
                     except FileNotFoundError:
                         continue
-                    if (
-                        not stat.S_ISREG(details.st_mode)
-                        or details.st_uid != os.geteuid()
-                    ):
+                    if not _private_regular(details):
                         raise AuditError("unsafe_audit")
-                    removable.append(name)
-            for link in links:
-                helpers._verify_directory_link(link)
-            _validate_named_file(anchor_fd, marker_name, marker_fd)
-            if runtime_fd is not None:
-                for name in removable:
+                    existing.append(name)
+            needs_archive = not purge and (bool(existing) or not marker_created)
+            try:
+                if runtime_fd is not None:
+                    archive_fd, _created = self._open_archive_directory(
+                        helpers,
+                        runtime_fd,
+                        create=needs_archive,
+                    )
+            except FileNotFoundError:
+                archive_fd = None
+            if archive_fd is not None:
+                archive_names = os.listdir(archive_fd)
+                for name in archive_names:
+                    if _ARCHIVE_NAME_RE.fullmatch(name) is None:
+                        raise AuditError("unsafe_audit")
+                    details = os.stat(
+                        name,
+                        dir_fd=archive_fd,
+                        follow_symlinks=False,
+                    )
+                    if not _private_directory(details):
+                        raise AuditError("unsafe_audit")
+                    archive_child_fd = os.open(
+                        name,
+                        os.O_RDONLY
+                        | getattr(os, "O_DIRECTORY", 0)
+                        | os.O_NOFOLLOW,
+                        dir_fd=archive_fd,
+                    )
+                    try:
+                        self._validate_archive_entry(archive_child_fd)
+                    finally:
+                        os.close(archive_child_fd)
+                if purge:
+                    self._purge_directory(archive_fd)
+                elif len(archive_names) >= MAX_AUDIT_ARCHIVES and existing:
+                    raise AuditError("audit_archive_full")
+            if not purge and needs_archive and runtime_fd is not None:
+                archive_name = _archive_entry_name()
+                os.mkdir(archive_name, 0o700, dir_fd=archive_fd)
+                archive_item_fd, _link = helpers._open_directory_at(
+                    archive_fd,
+                    archive_name,
+                    create=False,
+                    private=True,
+                )
+                if existing:
+                    self._archive_files(
+                        runtime_fd,
+                        archive_item_fd,
+                        existing,
+                    )
+                if not marker_created:
+                    os.link(
+                        marker_name,
+                        "namespace.marker",
+                        src_dir_fd=anchor_fd,
+                        dst_dir_fd=archive_item_fd,
+                        follow_symlinks=False,
+                    )
+                os.fsync(archive_item_fd)
+                os.fsync(archive_fd)
+            elif purge and runtime_fd is not None:
+                for name in existing:
                     os.unlink(name, dir_fd=runtime_fd)
-                if removable:
+                if existing:
                     os.fsync(runtime_fd)
             os.unlink(marker_name, dir_fd=anchor_fd)
             os.fsync(anchor_fd)
+            if existing and runtime_fd is not None:
+                os.fsync(runtime_fd)
+            return (
+                os.path.join(canonical_runtime, AUDIT_ARCHIVE_DIR_NAME, archive_name)
+                if archive_name is not None
+                else None
+            )
         except AuditError:
             raise
         except BaseException as error:
@@ -1343,6 +1607,167 @@ class SendAuditStore:
                 raise
             raise _translate_filesystem_error(error) from error
         finally:
+            if archive_item_fd is not None:
+                os.close(archive_item_fd)
+            if archive_fd is not None:
+                os.close(archive_fd)
+            if transaction_fd is not None:
+                if transaction_locked:
+                    try:
+                        fcntl.flock(transaction_fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                os.close(transaction_fd)
+            if marker_fd is not None:
+                if marker_locked:
+                    try:
+                        fcntl.flock(marker_fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                os.close(marker_fd)
+            for descriptor in reversed(directory_fds):
+                os.close(descriptor)
+
+    def rebind(self) -> None:
+        """Rebind a moved runtime after strict namespace verification."""
+
+        if fcntl is None or os.name != "posix":
+            raise AuditError("unsafe_audit")
+        helpers = _secure_helpers()
+        directory_fds: List[int] = []
+        marker_fd: Optional[int] = None
+        transaction_fd: Optional[int] = None
+        current_fd: Optional[int] = None
+        rotated_fd: Optional[int] = None
+        marker_locked = False
+        transaction_locked = False
+        try:
+            (
+                directory_fds,
+                links,
+                anchor_fd,
+                canonical_runtime,
+            ) = self._open_anchor(helpers, self.runtime_dir)
+            marker_name = _marker_name(canonical_runtime)
+            transaction_name = _transaction_name(marker_name)
+            try:
+                marker_fd, _ignored = _open_named_file(
+                    anchor_fd,
+                    marker_name,
+                    create=False,
+                )
+            except FileNotFoundError as error:
+                raise AuditError("audit_corrupt") from error
+            if marker_fd is None:
+                raise AuditError("audit_corrupt")
+            try:
+                fcntl.flock(marker_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno in (errno.EACCES, errno.EAGAIN):
+                    raise AuditError("audit_busy") from error
+                raise
+            marker_locked = True
+            transaction_fd, _ignored = _open_named_file(
+                anchor_fd,
+                transaction_name,
+                create=True,
+            )
+            assert transaction_fd is not None
+            try:
+                fcntl.flock(transaction_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno in (errno.EACCES, errno.EAGAIN):
+                    raise AuditError("audit_busy") from error
+                raise
+            transaction_locked = True
+            for link in links:
+                helpers._verify_directory_link(link)
+            _validate_named_file(anchor_fd, marker_name, marker_fd)
+            marker_payload, _marker_details = _read_descriptor(
+                marker_fd,
+                2048,
+            )
+            marker = _parse_marker(marker_payload)
+            runtime_fds, runtime_links, runtime_fd = self._open_existing_runtime(
+                helpers,
+                self.runtime_dir,
+            )
+            if runtime_fd is None:
+                raise AuditError("audit_corrupt")
+            directory_fds.extend(runtime_fds)
+            links.extend(runtime_links)
+            for link in links:
+                helpers._verify_directory_link(link)
+            key_fd, key, key_signature = self._open_key(
+                runtime_fd,
+                allow_create=False,
+            )
+            try:
+                runtime_details = os.fstat(runtime_fd)
+                key_details = os.fstat(key_fd)
+                if hashlib.sha256(key).hexdigest() != marker["key_fingerprint"]:
+                    raise AuditError("audit_corrupt")
+                if (
+                    self._existing_sensitive_file(
+                        runtime_fd,
+                        AUDIT_FILE_NAME,
+                    )
+                    is None
+                    or self._existing_sensitive_file(
+                        runtime_fd,
+                        AUDIT_NEXT_FILE_NAME,
+                    )
+                    is not None
+                ):
+                    raise AuditError("audit_corrupt")
+                current_fd, _ignored = _open_named_file(
+                    runtime_fd,
+                    AUDIT_FILE_NAME,
+                    create=False,
+                )
+                assert current_fd is not None
+                rotated_fd, _ignored = _open_named_file(
+                    runtime_fd,
+                    AUDIT_ROTATED_FILE_NAME,
+                    create=False,
+                )
+                self._load(
+                    runtime_fd,
+                    current_fd,
+                    rotated_fd,
+                    marker["namespace_epoch"],
+                )
+                rebound = dict(marker)
+                rebound.update(
+                    {
+                        "runtime_dev": int(runtime_details.st_dev),
+                        "runtime_ino": int(runtime_details.st_ino),
+                        "key_dev": int(key_details.st_dev),
+                        "key_ino": int(key_details.st_ino),
+                    }
+                )
+                _write_signature = self._write_marker(
+                    anchor_fd,
+                    marker_fd,
+                    rebound,
+                )
+            finally:
+                os.close(key_fd)
+            os.fsync(runtime_fd)
+            os.fsync(anchor_fd)
+        except AuditError:
+            raise
+        except FileNotFoundError as error:
+            raise AuditError("audit_corrupt") from error
+        except BaseException as error:
+            if not isinstance(error, Exception):
+                raise
+            raise _translate_filesystem_error(error) from error
+        finally:
+            if current_fd is not None:
+                os.close(current_fd)
+            if rotated_fd is not None:
+                os.close(rotated_fd)
             if transaction_fd is not None:
                 if transaction_locked:
                     try:

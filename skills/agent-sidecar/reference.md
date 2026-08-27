@@ -95,7 +95,8 @@ record while that HTTP instance runs. These daemon observation writes make no
 persistent transcript or agent-configuration changes.
 
 Send-audit logs, keys, locks, and namespace anchors are separate CLI-owned
-state. They are created or managed only by explicit CLI `send`/`audit reset`
+state. They are created or managed only by explicit CLI `send`/`audit rebind`/
+`audit reset`
 operations, not by daemon observation, status, or HTTP startup. The resumed
 native agent launched by `send` can still modify its own session and workspace
 as documented below.
@@ -799,19 +800,37 @@ a delivery-unknown receipt and diagnostics. Output is bounded: message input is
 Never retry any result with `delivery: "unknown"`; the native agent may already
 have received or acted on the message.
 
-### Audit reset
+### Audit recovery
 
-The only recovery for a corrupt, unsafe, or replaced send-audit namespace is:
+For a moved namespace with a valid marker, matching key fingerprint, and
+strictly valid retained logs, repair the inode binding without losing history:
+
+```text
+agent-sidecar audit rebind --allow-write --confirm REBIND-SEND-AUDIT
+```
+
+Rebind never reconstructs a missing or corrupt marker. When strict proof is not
+available, the supported fallback is an archive reset:
 
 ```text
 agent-sidecar audit reset --allow-write --confirm CLEAR-SEND-AUDIT
 ```
 
 Reset takes exclusive nonblocking audit locks and refuses to run while a send
-is active. It irreversibly removes the retained logs, key, and namespace
-binding, losing all audit and request-ID idempotency history. Use it only for an
-explicit user request for that destructive recovery. Skills and callers must
-never invoke reset automatically after an audit error.
+is active. It archives the retained logs, key, and marker under the private
+runtime's `audit-archive/` directory, preserving request-ID idempotency history.
+It refuses after eight archives rather than silently deleting evidence. Use
+the following stronger confirmation only to irreversibly delete active state
+and all archives:
+
+```text
+agent-sidecar audit reset --purge --allow-write --confirm PURGE-SEND-AUDIT
+```
+
+Both operations require an explicit user request; skills and callers must
+never invoke them automatically after an audit error. A send failure with
+`code: "audit_corrupt"` and `detail: "namespace_moved"` is an informational
+hint to use `audit rebind`.
 
 ## Command quick reference
 
@@ -832,7 +851,9 @@ agent-sidecar watch --all --remote --host <host-alias> --json
 agent-sidecar watch --all --remote --from-start --json
 agent-sidecar send <session-prefix> "<message>" --allow-write
 printf '%s' '<exact-message>' | agent-sidecar send '<full-session-id>' --agent '<agent-name>' --exact-session --message-stdin --allow-write --request-id '<unique-request-id>' --json
+agent-sidecar audit rebind --allow-write --confirm REBIND-SEND-AUDIT
 agent-sidecar audit reset --allow-write --confirm CLEAR-SEND-AUDIT
+agent-sidecar audit reset --purge --allow-write --confirm PURGE-SEND-AUDIT
 agent-sidecar package build --output dist/agent-sidecar.pyz
 agent-sidecar tui
 agent-sidecar tui --once
@@ -860,4 +881,4 @@ Unix-daemon default and are readonly with respect to agent-owned stores. Run
 remote monitoring only when the user explicitly requests it. Surface remote
 watch failure and gap warnings, and never auto-retry a remote watch. Run `send`
 only for an explicit same-turn request for that exact message or action. Never
-retry unknown delivery, and never run audit reset automatically.
+retry unknown delivery, and never run audit rebind or reset automatically.

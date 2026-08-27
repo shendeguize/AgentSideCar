@@ -322,18 +322,34 @@ Codex also receive the native prompt through stdin, but Cursor CLI necessarily
 includes it in the child argv. Warn against sending secrets through either
 form.
 
-Never invoke `agent-sidecar audit reset` automatically, including in response
-to `audit_corrupt`, `audit_error`, or `unsafe_lock`. In particular, reset must
-not be used to bypass `unsafe_lock` or justify retrying its request. It is a
-destructive recovery operation and must run only when the user explicitly
-requests it in the current turn:
+Never invoke `agent-sidecar audit rebind` or `audit reset` automatically,
+including in response to `audit_corrupt`, `audit_error`, or `unsafe_lock`.
+Rebind is available only for an explicitly reported
+`detail: "namespace_moved"` and never reconstructs a missing or corrupt marker:
+
+```sh
+agent-sidecar audit rebind --allow-write --confirm REBIND-SEND-AUDIT
+```
+
+When rebind cannot prove the original epoch, key fingerprint, and valid
+retained logs, use the explicit archive reset:
 
 ```sh
 agent-sidecar audit reset --allow-write --confirm CLEAR-SEND-AUDIT
 ```
 
-Reset refuses an active send and irreversibly deletes the retained audit and
-request-ID idempotency history. Report that consequence before acting.
+Reset refuses an active send and archives the key, marker, and retained logs
+under `audit-archive/`, preserving request-ID history for inspection. It
+refuses after eight archives rather than silently deleting evidence. Only the
+stronger explicit command below irreversibly deletes active state and all
+archives:
+
+```sh
+agent-sidecar audit reset --purge --allow-write --confirm PURGE-SEND-AUDIT
+```
+
+Report the history consequence before either recovery operation; neither is
+automatic error handling.
 
 Outside an explicit send request, never edit agent configuration, install
 hooks, inject messages, or modify transcript stores.

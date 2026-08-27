@@ -201,14 +201,18 @@ _CRITICAL_EXTRA_KEYS = (
 class SendError(ValueError):
     """A pre-spawn failure carrying only a stable, display-safe code."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: Optional[str] = None) -> None:
         if code not in _ERROR_MESSAGES:
             raise ValueError("invalid send error code")
         self.code = code
+        self.detail = detail
         super().__init__(_ERROR_MESSAGES[code])
 
     def to_dict(self) -> Dict[str, str]:
-        return {"code": self.code}
+        payload = {"code": self.code}
+        if self.detail is not None:
+            payload["detail"] = self.detail
+        return payload
 
 
 FilesystemIdentity = Tuple[str, int, int, int]
@@ -2933,7 +2937,7 @@ def _send_audit_identity(plan: SendPlan, message: str) -> AuditIdentity:
 
 def _send_error_from_audit(error: AuditError) -> SendError:
     code = "unsafe_lock" if error.code == "unsafe_audit" else error.code
-    return SendError(code)
+    return SendError(code, detail=error.detail)
 
 
 def _replayed_send_result(

@@ -579,15 +579,31 @@ outcome）且投递未知。不得使用新 request ID 自动或手动盲目重�
 中。无论使用哪种来源，对于 Cursor CLI，提示词仍会出现在原生子进程 argv 中，
 因为该上游恢复契约要求 argv 传输。不要使用此命令发送机密。
 
-针对损坏、不安全或被替换的发送审计命名空间，唯一的恢复命令是：
+如果命名空间被移动，但锚点、密钥指纹和保留日志仍能严格验证，可在不丢失请求 ID
+历史的情况下修复 inode 绑定：
+
+```sh
+agent-sidecar audit rebind --allow-write --confirm REBIND-SEND-AUDIT
+```
+
+无法证明可重绑时，reset 是受支持的后备恢复方式。默认 reset 会先将活动审计密钥、
+锚点和保留日志归档到 `audit-archive/`，然后启动新的 lineage；已有八个归档时会
+拒绝运行，绝不会静默删除归档：
 
 ```sh
 agent-sidecar audit reset --allow-write --confirm CLEAR-SEND-AUDIT
 ```
 
-发送正在使用审计命名空间时，reset 会拒绝运行。它会不可逆地删除审计密钥和保留
-日志，因此所有审计和请求 ID 幂等历史都会丢失。只有用户明确要求执行该恢复时才可
-运行；绝不能将其用作自动错误处理。
+发送正在使用审计命名空间时，reset 会拒绝运行。如需不可逆删除活动状态和全部归档，
+必须使用更强的确认文本：
+
+```sh
+agent-sidecar audit reset --purge --allow-write --confirm PURGE-SEND-AUDIT
+```
+
+这些命令都是显式恢复操作，绝不能用作自动错误处理。`audit_corrupt` 附带
+`detail: "namespace_moved"` 时表示可能可以执行 rebind；其他损坏应保持
+fail-closed，并使用 reset 归档，不要手动修改。
 
 打开实时终端仪表盘，或渲染一次不含 ANSI 的快照：
 
@@ -712,7 +728,7 @@ stderr；会话标识符用短哈希表示。
 守护进程状态协议/API 诊断中加入一个 `daemon_log` 的 `log_error` 条目。
 
 这些守护进程观察写入不同于 `audit.jsonl`、`audit.key`、发送锁及其命名空间
-锚点；后者由 CLI `send`/`audit reset` 操作创建和管理。仅启动守护进程或通过它
+锚点；后者由 CLI `send`/`audit rebind`/`audit reset` 操作创建和管理。仅启动守护进程或通过它
 观察不会创建发送审计状态。
 
 守护进程是可选的。`list`、`status` 和 `tui` 优先使用其快照；不可用时回退到直接

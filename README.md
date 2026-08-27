@@ -692,17 +692,34 @@ is still present in the native child argv whichever source is used, because
 that upstream resume contract requires argv transport. Do not use this command
 for secrets.
 
-The only recovery command for a corrupt, unsafe, or replaced send-audit
-namespace is:
+For a moved namespace whose marker, key fingerprint, and retained logs remain
+strictly verifiable, repair the inode binding without losing request-ID history:
+
+```sh
+agent-sidecar audit rebind --allow-write --confirm REBIND-SEND-AUDIT
+```
+
+When rebind is not provable, reset is the supported fallback. By default reset
+archives the active audit key, marker, and retained logs under
+`audit-archive/` before starting a new lineage; it refuses once eight archives
+exist and never silently deletes one:
 
 ```sh
 agent-sidecar audit reset --allow-write --confirm CLEAR-SEND-AUDIT
 ```
 
-Reset refuses to run while a send is using the audit namespace. It
-irreversibly deletes the audit key and retained logs, so all audit and
-request-ID idempotency history is lost. Run it only for an explicit user
-request to perform that recovery; never use it as automatic error handling.
+Reset refuses to run while a send is using the audit namespace. To
+irreversibly delete the active state and all archives, use the stronger
+confirmation:
+
+```sh
+agent-sidecar audit reset --purge --allow-write --confirm PURGE-SEND-AUDIT
+```
+
+These commands are explicit recovery operations, never automatic error
+handling. A `namespace_moved` detail on `audit_corrupt` means rebind may be
+available; all other corruption remains fail-closed and should be archived
+with reset rather than manually altered.
 
 Open the live terminal dashboard, or render one ANSI-free snapshot:
 
@@ -856,7 +873,7 @@ entry in daemon status protocol/API diagnostics.
 
 These daemon observation writes are distinct from `audit.jsonl`, `audit.key`,
 send locks, and their namespace anchor, which are created and managed by CLI
-`send`/`audit reset` operations. Merely starting or observing through the
+`send`/`audit rebind`/`audit reset` operations. Merely starting or observing through the
 daemon does not create send-audit state.
 
 The daemon is optional. `list`, `status`, and `tui` prefer its snapshot and

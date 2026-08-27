@@ -16,6 +16,8 @@ from sidecar.send_audit import (
     AUDIT_FILE_NAME,
     AUDIT_KEY_NAME,
     AUDIT_ROTATED_FILE_NAME,
+    AUDIT_ARCHIVE_DIR_NAME,
+    MAX_AUDIT_ARCHIVES,
     NAMESPACE_ANCHOR_NAME,
     AuditError,
     SendAuditStore,
@@ -322,6 +324,12 @@ class SendAuditStoreTests(unittest.TestCase):
             {"code": "audit_busy"},
             AuditError("audit_busy").to_dict(),
         )
+        self.assertEqual(
+            {"code": "audit_corrupt", "detail": "namespace_moved"},
+            AuditError("audit_corrupt", detail="namespace_moved").to_dict(),
+        )
+        with self.assertRaises(ValueError):
+            AuditError("audit_corrupt", detail="unsafe detail")
 
         pending = {
             "schema_version": audit_module.AUDIT_SCHEMA_VERSION,
@@ -1116,7 +1124,12 @@ class SendAuditStoreTests(unittest.TestCase):
         send_locks = self.runtime / "send-locks"
         send_locks.mkdir(mode=0o700)
 
-        store.reset()
+        archive = store.reset()
+        self.assertIsNotNone(archive)
+        archive_path = Path(archive)
+        self.assertTrue((archive_path / AUDIT_FILE_NAME).exists())
+        self.assertTrue((archive_path / AUDIT_KEY_NAME).exists())
+        self.assertTrue((archive_path / "namespace.marker").exists())
         for name in (
             AUDIT_FILE_NAME,
             AUDIT_ROTATED_FILE_NAME,
@@ -1155,6 +1168,196 @@ class SendAuditStoreTests(unittest.TestCase):
         self.assertIsNone(
             store.reserve("request-after-corrupt-marker", self.identity)
         )
+
+    def test_archive_limit_and_purge_are_explicit_and_bounded(self):
+        store = SendAuditStore(self.runtime)
+        for index in range(MAX_AUDIT_ARCHIVES):
+            store.reserve("request-archive-{}".format(index), self.identity)
+            self.assertIsNotNone(store.reset())
+        self.assertEqual(
+            MAX_AUDIT_ARCHIVES,
+            len(list((self.runtime / AUDIT_ARCHIVE_DIR_NAME).iterdir())),
+        )
+        store.reserve("request-archive-overflow", self.identity)
+        with self.assertRaises(AuditError) as raised:
+            store.reset()
+        self.assertEqual("audit_archive_full", raised.exception.code)
+        self.assertTrue((self.runtime / AUDIT_FILE_NAME).exists())
+        store.reset(purge=True)
+        self.assertEqual([], list((self.runtime / AUDIT_ARCHIVE_DIR_NAME).iterdir()))
+        self.assertIsNone(store.reserve("request-after-purge", self.identity))
+
+    def test_empty_reset_and_purge_do_not_create_a_new_lineage(self):
+        store = SendAuditStore(self.runtime)
+        self.assertIsNone(store.reset())
+        self.assertFalse(self.runtime.exists())
+        self.assertIsNone(store.reset(purge=True))
+        self.assertFalse(self.runtime.exists())
+
+    def test_purge_handles_an_active_namespace_without_an_archive_directory(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-purge-without-archive", self.identity)
+        self.assertFalse((self.runtime / AUDIT_ARCHIVE_DIR_NAME).exists())
+        self.assertIsNone(store.reset(purge=True))
+        self.assertFalse((self.runtime / AUDIT_FILE_NAME).exists())
+
+    def test_rebind_preserves_epoch_and_request_id_history_after_move(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-rebind", self.identity)
+        replacement = self.root / "replacement-runtime"
+        shutil.copytree(self.runtime, replacement)
+        old_runtime = self.root / "old-runtime"
+        self.runtime.rename(old_runtime)
+        replacement.rename(self.runtime)
+
+        with self.assertRaises(AuditError) as raised:
+            store.reserve("request-rebind", self.identity)
+        self.assertEqual("audit_corrupt", raised.exception.code)
+        self.assertEqual("namespace_moved", raised.exception.detail)
+
+        store.rebind()
+        replay = store.reserve("request-rebind", self.identity)
+        self.assertIsNotNone(replay)
+        self.assertEqual("request_pending", replay.outcome)
+
+    def test_rebind_rejects_missing_marker(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-rebind-invalid", self.identity)
+        _marker_path(self.home, self.runtime).unlink()
+        with self.assertRaises(AuditError) as raised:
+            store.rebind()
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+    def test_rebind_rejects_key_replacement_and_bad_history(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-rebind-key", self.identity)
+        replacement = self.root / "replacement-key-runtime"
+        shutil.copytree(self.runtime, replacement)
+        (replacement / AUDIT_KEY_NAME).write_bytes(b"x" * 32)
+        (replacement / AUDIT_KEY_NAME).chmod(0o600)
+        old_runtime = self.root / "old-key-runtime"
+        self.runtime.rename(old_runtime)
+        replacement.rename(self.runtime)
+        with self.assertRaises(AuditError) as raised:
+            store.rebind()
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+        shutil.rmtree(self.runtime)
+        shutil.copytree(old_runtime, self.runtime)
+        audit_path = self.runtime / AUDIT_FILE_NAME
+        audit_path.write_text("{bad json}\n", encoding="utf-8")
+        audit_path.chmod(0o600)
+        with self.assertRaises(AuditError) as raised:
+            store.rebind()
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+        shutil.rmtree(self.runtime)
+        shutil.copytree(old_runtime, self.runtime)
+        (self.runtime / AUDIT_FILE_NAME).unlink()
+        with self.assertRaises(AuditError) as raised:
+            store.rebind()
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+        shutil.rmtree(self.runtime)
+        with self.assertRaises(AuditError) as raised:
+            store.rebind()
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+    def test_purge_refuses_unsafe_archive_entries(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-archive-unsafe", self.identity)
+        archive = Path(store.reset())
+        unsafe = archive.parent / "unsafe"
+        unsafe.symlink_to(archive)
+        with self.assertRaises(AuditError) as raised:
+            store.reset(purge=True)
+        self.assertEqual("unsafe_audit", raised.exception.code)
+        self.assertTrue(unsafe.is_symlink())
+
+        unsafe.unlink()
+        (archive / "unexpected").write_bytes(b"unsafe")
+        (archive / "unexpected").chmod(0o600)
+        with self.assertRaises(AuditError) as raised:
+            store.reset(purge=True)
+        self.assertEqual("unsafe_audit", raised.exception.code)
+
+    def test_archive_helpers_reject_missing_and_unbounded_entries(self):
+        helpers = audit_module._secure_helpers()
+        directory = self.root / "archive-helper"
+        directory.mkdir(mode=0o700)
+        directory_fd = os.open(
+            str(directory),
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            existing = directory / AUDIT_FILE_NAME
+            existing.write_bytes(b"record")
+            existing.chmod(0o600)
+            audit_module.SendAuditStore._archive_files(
+                directory_fd,
+                directory_fd,
+                ("missing",),
+            )
+            with mock.patch.object(
+                audit_module.os,
+                "link",
+                side_effect=FileExistsError,
+            ):
+                with self.assertRaises(AuditError) as raised:
+                    audit_module.SendAuditStore._archive_files(
+                        directory_fd,
+                        directory_fd,
+                        (AUDIT_FILE_NAME,),
+                    )
+                self.assertEqual("audit_error", raised.exception.code)
+            with mock.patch.object(
+                audit_module.os,
+                "link",
+                side_effect=OSError(audit_module.errno.EIO, "link failed"),
+            ), mock.patch.object(
+                audit_module.os,
+                "unlink",
+                side_effect=OSError(audit_module.errno.EIO, "unlink failed"),
+            ):
+                with self.assertRaises(AuditError) as raised:
+                    audit_module.SendAuditStore._archive_files(
+                        directory_fd,
+                        directory_fd,
+                        (AUDIT_FILE_NAME,),
+                    )
+                self.assertEqual("audit_error", raised.exception.code)
+            existing.unlink()
+            for index in range(len(audit_module._ARCHIVE_FILE_NAMES) + 1):
+                path = directory / "entry-{}".format(index)
+                path.write_bytes(b"x")
+                path.chmod(0o600)
+            with self.assertRaises(AuditError) as raised:
+                audit_module.SendAuditStore._validate_archive_entry(directory_fd)
+            self.assertEqual("unsafe_audit", raised.exception.code)
+
+            for path in directory.iterdir():
+                path.unlink()
+            victim = self.root / "archive-victim"
+            victim.write_bytes(b"victim")
+            victim.chmod(0o600)
+            (directory / "link").symlink_to(victim)
+            with self.assertRaises(AuditError) as raised:
+                audit_module.SendAuditStore._purge_directory(directory_fd)
+            self.assertEqual("unsafe_audit", raised.exception.code)
+            (directory / "link").unlink()
+
+            archive_dir = directory / AUDIT_ARCHIVE_DIR_NAME
+            archive_dir.mkdir(mode=0o700)
+            archive_dir.chmod(0o600)
+            with self.assertRaises(AuditError) as raised:
+                SendAuditStore(self.runtime)._open_archive_directory(
+                    helpers,
+                    directory_fd,
+                    create=False,
+                )
+            self.assertEqual("unsafe_audit", raised.exception.code)
+        finally:
+            os.close(directory_fd)
 
     def test_reset_refuses_unsafe_symlink_without_partial_mutation(self):
         store = SendAuditStore(self.runtime)
