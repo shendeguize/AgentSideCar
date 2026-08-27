@@ -1192,6 +1192,13 @@ class SendAuditStoreTests(unittest.TestCase):
         self.assertIsNone(store.reset(purge=True))
         self.assertFalse(self.runtime.exists())
 
+    def test_purge_handles_an_active_namespace_without_an_archive_directory(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-purge-without-archive", self.identity)
+        self.assertFalse((self.runtime / AUDIT_ARCHIVE_DIR_NAME).exists())
+        self.assertIsNone(store.reset(purge=True))
+        self.assertFalse((self.runtime / AUDIT_FILE_NAME).exists())
+
     def test_rebind_preserves_epoch_and_request_id_history_after_move(self):
         store = SendAuditStore(self.runtime)
         store.reserve("request-rebind", self.identity)
