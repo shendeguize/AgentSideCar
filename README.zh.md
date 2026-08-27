@@ -536,6 +536,11 @@ stdin 接收原生提示词；Cursor CLI 必然通过子进程 argv 接收；Kim
 ACP 路径。Claude、Codex 与 Cursor 保持原有的恢复和结果语义。CLI 直接发送仍不
 支持 DSH；DSH 注入只存在于 DSH 插件内。
 
+`send` 只根据直接本地扫描解析目标。从 `list --remote` 得到的行不能作为发送
+目标；如果其 ID 不在本地扫描中，`send` 会以退出码 `2` 关闭失败，并在 JSON
+中返回 `target_not_found`。如果本地扫描发现的行带有远程来源，则使用单独的
+`remote_session` 拒绝。
+
 **Kimi Code 0.38.0 受保护恢复。**
 
 Kimi 支持刻意限定为精确版本与手动操作：只接受 Kimi Code `0.38.0`，每条命令只
