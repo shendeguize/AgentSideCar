@@ -252,6 +252,7 @@ const PREPARE_ERROR_STATUS: Readonly<Record<string, number>> = {
   invalid_session: 422,
   dsh_model_unconfigured: 409,
   dsh_preset_unsupported: 409,
+  dsh_agents_unavailable: 502,
   executor_error: 502,
   too_many_pending: 429,
   // Issued at prepare since M2 review F-6 (no injection path for this
@@ -279,6 +280,7 @@ const EXECUTE_ERROR_STATUS: Readonly<Record<string, number>> = {
   token_mismatch: 409,
   dsh_model_unconfigured: 409,
   dsh_preset_unsupported: 409,
+  dsh_agents_unavailable: 502,
   unsupported_agent: 422,
   executor_error: 502,
 }

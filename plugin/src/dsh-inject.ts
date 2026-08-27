@@ -300,6 +300,7 @@ type ResumeOutcome =
       readonly errorCode:
         | 'target_not_found'
         | 'dsh_preset_unsupported'
+        | 'dsh_agents_unavailable'
         | 'executor_error'
     }
   | { readonly kind: 'timeout' }
@@ -364,6 +365,7 @@ type ColdCheck =
         | 'target_not_found'
         | 'dsh_model_unconfigured'
         | 'dsh_preset_unsupported'
+        | 'dsh_agents_unavailable'
         | 'executor_error'
         | 'timeout'
       readonly modelRouteAvailable: boolean
@@ -374,6 +376,19 @@ type ColdCheck =
 // ---------------------------------------------------------------------------
 // Executor.
 // ---------------------------------------------------------------------------
+
+const MAX_EXECUTOR_DETAIL_CHARS = 512
+
+function sanitizedExecutorDetail(error: unknown, fallback: string): string {
+  const raw = error instanceof Error ? error.message : String(error)
+  const normalized = raw
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/(?:[A-Za-z]:[\\/]|\/)[^\s"'<>]+/g, '<path>')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const detail = normalized === '' ? fallback : `${fallback}: ${normalized}`
+  return detail.slice(0, MAX_EXECUTOR_DETAIL_CHARS)
+}
 
 export function createDshInjectExecutor(deps: {
   agents: AgentsServiceFace
@@ -422,7 +437,7 @@ export function createDshInjectExecutor(deps: {
       if (unloading || generation === null || !deps.agents.isAvailable()) {
         return {
           kind: 'failed',
-          errorCode: 'executor_error',
+          errorCode: 'dsh_agents_unavailable',
           modelRouteAvailable: false,
           presetInspectionAvailable: false,
           presetSupported: false,
@@ -498,7 +513,7 @@ export function createDshInjectExecutor(deps: {
       if (!deps.agents.isAvailable()) {
         return {
           kind: 'failed',
-          errorCode: 'executor_error',
+          errorCode: 'dsh_agents_unavailable',
           modelRouteAvailable: false,
           presetInspectionAvailable: true,
           presetSupported: inspected.value.state === 'absent',
@@ -1041,7 +1056,7 @@ export function createDshInjectExecutor(deps: {
       try {
         if (req.mode === 'steer') agent.steer(message)
         else agent.followup(message)
-      } catch {
+      } catch (error) {
         log('warn', 'dsh injection call threw', {
           ...baseMeta,
           coldPath,
@@ -1050,7 +1065,11 @@ export function createDshInjectExecutor(deps: {
             ? { routingSource: 'host-default', modelRouteAvailable: true }
             : {}),
         })
-        return { outcome: 'failed', errorCode: 'executor_error' }
+        return {
+          outcome: 'failed',
+          errorCode: 'executor_error',
+          detail: sanitizedExecutorDetail(error, 'dsh injection call failed'),
+        }
       }
 
       log('info', 'dsh injection delivered', {

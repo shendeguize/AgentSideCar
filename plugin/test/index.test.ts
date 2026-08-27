@@ -706,8 +706,8 @@ describe('M2 injection wiring', () => {
       { timeout: 3000, interval: 25 },
     )
 
-    // The target is cold and no host default model service exists: reject
-    // before confirmation rather than issue a token for a modelless resume.
+    // The target is cold and the dsh agent binding is absent: reject before
+    // confirmation rather than issue a token for an unavailable resume.
     const prepared = await postAction(fake.routes[0]!, {
       type: 'inject.prepare',
       target: { agent: 'dsh', sessionId: 'sess-dsh-1' },
@@ -715,7 +715,7 @@ describe('M2 injection wiring', () => {
       message: 'ping',
     })
     expect(prepared.status).toBe(502)
-    expect(prepared.json).toEqual({ reason: 'executor_error' })
+    expect(prepared.json).toEqual({ reason: 'dsh_agents_unavailable' })
     expect(prepared.json.confirmToken).toBeUndefined()
   })
 
@@ -1028,13 +1028,10 @@ describe('M2 injection wiring', () => {
       message: 'cold lifecycle probe',
     })
 
-    expect(executed.status).toBe(409)
-    expect(executed.json).toEqual({
-      outcome: 'failed',
-      errorCode: 'dsh_preset_unsupported',
-    })
-    expect(published).toBe(false)
-    expect(followup).not.toHaveBeenCalled()
+    expect(executed.status).toBe(200)
+    expect(executed.json).toEqual({ outcome: 'delivered' })
+    expect(published).toBe(true)
+    expect(followup).toHaveBeenCalledTimes(1)
   })
 
   it('rolls back when the cold host binding generation changes before setup', async () => {
@@ -1070,7 +1067,7 @@ describe('M2 injection wiring', () => {
     expect(executed.status).toBe(502)
     expect(executed.json).toEqual({
       outcome: 'failed',
-      errorCode: 'executor_error',
+      errorCode: 'dsh_agents_unavailable',
     })
     expect(published).toBe(false)
     expect(followup).not.toHaveBeenCalled()
@@ -1366,8 +1363,8 @@ describe('M2 injection wiring', () => {
       label: 'implicit default preset',
       inspect: async () => ({ meta: {}, events: [] }),
       agentPresets: true,
-      status: 409,
-      reason: 'dsh_preset_unsupported',
+      status: 200,
+      reason: undefined,
     },
     {
       label: 'unknown selected-event schema',
@@ -1389,7 +1386,7 @@ describe('M2 injection wiring', () => {
       reason: 'executor_error',
     },
   ])(
-    'fails closed for cold $label without leaking lifecycle secrets',
+    'handles cold $label without leaking lifecycle secrets',
     async ({ inspect, agentPresets, status, reason }) => {
       const resume = vi.fn(async (): Promise<never> => {
         throw new Error('resume must not be called')
@@ -1413,8 +1410,13 @@ describe('M2 injection wiring', () => {
       const { fake, prepared } = await prepareColdDsh(services, message)
 
       expect(prepared.status).toBe(status)
-      expect(prepared.json).toEqual({ reason })
-      expect(prepared.json.confirmToken).toBeUndefined()
+      if (status === 200) {
+        expect(prepared.json.reason).toBeUndefined()
+        expect(prepared.json.confirmToken).toEqual(expect.any(String))
+      } else {
+        expect(prepared.json).toEqual({ reason })
+        expect(prepared.json.confirmToken).toBeUndefined()
+      }
       expect(resume).not.toHaveBeenCalled()
       const external = `${JSON.stringify(prepared.json)}${fake.logs.join('\n')}`
       for (const secret of [
@@ -1423,7 +1425,7 @@ describe('M2 injection wiring', () => {
         '/SECRET/private/session/path',
         'SECRET-PROVIDER',
         'SECRET-MODEL',
-        message,
+        ...(status === 200 ? [] : [message]),
       ]) {
         expect(external).not.toContain(secret)
       }
@@ -1450,7 +1452,7 @@ describe('M2 injection wiring', () => {
 
       const { prepared } = await prepareColdDsh(services)
       expect(prepared.status).toBe(502)
-      expect(prepared.json).toEqual({ reason: 'executor_error' })
+      expect(prepared.json).toEqual({ reason: 'dsh_agents_unavailable' })
       expect(prepared.json.confirmToken).toBeUndefined()
       expect(resume).not.toHaveBeenCalled()
     },

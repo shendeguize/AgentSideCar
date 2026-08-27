@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overflow occurs, even if cleanup containment is also incomplete. A successful
   Darwin native exit with an observed fork is reported as completed with
   unknown delivery and `cleanup_incomplete`, rather than as a native failure.
+- DSH cold injection now gates presets from the target's persisted state rather
+  than the host's live `agentPresets` service, and plugin failures include
+  bounded sanitized detail with a distinct unavailable-agents code.
 
 ## [0.8.0] - 2026-08-28
 
