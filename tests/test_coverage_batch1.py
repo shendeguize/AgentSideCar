@@ -1308,3 +1308,149 @@ class BatchThreeCoverageMatrixTests(unittest.TestCase):
                 )
             )
 
+
+class CoverageRatchetMatrixTests(unittest.TestCase):
+    def test_json_limit_and_text_error_boundaries(self):
+        limits = json_limits.JSONLimits(
+            max_bytes=3,
+            max_depth=1,
+            max_nodes=2,
+            max_string_bytes=2,
+            max_integer_bits=2,
+        )
+        for payload in (None, b"", b"\xff", b"1234", b'{"a":1}'):
+            assert_rejected(self, json_limits.parse_json, payload, limits)
+        for value in (object(), {"a": [1, 2]}, {"a": 8}, "\ud800"):
+            assert_rejected(self, json_limits.validate_json, value, limits)
+        self.assertEqual("ok", json_limits.parse_json('"ok"', json_limits.JSONLimits()))
+        self.assertEqual("x…", text_utils.snip("xyz", 2))
+        self.assertEqual("", text_utils.snip("xyz", 0))
+        self.assertEqual("a", text_utils.normalize_scalar_text("a"))
+        self.assertEqual("�", text_utils.normalize_scalar_text("\ud800", "replace"))
+        assert_rejected(self, text_utils.normalize_scalar_text, "x", "bad")
+
+    def test_bus_queue_and_close_boundaries(self):
+        event_bus = bus.EventBus(queue_size=1)
+        filtered = event_bus.subscribe(["claude"])
+        filtered._offer({"agent": "codex"})
+        filtered._offer({"agent": "claude", "value": 1})
+        filtered._offer({"agent": "claude", "value": 2})
+        self.assertEqual({"agent": "claude", "value": 2}, filtered.get())
+        filtered.queue.put(object())
+        assert_rejected(self, filtered.get, timeout=0)
+        event_bus.close()
+        event_bus.close()
+        closed = event_bus.subscribe()
+        assert_rejected(self, closed.get, timeout=0)
+        assert_rejected(self, bus.EventBus, 0)
+
+    def test_remote_and_watch_type_validation_matrix(self):
+        for value in (None, "", "host name", "-host", "local"):
+            assert_rejected(self, remote_types.RemoteHost, value, "ready")
+        for value in ((1, 2), (3, 4, 5, 6), (True, 2, 3), (-1, 2, 3)):
+            assert_rejected(self, remote_types.ProbeResult, value, "/usr/bin/python3")
+        assert_rejected(
+            self,
+            remote_types.ProbeResult,
+            (3, 11, 0),
+            "relative-python",
+        )
+        ready = remote_watch_types.RemoteWatchReady("edge")
+        self.assertEqual("ready", ready.to_dict()["type"])
+        assert_rejected(self, remote_watch_types.RemoteWatchFailure, "edge", "bad")
+        event = {
+            "ts": "1",
+            "agent": "claude",
+            "session_id": "sid",
+            "kind": "text",
+            "text": "",
+            "extra": {"nested": [1]},
+        }
+        self.assertEqual("edge", remote_watch_types.validate_watch_event(event, "edge").host)
+        for bad in (None, [], {"bad": True}, {"x": set()}):
+            assert_rejected(
+                self,
+                remote_watch_types.validate_watch_event,
+                bad,
+                "edge",
+            )
+
+    def test_state_and_scan_edge_boundaries(self):
+        for metadata in (
+            {"status": "done"},
+            {"status": "running"},
+            {"running": "true"},
+            {"running-for-ms": "not-number", "command": "echo"},
+            {"current-command": "null"},
+            {"last-command": "echo", "last-exit-code": "1"},
+        ):
+            self.assertIn(state.terminal_metadata_is_active(metadata), (True, False))
+        with tempfile.TemporaryDirectory() as temporary:
+            session = daemon.Session(
+                "cursor", "sid", temporary, "", 1,
+                extra={"terminals_root": str(Path(temporary) / "missing")},
+            )
+            self.assertFalse(state.cursor_terminal_active(session))
+            self.assertFalse(
+                state.terminal_file_is_active(Path(temporary) / "missing", now=0)
+            )
+        assert_rejected(self, scan.Scanner.scan, mock.Mock(), recent=1, recent_seconds=2)
+        assert_rejected(self, scan.Scanner.scan, mock.Mock(), recent_seconds=-1)
+
+    def test_additional_json_remote_and_title_boundaries(self):
+        assert_rejected(
+            self,
+            json_limits._raw_payload,
+            "\ud800",
+        )
+        self.assertEqual(b"abc", json_limits._raw_payload(bytearray(b"abc")))
+        assert_rejected(self, json_limits._raw_payload, object())
+        assert_rejected(
+            self,
+            json_limits.parse_json,
+            b"1",
+            object(),
+        )
+        assert_rejected(
+            self,
+            json_limits.validate_json,
+            float("inf"),
+            json_limits.JSONLimits(),
+        )
+        self.assertEqual(
+            "query",
+            text_utils.extract_cursor_title(
+                ["<user_info>hidden</user_info>", "<user_query>query</user_query>"],
+                fallback="fallback",
+            ),
+        )
+        self.assertEqual(
+            "fallback",
+            text_utils.extract_cursor_title([None, "<broken>value"], fallback="fallback"),
+        )
+        self.assertEqual(
+            "[message redacted]",
+            text_utils.redact_message("message", "message"),
+        )
+
+        hosts = (
+            remote_types.RemoteHost("alpha", "ready"),
+            remote_types.RemoteHost("beta", "degraded"),
+        )
+        assert_rejected(self, remote._selected_hosts, hosts, ["ALPHA", "alpha"])
+        assert_rejected(self, remote.aggregate_remote, "list", hosts=hosts, max_workers=0)
+        assert_rejected(
+            self,
+            remote.aggregate_remote,
+            "list",
+            hosts=hosts,
+            fleet_timeout=0,
+        )
+        assert_rejected(
+            self,
+            remote.aggregate_remote,
+            "list",
+            hosts=hosts,
+            artifact=b"",
+        )
+
