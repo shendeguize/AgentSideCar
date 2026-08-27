@@ -77,7 +77,9 @@ The agent names below are also the exact values accepted by `list --agent`:
   Session discovery, inferred status, event watching, and known subagent
   relationships are supported.
 - `cursor-cli`: Cursor CLI `store.db` and its WAL are normally copied into
-  bounded private temporary snapshots before decoding. A metadata fallback may
+  bounded private temporary snapshots before decoding. The private snapshot is
+  normalized before its read-only open, so a cleanly exited WAL store remains
+  readable without changing the source database. A metadata fallback may
   instead open the live main database with SQLite `mode=ro&immutable=1`; that
   fallback does not read the WAL or take SQLite locks. Discovery, inferred
   status, history replay, and new normalized events are supported.

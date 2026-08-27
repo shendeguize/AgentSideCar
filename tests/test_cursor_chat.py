@@ -20,6 +20,7 @@ from sidecar.cursor_chat import (
     CursorChatFollower,
     CursorChatLimitError,
     CursorChatMetadataError,
+    CursorChatOpenError,
     CursorChatProtobufError,
     CursorChatSchemaError,
     CursorChatSnapshotBroker,
@@ -470,6 +471,31 @@ class CursorChatSnapshotTests(unittest.TestCase):
         self.assertEqual(1, len(snapshot_cursor_chat(main.path).messages))
         self.assertEqual(2, len(snapshot_cursor_chat(checkpointed.path).messages))
         self.assertEqual(3, len(snapshot_cursor_chat(wal_only.path).messages))
+
+    def test_checkpointed_wal_without_sidecars_is_readable(self):
+        store = self.make_store()
+        store.install([SYSTEM, USER_QUERY, ASSISTANT])
+        expected = golden_decoded_state(snapshot_cursor_chat(store.path))
+        store.checkpoint()
+        store.close()
+
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(store.path) + suffix)
+            if sidecar.exists():
+                sidecar.unlink()
+
+        self.assertEqual(expected, golden_decoded_state(snapshot_cursor_chat(store.path)))
+
+    def test_private_snapshot_open_failures_have_a_distinct_error(self):
+        store = self.make_store()
+        store.install([USER_QUERY])
+        with mock.patch.object(
+            cursor_chat.sqlite3,
+            "connect",
+            side_effect=sqlite3.DatabaseError("private snapshot open failed"),
+        ):
+            with self.assertRaises(CursorChatOpenError):
+                snapshot_cursor_chat(store.path)
 
     def test_order_metadata_project_title_and_deep_immutability(self):
         store = self.make_store()

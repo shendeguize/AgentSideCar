@@ -64,9 +64,10 @@ DSH Center 远程清单契约由版本化夹具钉死，并以只读边界写入
 - `cursor-ide`：Cursor IDE JSONL 会话记录和相关终端元数据。支持会话发现、状态
   推断、事件监视和已知的子 Agent 关系。
 - `cursor-cli`：通常会先将 Cursor CLI 的 `store.db` 及其 WAL 复制到有界的私有
-  临时快照，再进行解码。元数据回退路径可能改为使用 SQLite
-  `mode=ro&immutable=1` 打开实时主数据库；该回退路径不会读取 WAL，也不会获取
-  SQLite 锁。支持发现、状态推断、历史回放和新的规范化事件。
+  临时快照，再进行解码。私有快照会在只读打开前完成规范化，因此正常退出且没有
+  WAL 伴随文件的存储仍可读取，同时不会修改源数据库。元数据回退路径可能改为使用
+  SQLite `mode=ro&immutable=1` 打开实时主数据库；该回退路径不会读取 WAL，也不会
+  获取 SQLite 锁。支持发现、状态推断、历史回放和新的规范化事件。
 - `claude`：Claude Code 项目 JSONL 会话记录，包括已知的 sidechain 和子 Agent
   关系。
 - `codex`：Codex CLI rollout JSONL，以及可用时的只读原生状态 SQLite。

@@ -121,6 +121,12 @@ class CursorChatSourceError(CursorChatError):
     recoverable = True
 
 
+class CursorChatOpenError(CursorChatError):
+    """The private SQLite snapshot cannot be normalized or opened."""
+
+    recoverable = True
+
+
 class CursorChatBusyError(CursorChatError):
     """The source changed during every bounded snapshot attempt."""
 
@@ -1501,6 +1507,12 @@ def _read_stable_copy_with_signature_unlimited(
 
             connection: Optional[sqlite3.Connection] = None
             try:
+                normalization = sqlite3.connect(str(copied_db))
+                try:
+                    normalization.execute("PRAGMA journal_mode = DELETE").fetchone()
+                    normalization.commit()
+                finally:
+                    normalization.close()
                 uri = copied_db.as_uri() + "?mode=ro"
                 connection = sqlite3.connect(uri, uri=True)
                 connection.execute("PRAGMA query_only = ON")
@@ -1510,8 +1522,8 @@ def _read_stable_copy_with_signature_unlimited(
                 raise
             except sqlite3.DatabaseError:
                 raise _safe_message(
-                    CursorChatSourceError,
-                    "Cursor chat snapshot cannot be opened",
+                    CursorChatOpenError,
+                    "Cursor chat snapshot cannot be normalized or opened",
                 )
             finally:
                 if connection is not None:
@@ -2058,6 +2070,7 @@ __all__ = [
     "CursorChatLimitError",
     "CursorChatMetadata",
     "CursorChatMetadataError",
+    "CursorChatOpenError",
     "CursorChatProtobufError",
     "CursorChatSchemaError",
     "CursorChatSourceError",
