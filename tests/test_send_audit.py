@@ -328,6 +328,8 @@ class SendAuditStoreTests(unittest.TestCase):
             {"code": "audit_corrupt", "detail": "namespace_moved"},
             AuditError("audit_corrupt", detail="namespace_moved").to_dict(),
         )
+        with self.assertRaises(ValueError):
+            AuditError("audit_corrupt", detail="unsafe detail")
 
         pending = {
             "schema_version": audit_module.AUDIT_SCHEMA_VERSION,
@@ -1288,11 +1290,43 @@ class SendAuditStoreTests(unittest.TestCase):
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
         )
         try:
+            existing = directory / AUDIT_FILE_NAME
+            existing.write_bytes(b"record")
+            existing.chmod(0o600)
             audit_module.SendAuditStore._archive_files(
                 directory_fd,
                 directory_fd,
                 ("missing",),
             )
+            with mock.patch.object(
+                audit_module.os,
+                "link",
+                side_effect=FileExistsError,
+            ):
+                with self.assertRaises(AuditError) as raised:
+                    audit_module.SendAuditStore._archive_files(
+                        directory_fd,
+                        directory_fd,
+                        (AUDIT_FILE_NAME,),
+                    )
+                self.assertEqual("audit_error", raised.exception.code)
+            with mock.patch.object(
+                audit_module.os,
+                "link",
+                side_effect=OSError(audit_module.errno.EIO, "link failed"),
+            ), mock.patch.object(
+                audit_module.os,
+                "unlink",
+                side_effect=OSError(audit_module.errno.EIO, "unlink failed"),
+            ):
+                with self.assertRaises(AuditError) as raised:
+                    audit_module.SendAuditStore._archive_files(
+                        directory_fd,
+                        directory_fd,
+                        (AUDIT_FILE_NAME,),
+                    )
+                self.assertEqual("audit_error", raised.exception.code)
+            existing.unlink()
             for index in range(len(audit_module._ARCHIVE_FILE_NAMES) + 1):
                 path = directory / "entry-{}".format(index)
                 path.write_bytes(b"x")
