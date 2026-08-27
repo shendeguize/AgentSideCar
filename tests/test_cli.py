@@ -5461,6 +5461,41 @@ class SendCLITests(unittest.TestCase):
                 self.assertEqual([None], scanner.recent_calls)
                 self.assertEqual([], calls)
 
+    def test_send_remote_row_absent_from_local_scan_is_target_not_found(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = main(
+            [
+                "send",
+                "remote-session",
+                "--agent",
+                "claude",
+                "--exact-session",
+                "--message-stdin",
+                "--allow-write",
+                "--json",
+            ],
+            scanner=FakeScanner([make_session("local-session")]),
+            stdin=io.BytesIO(b"PRIVATE-MESSAGE"),
+            stdout=stdout,
+            stderr=stderr,
+            send_planner=lambda *args, **kwargs: self.fail(
+                "planner must not run for an absent remote row"
+            ),
+            send_executor=lambda *args, **kwargs: self.fail(
+                "executor must not run for an absent remote row"
+            ),
+        )
+
+        self.assertEqual(2, code)
+        self.assertEqual({"code": "target_not_found"}, json.loads(stdout.getvalue()))
+        self.assertIn(
+            "remote rows from list --remote cannot be targeted by send",
+            stderr.getvalue(),
+        )
+        self.assertNotIn("PRIVATE-MESSAGE", stderr.getvalue())
+
     def test_supported_send_contract_is_direct_local_and_forwards_timeout(self):
         session = make_session("supported-session", agent="codex")
         scanner = FakeScanner([session])
