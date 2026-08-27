@@ -1145,6 +1145,7 @@ def _run_remote_snapshot(
 
     result: Optional[object] = None
     control_error: Optional[str] = None
+    selection_error = False
     try:
         provider_arguments = {"selected": args.host or None}
         if command == "list" and _accepts_recent_seconds(provider):
@@ -1166,6 +1167,7 @@ def _run_remote_snapshot(
     except OSError:
         control_error = "remote: setup\n"
     except ValueError as error:
+        selection_error = True
         control_error = "remote: {}\n".format(sanitize_terminal_text(error))
 
     remote_rows: List[Mapping[str, Any]] = []
@@ -1218,7 +1220,7 @@ def _run_remote_snapshot(
     _render_snapshot(
         command,
         args,
-        list(local_rows) + remote_rows,
+        remote_rows if selection_error else list(local_rows) + remote_rows,
         stdout=stdout,
         show_host=True,
     )

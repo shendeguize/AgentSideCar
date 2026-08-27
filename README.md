@@ -377,7 +377,7 @@ C1–C4 cross-repository contract. C1 accepts a bare HostView array or a
 `{"hosts": [...]}` container. Sidecar consumes only `name`, `config.enabled`,
 `config.local`, `local`, `orphaned`, and `phase`; extra HostView fields are
 ignored. A host is eligible only when it is enabled, non-local, non-orphaned,
-and in the `ready` or `no_dsh` phase. Map-form host containers are supported
+and in the `ready`, `no_dsh`, `running`, or `degraded` phase. Map-form host containers are supported
 for the C4 config/state-file fallback, but are not part of the C1 producer
 shape. See the [DSH Center handbook](https://github.com/shendeguize/DSH_Center)
 for the producer-side contract. C5 tunneled plugin-page shape remains tracked
@@ -431,8 +431,9 @@ Remote failures are isolated by host and reported on stderr with stable codes,
 including `resource_limit` for bounded-data violations. Rows from local and
 successful remote hosts are still printed. A partial fleet success exits `0`.
 An empty eligible fleet also exits `0` with a notice that only local sessions
-are shown. Invalid inventory, setup, or host selection exits `2`; exit `3`
-applies only when a nonempty requested fleet has zero successful hosts. These
+are shown. Invalid inventory or setup exits `2` with local rows when available.
+An explicitly selected unknown or ineligible host exits `2` and emits no rows.
+Exit `3` applies only when a nonempty requested fleet has zero successful hosts. These
 snapshot commands do not provide remote message delivery.
 
 Follow one session by a unique ID prefix, or follow all watchable sessions:
@@ -612,12 +613,12 @@ Mutating send also requires deterministic descendant containment. On Darwin,
 Sidecar starts a gated supervisor, installs a `kqueue` monitor for root-process
 fork and exit activity, revalidates the target, and only then releases the
 native target to execute. A clean no-fork completion can be reported as
-delivered. Any observed fork is conservatively reported as
-`error_code: "cleanup_incomplete"` with delivery unknown, even if the child
-work was synchronous, the native root exited zero, and a response was captured.
-Never retry that result automatically. Kimi retains the fork diagnostic but
-has the stricter durable-proof result rule described below; it is never
-reported delivered.
+delivered. Any observed fork keeps
+`error_code: "cleanup_incomplete"` with delivery unknown. If the native root
+exits zero and a response was captured, the outcome is `completed`; otherwise
+it is `failed`. Never retry that result automatically. Kimi retains the fork
+diagnostic but has the stricter durable-proof result rule described below; it is
+never reported delivered.
 
 If the required containment primitives are unsupported, send reports
 `containment_unsupported` with delivery unknown before the native target
@@ -698,7 +699,8 @@ The message must be nonblank UTF-8 without NUL and at most 16 KiB. Timeout is
 1–900 seconds and defaults to 300. Execution is bounded and Agent Sidecar
 attempts one resume. Timeout, native failure, or output overflow means delivery
 is unknown; never retry an unknown delivery because the agent may already have
-received or acted on the message.
+received or acted on the message. Overflow receipts also include the bounded
+`overflow` kind and its applicable `overflow_limit` when one is known.
 
 On success, human output is the final native response, or a delivery receipt
 when no response is available. `--json` emits one result object. For Claude,

@@ -17,7 +17,7 @@ from sidecar.json_limits import (
 )
 
 
-ELIGIBLE_PHASES = frozenset(("ready", "no_dsh"))
+ELIGIBLE_PHASES = frozenset(("ready", "no_dsh", "running", "degraded"))
 FAILURE_CODES = frozenset(
     (
         "inventory",

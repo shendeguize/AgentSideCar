@@ -328,7 +328,8 @@ The C1–C4 cross-repository inventory contract is intentionally narrow. C1
 accepts a bare HostView array or a `{"hosts": [...]}` container. Sidecar
 consumes only `name`, `config.enabled`, `config.local`, `local`, `orphaned`,
 and `phase`; extra HostView fields are ignored. A host is eligible only when it
-is enabled, non-local, non-orphaned, and in the `ready` or `no_dsh` phase.
+is enabled, non-local, non-orphaned, and in the `ready`, `no_dsh`, `running`, or
+`degraded` phase.
 Map-form host containers are supported for the C4 config/state-file fallback,
 not as the C1 producer shape. C5 tunneled plugin-page shape is tracked through
 the cross-repository integration issue template.
@@ -385,7 +386,8 @@ host(s)`.
   fleet success, or the eligible fleet was empty. The empty case reports a
   notice that only local sessions are shown.
 - Exit `2`: invalid inventory, setup, selection, or command usage. Local rows
-  are still emitted when available.
+  remain available for inventory/setup failures; an explicitly selected unknown
+  or ineligible host emits no snapshot rows.
 - Exit `3`: a nonempty requested fleet had zero successful hosts. Local rows
   are still emitted when available.
 
@@ -409,8 +411,9 @@ precedence, fleet-wide scope, local validation, one-element probe, fail-closed
 errors, and aggregate hint are identical to remote snapshots.
 
 Inventory and eligibility match remote snapshots: DSH Center hosts must be
-enabled, nonlocal, non-orphaned, and in the `ready` or `no_dsh` phase. Each
-selected host uses the remote-snapshot probe contract: `python3` first, then
+enabled, nonlocal, non-orphaned, and in the `ready`, `no_dsh`, `running`, or
+`degraded` phase. Each selected host uses the remote-snapshot probe contract:
+`python3` first, then
 `python3.14` down through `python3.8`, selecting the first available Python
 3.8+ interpreter from the noninteractive SSH shell's `PATH`. The selected
 executable path from bounded default discovery is bound only to the bootstrap
@@ -700,14 +703,13 @@ the native target.
 
 A native result can be reported as delivered only when the monitored root
 completes successfully with no observed fork and containment remains reliable.
-Any fork permanently makes cleanup unprovable for that send. The result is
-therefore `error_code: "cleanup_incomplete"` and `delivery: "unknown"` even if
-every child completed synchronously, the root returned zero, and bounded
-response text was captured. An otherwise completed run becomes
-`outcome: "failed"`; a timed-out run remains `outcome: "timed_out"` while using
-the same cleanup error code. Kimi is the narrow exception to the outcome
-mapping: strict durable proof can produce `completed`, but delivery remains
-unknown and never delivered. Never retry `cleanup_incomplete` automatically.
+Any fork permanently makes cleanup unprovable for that send. The result keeps
+`error_code: "cleanup_incomplete"` and `delivery: "unknown"` even if every
+child completed synchronously. When the root returns zero and bounded response
+text was captured, the outcome is `completed`; otherwise it is `failed`. A
+timed-out run remains `outcome: "timed_out"` while using the same cleanup error
+code. Kimi's strict durable proof has the same completed/unknown shape, but
+never reports delivered. Never retry `cleanup_incomplete` automatically.
 
 If Darwin `kqueue` fork monitoring or another required containment primitive is
 unavailable, the result is `outcome: "failed"`,
@@ -797,6 +799,10 @@ With `--json`, stdout is one object with exactly these fields:
 - `response`: bounded parsed native response text.
 - `stderr`: bounded native diagnostic text.
 - `error_code`: stable failure code or null.
+- `overflow`: the stream that exceeded its bound, or `output` for decoded
+  output that exceeded a bound; otherwise null.
+- `overflow_limit`: the applicable byte limit for `input`, `stdout`, or
+  `stderr` overflow; otherwise null.
 - `request_id`: caller-supplied or generated opaque request ID.
 - `replayed`: whether the result came from retained audit history without a
   native spawn.

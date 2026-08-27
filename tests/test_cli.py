@@ -922,30 +922,39 @@ class CLITests(unittest.TestCase):
                         self.assertEqual(1, client.status_calls)
                         self.assertEqual([], scanner.recent_calls)
                         if as_json:
-                            self.assertEqual(
-                                [
+                            expected_rows = (
+                                []
+                                if "selected remote" in expected_error
+                                else [
                                     dict(local.to_dict(), host="local"),
                                     dict(local_older.to_dict(), host="local"),
-                                ],
-                                json.loads(stdout.getvalue()),
+                                ]
                             )
+                            self.assertEqual(expected_rows, json.loads(stdout.getvalue()))
                         else:
                             lines = stdout.getvalue().splitlines()
-                            self.assertEqual(
-                                [
-                                    "HOST",
-                                    "AGENT",
-                                    "STATUS",
-                                    "SESSION",
-                                    "AGE",
-                                    "UPDATED",
-                                    "TITLE",
-                                ],
-                                lines[0].split(),
-                            )
-                            self.assertIn("local", lines[1])
-                            self.assertIn(local.session_id, lines[1])
-                            self.assertIn(local_older.session_id, lines[2])
+                            if "selected remote" in expected_error:
+                                if command == "status":
+                                    self.assertEqual(["no active sessions"], lines)
+                                else:
+                                    self.assertEqual(1, len(lines))
+                                    self.assertEqual("HOST", lines[0].split()[0])
+                            else:
+                                self.assertEqual(
+                                    [
+                                        "HOST",
+                                        "AGENT",
+                                        "STATUS",
+                                        "SESSION",
+                                        "AGE",
+                                        "UPDATED",
+                                        "TITLE",
+                                    ],
+                                    lines[0].split(),
+                                )
+                                self.assertIn("local", lines[1])
+                                self.assertIn(local.session_id, lines[1])
+                                self.assertIn(local_older.session_id, lines[2])
                             self.assertNotIn(
                                 filtered.session_id,
                                 stdout.getvalue(),
@@ -5700,11 +5709,11 @@ class SendCLITests(unittest.TestCase):
         )
         self.assertNotIn("delivered", rendered)
 
-    def test_claude_cleanup_unknown_remains_failure_in_json_and_text(self):
+    def test_claude_cleanup_unknown_reports_completed_without_delivery(self):
         session = make_session("claude-cleanup", agent="claude")
         result = self.result(
             session,
-            outcome="failed",
+            outcome="completed",
             delivery="unknown",
             error_code="cleanup_incomplete",
             request_id="request-claude-cleanup",
@@ -5740,7 +5749,7 @@ class SendCLITests(unittest.TestCase):
                     self.assertEqual(result.to_dict(), json.loads(stdout.getvalue()))
                 else:
                     self.assertIn(
-                        "delivery unknown for claude:claude-cleanup (failed)",
+                        "completed but delivery unknown for claude:claude-cleanup",
                         stdout.getvalue(),
                     )
                 self.assertIn("cleanup_incomplete", stderr.getvalue())

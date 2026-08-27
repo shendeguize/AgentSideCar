@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before read-only decoding, so cleanly exited stores remain readable without
   modifying the source database. Snapshot normalization/open failures now use
   the distinct `CursorChatOpenError` diagnostic.
+- Remote observation now includes eligible DSH Center hosts in `running` and
+  `degraded` phases. Explicit selection of an unknown or ineligible host exits
+  with the existing control error and does not emit a misleading local snapshot.
+- Native send receipts now identify the bounded output stream and limit when
+  overflow occurs, even if cleanup containment is also incomplete. A successful
+  Darwin native exit with an observed fork is reported as completed with
+  unknown delivery and `cleanup_incomplete`, rather than as a native failure.
 
 ## [0.8.0] - 2026-08-28
 

@@ -357,8 +357,24 @@ class SendAuditStoreTests(unittest.TestCase):
             "error": "native_failure",
         }
         self.assertEqual(failed, audit_module._validate_record(failed))
+        completed_unknown = {
+            **failed,
+            "outcome": "completed",
+            "delivery": "unknown",
+            "returncode": 0,
+            "error": "cleanup_incomplete",
+        }
+        self.assertEqual(
+            completed_unknown,
+            audit_module._validate_record(completed_unknown),
+        )
         for update in (
-            {"outcome": "completed", "delivery": "unknown", "returncode": 0, "error": None},
+            {
+                "outcome": "completed",
+                "delivery": "unknown",
+                "returncode": 0,
+                "error": "native_failure",
+            },
             {"outcome": "failed", "delivery": "delivered"},
             {"returncode": True},
             {"error": "../unsafe"},
