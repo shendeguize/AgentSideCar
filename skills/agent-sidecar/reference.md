@@ -83,9 +83,11 @@ several minutes late.
 ## Read-only storage behavior
 
 Cursor CLI observation normally copies the bounded main database and WAL into a
-private temporary snapshot before decoding. A metadata fallback may open the
-live main database with SQLite `mode=ro&immutable=1`; it does not read the WAL
-or take SQLite locks.
+private temporary snapshot before decoding. The private snapshot is normalized
+before its read-only open, so a cleanly exited WAL store remains readable
+without modifying the source database. A metadata fallback may open the live
+main database with SQLite `mode=ro&immutable=1`; it does not read the WAL or
+take SQLite locks.
 
 The default Unix daemon writes its socket and PID file, may create bounded
 ephemeral private temporary snapshots, and persists bounded private

@@ -432,9 +432,11 @@ surviving entries, expose upstream details, or invent an agent-level retry.
 
 ## Interpretation limits
 
-- Cursor CLI reads normally use bounded private temporary DB/WAL snapshots. A
-  metadata fallback may open the live main database with
-  `mode=ro&immutable=1`, without reading its WAL or taking SQLite locks.
+- Cursor CLI reads normally use bounded private temporary DB/WAL snapshots. The
+  private snapshot is normalized before its read-only open, so cleanly exited
+  WAL stores remain readable without modifying the source database. A metadata
+  fallback may open the live main database with `mode=ro&immutable=1`, without
+  reading its WAL or taking SQLite locks.
 - Daemon-backed observation may report bounded, sanitized tailer diagnostics
   on stderr; include them when they are relevant to the user's request.
 - The mode-`0700` runtime contains bounded mode-`0600` `daemon.jsonl` plus two

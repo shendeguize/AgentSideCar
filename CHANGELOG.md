@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Cursor CLI WAL snapshots are normalized only in their private temporary copy
+  before read-only decoding, so cleanly exited stores remain readable without
+  modifying the source database. Snapshot normalization/open failures now use
+  the distinct `CursorChatOpenError` diagnostic.
+
 ## [0.8.0] - 2026-08-28
 
 ### Added
