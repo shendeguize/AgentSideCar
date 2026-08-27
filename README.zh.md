@@ -331,7 +331,8 @@ agent-sidecar status --remote --remote-python /usr/bin/python3.11 --json
 DSH Center 主机清单边界保持窄化，并作为 C1–C4 跨仓契约共享。C1 接受裸 HostView
 数组或 `{"hosts": [...]}` 容器。Sidecar 只消费 `name`、`config.enabled`、
 `config.local`、`local`、`orphaned` 和 `phase`；额外的 HostView 字段会被忽略。
-主机只有在已启用、非本地、非孤立且阶段为 `ready` 或 `no_dsh` 时才符合条件。
+主机只有在已启用、非本地、非孤立且阶段为 `ready`、`no_dsh`、`running` 或
+`degraded` 时才符合条件。
 Map 形式的主机容器仅支持 C4 配置/状态文件回退，不属于 C1 的生产方数据形态。
 生产方契约见 [DSH Center handbook](https://github.com/shendeguize/DSH_Center)。
 C5 隧道插件页面形态继续通过跨仓集成 Issue 模板追踪。
@@ -370,8 +371,9 @@ token。探测响应的所有字段仍会完整校验，但不同的返回 `exec
 
 远程故障按主机隔离，并在 stderr 上使用稳定错误码报告，其中有界数据违规对应
 `resource_limit`。本地行和成功远程主机的行仍会输出。机群部分成功时退出码为
-`0`。符合条件的机群为空时也以 `0` 退出，并提示只显示本地会话。清单、初始化或
-主机选择无效时退出码为 `2`；只有非空的已请求机群中没有任何主机成功时，退出码
+`0`。符合条件的机群为空时也以 `0` 退出，并提示只显示本地会话。清单或初始化
+失败时退出码为 `2`，并在可用时保留本地行；显式选择未知或不符合条件的主机时
+退出码为 `2` 且不输出快照行。只有非空的已请求机群中没有任何主机成功时，退出码
 才为 `3`。这些快照命令不提供远程消息投递。
 
 可以用唯一的会话 ID 前缀跟踪单个会话，也可以跟踪所有可监视会话：
@@ -406,7 +408,7 @@ agent-sidecar watch --all --remote --remote-python /usr/bin/python3.11 --json
 `--remote` 的本地监视命令保持原有事件模式和展示形式。
 
 远程监视使用与远程快照相同的 DSH Center 清单和资格规则：主机必须已启用、非
-本地、非孤立，并处于 `ready` 或 `no_dsh` 阶段。每台主机使用与远程快照相同的
+本地、非孤立，并处于 `ready`、`no_dsh`、`running` 或 `degraded` 阶段。每台主机使用与远程快照相同的
 有界 Python 候选顺序（`python3`，然后从 `python3.14` 依次到 `python3.8`），
 并选择首个可用的 Python 3.8+ 解释器。解析使用非交互 SSH Shell 的 `PATH`，它
 可能不同于交互式登录环境。`sh -c` 只固定内层探测的 POSIX 语法；外层命令仍由
@@ -515,10 +517,10 @@ Sidecar 发送，以及已经改变或消失的目标，并持锁直到原生进
 可变更发送还要求确定性的后代进程遏制。在 Darwin 上，Sidecar 会启动一个带门控
 的监督进程，安装 `kqueue` 监视器以观察根进程的 fork 和退出活动，重新验证目标，
 然后才允许原生目标执行。干净的无 fork 完成可以报告为已投递。任何观察到的 fork
-都会保守地报告为 `error_code: "cleanup_incomplete"`，投递状态未知；即使子工作
-是同步的、原生根进程以零退出且已捕获响应，也同样如此。绝不能自动重试该结果。
-Kimi 会保留该 fork 诊断，但使用下述更严格的持久证据结果规则，且永不报告
-delivered。
+都会保留 `error_code: "cleanup_incomplete"`，投递状态未知。如果原生根进程以零
+退出且已捕获响应，结果为 `outcome: "completed"`；否则为 `failed`。绝不能自动
+重试该结果。Kimi 会保留该 fork 诊断，但使用下述更严格的持久证据结果规则，且
+永不报告 delivered。
 
 如果所需遏制原语不受支持，原生目标执行前 `send` 会报告
 `containment_unsupported`，投递状态未知。不会进行全进程扫描，也不会杀死未验证

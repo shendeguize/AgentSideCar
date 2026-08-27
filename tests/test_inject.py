@@ -609,7 +609,7 @@ class ExecutionTests(InjectionTestCase):
             ),
         )
 
-        self.assertEqual("failed", incomplete.outcome)
+        self.assertEqual("completed", incomplete.outcome)
         self.assertEqual("unknown", incomplete.delivery)
         self.assertEqual("cleanup_incomplete", incomplete.error_code)
         self.assertEqual(0, incomplete.returncode)
@@ -628,6 +628,27 @@ class ExecutionTests(InjectionTestCase):
         self.assertEqual("timed_out", timeout.outcome)
         self.assertEqual("unknown", timeout.delivery)
         self.assertEqual("cleanup_incomplete", timeout.error_code)
+
+    def test_overflow_wins_over_incomplete_cleanup_and_exposes_limit(self):
+        plan = self.plan()
+        result = self.execute_plan(
+            plan,
+            allow_write=True,
+            runner=lambda *args, **kwargs: self.completed(
+                plan,
+                returncode=-9,
+                stderr=b"x" * MAX_STDERR_BYTES,
+                overflow="stderr",
+                cleanup_incomplete=True,
+            ),
+        )
+
+        self.assertEqual("overflow", result.outcome)
+        self.assertEqual("unknown", result.delivery)
+        self.assertEqual("stderr_overflow", result.error_code)
+        self.assertEqual("stderr", result.overflow)
+        self.assertEqual(MAX_STDERR_BYTES, result.overflow_limit)
+        self.assertEqual(MAX_STDERR_BYTES, result.to_dict()["overflow_limit"])
 
     def test_overflow_and_nonzero_are_unknown(self):
         plan = self.plan()
@@ -654,6 +675,8 @@ class ExecutionTests(InjectionTestCase):
 
         self.assertEqual(("overflow", "unknown"), (overflow.outcome, overflow.delivery))
         self.assertEqual("stdout_overflow", overflow.error_code)
+        self.assertEqual("stdout", overflow.overflow)
+        self.assertEqual(MAX_STDOUT_BYTES, overflow.overflow_limit)
         self.assertEqual(("failed", "unknown"), (failed.outcome, failed.delivery))
         self.assertEqual(7, failed.returncode)
         self.assertEqual("partial response", failed.response)

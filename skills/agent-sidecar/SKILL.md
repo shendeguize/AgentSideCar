@@ -274,14 +274,13 @@ state or workspace files.
 Mutating send requires deterministic descendant containment. On Darwin,
 Sidecar starts a gated supervisor and installs a `kqueue` monitor for
 root-process fork activity before releasing the native target. A no-fork
-completion can be delivered. Any observed fork is conservatively returned as
-`error_code: "cleanup_incomplete"` with `delivery: "unknown"`, even when tool
-work was synchronous, the native process exited zero, or response text was
-captured. State plainly that delivery is unknown; do not describe the send,
-response, or tool work as successfully delivered, and never retry it
-automatically. For Kimi, strict durable proof can still produce
-`outcome: "completed"` while retaining unknown delivery; it never produces
-delivered.
+completion can be delivered. Any observed fork retains
+`error_code: "cleanup_incomplete"` with `delivery: "unknown"`. If the native
+process exits zero and response text was captured, the outcome is
+`"completed"`; otherwise it is `"failed"`. State plainly that delivery is
+unknown; do not describe the send as successfully delivered, and never retry it
+automatically. For Kimi, strict durable proof follows the same completed/unknown
+shape; it never produces delivered.
 
 On platforms without the required containment primitives, send returns
 `containment_unsupported` with delivery unknown before the native target

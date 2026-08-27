@@ -160,6 +160,28 @@
         "files": {}
       },
       "manualInstances": []
+    },
+    {
+      "name": "remote-running",
+      "local": false,
+      "orphaned": false,
+      "config": {
+        "local": false,
+        "enabled": true
+      },
+      "phase": "running",
+      "ignored": "synthetic-extra-field"
+    },
+    {
+      "name": "remote-degraded",
+      "local": false,
+      "orphaned": false,
+      "config": {
+        "local": false,
+        "enabled": true
+      },
+      "phase": "degraded",
+      "ignored": "synthetic-extra-field"
     }
   ]
 }

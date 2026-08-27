@@ -204,6 +204,11 @@ proof it remains failed (or the bounded timeout/overflow outcome) and unknown.
 Do not retry the same content under a new request ID. Reusing the same retained
 request ID can only replay its audit receipt and does not spawn again. Claude,
 Codex, and Cursor retain their existing send semantics.
+On Darwin, if a native send observes a fork but the root exits zero with a
+captured response, Sidecar reports `outcome: "completed"` with
+`delivery: "unknown"` and retains `cleanup_incomplete`; it never upgrades that
+result to delivered or retries it automatically. Budget overflow is reported
+separately from cleanup uncertainty.
 
 `send --agent NAME` optionally restricts selection to an exact,
 case-insensitive agent name, and `--exact-session` optionally disables prefix

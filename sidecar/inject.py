@@ -306,6 +306,8 @@ class SendResult:
     response: str = ""
     stderr: str = ""
     error_code: Optional[str] = None
+    overflow: Optional[str] = None
+    overflow_limit: Optional[int] = None
     request_id: str = ""
     replayed: bool = False
 
@@ -338,6 +340,8 @@ class SendResult:
             "response": self.response,
             "stderr": self.stderr,
             "error_code": self.error_code,
+            "overflow": self.overflow,
+            "overflow_limit": self.overflow_limit,
             "request_id": self.request_id,
             "replayed": self.replayed,
         }
@@ -2285,6 +2289,14 @@ def _result_returncode(completed: object) -> Optional[int]:
     return value if type(value) is int else None
 
 
+def _overflow_limit(kind: Optional[str]) -> Optional[int]:
+    return {
+        "input": MAX_MESSAGE_BYTES,
+        "stdout": MAX_STDOUT_BYTES,
+        "stderr": MAX_STDERR_BYTES,
+    }.get(kind)
+
+
 def _render_output(
     agent: str,
     stdout: object,
@@ -2875,19 +2887,8 @@ def _run_native_send(
         if overflow not in (None, "input", "stdout", "stderr"):
             overflow = None
         returncode = _result_returncode(completed)
-        if getattr(completed, "cleanup_incomplete", False) is True:
-            return SendResult(
-                agent=validated_plan.agent,
-                session_id=validated_plan.session_id,
-                outcome="failed",
-                delivery="unknown",
-                returncode=returncode,
-                response=response,
-                stderr=error_text,
-                error_code="cleanup_incomplete",
-                request_id=request_id,
-            )
-        if overflow is not None or oversized:
+        overflow_kind = overflow or ("output" if oversized else None)
+        if overflow_kind is not None:
             return SendResult(
                 agent=validated_plan.agent,
                 session_id=validated_plan.session_id,
@@ -2896,10 +2897,23 @@ def _run_native_send(
                 returncode=returncode,
                 response=response,
                 stderr=error_text,
-                error_code="{}_overflow".format(overflow or "output"),
+                error_code="{}_overflow".format(overflow_kind),
+                overflow=overflow_kind,
+                overflow_limit=_overflow_limit(overflow),
                 request_id=request_id,
             )
-
+        if getattr(completed, "cleanup_incomplete", False) is True:
+            return SendResult(
+                agent=validated_plan.agent,
+                session_id=validated_plan.session_id,
+                outcome="completed" if returncode == 0 and response else "failed",
+                delivery="unknown",
+                returncode=returncode,
+                response=response,
+                stderr=error_text,
+                error_code="cleanup_incomplete",
+                request_id=request_id,
+            )
         if returncode == 0:
             return SendResult(
                 agent=validated_plan.agent,

@@ -258,6 +258,9 @@ class RemoteDataModelTests(unittest.TestCase):
             remote.RemoteFailure("edge", "permission denied: secret")
         with self.assertRaises(ValueError):
             remote.RemoteHost("edge", "probing")
+        for phase in ("running", "degraded"):
+            with self.subTest(phase=phase):
+                self.assertEqual(phase, remote.RemoteHost("edge", phase).phase)
         for alias in ("local", "LOCAL", "Local"):
             with self.subTest(alias=alias):
                 with self.assertRaises(ValueError):
@@ -530,6 +533,8 @@ class InventoryTests(unittest.TestCase):
             inventory_row("local", local=True),
             inventory_row("orphan", orphaned=True),
             inventory_row("probing", phase="probing"),
+            inventory_row("running", phase="running"),
+            inventory_row("degraded", phase="degraded"),
         ]
         calls = []
 
@@ -540,7 +545,12 @@ class InventoryTests(unittest.TestCase):
         hosts = remote.load_remote_hosts(runner=runner, env={"HOME": "/unused"})
 
         self.assertEqual(
-            [("No_DSH", "no_dsh"), ("Ready.Remote", "ready")],
+            [
+                ("degraded", "degraded"),
+                ("No_DSH", "no_dsh"),
+                ("Ready.Remote", "ready"),
+                ("running", "running"),
+            ],
             [(host.alias, host.phase) for host in hosts],
         )
         self.assertEqual([["dshc", "ls", "--json"]], [call[0] for call in calls])
@@ -767,7 +777,12 @@ class InventoryTests(unittest.TestCase):
         hosts = remote_inventory._hosts_from_canonical(payload)
 
         self.assertEqual(
-            [("remote-no-dsh", "no_dsh"), ("remote-ready", "ready")],
+            [
+                ("remote-degraded", "degraded"),
+                ("remote-no-dsh", "no_dsh"),
+                ("remote-ready", "ready"),
+                ("remote-running", "running"),
+            ],
             [(host.alias, host.phase) for host in hosts],
         )
 

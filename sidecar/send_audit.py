@@ -338,9 +338,16 @@ def _validate_record(value: object) -> Mapping[str, Any]:
             raise AuditError("audit_corrupt")
         if outcome == "completed":
             if (
-                record["delivery"] != "delivered"
-                or returncode != 0
-                or error is not None
+                not (
+                    record["delivery"] == "delivered"
+                    and returncode == 0
+                    and error is None
+                )
+                and not (
+                    record["delivery"] == "unknown"
+                    and returncode == 0
+                    and error == "cleanup_incomplete"
+                )
             ):
                 raise AuditError("audit_corrupt")
         elif record["delivery"] != "unknown":
