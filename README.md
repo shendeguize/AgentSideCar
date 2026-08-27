@@ -637,6 +637,12 @@ Claude, Codex, and Cursor retain their existing resume and result semantics.
 Direct CLI send still does not support DSH sessions; DSH injection exists only
 inside the DSH plugin.
 
+`send` resolves only against its direct local scan. A row obtained from
+`list --remote` is not a send target; if its ID is absent from that scan, the
+command fails closed with exit `2` and JSON code `target_not_found`. The
+`remote_session` rejection applies when a locally scanned row carries remote
+provenance.
+
 **Kimi Code 0.38.0 protected resume.**
 
 Kimi support is deliberately exact-version and manual: only Kimi Code

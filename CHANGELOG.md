@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `audit reset` now archives the active key, marker, and retained logs by
   default, refuses after eight archives, and reports `namespace_moved` as a
   safe recovery detail on `audit_corrupt`.
+- `send` now adds a human-readable hint on `target_not_found` explaining that
+  rows from `list --remote` cannot be targeted by `send`.
 
 ### Documentation
 
@@ -29,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Chinese READMEs and agent reference, including the read-only boundary and
   cross-repository issue workflow.
 - Added a DSH Center integration issue template with redaction guidance.
+- Documented the `send` boundary between `target_not_found` for rows absent
+  from the direct local scan and the `remote_session` rejection for locally
+  scanned rows with remote provenance, across both READMEs, the skill, and the
+  agent reference.
 
 ## [0.7.0] - 2026-08-27
 
