@@ -2,7 +2,7 @@
 
 ## Installation and release artifact
 
-Agent Sidecar 0.7.0 requires Python 3.9+ for local installation and tooling and
+Agent Sidecar 0.8.0 requires Python 3.9+ for local installation and tooling and
 declares no runtime Python dependencies. Its remote observation payload accepts
 Python 3.8+ on SSH targets. It is not documented as published on PyPI. Install
 the console script from a checkout or Git source:
@@ -12,7 +12,7 @@ pipx install .
 pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'
 ```
 
-Append an available release tag such as `@v0.7.0` to the Git URL when an
+Append an available release tag such as `@v0.8.0` to the Git URL when an
 immutable revision is required. The existing `scripts/install-skill.sh`
 alternative creates only symlinks into its checkout and retains its
 idempotent/refuse-unrelated-path safety behavior.
