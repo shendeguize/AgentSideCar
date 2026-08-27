@@ -442,7 +442,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm",
         default=None,
         metavar="TEXT",
-        help="must be exactly CLEAR-SEND-AUDIT",
+        help="CLEAR-SEND-AUDIT, or PURGE-SEND-AUDIT with --purge",
+    )
+    audit_reset_parser.add_argument(
+        "--purge",
+        action="store_true",
+        help="irreversibly delete active and archived send-audit state",
+    )
+    audit_rebind_parser = audit_commands.add_parser(
+        "rebind",
+        help="repair a strictly verified moved send-audit namespace",
+        allow_abbrev=False,
+    )
+    audit_rebind_parser.add_argument(
+        "--allow-write",
+        action="store_true",
+        help="explicitly permit updating the audit namespace marker",
+    )
+    audit_rebind_parser.add_argument(
+        "--confirm",
+        default=None,
+        metavar="TEXT",
+        help="must be exactly REBIND-SEND-AUDIT",
     )
 
     package_parser = commands.add_parser(
@@ -2372,6 +2393,13 @@ def _safe_send_text(value: object, message: str) -> str:
 def _report_send_error(error: object, message: str, stderr: TextIO) -> None:
     stderr.write("send: {}\n".format(_safe_send_text(error, message)))
     stderr.flush()
+    if getattr(error, "detail", None) == "namespace_moved":
+        stderr.write(
+            "send: audit namespace moved; run "
+            "`agent-sidecar audit rebind --allow-write "
+            "--confirm REBIND-SEND-AUDIT`\n"
+        )
+        stderr.flush()
 
 
 def _write_send_error(
@@ -2384,7 +2412,11 @@ def _write_send_error(
     stderr: TextIO,
 ) -> None:
     if as_json:
-        _write_json({"code": code}, stdout)
+        payload = {"code": code}
+        detail = getattr(error, "detail", None)
+        if detail is not None:
+            payload["detail"] = detail
+        _write_json(payload, stdout)
     _report_send_error(error, message, stderr)
 
 
@@ -2665,31 +2697,77 @@ def _run_audit_reset(
     stderr: TextIO,
     resetter=None,
 ) -> int:
+    purge = bool(getattr(args, "purge", False))
+    expected = "PURGE-SEND-AUDIT" if purge else "CLEAR-SEND-AUDIT"
     if (
         args.allow_write is not True
-        or args.confirm != "CLEAR-SEND-AUDIT"
+        or args.confirm != expected
     ):
         stderr.write(
             "audit reset: requires --allow-write and "
-            "--confirm CLEAR-SEND-AUDIT\n"
+            "--confirm {}\n".format(expected)
         )
         stderr.flush()
         return 2
     operation = SendAuditStore().reset if resetter is None else resetter
     try:
-        operation()
+        result = operation() if not purge else operation(purge=True)
     except AuditError as error:
         stderr.write(
             "audit reset: {}\n".format(sanitize_terminal_text(str(error)))
         )
         stderr.flush()
         return 1
-    stdout.write("send audit reset\n")
+    if purge:
+        stdout.write("send audit purged\n")
+    elif result:
+        stdout.write("send audit reset; archived {}\n".format(result))
+    else:
+        stdout.write("send audit reset; no prior state\n")
     stdout.flush()
-    stderr.write(
-        "warning: send request-id idempotency history has been lost\n"
-    )
+    if purge:
+        stderr.write(
+            "warning: send audit and all archived request-id idempotency "
+            "history has been permanently deleted\n"
+        )
+    elif result:
+        stderr.write(
+            "send request-id idempotency history is retained in the archive\n"
+        )
+    else:
+        stderr.write("send audit had no retained history\n")
     stderr.flush()
+    return 0
+
+
+def _run_audit_rebind(
+    args: argparse.Namespace,
+    *,
+    stdout: TextIO,
+    stderr: TextIO,
+    rebinder=None,
+) -> int:
+    if (
+        args.allow_write is not True
+        or args.confirm != "REBIND-SEND-AUDIT"
+    ):
+        stderr.write(
+            "audit rebind: requires --allow-write and "
+            "--confirm REBIND-SEND-AUDIT\n"
+        )
+        stderr.flush()
+        return 2
+    operation = SendAuditStore().rebind if rebinder is None else rebinder
+    try:
+        operation()
+    except AuditError as error:
+        stderr.write(
+            "audit rebind: {}\n".format(sanitize_terminal_text(str(error)))
+        )
+        stderr.flush()
+        return 1
+    stdout.write("send audit rebound\n")
+    stdout.flush()
     return 0
 
 
@@ -2752,6 +2830,7 @@ def main(
     send_planner=None,
     send_executor=None,
     audit_resetter=None,
+    audit_rebinder=None,
     service_installer=None,
     service_uninstaller=None,
     service_status_provider=None,
@@ -2869,11 +2948,18 @@ def main(
         )
 
     if args.command == "audit":
-        return _run_audit_reset(
+        if args.audit_command == "reset":
+            return _run_audit_reset(
+                args,
+                stdout=output,
+                stderr=errors,
+                resetter=audit_resetter,
+            )
+        return _run_audit_rebind(
             args,
             stdout=output,
             stderr=errors,
-            resetter=audit_resetter,
+            rebinder=audit_rebinder,
         )
 
     if args.command == "package":

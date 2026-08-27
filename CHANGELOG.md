@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit `audit rebind` recovery for strictly verified moved
+  namespaces, preserving the original epoch and request-ID idempotency history.
+- Added `audit reset --purge` for deliberately deleting active and archived
+  audit state with a separate confirmation.
+
+### Changed
+
+- `audit reset` now archives the active key, marker, and retained logs by
+  default, refuses after eight archives, and reports `namespace_moved` as a
+  safe recovery detail on `audit_corrupt`.
+
 ## [0.7.0] - 2026-08-27
 
 ### Added

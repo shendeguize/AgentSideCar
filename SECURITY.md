@@ -145,13 +145,27 @@ remain sensitive local state. Delivery reported as unknown must not be retried
 automatically because the agent may already have acted.
 
 The send-audit namespace is persistently bound to its canonical runtime inode,
-home-anchor marker, key identity, and retained history. Do not delete, move,
-recreate, or replace `AGENT_SIDECAR_RUNTIME_DIR`, the marker, or audit files to
-clear `unsafe_lock`: that result means the previous namespace history or
-identity cannot be proved. Preserve it and fail closed; deleting evidence does
-not authorize a retry. Only an explicitly new request lineage may select a new
-owner-private runtime path and new request ID, and that new namespace and its
-audit history must then be retained. It is not recovery of the old lineage.
+home-anchor marker, key identity, and retained history. Do not manually delete,
+move, recreate, or replace `AGENT_SIDECAR_RUNTIME_DIR`, the marker, or audit
+files to clear `unsafe_lock`: that result means the previous namespace history
+or identity cannot be proved. Preserve it and fail closed; deleting evidence
+does not authorize a retry. The only supported recovery operations are the
+explicit `audit rebind` and `audit reset` commands. Rebind is accepted only
+when the anchored marker is valid, its key fingerprint matches, the current
+logs parse and validate under the original epoch, and all paths remain
+owner-private. It changes only the marker's recorded device/inode values; it
+does not reconstruct a missing marker or accept self-consistent replacement
+state. A `namespace_moved` detail is therefore an informational recovery
+candidate, not permission for automatic repair.
+
+Reset archives the active key, marker, and retained logs into the private
+runtime's `audit-archive` directory before starting a new lineage. The archive
+count is bounded at eight and reset refuses rather than silently deleting old
+evidence. Only `audit reset --purge` with its separate confirmation removes
+the active state and all archives. An explicitly new request lineage may
+instead select a new owner-private runtime path and new request ID, and that
+new namespace and its audit history must then be retained. It is not recovery
+of the old lineage.
 
 Kimi mutation is limited to the exact supported Kimi Code `0.38.0` and a
 top-level local session observed as `waiting` or `idle`. Sidecar binds and

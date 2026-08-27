@@ -4960,8 +4960,8 @@ class SendCLITests(unittest.TestCase):
         )
         self.assertEqual(0, code)
         self.assertEqual([True], calls)
-        self.assertEqual("send audit reset\n", stdout.getvalue())
-        self.assertIn("idempotency history has been lost", stderr.getvalue())
+        self.assertEqual("send audit reset; no prior state\n", stdout.getvalue())
+        self.assertIn("had no retained history", stderr.getvalue())
 
         def busy():
             raise AuditError("audit_busy")
@@ -4977,6 +4977,98 @@ class SendCLITests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertEqual("", stdout.getvalue())
         self.assertIn("send audit is active", stderr.getvalue())
+
+    def test_audit_reset_purge_requires_distinct_confirmation(self):
+        calls = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = main(
+            [
+                "audit",
+                "reset",
+                "--purge",
+                "--allow-write",
+                "--confirm",
+                "CLEAR-SEND-AUDIT",
+            ],
+            stdout=stdout,
+            stderr=stderr,
+            audit_resetter=lambda **kwargs: calls.append(kwargs),
+        )
+        self.assertEqual(2, code)
+        self.assertEqual([], calls)
+        self.assertIn("PURGE-SEND-AUDIT", stderr.getvalue())
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = main(
+            [
+                "audit",
+                "reset",
+                "--purge",
+                "--allow-write",
+                "--confirm",
+                "PURGE-SEND-AUDIT",
+            ],
+            stdout=stdout,
+            stderr=stderr,
+            audit_resetter=lambda **kwargs: calls.append(kwargs),
+        )
+        self.assertEqual(0, code)
+        self.assertEqual([{"purge": True}], calls)
+        self.assertEqual("send audit purged\n", stdout.getvalue())
+        self.assertIn("permanently deleted", stderr.getvalue())
+
+    def test_audit_rebind_requires_confirmation_and_reports_success(self):
+        calls = []
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = main(
+            ["audit", "rebind"],
+            stdout=stdout,
+            stderr=stderr,
+            audit_rebinder=lambda: calls.append(True),
+        )
+        self.assertEqual(2, code)
+        self.assertEqual([], calls)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = main(
+            [
+                "audit",
+                "rebind",
+                "--allow-write",
+                "--confirm",
+                "REBIND-SEND-AUDIT",
+            ],
+            stdout=stdout,
+            stderr=stderr,
+            audit_rebinder=lambda: calls.append(True),
+        )
+        self.assertEqual(0, code)
+        self.assertEqual([True], calls)
+        self.assertEqual("send audit rebound\n", stdout.getvalue())
+
+    def test_namespace_moved_send_error_has_targeted_hint(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        error = SendError("audit_corrupt", detail="namespace_moved")
+        cli_module._write_send_error(
+            error,
+            "audit_corrupt",
+            as_json=True,
+            message="message",
+            stdout=stdout,
+            stderr=stderr,
+        )
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(
+            {"code": "audit_corrupt", "detail": "namespace_moved"},
+            payload,
+        )
+        self.assertIn("audit namespace moved", stderr.getvalue())
+        self.assertIn("audit rebind", stderr.getvalue())
 
     def test_parser_and_help_describe_mutating_local_headless_resume(self):
         parser = build_parser()
