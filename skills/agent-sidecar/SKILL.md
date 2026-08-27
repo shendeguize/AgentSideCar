@@ -215,11 +215,6 @@ scan; it does not use the daemon or remote aggregation. Claude, Codex, and
 Cursor keep their existing send semantics. Direct CLI send does not support
 DSH; use the DSH plugin for DSH injection.
 
-A row returned by `list --remote` cannot be passed to `send`: if its session ID
-is absent from the local scan, `send` fails closed with exit `2` and
-`target_not_found`. The separate `remote_session` rejection is used when the
-local scanner does find a row carrying remote provenance.
-
 Kimi is an exact-version special case. For Kimi Code `0.38.0`, always use the
 protected manual spawn-resume form:
 

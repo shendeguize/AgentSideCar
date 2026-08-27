@@ -2607,10 +2607,6 @@ def _run_send(
             stdout=stdout,
             stderr=stderr,
         )
-        stderr.write(
-            "send: remote rows from list --remote cannot be targeted by send\n"
-        )
-        stderr.flush()
         return 2
     except ValueError as error:
         _write_send_error(

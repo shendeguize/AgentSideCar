@@ -594,12 +594,6 @@ sidechain sessions are rejected. `cursor-ide`, `copilot`, and `dsh` are
 unsupported. Claude, Codex, and Cursor retain their prior resume and result
 semantics; Kimi uses the special contract below.
 
-`send` resolves against its direct local scan only. A session row obtained from
-`list --remote` is not a send target; if its ID is absent from that local scan,
-the command fails closed with exit `2` and JSON code `target_not_found`. The
-`remote_session` rejection applies when a row found by the local scanner carries
-remote provenance.
-
 ### Kimi Code 0.38.0 protected ACP resume
 
 Kimi support is exact-version and manual. Use the full composite binding and

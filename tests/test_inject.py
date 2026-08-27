@@ -2197,6 +2197,46 @@ class KimiSendIntegrationTests(unittest.TestCase):
         evidence.close()
         self.assertIsNone(inject_module._kimi_state_reason(evidence))
 
+    def test_kimi_file_proof_bounds_and_state_reason_fail_closed(self):
+        evidence = inject_module.capture_kimi_identity(self.session())
+        try:
+            descriptor = evidence._anchors.descriptor("wire")
+            wire_size = evidence.root_wire_generation.size
+            self.assertEqual(
+                self.wire_path.read_bytes(),
+                inject_module._read_kimi_file(
+                    descriptor,
+                    wire_size,
+                    inject_module.KIMI_PROOF_BYTES,
+                ),
+            )
+            for args in (
+                (descriptor, -1, inject_module.KIMI_PROOF_BYTES),
+                (descriptor, inject_module.KIMI_PROOF_BYTES + 1, inject_module.KIMI_PROOF_BYTES),
+                (True, 1, inject_module.KIMI_PROOF_BYTES),
+            ):
+                with self.subTest(args=args):
+                    with self.assertRaises(SendError):
+                        inject_module._read_kimi_file(*args)
+            with mock.patch.object(inject_module.os, "pread", return_value=b""):
+                with self.assertRaises(SendError):
+                    inject_module._read_kimi_file(descriptor, 1, 10)
+            self.assertEqual("completed", inject_module._kimi_state_reason(evidence))
+            self._write_json(self.state_path, [])
+            self.assertIsNone(inject_module._kimi_state_reason(evidence))
+            invalid_reason = dict(self.state, lastTurnReason=42)
+            self._write_json(self.state_path, invalid_reason)
+            self.assertIsNone(inject_module._kimi_state_reason(evidence))
+            failed_state = dict(self.state, lastTurnReason="failed")
+            self._write_json(self.state_path, failed_state)
+            refreshed = inject_module.capture_kimi_identity(self.session())
+            try:
+                self.assertEqual("failed", inject_module._kimi_state_reason(refreshed))
+            finally:
+                refreshed.close()
+        finally:
+            evidence.close()
+
     def test_kimi_version_is_exact_and_rechecked_before_audit(self):
         calls = []
 
