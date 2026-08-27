@@ -102,8 +102,8 @@ DSH 进程内注入在 prepare 阶段先区分目标是否已经加载:
 
   此时不会创建 requestId/confirmToken,不会调用 resume,也不消耗模型 token。
 - **陈旧看板与权威持久化**:看板行只是观察快照。若 cold 检查时权威 `sessionPersistence.list` 已证明目标不存在,prepare 返回 HTTP 404 `{"reason":"target_not_found"}`,即使卡片仍在也不会尝试 resume 或签发 token。
-- **cold preset 当前不受支持**:插件检查持久化 header 与最新有效 `agent-preset/selected` 事件得到 effective preset;只要 preset 被证明存在,prepare 就返回 HTTP 409 `{"reason":"dsh_preset_unsupported"}`。即使持久化状态没有显式 preset,只要宿主挂载了 `agentPresets`,原生恢复会施加隐式默认 preset,因此同样以 409 拒绝且不签发 confirmToken。本文档不承诺 preset cold resume;该限制不影响上述 live Agent 路径。
-- **未知状态关闭失败**:权威持久化/preset 服务缺席、读取失败、返回不合法形状、检查超时或无法证明 missing/present/absent 时,prepare 以 HTTP 502 `executor_error` 拒绝且不签发 token。prepare 与 execute 之间若发生服务 HMR/代际切换,或恢复发布前的实际会话/preset 与检查结果不一致,执行也会关闭失败并撤销未发布的恢复。响应和日志只给稳定错误码与布尔诊断,绝不输出 provider/model、preset 值、消息正文或私有持久化路径。
+- **cold preset 当前不受支持**:插件检查持久化 header 与最新有效 `agent-preset/selected` 事件得到 effective preset;只要目标 session 的持久化状态证明 preset 存在,prepare 就返回 HTTP 409 `{"reason":"dsh_preset_unsupported"}`。目标 session 没有显式 preset 时,宿主是否挂载 `agentPresets` 不会改变判定,因此 preset-free cold resume 可以继续走 host default model 路由。本文档不承诺 preset cold resume;该限制不影响上述 live Agent 路径。
+- **未知状态关闭失败**:权威持久化/preset 服务缺席、读取失败、返回不合法形状、检查超时或无法证明 missing/present/absent 时,prepare 以 HTTP 502 拒绝且不签发 token;无 agents binding 时错误码为 `dsh_agents_unavailable`。prepare 与 execute 之间若发生服务 HMR/代际切换,或恢复发布前的实际会话/preset 与检查结果不一致,执行也会关闭失败并撤销未发布的恢复。响应可包含有界、脱敏的 `detail`,并只给稳定错误码;绝不输出 provider/model、preset 值、消息正文或私有持久化路径。
 
 `inject.execute` 返回 `{"outcome":"delivered"}` 时,对 DSH 通路只表示同步
 `followup`/`steer` 调用已经把消息交给目标 inbox(接受或排队)。它**不表示**模型 turn

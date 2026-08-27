@@ -587,7 +587,6 @@ export function apply(ctx: HostContext, config: Config): void {
     readonly persistence: SessionPersistenceFace
   } | null = null
   let hostServiceGeneration = 0
-  let liveAgentPresets: unknown | null = null
   let liveAgentDefaultModel: AgentDefaultModelFace | null = null
   const agentsFace: AgentsServiceFace = {
     isAvailable: () => coldServices !== null,
@@ -687,10 +686,6 @@ export function apply(ctx: HostContext, config: Config): void {
     if (typeof getter !== 'function') return { state: 'unknown' }
     let modelService: unknown
     try {
-      const presets = getter.call(ctx, 'agentPresets')
-      if (presets !== undefined) {
-        return { state: presets === null ? 'unknown' : 'present' }
-      }
       modelService = getter.call(ctx, 'agentDefaultModel')
     } catch {
       return { state: 'unknown' }
@@ -698,16 +693,11 @@ export function apply(ctx: HostContext, config: Config): void {
 
     const proofGeneration = hostServiceGeneration
     const assertPublicationProof = (): void => {
-      let currentPresets: unknown
       let currentModelService: unknown
       try {
-        currentPresets = getter.call(ctx, 'agentPresets')
         currentModelService = getter.call(ctx, 'agentDefaultModel')
       } catch {
         throw new DshResumeGuardError('executor_error')
-      }
-      if (currentPresets !== undefined || liveAgentPresets !== null) {
-        throw new DshResumeGuardError('dsh_preset_unsupported')
       }
       if (
         hostServiceGeneration !== proofGeneration ||
@@ -1154,19 +1144,9 @@ export function apply(ctx: HostContext, config: Config): void {
     })
   })
 
-  // Optional host services participate in the same generation witness used by
-  // cold-resume publication proofs. Their callbacks remain lazy, so profiles
-  // without either service still load normally.
-  ctx.inject(['agentPresets'], (injected) => {
-    const pctx = injected as HostContext & { agentPresets: unknown }
-    const bound = pctx.agentPresets
-    hostServiceGeneration += 1
-    liveAgentPresets = bound
-    pctx.effect(() => () => {
-      hostServiceGeneration += 1
-      if (liveAgentPresets === bound) liveAgentPresets = null
-    }, 'agent-sidecar: agent presets generation release')
-  })
+  // Preset eligibility is scoped to the persisted target session. The host's
+  // optional agentPresets service must not turn a preset-free target into a
+  // preset-bearing one.
   ctx.inject(['agentDefaultModel'], (injected) => {
     const mctx = injected as HostContext & {
       agentDefaultModel: AgentDefaultModelFace

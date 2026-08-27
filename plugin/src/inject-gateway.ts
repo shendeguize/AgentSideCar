@@ -65,6 +65,7 @@ export type InjectErrorCode =
   | InjectIneligibilityReason
   | 'dsh_model_unconfigured'
   | 'dsh_preset_unsupported'
+  | 'dsh_agents_unavailable'
   | 'too_many_pending'
   | 'token_missing'
   | 'token_expired'

@@ -1448,6 +1448,11 @@ async function disposeQuietly(handle) {
 		return false;
 	}
 }
+const MAX_EXECUTOR_DETAIL_CHARS = 512;
+function sanitizedExecutorDetail(error, fallback) {
+	const normalized = (error instanceof Error ? error.message : String(error)).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/(?:[A-Za-z]:[\\/]|\/)[^\s"'<>]+/g, "<path>").replace(/\s+/g, " ").trim();
+	return (normalized === "" ? fallback : `${fallback}: ${normalized}`).slice(0, MAX_EXECUTOR_DETAIL_CHARS);
+}
 function createDshInjectExecutor(deps) {
 	const pluginName = deps.pluginName ?? "agent-sidecar";
 	const log = deps.log ?? (() => {});
@@ -1471,7 +1476,7 @@ function createDshInjectExecutor(deps) {
 			const generation = currentGeneration();
 			if (unloading || generation === null || !deps.agents.isAvailable()) return {
 				kind: "failed",
-				errorCode: "executor_error",
+				errorCode: "dsh_agents_unavailable",
 				modelRouteAvailable: false,
 				presetInspectionAvailable: false,
 				presetSupported: false
@@ -1528,7 +1533,7 @@ function createDshInjectExecutor(deps) {
 			};
 			if (!deps.agents.isAvailable()) return {
 				kind: "failed",
-				errorCode: "executor_error",
+				errorCode: "dsh_agents_unavailable",
 				modelRouteAvailable: false,
 				presetInspectionAvailable: true,
 				presetSupported: inspected.value.state === "absent"
@@ -1997,7 +2002,7 @@ function createDshInjectExecutor(deps) {
 			try {
 				if (req.mode === "steer") agent.steer(message);
 				else agent.followup(message);
-			} catch {
+			} catch (error) {
 				log("warn", "dsh injection call threw", {
 					...baseMeta,
 					coldPath,
@@ -2009,7 +2014,8 @@ function createDshInjectExecutor(deps) {
 				});
 				return {
 					outcome: "failed",
-					errorCode: "executor_error"
+					errorCode: "executor_error",
+					detail: sanitizedExecutorDetail(error, "dsh injection call failed")
 				};
 			}
 			log("info", "dsh injection delivered", {
@@ -3276,6 +3282,7 @@ const PREPARE_ERROR_STATUS = {
 	invalid_session: 422,
 	dsh_model_unconfigured: 409,
 	dsh_preset_unsupported: 409,
+	dsh_agents_unavailable: 502,
 	executor_error: 502,
 	too_many_pending: 429,
 	unsupported_agent: 422
@@ -3300,6 +3307,7 @@ const EXECUTE_ERROR_STATUS = {
 	token_mismatch: 409,
 	dsh_model_unconfigured: 409,
 	dsh_preset_unsupported: 409,
+	dsh_agents_unavailable: 502,
 	unsupported_agent: 422,
 	executor_error: 502
 };
@@ -5149,7 +5157,6 @@ function apply(ctx, config) {
 	let liveAgents = null;
 	let coldServices = null;
 	let hostServiceGeneration = 0;
-	let liveAgentPresets = null;
 	let liveAgentDefaultModel = null;
 	const agentsFace = {
 		isAvailable: () => coldServices !== null,
@@ -5225,23 +5232,18 @@ function apply(ctx, config) {
 		if (typeof getter !== "function") return { state: "unknown" };
 		let modelService;
 		try {
-			const presets = getter.call(ctx, "agentPresets");
-			if (presets !== void 0) return { state: presets === null ? "unknown" : "present" };
 			modelService = getter.call(ctx, "agentDefaultModel");
 		} catch {
 			return { state: "unknown" };
 		}
 		const proofGeneration = hostServiceGeneration;
 		const assertPublicationProof = () => {
-			let currentPresets;
 			let currentModelService;
 			try {
-				currentPresets = getter.call(ctx, "agentPresets");
 				currentModelService = getter.call(ctx, "agentDefaultModel");
 			} catch {
 				throw new DshResumeGuardError("executor_error");
 			}
-			if (currentPresets !== void 0 || liveAgentPresets !== null) throw new DshResumeGuardError("dsh_preset_unsupported");
 			if (hostServiceGeneration !== proofGeneration || coldServices !== services || currentModelService !== modelService) throw new DshResumeGuardError("executor_error");
 		};
 		return {
@@ -5553,16 +5555,6 @@ function apply(ctx, config) {
 			agentsAvailable: true,
 			persistenceAvailable: true
 		});
-	});
-	ctx.inject(["agentPresets"], (injected) => {
-		const pctx = injected;
-		const bound = pctx.agentPresets;
-		hostServiceGeneration += 1;
-		liveAgentPresets = bound;
-		pctx.effect(() => () => {
-			hostServiceGeneration += 1;
-			if (liveAgentPresets === bound) liveAgentPresets = null;
-		}, "agent-sidecar: agent presets generation release");
 	});
 	ctx.inject(["agentDefaultModel"], (injected) => {
 		const mctx = injected;

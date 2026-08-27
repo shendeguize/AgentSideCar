@@ -507,8 +507,9 @@ following:
 - the host `agents`/persistence and preset-inspection services are available
   and remain in the same service generation through publication;
 - the current host-default provider and model are both nonblank;
-- neither the persisted effective state nor the host supplies an explicit or
-  implicit preset.
+- the persisted effective state has no explicit preset. A host-mounted
+  `agentPresets` service does not add an implicit preset to a target whose
+  persisted state is absent.
 
 Cold `steer` therefore does not mean steering a previously running turn. The
 plugin first resumes an unpublished Agent under those checks and only then
@@ -537,7 +538,9 @@ Injection HTTP status has these stable meanings:
   `dsh_preset_unsupported`, and execute-time token reuse or mismatch.
 - `502`: fail-closed host-service or executor failure, normally
   `executor_error`, including a DSH state that cannot be inspected or safely
-  published. No private upstream detail is part of the contract.
+  published. An unavailable agents binding uses `dsh_agents_unavailable`.
+  Failure results may include bounded, sanitized `detail`; no private upstream
+  detail is part of the contract.
 
 These statuses are not delivery receipts. In particular, an execute result
 with `outcome: "unknown"` is returned as HTTP `200` because it is a terminal

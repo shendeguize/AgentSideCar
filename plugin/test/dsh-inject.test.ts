@@ -983,6 +983,7 @@ describe('injection call failure', () => {
     expect(result).toEqual({
       outcome: 'failed',
       errorCode: 'executor_error',
+      detail: 'dsh injection call failed: agent "session-7" is disposed',
     })
   })
 
@@ -993,7 +994,11 @@ describe('injection call failure', () => {
 
     const result = await executor.execute(request({ mode: 'steer' }))
 
-    expect(result).toEqual({ outcome: 'failed', errorCode: 'executor_error' })
+    expect(result).toEqual({
+      outcome: 'failed',
+      errorCode: 'executor_error',
+      detail: 'dsh injection call failed: boom',
+    })
   })
 
   it('sanitizes a non-Error splice throw', async () => {
@@ -1012,7 +1017,29 @@ describe('injection call failure', () => {
 
     const result = await executor.execute(request())
 
-    expect(result).toEqual({ outcome: 'failed', errorCode: 'executor_error' })
+    expect(result).toEqual({
+      outcome: 'failed',
+      errorCode: 'executor_error',
+      detail: 'dsh injection call failed: raw failure',
+    })
+  })
+
+  it('redacts absolute paths and bounds splice failure detail', async () => {
+    const { agent } = fakeAgent({
+      throwWith: new Error(`/SECRET/private/${'x'.repeat(800)}`),
+    })
+    const { agents } = fakeAgents({ loaded: { 'session-7': agent } })
+    const executor = createDshInjectExecutor({ agents })
+
+    const result = await executor.execute(request())
+
+    expect(result).toMatchObject({
+      outcome: 'failed',
+      errorCode: 'executor_error',
+      detail: 'dsh injection call failed: <path>',
+    })
+    expect(result.detail).not.toContain('/SECRET/private')
+    expect(result.detail!.length).toBeLessThanOrEqual(512)
   })
 })
 
