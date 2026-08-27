@@ -326,6 +326,14 @@ agent-sidecar status --remote --remote-python /usr/bin/python3.11 --json
 非本地且非孤立的主机。远程 `list` 与本地 `list` 使用相同的默认 48 小时时间窗；
 `--all` 会从本地和远程请求全部可用历史。
 
+DSH Center 主机清单边界保持窄化，并作为 C1–C4 跨仓契约共享。C1 接受裸 HostView
+数组或 `{"hosts": [...]}` 容器。Sidecar 只消费 `name`、`config.enabled`、
+`config.local`、`local`、`orphaned` 和 `phase`；额外的 HostView 字段会被忽略。
+主机只有在已启用、非本地、非孤立且阶段为 `ready` 或 `no_dsh` 时才符合条件。
+Map 形式的主机容器仅支持 C4 配置/状态文件回退，不属于 C1 的生产方数据形态。
+生产方契约见 [DSH Center handbook](https://github.com/shendeguize/DSH_Center)。
+C5 隧道插件页面形态继续通过跨仓集成 Issue 模板追踪。
+
 Sidecar 会从当前生效、已安装的 `sidecar` 包构建有界 zipapp，并通过非交互 SSH
 进行流式传输：从检出版本运行时来源为检出版本；从 pipx 或 wheel 运行时来源为
 site-packages；从 zipapp 运行时来源为内嵌包。远程无需安装 Agent Sidecar 或任何

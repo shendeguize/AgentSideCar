@@ -760,6 +760,58 @@ class InventoryTests(unittest.TestCase):
                 runner=lambda argv, **kwargs: json_completed(argv, rows)
             )
 
+    def test_center_fixture_filters_by_contract_eligibility(self):
+        fixture = REPO_ROOT / "tests" / "fixtures" / "dshc_ls_v1.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+
+        hosts = remote_inventory._hosts_from_canonical(payload)
+
+        self.assertEqual(
+            [("remote-no-dsh", "no_dsh"), ("remote-ready", "ready")],
+            [(host.alias, host.phase) for host in hosts],
+        )
+
+    def test_center_bare_array_and_hosts_container_have_same_result(self):
+        fixture = REPO_ROOT / "tests" / "fixtures" / "dshc_ls_v1.json"
+        payload = json.loads(fixture.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            remote_inventory._hosts_from_canonical(payload),
+            remote_inventory._hosts_from_canonical(payload["hosts"]),
+        )
+
+    def test_inventory_reads_enabled_and_local_from_config(self):
+        payload = [
+            {
+                "name": "config-only-flags",
+                "orphaned": False,
+                "phase": "ready",
+                "config": {"enabled": True, "local": False},
+            }
+        ]
+
+        hosts = remote_inventory._hosts_from_canonical(payload)
+
+        self.assertEqual(
+            [("config-only-flags", "ready")],
+            [(host.alias, host.phase) for host in hosts],
+        )
+
+    def test_inventory_rejects_map_alias_name_mismatch(self):
+        payload = {
+            "hosts": {
+                "edge": {
+                    "name": "other-edge",
+                    "orphaned": False,
+                    "phase": "ready",
+                    "config": {"enabled": True, "local": False},
+                }
+            }
+        }
+
+        with self.assertRaises(remote.RemoteInventoryError):
+            remote_inventory._hosts_from_canonical(payload)
+
 
 class ZipappTests(unittest.TestCase):
     def _write_outer_archive(self, path, *, omit=(), extras=()):

@@ -1,0 +1,102 @@
+name: DSH Center integration
+description: Report a cross-repository DSH Center and Agent Sidecar integration issue
+title: "[Integration] "
+labels:
+  - integration:dsh-center
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for a reproducible DSH Center ↔ Agent Sidecar integration
+        problem or contract change.
+
+        Do not include SSH addresses, usernames, credentials, bearer tokens,
+        transcript/message content, session or request identifiers, raw
+        databases, audit keys, or unredacted filesystem paths. Suspected
+        vulnerabilities belong in the [private security reporting
+        channel](https://github.com/shendeguize/AgentSideCar/security/advisories/new).
+
+  - type: input
+    id: counterpart_issue
+    attributes:
+      label: Counterpart repository issue
+      description: Link the corresponding issue in DSH Center, or write "not opened yet" for a proposed contract change.
+      placeholder: https://github.com/shendeguize/DSH_Center/issues/123
+    validations:
+      required: true
+
+  - type: dropdown
+    id: contract_surface
+    attributes:
+      label: Contract surface
+      description: Select the narrowest affected cross-repository contract.
+      options:
+        - C1 — dshc ls --json HostView inventory
+        - C2 — consumed inventory fields
+        - C3 — eligibility semantics
+        - C4 — config/state file fallback
+        - C5 — tunneled plugin page shape
+        - Multiple surfaces
+        - Not a contract change
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Version matrix
+      description: Include Center, Sidecar, dsh-agent-sidecar plugin, and dsh-center-hub plugin versions or commits.
+      placeholder: "Center 0.2.x; Sidecar 0.7.0; dsh-agent-sidecar 0.3.0; dsh-center-hub 0.2.x"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Give synthetic, bounded steps. State whether the command path is dshc inventory, file fallback, remote observation, or tunneled page access.
+      placeholder: |
+        1. Prepare a synthetic inventory row ...
+        2. Run agent-sidecar list --remote --json ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe the observable result and the relevant C1–C5 rule.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include exit status and stable error code when available, but no private diagnostics.
+    validations:
+      required: true
+
+  - type: textarea
+    id: sanitized_payload
+    attributes:
+      label: Sanitized payload or diagnostics
+      description: Paste only synthetic or redacted JSON and bounded diagnostics. Do not attach raw inventory, transcripts, databases, or audit files.
+      placeholder: |
+        {
+          "name": "<synthetic-host>",
+          "phase": "ready",
+          "local": false,
+          "orphaned": false,
+          "config": {"enabled": true, "local": false}
+        }
+      render: json
+
+  - type: checkboxes
+    id: redaction_confirmation
+    attributes:
+      label: Redaction confirmation
+      options:
+        - label: I removed credentials, tokens, SSH details, transcript/message content, session/request identifiers, and private paths.
+          required: true
