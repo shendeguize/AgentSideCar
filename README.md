@@ -366,6 +366,18 @@ config/state files under `DSHC_HOME` or `~/.dsh_center` as a strict fallback.
 Only enabled, nonlocal, non-orphaned hosts in an eligible phase are queried.
 Remote `list` uses the same 48-hour default as local `list`; `--all` requests
 the full available history from both.
+
+The DSH Center inventory boundary is intentionally narrow and is shared as the
+C1–C4 cross-repository contract. C1 accepts a bare HostView array or a
+`{"hosts": [...]}` container. Sidecar consumes only `name`, `config.enabled`,
+`config.local`, `local`, `orphaned`, and `phase`; extra HostView fields are
+ignored. A host is eligible only when it is enabled, non-local, non-orphaned,
+and in the `ready` or `no_dsh` phase. Map-form host containers are supported
+for the C4 config/state-file fallback, but are not part of the C1 producer
+shape. See the [DSH Center handbook](https://github.com/shendeguize/DSH_Center)
+for the producer-side contract. C5 tunneled plugin-page shape remains tracked
+through the cross-repository integration issue template.
+
 The sidecar builds a bounded zipapp from its active installed `sidecar` package
 and streams it over noninteractive SSH. That source is the checkout when run
 there, installed site-packages under pipx or a wheel, or the embedded package

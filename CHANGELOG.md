@@ -13,12 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespaces, preserving the original epoch and request-ID idempotency history.
 - Added `audit reset --purge` for deliberately deleting active and archived
   audit state with a separate confirmation.
+- Added a versioned synthetic DSH Center inventory fixture and contract-test
+  coverage for eligible hosts, strict filtering, aliases, bounded input, and
+  both array and container payload forms.
 
 ### Changed
 
 - `audit reset` now archives the active key, marker, and retained logs by
   default, refuses after eight archives, and reports `namespace_moved` as a
   safe recovery detail on `audit_corrupt`.
+
+### Documentation
+
+- Documented the DSH Center C1–C4 remote inventory contract in the English and
+  Chinese READMEs and agent reference, including the read-only boundary and
+  cross-repository issue workflow.
+- Added a DSH Center integration issue template with redaction guidance.
 
 ## [0.7.0] - 2026-08-27
 

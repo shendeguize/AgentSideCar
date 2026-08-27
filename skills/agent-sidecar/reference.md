@@ -321,6 +321,16 @@ candidates. The environment variable is read only for remote-enabled `list`,
 
 Inventory comes from `dshc ls --json`, or from the DSH Center config and state
 files under `DSHC_HOME` or `~/.dsh_center` when that command is unavailable.
+
+The C1–C4 cross-repository inventory contract is intentionally narrow. C1
+accepts a bare HostView array or a `{"hosts": [...]}` container. Sidecar
+consumes only `name`, `config.enabled`, `config.local`, `local`, `orphaned`,
+and `phase`; extra HostView fields are ignored. A host is eligible only when it
+is enabled, non-local, non-orphaned, and in the `ready` or `no_dsh` phase.
+Map-form host containers are supported for the C4 config/state-file fallback,
+not as the C1 producer shape. C5 tunneled plugin-page shape is tracked through
+the cross-repository integration issue template.
+
 The query uses a bounded deterministic zipapp built from the active installed
 `sidecar` package and streamed over strict, noninteractive SSH. This means
 checkout source, installed site-packages, or an embedded zipapp package as
