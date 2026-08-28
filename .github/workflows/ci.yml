@@ -79,6 +79,9 @@ jobs:
 
   check:
     name: check (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    # Pull requests use the required 3.9 gate; Python 3.13 runs in the
+    # push/weekly matrices so PR feedback does not repeat the full suite.
+    if: github.event_name != 'pull_request' || matrix.python-version == '3.9'
     strategy:
       fail-fast: false
       matrix:
@@ -153,7 +156,7 @@ jobs:
         run: |
           set +e
           set -o pipefail
-          python scripts/check.py 2>&1 | tee "${RUNNER_TEMP}/quality-gate.log"
+          python scripts/check.py --fast 2>&1 | tee "${RUNNER_TEMP}/quality-gate.log"
           exit_code=${PIPESTATUS[0]}
           set -e
           echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"

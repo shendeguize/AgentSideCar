@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DSH cold injection now gates presets from the target's persisted state rather
   than the host's live `agentPresets` service, and plugin failures include
   bounded sanitized detail with a distinct unavailable-agents code.
+- Core coverage enforcement now requires at least 95% line and branch coverage;
+  targeted regression matrices expand the exercised validation and lifecycle
+  boundaries.
+- The local and weekly quality gates now use the fast path, which executes the
+  full test suite once under coverage instead of repeating it as a separate
+  test stage.
 
 ## [0.8.0] - 2026-08-28
 

@@ -47,6 +47,36 @@ class CheckScriptTests(unittest.TestCase):
         self.assertEqual(7, result)
         self.assertEqual([("lint", False), ("tests", False)], calls)
 
+    def test_fast_mode_runs_coverage_once_and_skips_duplicate_tests(self):
+        calls = []
+
+        def runner(stage, full_tests_ran):
+            calls.append((stage, full_tests_ran))
+            return 0
+
+        result = check.main(
+            ["--fast"],
+            stage_runner=runner,
+            stream=io.StringIO(),
+        )
+
+        self.assertEqual(0, result)
+        self.assertEqual(
+            [
+                ("lint", False),
+                ("coverage", False),
+                ("pack", True),
+                ("cli", True),
+                ("skill", True),
+                ("site", True),
+            ],
+            calls,
+        )
+
+    def test_fast_mode_cannot_be_combined_with_selected_stages(self):
+        with self.assertRaises(SystemExit):
+            check.main(["--fast", "--only", "lint"], stream=io.StringIO())
+
 
 if __name__ == "__main__":
     unittest.main()

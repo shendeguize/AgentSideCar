@@ -14,15 +14,17 @@ Agent Sidecar has zero runtime Python dependencies: `[project].dependencies`
 must remain an explicit empty array. Ruff and coverage are development-only
 tools in the `dev` extra; build tooling is not part of the installed runtime.
 
-Set up a development checkout and run the same quality gate used by CI:
+Set up a development checkout and run the fast quality gate used by CI:
 
 ```bash
 python3 -m pip install -e '.[dev]'
-python3 scripts/check.py
+python3 scripts/check.py --fast
 ```
 
-The gate runs lint, the full test suite, packaging and zipapp smoke tests, CLI
-checks, and skill checks. Run it before opening or updating a pull request.
+The fast gate runs lint, the full test suite once under coverage, packaging and
+zipapp smoke tests, CLI checks, and skill checks. The original stage-by-stage
+workflow remains available with `python3 scripts/check.py` when isolated test
+output is needed.
 
 ## Branch and pull-request model
 

@@ -61,7 +61,7 @@ class CoverageGateTests(unittest.TestCase):
             ),
             (
                 {
-                    "sidecar/model.py": summary(90, 100),
+                    "sidecar/model.py": summary(95, 100),
                     "sidecar/cli.py": summary(70, 100),
                 },
                 ("overall coverage",),
@@ -76,7 +76,7 @@ class CoverageGateTests(unittest.TestCase):
                     tuple(failure.split()[0] + " coverage" for failure in result.failures),
                 )
 
-    def test_branch_coverage_is_measured_but_report_only(self):
+    def test_core_branch_coverage_is_a_hard_gate(self):
         result = coverage_gate.evaluate_coverage(
             document(
                 {
@@ -88,7 +88,13 @@ class CoverageGateTests(unittest.TestCase):
 
         self.assertEqual(100.0, result.metrics["core"].percent)
         self.assertEqual(0.0, result.metrics["core"].branch_percent)
-        self.assertTrue(result.passed)
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any(
+                failure.startswith("core branch coverage")
+                for failure in result.failures
+            )
+        )
 
     def test_tier_grouping_is_explicit_and_exhaustive(self):
         for path in coverage_gate.RELAXED_MODULES:

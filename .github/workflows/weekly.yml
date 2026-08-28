@@ -61,7 +61,7 @@ jobs:
         run: |
           set +e
           set -o pipefail
-          python scripts/check.py 2>&1 | tee "${RUNNER_TEMP}/quality-gate.log"
+          python scripts/check.py --fast 2>&1 | tee "${RUNNER_TEMP}/quality-gate.log"
           exit_code=${PIPESTATUS[0]}
           echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"
           exit 0
