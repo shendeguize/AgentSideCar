@@ -79,9 +79,6 @@ jobs:
 
   check:
     name: check (${{ matrix.os }}, Python ${{ matrix.python-version }})
-    # Pull requests use the required 3.9 gate; Python 3.13 runs in the
-    # push/weekly matrices so PR feedback does not repeat the full suite.
-    if: github.event_name != 'pull_request' || matrix.python-version == '3.9'
     strategy:
       fail-fast: false
       matrix:
@@ -150,6 +147,9 @@ jobs:
           PY
 
       - name: Run repository quality gate
+        # Pull requests use the required 3.9 gate; Python 3.13 runs in the
+        # push/weekly matrices so PR feedback does not repeat the full suite.
+        if: github.event_name != 'pull_request' || matrix.python-version == '3.9'
         id: quality_gate
         env:
           PYTHON_VERSION: ${{ matrix.python-version }}
@@ -168,7 +168,7 @@ jobs:
       # deeply nested input. Accept only that known contract-test error until
       # product code enforces its own nesting bound; any additional error fails.
       - name: Verify Python 3.13 known limitation
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13' && github.event_name != 'pull_request'
         env:
           QUALITY_EXIT_CODE: ${{ steps.quality_gate.outputs.exit_code }}
         run: |
@@ -198,7 +198,7 @@ jobs:
           PY
 
       - name: Complete Python 3.13 non-test stages
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13' && github.event_name != 'pull_request'
         run: |
           python scripts/check.py \
             --only pack \

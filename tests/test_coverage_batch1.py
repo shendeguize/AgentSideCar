@@ -5039,3 +5039,142 @@ class CoverageRatchetAdditionalTests(unittest.TestCase):
             list(tail.watch_sessions([], cancel_event=cancel, on_ready=callback)),
         )
 
+
+class SendAuditExceptionalBranchTests(unittest.TestCase):
+    def test_namespace_close_and_lock_lifecycle_edges(self):
+        namespace = audit.AuditNamespace(
+            audit.SendAuditStore(),
+            [10, 11],
+            [],
+            1,
+            2,
+            "runtime",
+            12,
+            "marker",
+            13,
+            "transaction",
+            {"namespace_epoch": "e_test"},
+            (1,),
+            14,
+            b"k",
+            (2,),
+            True,
+        )
+        with mock.patch.object(audit.os, "close") as close, mock.patch.object(
+            audit.fcntl, "flock"
+        ):
+            namespace.close()
+        self.assertEqual(
+            [mock.call(14), mock.call(12), mock.call(13), mock.call(11), mock.call(10)],
+            close.call_args_list,
+        )
+        namespace.close()
+        self.assertEqual(5, close.call_count)
+
+        empty = audit.AuditNamespace(
+            audit.SendAuditStore(),
+            [],
+            [],
+            1,
+            2,
+            "runtime",
+            None,
+            "marker",
+            None,
+            "transaction",
+            {"namespace_epoch": "e_test"},
+            (1,),
+            None,
+            b"k",
+            (2,),
+            False,
+        )
+        empty.close()
+        with self.assertRaises(audit.AuditError):
+            with audit.SendAuditStore()._locked(
+                mock.Mock(transaction_fd=None)
+            ):
+                pass
+
+    def test_locked_context_translates_unlock_failures(self):
+        namespace = mock.Mock(transaction_fd=9)
+        namespace.validate.return_value = None
+        with mock.patch.object(
+            audit.fcntl,
+            "flock",
+            side_effect=(None, OSError("unlock")),
+        ):
+            with audit.SendAuditStore()._locked(namespace):
+                pass
+        self.assertEqual(3, namespace.validate.call_count)
+
+    def test_exception_only_filesystem_boundaries_preserve_base_exceptions(self):
+        helper = mock.Mock()
+        helper._validate_lock_file.side_effect = KeyboardInterrupt()
+        with mock.patch.object(audit, "_secure_helpers", return_value=helper):
+            with self.assertRaises(KeyboardInterrupt):
+                audit._validate_named_file(1, "name", 2)
+
+        with mock.patch.object(
+            audit,
+            "_validate_named_file",
+            side_effect=KeyboardInterrupt(),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                audit._read_file(1, "name", 2)
+
+        namespace = audit.AuditNamespace(
+            audit.SendAuditStore(),
+            [1],
+            [],
+            1,
+            2,
+            "runtime",
+            3,
+            "marker",
+            4,
+            "transaction",
+            {"namespace_epoch": "e_test"},
+            (1,),
+            5,
+            b"k",
+            (2,),
+            True,
+        )
+        helper._validate_directory.side_effect = KeyboardInterrupt()
+        with mock.patch.object(audit, "_secure_helpers", return_value=helper):
+            with mock.patch.object(audit.os, "fstat", return_value=mock.Mock()):
+                with self.assertRaises(KeyboardInterrupt):
+                    namespace.validate()
+
+    def test_open_existing_runtime_rejects_root_without_components(self):
+        helper = mock.Mock()
+        helper._runtime_root.return_value = Path("/")
+        with self.assertRaises(audit.AuditError):
+            audit.SendAuditStore._open_existing_runtime(helper, None)
+
+    def test_tailer_pool_normalizes_scalar_errors(self):
+        published = []
+        pool = tailer_pool.TailerPool(published.append)
+        tailer = mock.Mock(errors="scalar-error")
+        pool._consume_tailer_errors(("agent", "session"), tailer)
+        self.assertEqual(
+            [{"agent": "agent", "session_id": "session", "code": "tail_error"}],
+            list(pool._tail_errors),
+        )
+
+    def test_daemon_log_error_records_first_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = daemon.SidecarDaemon(
+                scanner=mock.Mock(),
+                runtime_dir=Path(temporary),
+            )
+            with mock.patch.object(daemon.sys, "stderr") as stderr:
+                instance._record_log_error("audit_error")
+            self.assertEqual("audit_error", instance._log_error)
+            self.assertEqual(
+                ("daemon log unavailable (audit_error)",),
+                instance._shutdown_diagnostics,
+            )
+            stderr.write.assert_called_once()
+
