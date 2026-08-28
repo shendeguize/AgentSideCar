@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -5242,4 +5243,69 @@ class SendAuditExceptionalBranchTests(unittest.TestCase):
             return_value=mock.Mock(st_size=1),
         ), mock.patch.object(inject, "parse_json", return_value=1):
             self.assertIsNone(inject._kimi_state_reason(evidence))
+
+    def test_send_audit_reset_and_rebind_lock_edges(self):
+        store = audit.SendAuditStore("/tmp/runtime")
+        anchor = ([10], [], 11, "/tmp/runtime")
+        with mock.patch.object(store, "_open_anchor", return_value=anchor), mock.patch.object(
+            audit,
+            "_open_named_file",
+            side_effect=((12, True), (13, True)),
+        ), mock.patch.object(
+            store,
+            "_open_existing_runtime",
+            return_value=([], [], None),
+        ), mock.patch.object(
+            audit, "_validate_named_file"
+        ), mock.patch.object(
+            audit.os, "fsync"
+        ), mock.patch.object(
+            audit.os, "unlink"
+        ), mock.patch.object(
+            audit.os, "close"
+        ), mock.patch.object(
+            audit.fcntl, "flock"
+        ):
+            self.assertIsNone(store.reset())
+
+        for flock_calls in (
+            [OSError(errno.EAGAIN, "busy")],
+            [None, OSError(errno.EAGAIN, "busy"), None],
+        ):
+            with mock.patch.object(store, "_open_anchor", return_value=anchor), mock.patch.object(
+                audit,
+                "_open_named_file",
+                side_effect=((12, False), (13, False)),
+            ), mock.patch.object(
+                audit.fcntl, "flock", side_effect=flock_calls
+            ), mock.patch.object(
+                audit.os, "close"
+            ):
+                with self.assertRaises(audit.AuditError) as raised:
+                    store.reset()
+                self.assertEqual("audit_busy", raised.exception.code)
+
+        with mock.patch.object(store, "_open_anchor", return_value=anchor), mock.patch.object(
+            audit,
+            "_open_named_file",
+            return_value=(None, False),
+        ), mock.patch.object(audit.os, "close"):
+            with self.assertRaises(audit.AuditError) as raised:
+                store.rebind()
+            self.assertEqual("audit_corrupt", raised.exception.code)
+
+        with mock.patch.object(store, "_open_anchor", return_value=anchor), mock.patch.object(
+            audit,
+            "_open_named_file",
+            return_value=(12, False),
+        ), mock.patch.object(
+            audit.fcntl,
+            "flock",
+            side_effect=OSError(errno.EAGAIN, "busy"),
+        ), mock.patch.object(
+            audit.os, "close"
+        ):
+            with self.assertRaises(audit.AuditError) as raised:
+                store.rebind()
+            self.assertEqual("audit_busy", raised.exception.code)
 
