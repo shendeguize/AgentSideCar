@@ -5309,3 +5309,91 @@ class SendAuditExceptionalBranchTests(unittest.TestCase):
                 store.rebind()
             self.assertEqual("audit_busy", raised.exception.code)
 
+    def test_send_audit_archive_validation_and_link_failures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            descriptor = os.open(temporary, os.O_RDONLY)
+            try:
+                (directory / audit.AUDIT_FILE_NAME).mkdir(mode=0o700)
+                with self.assertRaises(audit.AuditError):
+                    audit.SendAuditStore._validate_archive_entry(descriptor)
+            finally:
+                os.close(descriptor)
+
+        with mock.patch.object(
+            audit.os, "stat", return_value=mock.Mock()
+        ), mock.patch.object(
+            audit, "_private_regular", return_value=False
+        ):
+            with self.assertRaises(audit.AuditError):
+                audit.SendAuditStore._archive_files(1, 2, ("audit",))
+
+    def test_inject_probe_and_snapshot_preflight_edges(self):
+        with mock.patch.object(
+            inject, "_executable_identity", return_value=("other",)
+        ):
+            with self.assertRaises(inject.SendError):
+                inject._probe_kimi_version(
+                    "kimi",
+                    ("expected",),
+                    mock.Mock(),
+                )
+
+        with mock.patch.object(
+            inject, "_executable_identity", side_effect=KeyboardInterrupt()
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                inject._probe_kimi_version(
+                    "kimi",
+                    ("expected",),
+                    mock.Mock(),
+                )
+
+        with mock.patch.object(inject.os, "O_NOFOLLOW", 0):
+            with self.assertRaises(inject.SendError):
+                inject._snapshot_runtime_asset_for_analysis(
+                    "source",
+                    Path("/tmp/destination"),
+                    "relative",
+                )
+
+        details = [
+            mock.Mock(st_dev=1, st_ino=1),
+            mock.Mock(st_dev=1, st_ino=2),
+            mock.Mock(st_dev=1, st_ino=1),
+        ]
+        with mock.patch.object(
+            audit.os, "stat", side_effect=details
+        ), mock.patch.object(
+            audit, "_private_regular", return_value=True
+        ), mock.patch.object(
+            audit.os, "link"
+        ), mock.patch.object(
+            audit.os, "unlink"
+        ) as unlink:
+            with self.assertRaises(audit.AuditError):
+                audit.SendAuditStore._archive_files(1, 2, ("audit",))
+            unlink.assert_called_once_with("audit", dir_fd=2)
+
+        with mock.patch.object(
+            audit.os, "stat", return_value=mock.Mock()
+        ), mock.patch.object(
+            audit, "_private_regular", return_value=True
+        ), mock.patch.object(
+            audit.os, "link", side_effect=FileExistsError("exists")
+        ):
+            with self.assertRaises(audit.AuditError):
+                audit.SendAuditStore._archive_files(1, 2, ("audit",))
+
+        with mock.patch.object(
+            audit.os, "stat", return_value=mock.Mock()
+        ), mock.patch.object(
+            audit, "_private_regular", return_value=True
+        ), mock.patch.object(
+            audit.os, "link", side_effect=OSError("link")
+        ), mock.patch.object(
+            audit.os, "unlink", side_effect=OSError("cleanup")
+        ):
+            with self.assertRaises(audit.AuditError):
+                audit.SendAuditStore._archive_files(1, 2, ("audit",))
+
