@@ -5178,3 +5178,68 @@ class SendAuditExceptionalBranchTests(unittest.TestCase):
             )
             stderr.write.assert_called_once()
 
+    def test_daemon_log_open_removes_extra_backups(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = daemon_log.DaemonLog(
+                Path(temporary),
+                backups=0,
+            )
+            instance._open_directory = mock.Mock(return_value=10)
+            instance._validate_entry = mock.Mock()
+            instance._entry_stat = mock.Mock(return_value=mock.Mock())
+            instance._open_private_file = mock.Mock(
+                side_effect=((11, (1, 1)), (12, (2, 2)))
+            )
+            instance._repair_current = mock.Mock()
+            with mock.patch.object(daemon_log._fcntl, "flock"):
+                with mock.patch.object(daemon_log.os, "unlink") as unlink:
+                    with mock.patch.object(daemon_log.os, "fsync") as fsync:
+                        self.assertIs(instance.open(), instance)
+            self.assertTrue(unlink.called)
+            self.assertTrue(fsync.called)
+
+    def test_inject_parser_and_guard_exception_edges(self):
+        self.assertEqual(
+            "result",
+            inject._assistant_record_text({"result": {"text": "result"}}),
+        )
+        self.assertEqual(("", ""), inject._codex_record_text(None))
+        self.assertEqual(
+            ("", ""),
+            inject._codex_record_text(
+                {"item": {"type": "tool", "content": "ignored"}}
+            ),
+        )
+
+        plan = mock.Mock()
+        plan.target.executable_identity = ("kimi", 1, 2)
+        evidence = mock.Mock(project="/tmp/project")
+        with self.assertRaises(KeyboardInterrupt):
+            inject._guard_kimi_processes(
+                plan,
+                evidence,
+                mock.Mock(side_effect=KeyboardInterrupt()),
+            )
+        expected = inject.SendError("session_busy")
+        with self.assertRaises(inject.SendError) as raised:
+            inject._guard_kimi_processes(
+                plan,
+                evidence,
+                mock.Mock(side_effect=expected),
+            )
+        self.assertIs(expected, raised.exception)
+
+    def test_inject_kimi_file_and_state_edges(self):
+        with mock.patch.object(inject.os, "pread", return_value=b"xxx"):
+            with self.assertRaises(inject.SendError):
+                inject._read_kimi_file(1, 2, 4)
+
+        evidence = mock.Mock(state_generation=mock.Mock(size=1))
+        evidence._anchors.descriptor.return_value = 7
+        with mock.patch.object(
+            inject.os,
+            "fstat",
+            return_value=mock.Mock(st_size=1),
+        ), mock.patch.object(inject, "parse_json", return_value=1):
+            self.assertIsNone(inject._kimi_state_reason(evidence))
+
