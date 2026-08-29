@@ -106,6 +106,12 @@ def _run_stage(stage: str, full_tests_ran: bool) -> int:
             )
             if json_code:
                 return json_code
+            report_code = _run_command(
+                (python, "-m", "coverage", "report", "-m"),
+                env=environment,
+            )
+            if report_code:
+                return report_code
             return _run_command(
                 (
                     python,
