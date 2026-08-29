@@ -365,6 +365,22 @@ class GovernanceContractTests(unittest.TestCase):
         self.assertIn('python-version: "3.11"', document)
         self.assertIn("sys.version_info[:2] != (3, 11)", document)
 
+    def test_plugin_release_uses_oidc_and_builds_once(self):
+        document = (WORKFLOWS / "plugin-release.yml").read_text(encoding="utf-8")
+
+        self.assertIn('tags:\n      - "plugin-v*"', document)
+        self.assertIn("id-token: write", document)
+        self.assertIn('node-version: "24"', document)
+        self.assertIn("package-manager-cache: false", document)
+        self.assertIn("pnpm test", document)
+        self.assertIn("pnpm typecheck && pnpm build", document)
+        self.assertEqual(1, document.count("pnpm build"))
+        self.assertIn(
+            "npm publish --access public --provenance --ignore-scripts",
+            document,
+        )
+        self.assertNotIn("NPM_TOKEN", document)
+
     def test_release_guard_requires_head_to_equal_the_peeled_tag_commit(self):
         document = (ROOT / "scripts" / "release_guard.py").read_text(
             encoding="utf-8"
