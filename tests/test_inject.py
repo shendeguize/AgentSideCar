@@ -4428,6 +4428,32 @@ class NativeOutputTests(InjectionTestCase):
             )
         self.assertEqual("unsupported_kimi", raised.exception.code)
 
+    def test_kimi_send_closes_refreshed_plan_when_identity_is_invalid(self):
+        plan = self.plan()
+        with mock.patch.object(
+            inject_module,
+            "_refreshed_send_plan",
+            return_value=plan,
+        ), mock.patch.object(inject_module, "_session_lock") as session_lock:
+            session_lock.return_value.__enter__.return_value = mock.Mock()
+            with self.assertRaises(SendError) as raised:
+                inject_module._run_kimi_send(
+                    plan,
+                    "message",
+                    bound_executable=mock.Mock(),
+                    bounded_timeout=1.0,
+                    refresher=mock.Mock(),
+                    executable_resolver=mock.Mock(),
+                    runtime_dir=self.runtime,
+                    runtime_namespace=mock.Mock(),
+                    monotonic=time.monotonic,
+                    request_id="functional-request",
+                    version_runner=mock.Mock(),
+                    kimi_runner=mock.Mock(),
+                    process_guard=mock.Mock(),
+                )
+        self.assertEqual("invalid_plan", raised.exception.code)
+
     def test_kimi_suffix_reader_rejects_generation_and_prefix_mutations(self):
         evidence = mock.Mock()
         boundary = mock.Mock(wire_offset=3)

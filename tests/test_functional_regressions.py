@@ -336,6 +336,29 @@ class FunctionalRegressionTests(unittest.TestCase):
         resumed._pending.add(("missing", "pending"))
         resumed.refresh([], changed_keys=(), initial=False, now=0.0)
         self.assertNotIn(("missing", "pending"), resumed._pending)
+        active_key = ("claude", "active")
+        active_session = mock.Mock(
+            transcript=session.transcript,
+            extra={},
+            agent="claude",
+            session_id="active",
+            status=Status.WORKING,
+        )
+        active_tailer = mock.Mock(
+            single_poll_per_refresh=True,
+            poll=mock.Mock(return_value=[]),
+            has_pending_records=True,
+        )
+        resumed._tailers[active_key] = active_tailer
+        resumed._paths[active_key] = session.transcript
+        resumed._pending.add(active_key)
+        resumed.refresh(
+            [active_session],
+            changed_keys=(),
+            initial=False,
+            now=0.0,
+        )
+        self.assertIn(active_key, resumed._pending)
         existing = BareTailer()
         existing.session = None
         resumed._tailers[key] = existing

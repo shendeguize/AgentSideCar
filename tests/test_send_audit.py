@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import multiprocessing
@@ -1553,6 +1554,17 @@ class SendAuditStoreTests(unittest.TestCase):
             store.reset()
         self.assertEqual("unsafe_audit", raised.exception.code)
         self.assertTrue((self.runtime / AUDIT_KEY_NAME).exists())
+
+    def test_reset_translates_unexpected_transaction_lock_failure(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-before-lock-failure", self.identity)
+        with mock.patch.object(
+            audit_module.fcntl,
+            "flock",
+            side_effect=[None, OSError(errno.EIO, "I/O failure"), None],
+        ):
+            with self.assertRaises(AuditError):
+                store.reset()
 
     def test_malformed_schema_types_always_raise_audit_corrupt(self):
         store = SendAuditStore(self.runtime)
