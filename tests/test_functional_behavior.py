@@ -34,6 +34,9 @@ class FunctionalAuditBehaviorTests(unittest.TestCase):
         self.assertEqual(0, raised.exception.code)
 
     def test_json_contract_accepts_normal_scalar_values(self):
+        validate_json(7, JSONLimits())
+        validate_json(1.25, JSONLimits())
+        validate_json("functional", JSONLimits())
         validate_json(
             {"integer": 7, "real": 1.25, "text": "functional"},
             JSONLimits(),
