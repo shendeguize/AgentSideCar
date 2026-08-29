@@ -272,6 +272,7 @@ class PlanTests(InjectionTestCase):
                 "exec",
                 "resume",
                 "--json",
+                "--skip-git-repo-check",
                 "session-123",
                 "-",
             ),
@@ -319,7 +320,7 @@ class PlanTests(InjectionTestCase):
     def test_explicitly_unsupported_agents_have_stable_reason_codes(self):
         expected = {
             "cursor-ide": "unsupported_cursor_ide",
-            "copilot": "unsupported_copilot",
+            "copilot": "session_unavailable",
             "dsh": "unsupported_dsh",
             "cursor": "unsupported_agent",
             "CLAUDE": "unsupported_agent",

@@ -255,6 +255,12 @@ const DAEMON_GRACE_MS = 5000
 const DETECT_TIMEOUT_MS = 10_000
 /** SIGTERM → grace → SIGKILL window when the send-cli hard timeout kills. */
 const SEND_CLI_GRACE_MS = 2000
+/**
+ * Codex resume can spend over 30s rebuilding a large-context turn before it
+ * emits its final JSONL event. Keep the plugin-side bound below the Sidecar
+ * maximum while avoiding false unknown-delivery results on healthy resumes.
+ */
+const SEND_CLI_TIMEOUT_MS = 180_000
 /** Output cap for the detection probe (one sanitized message line). */
 const DETECT_OUTPUT_BYTES = 4096
 /** Per-line clamp when forwarding daemon output into ctx.logger (S8). */
@@ -784,7 +790,7 @@ export function apply(ctx: HostContext, config: Config): void {
   const sendCliExecutor = createSendCliExecutor({
     spawn: spawnSendCli,
     log,
-    opts: { command },
+    opts: { command, timeoutMs: SEND_CLI_TIMEOUT_MS },
   })
 
   /** Live target re-check against the reconciled store (§4.f.5 prepare). */

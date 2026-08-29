@@ -71,8 +71,9 @@ DSH Center 远程清单契约由版本化夹具钉死，并以只读边界写入
 - `claude`：Claude Code 项目 JSONL 会话记录，包括已知的 sidechain 和子 Agent
   关系。
 - `codex`：Codex CLI rollout JSONL，以及可用时的只读原生状态 SQLite。
-- `copilot`：仅支持 GitHub Copilot CLI 的 `workspace.yaml` 元数据。0.9.0 版本
-  没有对应事件源，因此状态报告为 `idle`。
+- `copilot`：支持 GitHub Copilot CLI 的 `workspace.yaml` 元数据和认证后的
+  `--resume --interactive` 发送。0.9.0 版本没有对应事件源，因此状态报告为
+  `idle`。
 - `dsh`：优先通过 DeepSeek DSH 投影缓存元数据进行列表和状态查询，并以有界的
   持久会话扫描补充发现缓存缺失的 headless 运行，也支持从压缩会话记录中监视
   事件。`DSH_HOME` 可指定独立的绝对 DSH 存储根目录。基于缓存的列表和状态查询
@@ -534,20 +535,21 @@ Sidecar 发送，以及已经改变或消失的目标，并持锁直到原生进
 不要发送。
 
 符合条件的目标是本地、顶层、处于 `waiting` 或 `idle` 的 `claude`、`codex`、
-`cursor-cli` 或 `kimi` 会话。`working`、`dead`、子会话、sidechain 和远程会话
-都会被拒绝；`cursor-ide`、`copilot` 和 `dsh` 也会被拒绝。Claude 和 Codex 通过
+`cursor-cli`、`kimi` 或 `copilot` 会话。`working`、`dead`、子会话、sidechain
+和远程会话都会被拒绝；`cursor-ide` 和 `dsh` 也会被拒绝。Claude 和 Codex 通过
 stdin 接收原生提示词；Cursor CLI 必然通过子进程 argv 接收；Kimi 使用下述受保护
-ACP 路径。Claude、Codex 与 Cursor 保持原有的恢复和结果语义。CLI 直接发送仍不
-支持 DSH；DSH 注入只存在于 DSH 插件内。
+ACP 路径；Copilot 使用认证后的 `--resume --interactive` 路径。Claude、Codex
+与 Cursor 保持原有的恢复和结果语义。CLI 直接发送仍不支持 DSH；DSH 注入只存在
+于 DSH 插件内。
 
 `send` 只根据直接本地扫描解析目标。从 `list --remote` 得到的行不能作为发送
 目标；如果其 ID 不在本地扫描中，`send` 会以退出码 `2` 关闭失败，并在 JSON
 中返回 `target_not_found`。如果本地扫描发现的行带有远程来源，则使用单独的
 `remote_session` 拒绝。
 
-**Kimi Code 0.38.0 受保护恢复。**
+**Kimi Code 0.38.0 / 0.39.1 受保护恢复。**
 
-Kimi 支持刻意限定为精确版本与手动操作：只接受 Kimi Code `0.38.0`，每条命令只
+Kimi 支持刻意限定为精确版本与手动操作：只接受 Kimi Code `0.38.0` 或 `0.39.1`，每条命令只
 启动一个独立的 `kimi acp` 进程来恢复持久化根会话。它不是 live inbox，不会附着
 既有终端，也不能向进行中的 turn queue 或 steer；因此观察为 `working` 的 Kimi
 会话会被拒绝。
@@ -967,11 +969,11 @@ Changelog 和发布治理请参见[贡献指南](CONTRIBUTING.md)。
 ## 当前范围与后续工作
 
 0.9.0 版本为受支持数据源提供本地观察、Cursor CLI 事件监视、远程 `list`/`status`
-快照、并发本地和远程 `watch --all --remote`，并为 Claude、Codex、Cursor CLI
-以及精确 Kimi Code 0.38.0 受保护 ACP 路径提供实验性本地发送。它可以为 pipx 和
+快照、并发本地和远程 `watch --all --remote`，并为 Claude、Codex、Cursor CLI、
+Copilot 以及精确 Kimi Code 0.38.0/0.39.1 受保护 ACP 路径提供实验性本地发送。它可以为 pipx 和
 确定性 zipapp 使用场景打包 CLI，并加入显式 macOS LaunchAgent 管理和私有轮转
 守护进程诊断。远程前缀监视和远程发送仍不受支持。`send` 不支持 dsh 会话，dsh
-会话注入仅能通过 dsh 插件完成；Cursor IDE 与 Copilot 发送不受支持。可选 HTTP
+会话注入仅能通过 dsh 插件完成；Cursor IDE 发送不受支持。可选 HTTP
 面板和只读 API 仍严格限制在数值 IPv4 回环地址，既不扩展远程监控，也不提供控制
 平面。
 

@@ -172,7 +172,7 @@ function sha12(message: string): string {
 // ---------------------------------------------------------------------------
 
 describe('deriveInjectEligibility', () => {
-  it.each(['cursor-ide', 'copilot', 'unknown'])(
+  it.each(['cursor-ide', 'unknown'])(
     'rejects unsupported agent %s',
     (agent) => {
       expect(deriveInjectEligibility(sessionRow({ agent }))).toEqual({
@@ -182,7 +182,7 @@ describe('deriveInjectEligibility', () => {
     },
   )
 
-  it.each(['claude', 'codex', 'cursor-cli', 'kimi'])(
+  it.each(['claude', 'codex', 'cursor-cli', 'kimi', 'copilot'])(
     'allows local top-level waiting/idle external agent %s',
     (agent) => {
       for (const status of ['waiting', 'idle']) {
@@ -718,9 +718,9 @@ describe('dispatch', () => {
     ])
   })
 
-  it('routes external spawn-resume agents, including Kimi, to send-cli', async () => {
+  it('routes external spawn-resume agents, including Kimi and Copilot, to send-cli', async () => {
     const h = makeHarness()
-    for (const agent of ['claude', 'codex', 'cursor-cli', 'kimi']) {
+    for (const agent of ['claude', 'codex', 'cursor-cli', 'kimi', 'copilot']) {
       const target: InjectTarget = { agent, sessionId: `sess-${agent}` }
       const { requestId, confirmToken } = await prepared(h, target, `for ${agent}`)
       const result = await h.gateway.execute({ requestId, confirmToken, message: `for ${agent}` })
@@ -731,6 +731,7 @@ describe('dispatch', () => {
       'codex',
       'cursor-cli',
       'kimi',
+      'copilot',
     ])
     expect(h.dsh.calls).toHaveLength(0)
   })
@@ -738,8 +739,8 @@ describe('dispatch', () => {
   it('rejects non-injectable agents at PREPARE: no token, no capacity, no executor (F-6)', async () => {
     const h = makeHarness()
     // verifyTarget answers for any target here, so the rejection below can
-    // only come from the whitelist check, not from target_not_found.
-    for (const agent of ['copilot', 'cursor-ide']) {
+    // only comes from the whitelist check, not from target_not_found.
+    for (const agent of ['cursor-ide']) {
       const prep = await h.gateway.prepare({
         target: { agent, sessionId: `sess-${agent}` },
         mode: 'queue',

@@ -85,6 +85,7 @@ MAX_SESSION_ID_BYTES = 512
 SEND_LOCK_DIRECTORY = "send-locks"
 RUNTIME_ENV = "AGENT_SIDECAR_RUNTIME_DIR"
 KIMI_SUPPORTED_VERSION = "0.38.0"
+KIMI_SUPPORTED_VERSIONS = frozenset((KIMI_SUPPORTED_VERSION, "0.39.1"))
 KIMI_VERSION_TIMEOUT_SECONDS = 30.0
 KIMI_VERSION_STDOUT_BYTES = 256
 KIMI_PROOF_BYTES = 16 * 1024 * 1024
@@ -97,7 +98,7 @@ KIMI_RUNTIME_ASSET_COUNT = 2048
 KIMI_DYLIB_COUNT = 256
 KIMI_DYLIB_TOTAL_BYTES = 512 * 1024 * 1024
 
-SUPPORTED_AGENTS = frozenset(("claude", "codex", "cursor-cli", "kimi"))
+SUPPORTED_AGENTS = frozenset(("claude", "codex", "copilot", "cursor-cli", "kimi"))
 SEND_OUTCOMES = frozenset(
     (
         "completed",
@@ -113,25 +114,27 @@ DELIVERY_STATES = frozenset(("delivered", "unknown"))
 _EXECUTABLE_NAMES = {
     "claude": "claude",
     "codex": "codex",
+    "copilot": "copilot",
     "cursor-cli": "cursor-agent",
     "kimi": "kimi",
 }
 _PROMPT_TRANSPORTS = {
     "claude": "stdin",
     "codex": "stdin",
+    "copilot": "argv",
     "cursor-cli": "argv",
     "kimi": "ndjson",
 }
 _SEND_TRANSPORTS = {
     "claude": "argv-resume",
     "codex": "argv-resume",
+    "copilot": "argv-resume",
     "cursor-cli": "argv-resume",
     "kimi": "kimi_acp",
 }
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$")
 _UNSUPPORTED_AGENT_CODES = {
     "cursor-ide": "unsupported_cursor_ide",
-    "copilot": "unsupported_copilot",
     "dsh": "unsupported_dsh",
 }
 _ERROR_MESSAGES = {
@@ -480,6 +483,21 @@ def _transcript_path(value: object) -> str:
         raise SendError("session_unavailable") from error
 
 
+def _copilot_workspace_path(session: Session) -> str:
+    value = session.extra.get("workspace")
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise SendError("session_unavailable")
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise SendError("session_unavailable")
+        return os.path.abspath(str(candidate))
+    except SendError:
+        raise
+    except (OSError, RuntimeError, ValueError) as error:
+        raise SendError("session_unavailable") from error
+
+
 def _source_paths(session: Session, transcript: str) -> Tuple[str, ...]:
     paths = [transcript]
     if session.extra.get("transcript_kind") == "cursor-chat-sqlite":
@@ -545,7 +563,11 @@ def _send_target(
     kimi_runtime: Optional[_KimiRuntimeManifest] = None,
 ) -> SendTarget:
     if kimi_identity is None:
-        transcript = _transcript_path(session.transcript)
+        transcript = (
+            _copilot_workspace_path(session)
+            if agent == "copilot"
+            else _transcript_path(session.transcript)
+        )
         paths = _source_paths(session, transcript)
         signature = tuple(
             _stat_source(path, required=index == 0)
@@ -673,7 +695,26 @@ def _send_arguments(
             "json",
         )
     if agent == "codex":
-        return (executable, "exec", "resume", "--json", session_id, "-")
+        return (
+            executable,
+            "exec",
+            "resume",
+            "--json",
+            "--skip-git-repo-check",
+            session_id,
+            "-",
+        )
+    if agent == "copilot":
+        return (
+            executable,
+            "--resume",
+            session_id,
+            "--interactive",
+            message,
+            "--silent",
+            "--no-color",
+            "--no-auto-update",
+        )
     if agent == "cursor-cli":
         return (
             executable,
@@ -724,7 +765,7 @@ def _probe_kimi_version(
             or _result_returncode(result) != 0
             or getattr(result, "overflow", None) is not None
             or getattr(result, "cleanup_incomplete", False) is True
-            or version != KIMI_SUPPORTED_VERSION
+            or version not in KIMI_SUPPORTED_VERSIONS
         ):
             raise SendError("unsupported_kimi")
     except SendError:
@@ -752,6 +793,18 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         if written <= 0:
             raise OSError("short snapshot write")
         offset += written
+
+
+def _runtime_owner_allowed(owner: int) -> bool:
+    """Allow root to verify canon-managed, non-world-writable runtimes.
+
+    Canon may install the Node runtime as the pod user's uid while the
+    operator intentionally runs Sidecar as root. Integrity and no-write-bit
+    checks below still apply, and the file is revalidated before use.
+    """
+
+    effective_uid = os.geteuid() if callable(getattr(os, "geteuid", None)) else owner
+    return effective_uid == 0 or owner in (0, effective_uid)
 
 
 def _owner_safe_file_identity(path: str) -> ExecutableIdentity:
@@ -794,7 +847,7 @@ def _owner_safe_file_identity(path: str) -> ExecutableIdentity:
     )
     if (
         not stat.S_ISREG(before.st_mode)
-        or before.st_uid not in (0, effective_uid)
+        or not _runtime_owner_allowed(before.st_uid)
         or bool(stat.S_IMODE(before.st_mode) & 0o022)
         or signature != after_signature
         or signature != linked_signature
@@ -803,9 +856,14 @@ def _owner_safe_file_identity(path: str) -> ExecutableIdentity:
     return (path, *signature, digest.hexdigest())
 
 
-def _runtime_asset(path: str, relative_path: str) -> _KimiRuntimeAsset:
+def _runtime_asset(
+    path: str,
+    relative_path: str,
+    *,
+    max_bytes: int = KIMI_RUNTIME_FILE_BYTES,
+) -> _KimiRuntimeAsset:
     identity = _owner_safe_file_identity(path)
-    if identity[4] < 0 or identity[4] > KIMI_RUNTIME_FILE_BYTES:
+    if identity[4] < 0 or identity[4] > max_bytes:
         raise SendError("unsupported_kimi")
     mode = 0o500 if stat.S_IMODE(identity[3]) & 0o111 else 0o400
     return _KimiRuntimeAsset(relative_path, identity, mode)
@@ -833,7 +891,7 @@ def _snapshot_runtime_asset_for_analysis(
         mode = stat.S_IMODE(before.st_mode)
         if (
             not stat.S_ISREG(before.st_mode)
-            or before.st_uid not in (0, effective_uid)
+            or not _runtime_owner_allowed(before.st_uid)
             or bool(mode & 0o022)
             or before.st_size < 0
             or before.st_size > KIMI_RUNTIME_FILE_BYTES
@@ -933,7 +991,10 @@ def _capture_package_assets(root: Path) -> Tuple[_KimiRuntimeAsset, ...]:
             raise SendError("unsupported_kimi") from error
         if (
             not stat.S_ISDIR(details.st_mode)
-            or (effective_uid is not None and details.st_uid not in (0, effective_uid))
+            or (
+                effective_uid is not None
+                and not _runtime_owner_allowed(details.st_uid)
+            )
             or bool(stat.S_IMODE(details.st_mode) & 0o022)
         ):
             raise SendError("unsupported_kimi")
@@ -943,6 +1004,24 @@ def _capture_package_assets(root: Path) -> Tuple[_KimiRuntimeAsset, ...]:
             except OSError as error:
                 raise SendError("unsupported_kimi") from error
             item = Path(entry.path)
+            if stat.S_ISLNK(item_details.st_mode):
+                try:
+                    target = item.resolve(strict=True)
+                    target.relative_to(canonical)
+                except (OSError, RuntimeError, ValueError) as error:
+                    raise SendError("unsupported_kimi") from error
+                if not target.is_file():
+                    raise SendError("unsupported_kimi")
+                relative = item.relative_to(canonical).as_posix()
+                asset = _runtime_asset(str(target), relative)
+                assets.append(asset)
+                total += asset.identity[4]
+                if (
+                    len(assets) > KIMI_RUNTIME_ASSET_COUNT
+                    or total > KIMI_RUNTIME_TOTAL_BYTES
+                ):
+                    raise SendError("unsupported_kimi")
+                continue
             if stat.S_ISDIR(item_details.st_mode):
                 stack.append(item)
                 continue
@@ -1030,7 +1109,15 @@ def _capture_macho_closure(
     node: str,
 ) -> Tuple[_KimiRuntimeAsset, Tuple[_KimiRuntimeAsset, ...], Tuple[str, ...]]:
     if sys.platform != "darwin":
-        return _runtime_asset(node, "bin/node"), (), ()
+        return (
+            _runtime_asset(
+                node,
+                "bin/node",
+                max_bytes=KIMI_INTERPRETER_BYTES,
+            ),
+            (),
+            (),
+        )
     try:
         analysis_root = Path(tempfile.mkdtemp(prefix="agent-sidecar-kimi-otool-"))
     except OSError as error:
@@ -1271,7 +1358,7 @@ def _snapshot_verified_file(
         )
         if (
             not stat.S_ISREG(before.st_mode)
-            or before.st_uid not in (0, effective_uid)
+            or not _runtime_owner_allowed(before.st_uid)
             or bool(source_mode & 0o022)
             or before.st_size < 0
             or before.st_size > limit
@@ -1364,7 +1451,11 @@ def _bind_kimi_executable(
                 asset.identity[0],
                 destination,
                 expected=asset.identity,
-                limit=KIMI_RUNTIME_FILE_BYTES,
+                limit=(
+                    KIMI_INTERPRETER_BYTES
+                    if asset.relative_path == "bin/node"
+                    else KIMI_RUNTIME_FILE_BYTES
+                ),
                 mode=asset.mode,
             )
         if manifest.node is not None:
@@ -1466,7 +1557,7 @@ def _probe_bound_kimi_version(
             _result_returncode(result) != 0
             or getattr(result, "overflow", None) is not None
             or getattr(result, "cleanup_incomplete", False) is True
-            or version != KIMI_SUPPORTED_VERSION
+            or version not in KIMI_SUPPORTED_VERSIONS
         ):
             raise SendError("unsupported_kimi")
     except SendError:
@@ -1623,10 +1714,10 @@ def _plan_message(plan: SendPlan) -> str:
         if validate_message(message) != plan.input_data:
             raise SendError("invalid_plan")
         return message
-    if plan.agent == "cursor-cli":
+    if plan.agent in ("copilot", "cursor-cli"):
         if plan.input_data is not None or len(plan.argv) != 8:
             raise SendError("invalid_plan")
-        message = plan.argv[-1]
+        message = plan.argv[4] if plan.agent == "copilot" else plan.argv[-1]
         validate_message(message)
         return message
     raise SendError("invalid_plan")
@@ -3137,6 +3228,7 @@ __all__ = [
     "DEFAULT_SEND_TIMEOUT_SECONDS",
     "DELIVERY_STATES",
     "KIMI_SUPPORTED_VERSION",
+    "KIMI_SUPPORTED_VERSIONS",
     "MAX_MESSAGE_BYTES",
     "MAX_SEND_TIMEOUT_SECONDS",
     "MAX_SESSION_ID_BYTES",

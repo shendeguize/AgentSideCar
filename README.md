@@ -87,8 +87,9 @@ The agent names below are also the exact values accepted by `list --agent`:
   and subagent relationships.
 - `codex`: Codex CLI rollout JSONL plus read-only native status SQLite when
   available.
-- `copilot`: GitHub Copilot CLI `workspace.yaml` metadata only. It has no event
-  source in v0.9.0 and is reported as `idle`.
+- `copilot`: GitHub Copilot CLI `workspace.yaml` metadata and authenticated
+  `--resume --interactive` send support. It has no event source in v0.9.0 and
+  is reported as `idle`.
 - `dsh`: DeepSeek DSH projection-cache metadata for listing and status, with
   bounded durable-session discovery as a fallback for cache-missing headless
   runs, plus compressed transcript events for watching. `DSH_HOME` selects an
@@ -634,12 +635,13 @@ resume or write concurrent history. Status is inferred and can lag, so do not
 send to a session that may still be open or active even when it is reported as
 `waiting`.
 
-Eligible targets are local, top-level `claude`, `codex`, `cursor-cli`, or
-`kimi` sessions in `waiting` or `idle`. `working`, `dead`, child, sidechain,
-and remote sessions are rejected, as are `cursor-ide`, `copilot`, and `dsh`.
+Eligible targets are local, top-level `claude`, `codex`, `cursor-cli`, `kimi`,
+or `copilot` sessions in `waiting` or `idle`. `working`, `dead`, child,
+sidechain, and remote sessions are rejected, as are `cursor-ide` and `dsh`.
 Claude and Codex receive the native prompt on stdin. Cursor CLI necessarily
 receives it in the child process argv. Kimi uses the protected ACP path below.
-Claude, Codex, and Cursor retain their existing resume and result semantics.
+Copilot uses its authenticated `--resume --interactive` path. Claude, Codex,
+and Cursor retain their existing resume and result semantics.
 Direct CLI send still does not support DSH sessions; DSH injection exists only
 inside the DSH plugin.
 
@@ -649,10 +651,10 @@ command fails closed with exit `2` and JSON code `target_not_found`. The
 `remote_session` rejection applies when a locally scanned row carries remote
 provenance.
 
-**Kimi Code 0.38.0 protected resume.**
+**Kimi Code 0.38.0 / 0.39.1 protected resume.**
 
 Kimi support is deliberately exact-version and manual: only Kimi Code
-`0.38.0` is accepted, and one command starts one separate `kimi acp` process
+`0.38.0` or `0.39.1` is accepted, and one command starts one separate `kimi acp` process
 to resume the persisted root session. This is not a live inbox, does not
 attach to the existing terminal, and cannot queue or steer an in-progress
 turn. A Kimi session observed as `working` is therefore rejected.
@@ -1177,12 +1179,12 @@ runtime files, follow the sanitization requirements in the Security Policy.
 Version 0.9.0 provides local observation for the supported sources, Cursor CLI
 event watching, remote `list`/`status` snapshots, concurrent local and remote
 `watch --all --remote`, and experimental local send for Claude, Codex, Cursor
-CLI, and the exact Kimi Code 0.38.0 protected ACP path. It packages the CLI for
+CLI, Copilot, and exact Kimi Code 0.38.0/0.39.1 protected ACP paths. It packages the CLI for
 pipx and deterministic zipapp use, and adds explicit macOS LaunchAgent
 management plus private rotating daemon diagnostics. Remote prefix watch and
 remote send remain unsupported. `send` does not support dsh sessions, whose
-injection is available only through the dsh plugin; Cursor IDE and Copilot send
-are unsupported. The opt-in HTTP panel and read-only API remain
+injection is available only through the dsh plugin; Cursor IDE send remains
+unsupported. The opt-in HTTP panel and read-only API remain
 numeric-IPv4-loopback-only and do not extend remote monitoring or provide a
 control plane.
 

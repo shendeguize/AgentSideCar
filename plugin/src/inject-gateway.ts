@@ -235,6 +235,7 @@ const SEND_CLI_AGENTS: ReadonlySet<string> = new Set([
   'codex',
   'cursor-cli',
   'kimi',
+  'copilot',
 ])
 
 // ---------------------------------------------------------------------------
