@@ -132,10 +132,14 @@ Releases run on two independent tracks with independent version lines:
   workflow publishes the zipapp and checksums to a GitHub Release. A `v*` tag
   makes no claim about the plugin.
 - The plugin's version source is `plugin/package.json`. Plugin releases are
-  tagged `plugin-v<version>` (for example `plugin-v0.1.0`) and published to
-  npm from `plugin/` with `npm publish --access public`; `publishConfig` pins
-  the official npm registry, and `prepublishOnly` reruns the typecheck and
-  both builds so the package ships current prebuilt `lib/` output. A
+  tagged `plugin-v<version>` (for example `plugin-v0.1.0`) and published by
+  `.github/workflows/plugin-release.yml` directly from GitHub Actions.
+  The workflow installs the locked pnpm graph, runs Vitest and typecheck,
+  builds `lib/` once, verifies tracked bundles, and publishes with npm
+  Trusted Publishing (OIDC); it does not use a long-lived `NPM_TOKEN`.
+  Configure npm's Trusted Publisher once for
+  `shendeguize/AgentSideCar`, workflow
+  `.github/workflows/plugin-release.yml`, with no environment name. A
   `plugin-v*` tag never advances the `release` branch and makes no claim
   about the Python product.
 
