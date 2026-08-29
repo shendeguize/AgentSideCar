@@ -2042,6 +2042,7 @@ class KimiSendIntegrationTests(unittest.TestCase):
         }
         self._write_fixture()
         self.executable = self.root / "kimi"
+
         self.executable.write_text(
             "#!/bin/sh\n"
             'if [ "$1" = "--version" ]; then\n'
@@ -2068,6 +2069,14 @@ class KimiSendIntegrationTests(unittest.TestCase):
         )
         account_home.start()
         self.addCleanup(account_home.stop)
+
+    def test_runtime_owner_allowed_accepts_root_and_current_user_only(self):
+        with mock.patch.object(inject_module.os, "geteuid", return_value=1000):
+            self.assertTrue(inject_module._runtime_owner_allowed(0))
+            self.assertTrue(inject_module._runtime_owner_allowed(1000))
+            self.assertFalse(inject_module._runtime_owner_allowed(1001))
+        with mock.patch.object(inject_module.os, "geteuid", None):
+            self.assertTrue(inject_module._runtime_owner_allowed(1001))
 
     def _write_json(self, path, value):
         path.write_text(

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from numbers import Real
 from pathlib import Path
-from typing import BinaryIO, Callable, Dict, Iterator, Mapping, Optional, Sequence, Set, Tuple, Union
+from typing import Any, BinaryIO, Callable, Dict, Iterator, Mapping, Optional, Sequence, Set, Tuple, Union
 
 
 MAX_TIMEOUT_SECONDS = 3600.0

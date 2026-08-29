@@ -842,9 +842,6 @@ def _owner_safe_file_identity(path: str) -> ExecutableIdentity:
         int(getattr(linked, "st_mtime_ns", int(linked.st_mtime * 1e9))),
         int(getattr(linked, "st_ctime_ns", int(linked.st_ctime * 1e9))),
     )
-    effective_uid = (
-        os.geteuid() if callable(getattr(os, "geteuid", None)) else before.st_uid
-    )
     if (
         not stat.S_ISREG(before.st_mode)
         or not _runtime_owner_allowed(before.st_uid)
