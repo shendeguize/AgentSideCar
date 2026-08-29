@@ -358,8 +358,6 @@ def aggregate_remote(
             rows.clear()
             succeeded.clear()
             return
-        if aggregate_overflow:
-            return
         rows.extend(candidate_rows)
         succeeded.append(host.alias)
 

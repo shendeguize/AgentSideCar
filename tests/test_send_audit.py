@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import multiprocessing
@@ -1554,6 +1555,17 @@ class SendAuditStoreTests(unittest.TestCase):
         self.assertEqual("unsafe_audit", raised.exception.code)
         self.assertTrue((self.runtime / AUDIT_KEY_NAME).exists())
 
+    def test_reset_translates_unexpected_transaction_lock_failure(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("request-before-lock-failure", self.identity)
+        with mock.patch.object(
+            audit_module.fcntl,
+            "flock",
+            side_effect=[None, OSError(errno.EIO, "I/O failure"), None],
+        ):
+            with self.assertRaises(AuditError):
+                store.reset()
+
     def test_malformed_schema_types_always_raise_audit_corrupt(self):
         store = SendAuditStore(self.runtime)
         store.reserve("request-types", self.identity)
@@ -1985,6 +1997,182 @@ class SendAuditStoreTests(unittest.TestCase):
         self.assertEqual(1, spawned.value)
         self.assertEqual(1, results.count("spawned"))
         self.assertEqual(1, results.count("request_pending"))
+
+    def test_history_compaction_preserves_pending_and_terminal_receipts(self):
+        pending = {
+            "request_id": "history-request",
+            "agent": "claude",
+            "target_hmac": "a" * 64,
+            "request_hmac": "b" * 64,
+            "confirmation_mode": "allow_write",
+            "outcome": "pending",
+        }
+        terminal = dict(pending, outcome="failed")
+        self.assertEqual(
+            {"history-request": [pending]},
+            audit_module._validate_histories([pending]),
+        )
+        self.assertEqual(
+            {"history-request": [pending, terminal]},
+            audit_module._validate_histories([pending, terminal]),
+        )
+
+    def test_audit_directory_helpers_translate_filesystem_failures(self):
+        with mock.patch.object(
+            audit_module.os,
+            "listdir",
+            side_effect=OSError("denied"),
+        ):
+            with self.assertRaises(AuditError) as raised:
+                SendAuditStore._purge_directory(1)
+            self.assertEqual("audit_error", raised.exception.code)
+            with self.assertRaises(AuditError) as raised:
+                SendAuditStore._validate_archive_entry(1)
+            self.assertEqual("audit_error", raised.exception.code)
+
+        with mock.patch.object(
+            audit_module.os,
+            "listdir",
+            return_value=[AUDIT_FILE_NAME],
+        ), mock.patch.object(
+            audit_module.os,
+            "stat",
+            side_effect=OSError("denied"),
+        ):
+            with self.assertRaises(AuditError) as raised:
+                SendAuditStore._validate_archive_entry(1)
+            self.assertEqual("audit_error", raised.exception.code)
+
+    def test_archive_directory_creation_handles_race_and_reopens_private_dir(self):
+        helpers = mock.Mock()
+        helpers._open_directory_at.return_value = (42, None)
+        with mock.patch.object(
+            audit_module.os,
+            "open",
+            side_effect=FileNotFoundError(),
+        ), mock.patch.object(
+            audit_module.os,
+            "mkdir",
+            side_effect=FileExistsError(),
+        ):
+            self.assertEqual(
+                (42, True),
+                SendAuditStore(self.runtime)._open_archive_directory(
+                    helpers,
+                    1,
+                    create=True,
+                ),
+            )
+        helpers._open_directory_at.assert_called_once()
+
+    def test_namespace_open_falls_back_to_shared_lock_and_repairs_empty_marker(self):
+        calls = [0]
+
+        def flock(_descriptor, _operation):
+            if calls[0] == 0:
+                calls[0] += 1
+                raise OSError(audit_module.errno.EAGAIN, "busy")
+            calls[0] += 1
+
+        with mock.patch.object(audit_module.fcntl, "flock", side_effect=flock):
+            with SendAuditStore(self.runtime).open_namespace() as namespace:
+                self.assertIsNotNone(namespace)
+        self.assertGreaterEqual(calls[0], 4)
+
+    def test_record_validation_converts_unexpected_mapping_failures(self):
+        with self.assertRaises(AuditError) as raised:
+            audit_module._validate_record(mock.Mock())
+        self.assertEqual("audit_corrupt", raised.exception.code)
+
+    def test_reserve_rejects_non_audit_identity_before_opening_namespace(self):
+        with self.assertRaises(AuditError) as raised:
+            SendAuditStore(self.runtime)._reserve(
+                mock.Mock(),
+                "valid-request",
+                object(),
+            )
+        self.assertEqual("audit_error", raised.exception.code)
+
+    def test_open_logs_translates_creation_fsync_failure_and_closes_fds(self):
+        store = SendAuditStore(self.runtime)
+        with mock.patch.object(
+            audit_module,
+            "_open_named_file",
+            side_effect=[(31, True), (32, False)],
+        ), mock.patch.object(
+            store,
+            "_recover_rotation",
+        ), mock.patch.object(
+            audit_module.os,
+            "fsync",
+            side_effect=OSError("sync failed"),
+        ), mock.patch.object(audit_module.os, "close") as close:
+            with self.assertRaises(AuditError) as raised:
+                store._open_logs(7, "epoch")
+        self.assertEqual("audit_error", raised.exception.code)
+        self.assertEqual([31, 32], [item.args[0] for item in close.call_args_list])
+
+    def test_reset_rejects_nonprivate_archive_directories(self):
+        store = SendAuditStore(self.runtime)
+        store.reserve("archive-private-check", self.identity)
+        archive = Path(store.reset())
+        store.reserve("archive-private-check-2", self.identity)
+        archive.chmod(0o755)
+        with self.assertRaises(AuditError) as raised:
+            store.reset()
+        self.assertEqual("unsafe_audit", raised.exception.code)
+
+    def test_locked_namespace_translates_second_validation_failure(self):
+        store = SendAuditStore(self.runtime)
+        namespace = mock.Mock(transaction_fd=17)
+        namespace.validate.side_effect = [None, RuntimeError("moved")]
+        with mock.patch.object(audit_module.fcntl, "flock"):
+            with self.assertRaises(AuditError) as raised:
+                with store._locked(namespace):
+                    pass
+        self.assertEqual("audit_error", raised.exception.code)
+
+    def test_recover_rotation_translates_unexpected_replace_failure(self):
+        store = SendAuditStore(self.runtime)
+        record = {
+            "request_id": "rotation-request",
+            "agent": "claude",
+            "target_hmac": "a" * 64,
+            "request_hmac": "b" * 64,
+            "confirmation_mode": "allow_write",
+            "outcome": "pending",
+            "namespace_epoch": "epoch",
+        }
+        with mock.patch.object(
+            audit_module,
+            "_open_named_file",
+            return_value=(31, True),
+        ), mock.patch.object(
+            store,
+            "_existing_sensitive_file",
+            side_effect=[object(), None],
+        ), mock.patch.object(
+            audit_module,
+            "_read_file",
+            return_value=b"record",
+        ), mock.patch.object(
+            audit_module,
+            "_parse_file",
+            return_value=[record],
+        ), mock.patch.object(
+            audit_module,
+            "_validate_histories",
+        ), mock.patch.object(
+            audit_module.os,
+            "close",
+        ), mock.patch.object(
+            audit_module.os,
+            "replace",
+            side_effect=RuntimeError("replace failed"),
+        ):
+            with self.assertRaises(AuditError) as raised:
+                store._recover_rotation(7, "epoch")
+        self.assertEqual("audit_error", raised.exception.code)
 
 
 if __name__ == "__main__":

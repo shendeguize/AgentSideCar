@@ -257,9 +257,11 @@ def _strict_process_rows(
         if not stripped:
             continue
         parts = stripped.split(None, 3)
+        if len(parts) < 3 and _has_kimi_indicator(
+            _lexical_command_probes(stripped)
+        ):
+            raise _inspection_failed()
         if len(parts) < 3:
-            if _has_kimi_indicator(_lexical_command_probes(stripped)):
-                raise _inspection_failed()
             continue
         pid_text, pgid_text, argv0 = parts[:3]
         command = parts[3] if len(parts) == 4 else argv0
@@ -270,9 +272,12 @@ def _strict_process_rows(
             if _has_kimi_indicator(_lexical_command_probes(stripped)):
                 raise _inspection_failed() from None
             continue
-        if pid <= 0 or pgid <= 0 or not argv0 or not command:
-            if _has_kimi_indicator(_lexical_command_probes(stripped)):
-                raise _inspection_failed()
+        invalid_row = pid <= 0 or pgid <= 0 or not argv0 or not command
+        if invalid_row and _has_kimi_indicator(
+            _lexical_command_probes(stripped)
+        ):
+            raise _inspection_failed()
+        if invalid_row:
             continue
         rows.append((pid, pgid, argv0, command))
     return rows
@@ -533,12 +538,12 @@ def _node_candidate_tokens(tokens: Tuple[str, ...]) -> Tuple[str, ...]:
             if token.startswith("-r") and len(token) > 2:
                 values.append(token[2:])
                 continue
-            if "=" in token:
-                option, value = token.split("=", 1)
-                if option not in _NODE_ATTACHED_PATH_OPTIONS:
-                    continue
-                if value:
-                    values.append(value)
+            option, separator, value = token.partition("=")
+            if not separator:
+                continue
+            if option not in _NODE_ATTACHED_PATH_OPTIONS:
+                continue
+            values.extend((value,) if value else ())
             continue
         values.append(token)
     return tuple(values)
@@ -666,9 +671,11 @@ def _relative_candidate_token_identity(
             os.close(descriptor)
         except OSError:
             pass
-    if not stat.S_ISREG(metadata.st_mode):
-        return None
-    return metadata.st_dev, metadata.st_ino
+    return (
+        None
+        if not stat.S_ISREG(metadata.st_mode)
+        else (metadata.st_dev, metadata.st_ino)
+    )
 
 
 def _strict_executable_binding(

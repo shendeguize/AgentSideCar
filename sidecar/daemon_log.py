@@ -398,8 +398,14 @@ class DaemonLog:
                     os.close(log_fd)
                 if lock_fd is not None:
                     try:
-                        if _fcntl is not None:
-                            _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+                        getattr(
+                            _fcntl,
+                            "flock",
+                            lambda *_unused: None,
+                        )(
+                            lock_fd,
+                            getattr(_fcntl, "LOCK_UN", 0),
+                        )
                     except OSError:
                         pass
                     os.close(lock_fd)
@@ -452,13 +458,13 @@ class DaemonLog:
                 if self._entry_stat(directory_fd, source) is None:
                     if self._entry_stat(directory_fd, destination) is not None:
                         os.unlink(destination, dir_fd=directory_fd)
-                    continue
-                os.replace(
-                    source,
-                    destination,
-                    src_dir_fd=directory_fd,
-                    dst_dir_fd=directory_fd,
-                )
+                else:
+                    os.replace(
+                        source,
+                        destination,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                    )
             os.replace(
                 LOG_NAME,
                 "{}.1".format(LOG_NAME),
@@ -520,9 +526,12 @@ class DaemonLog:
             elif name == "http_port":
                 if isinstance(value, int) and not isinstance(value, bool):
                     record[name] = min(65535, max(0, value))
-            elif name == "count":
-                if isinstance(value, int) and not isinstance(value, bool):
-                    record[name] = min(1_000_000_000, max(0, value))
+            elif (
+                name == "count"
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+            ):
+                record[name] = min(1_000_000_000, max(0, value))
         return record
 
     def _encode(self, event: object, fields: Mapping[str, Any]) -> bytes:

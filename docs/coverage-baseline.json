@@ -1,0 +1,16 @@
+{
+  "version": "0.9.0",
+  "recorded_at": "2026-08-28",
+  "core": {
+    "lines": 96.69,
+    "branches": 95.0
+  },
+  "relaxed": {
+    "lines": 82.70,
+    "branches": 72.60
+  },
+  "overall": {
+    "lines": 89.50,
+    "branches": 83.75
+  }
+}

@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-08-29
 
 ### Fixed
 
@@ -23,6 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DSH cold injection now gates presets from the target's persisted state rather
   than the host's live `agentPresets` service, and plugin failures include
   bounded sanitized detail with a distinct unavailable-agents code.
+- Core coverage enforcement now requires at least 97% line and branch coverage,
+  compares results with the committed v0.9.0 baseline, and rejects unapproved
+  suppression growth.
+- Added a versioned functional/design traceability matrix and a standard-library
+  selector that reports mapped Python and plugin suites plus unmapped release
+  items during migration.
+- The local and weekly quality gates now use the fast path, which executes the
+  full test suite once under coverage instead of repeating it as a separate
+  test stage.
 
 ## [0.8.0] - 2026-08-28
 
@@ -411,7 +420,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI and terminal-dashboard workflows for session listing, status, watching,
   and process inspection.
 
-[Unreleased]: https://github.com/shendeguize/AgentSideCar/compare/v0.7.0...HEAD
+[0.9.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.4.4...v0.5.0

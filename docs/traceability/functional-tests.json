@@ -1,0 +1,216 @@
+{
+  "version": "0.9.0",
+  "suites": [
+    {
+      "name": "python-observation",
+      "runtime": "python",
+      "command": [
+        "-m",
+        "unittest",
+        "tests.test_claude",
+        "tests.test_codex",
+        "tests.test_cursor",
+        "tests.test_copilot",
+        "tests.test_dsh",
+        "tests.test_kimi"
+      ],
+      "matrix_ids": [
+        "FU-AGENT-001"
+      ]
+    },
+    {
+      "name": "python-daemon",
+      "runtime": "python",
+      "command": [
+        "-m",
+        "unittest",
+        "tests.test_daemon",
+        "tests.test_client",
+        "tests.test_bus",
+        "tests.test_tail",
+        "tests.test_tailer_pool",
+        "tests.test_daemon_log"
+      ],
+      "matrix_ids": [
+        "FU-DAEMON-001",
+        "FU-EVENT-001"
+      ]
+    },
+    {
+      "name": "python-contracts",
+      "runtime": "python",
+      "command": [
+        "-m",
+        "unittest",
+        "tests.test_cli",
+        "tests.test_runtime_cmd",
+        "tests.test_http_server",
+        "tests.test_native_contracts",
+        "tests.test_process",
+        "tests.test_process_runner"
+      ],
+      "matrix_ids": [
+        "FU-HTTP-001",
+        "FU-PROCESS-001"
+      ]
+    },
+    {
+      "name": "python-remote",
+      "runtime": "python",
+      "command": [
+        "-m",
+        "unittest",
+        "tests.test_remote",
+        "tests.test_remote_watch",
+        "tests.test_payload_compat",
+        "tests.test_scan"
+      ],
+      "matrix_ids": [
+        "FU-REMOTE-001"
+      ]
+    },
+    {
+      "name": "python-send",
+      "runtime": "python",
+      "command": [
+        "-m",
+        "unittest",
+        "tests.test_inject",
+        "tests.test_send_audit",
+        "tests.test_kimi_acp",
+        "tests.test_kimi_identity"
+      ],
+      "matrix_ids": [
+        "FU-INJECT-001",
+        "FU-KIMI-001"
+      ]
+    },
+    {
+      "name": "python-real-functional-behavior",
+      "runtime": "python",
+      "command": [
+        "-m",
+        "unittest",
+        "tests.test_functional_behavior"
+      ],
+      "matrix_ids": [
+        "FU-CLI-001",
+        "FU-TAIL-001",
+        "FU-AUDIT-001"
+      ]
+    },
+    {
+      "name": "python-release-quality",
+      "runtime": "python",
+      "command": [
+        "-m",
+        "unittest",
+        "tests.test_release",
+        "tests.test_release_guard",
+        "tests.test_install_script",
+        "tests.test_governance",
+        "tests.test_check_script",
+        "tests.test_coverage_gate",
+        "tests.test_skill",
+        "tests.test_site"
+      ],
+      "matrix_ids": [
+        "FU-PACK-001",
+        "FU-QUALITY-001"
+      ]
+    },
+    {
+      "name": "plugin-contracts",
+      "runtime": "plugin",
+      "command": [
+        "pnpm",
+        "test"
+      ],
+      "matrix_ids": [
+        "DS-ADR-001",
+        "DS-ADR-002",
+        "DS-ADR-003",
+        "DS-ADR-004",
+        "DS-ADR-005",
+        "DS-ADR-006",
+        "DS-ADR-007",
+        "DS-ADR-008",
+        "M1-001",
+        "M1-002",
+        "M1-003",
+        "M1-004",
+        "M1-005",
+        "M1-006",
+        "M1-007",
+        "M2-001",
+        "M2-002",
+        "M2-003",
+        "M2-004",
+        "M2-005",
+        "M2-006",
+        "M3-001",
+        "M3-002",
+        "M3-003",
+        "M3-004",
+        "M3-005",
+        "M4-001",
+        "M4-002",
+        "M4-003",
+        "M4-004",
+        "M4-005",
+        "UX-01",
+        "UX-02",
+        "UX-03",
+        "UX-04",
+        "UX-05",
+        "UX-06",
+        "UX-07",
+        "UX-08",
+        "UX-09",
+        "UX-10",
+        "UX-11",
+        "UX-12",
+        "UX-13",
+        "UX-14",
+        "UX-15",
+        "UX-16",
+        "UX-17",
+        "UX-18",
+        "UX-19",
+        "UX-20"
+      ]
+    },
+    {
+      "name": "python-environment-and-regressions",
+      "runtime": "python",
+      "command": [
+        "-m",
+        "unittest",
+        "tests.test_functional_regressions"
+      ],
+      "matrix_ids": [
+        "ENV-C1",
+        "ENV-C2",
+        "ENV-C3",
+        "ENV-C4",
+        "ENV-C5",
+        "ENV-C6",
+        "ENV-C7",
+        "ENV-N1",
+        "ENV-N2",
+        "ENV-N3",
+        "ENV-N4",
+        "ENV-N5",
+        "ENV-N6",
+        "IN-01",
+        "IN-02",
+        "IN-03",
+        "IN-04",
+        "IN-05",
+        "IN-06",
+        "IN-07",
+        "IN-08"
+      ]
+    }
+  ]
+}

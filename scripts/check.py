@@ -13,7 +13,17 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence, TextIO, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGE_ORDER = ("lint", "tests", "coverage", "pack", "cli", "skill", "site")
+STAGE_ORDER = (
+    "matrix",
+    "lint",
+    "tests",
+    "coverage",
+    "pack",
+    "cli",
+    "skill",
+    "site",
+)
+FAST_STAGE_ORDER = ("matrix", "lint", "coverage", "pack", "cli", "skill", "site")
 StageRunner = Callable[[str, bool], int]
 
 
@@ -44,6 +54,8 @@ def _run_command(
 
 def _run_stage(stage: str, full_tests_ran: bool) -> int:
     python = sys.executable
+    if stage == "matrix":
+        return _run_command((python, str(ROOT / "scripts" / "functional_matrix.py"), "check"))
     if stage == "lint":
         return _run_command(("ruff", "check", "."))
     if stage == "tests":
@@ -94,8 +106,20 @@ def _run_stage(stage: str, full_tests_ran: bool) -> int:
             )
             if json_code:
                 return json_code
+            report_code = _run_command(
+                (python, "-m", "coverage", "report", "-m"),
+                env=environment,
+            )
+            if report_code:
+                return report_code
             return _run_command(
-                (python, str(ROOT / "scripts" / "coverage_gate.py"), str(report_file))
+                (
+                    python,
+                    str(ROOT / "scripts" / "coverage_gate.py"),
+                    str(report_file),
+                    "--baseline",
+                    str(ROOT / "docs" / "coverage-baseline.json"),
+                )
             )
     if stage == "pack":
         with tempfile.TemporaryDirectory(prefix="agent-sidecar-check-") as temporary:
@@ -141,7 +165,10 @@ def run_stages(
     for stage in stages:
         started = time.monotonic()
         print("==> {}".format(stage), file=output, flush=True)
-        return_code = stage_runner(stage, "tests" in completed)
+        return_code = stage_runner(
+            stage,
+            "tests" in completed or "coverage" in completed,
+        )
         elapsed = time.monotonic() - started
         if return_code:
             print(
@@ -170,6 +197,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="STAGE",
         help="run only this stage (repeatable)",
     )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="run coverage once as the full test pass, avoiding duplicate tests",
+    )
     return parser
 
 
@@ -180,8 +212,10 @@ def main(
     stream: Optional[TextIO] = None,
 ) -> int:
     args = build_parser().parse_args(argv)
+    if args.fast and args.only:
+        raise SystemExit("--fast cannot be combined with --only")
     return run_stages(
-        select_stages(args.only),
+        FAST_STAGE_ORDER if args.fast else select_stages(args.only),
         stage_runner=stage_runner,
         stream=stream,
     )

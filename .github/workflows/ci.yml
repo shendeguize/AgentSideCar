@@ -146,14 +146,20 @@ jobs:
           print("project runtime dependencies: 0")
           PY
 
+      - name: Validate functional/design matrix
+        run: python scripts/functional_matrix.py check
+
       - name: Run repository quality gate
+        # Pull requests use the required 3.9 gate; Python 3.13 runs in the
+        # push/weekly matrices so PR feedback does not repeat the full suite.
+        if: github.event_name != 'pull_request' || matrix.python-version == '3.9'
         id: quality_gate
         env:
           PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
           set +e
           set -o pipefail
-          python scripts/check.py 2>&1 | tee "${RUNNER_TEMP}/quality-gate.log"
+          python scripts/check.py --fast 2>&1 | tee "${RUNNER_TEMP}/quality-gate.log"
           exit_code=${PIPESTATUS[0]}
           set -e
           echo "exit_code=${exit_code}" >> "${GITHUB_OUTPUT}"
@@ -165,7 +171,7 @@ jobs:
       # deeply nested input. Accept only that known contract-test error until
       # product code enforces its own nesting bound; any additional error fails.
       - name: Verify Python 3.13 known limitation
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13' && github.event_name != 'pull_request'
         env:
           QUALITY_EXIT_CODE: ${{ steps.quality_gate.outputs.exit_code }}
         run: |
@@ -195,12 +201,26 @@ jobs:
           PY
 
       - name: Complete Python 3.13 non-test stages
-        if: matrix.python-version == '3.13'
+        if: matrix.python-version == '3.13' && github.event_name != 'pull_request'
         run: |
           python scripts/check.py \
             --only pack \
             --only cli \
             --only skill
+
+      - name: Publish quality summary
+        if: always()
+        env:
+          QUALITY_EXIT_CODE: ${{ steps.quality_gate.outputs.exit_code }}
+        run: |
+          {
+            echo "## Agent Sidecar quality gate"
+            echo ""
+            echo "- Matrix: \`${{ matrix.os }}, Python ${{ matrix.python-version }}\`"
+            echo "- Quality gate exit code: \`${QUALITY_EXIT_CODE:-not-run}\`"
+            echo "- Coverage redline: core lines and branches \`>=97%\`"
+            echo "- Baseline: \`docs/coverage-baseline.json\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   remote-python-3-8:
     name: Remote payload (Python 3.8)

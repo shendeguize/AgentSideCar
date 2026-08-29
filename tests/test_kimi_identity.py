@@ -285,6 +285,16 @@ class KimiIdentityValidTests(KimiIdentityFixture):
             with evidence:
                 self.fail("closed evidence must not be reusable")
 
+    def test_workspace_registry_without_session_entry_is_ignored(self):
+        self.workspace["workspaces"] = {}
+        self._write_json(self.workspace_path, self.workspace)
+
+        with capture_kimi_identity(self.make_session(), home=self.home) as evidence:
+            self.assertEqual(
+                {"adapter", "index", "state"},
+                {source.kind for source in evidence.project_sources},
+            )
+
     def test_empty_optional_project_values_are_not_identity_sources(self):
         self.index_row["workDir"] = ""
         self.state["cwd"] = None

@@ -4,8 +4,8 @@
 
 | Version | Security support |
 | --- | --- |
-| 0.4.x | Supported. Fixes are made against the latest 0.4.x patch, so an upgrade may be required. |
-| 0.3.x and older | Unmaintained. Reports are still reviewed on a best-effort basis, but fixes and backports are not promised. |
+| 0.9.x | Supported. Fixes are made against the latest 0.9.x patch, so an upgrade may be required. |
+| 0.8.x and older | Unmaintained. Reports are still reviewed on a best-effort basis, but fixes and backports are not promised. |
 
 ## Report a vulnerability privately
 
