@@ -13,8 +13,17 @@ from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence, TextIO, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
-STAGE_ORDER = ("lint", "tests", "coverage", "pack", "cli", "skill", "site")
-FAST_STAGE_ORDER = ("lint", "coverage", "pack", "cli", "skill", "site")
+STAGE_ORDER = (
+    "matrix",
+    "lint",
+    "tests",
+    "coverage",
+    "pack",
+    "cli",
+    "skill",
+    "site",
+)
+FAST_STAGE_ORDER = ("matrix", "lint", "coverage", "pack", "cli", "skill", "site")
 StageRunner = Callable[[str, bool], int]
 
 
@@ -45,6 +54,8 @@ def _run_command(
 
 def _run_stage(stage: str, full_tests_ran: bool) -> int:
     python = sys.executable
+    if stage == "matrix":
+        return _run_command((python, str(ROOT / "scripts" / "functional_matrix.py"), "check"))
     if stage == "lint":
         return _run_command(("ruff", "check", "."))
     if stage == "tests":
@@ -96,7 +107,13 @@ def _run_stage(stage: str, full_tests_ran: bool) -> int:
             if json_code:
                 return json_code
             return _run_command(
-                (python, str(ROOT / "scripts" / "coverage_gate.py"), str(report_file))
+                (
+                    python,
+                    str(ROOT / "scripts" / "coverage_gate.py"),
+                    str(report_file),
+                    "--baseline",
+                    str(ROOT / "docs" / "coverage-baseline.json"),
+                )
             )
     if stage == "pack":
         with tempfile.TemporaryDirectory(prefix="agent-sidecar-check-") as temporary:

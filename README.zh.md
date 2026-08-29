@@ -26,18 +26,18 @@ HTTP 面板和 API 会在本机 IPv4 回环地址上公开只读的守护进程�
 Agent 配置；但恢复后的原生 Agent 可以按上述方式进行修改。Release 安装程序只
 写入所选可执行文件和可选 Skill Bundle；检出版本安装程序则创建集成用符号链接。
 
-0.8.0 版本的本地安装与工具要求 Python 3.9+，且没有 Python 运行时依赖。SSH
+0.9.0 版本的本地安装与工具要求 Python 3.9+，且没有 Python 运行时依赖。SSH
 目标接受使用 Python 3.8+ 的远程观察载荷。监视 DSH 事件还需要外部 `zstd`
 可执行文件。
 
-## 版本 0.8.0
+## 版本 0.9.0
 
-0.8.0 版本提供并发的本地/远程 `watch --all --remote`、持久化的私有发送审计、
+0.9.0 版本提供并发的本地/远程 `watch --all --remote`、持久化的私有发送审计、
 请求 ID 幂等性，以及可选启用、仅限数值回环地址的 HTTP 面板。它还包含确定性的
 可执行 zipapp、适用于 `pipx` 的包元数据、显式管理的 macOS 用户 LaunchAgent、
 具有日志轮转的有界私有守护进程诊断、不可变的私有状态快照、面向 Python 3.8+
 SSH 目标且可显式钉死解释器的远程观察，以及可恢复且串行化的 Release 安装。
-0.8.0 新增：命名空间迁移后可用 `audit rebind` 显式恢复，且保留原有 epoch 与
+0.9.0 新增：命名空间迁移后可用 `audit rebind` 显式恢复，且保留原有 epoch 与
 请求 ID 幂等历史；`audit reset` 默认归档活动状态，`--purge` 需单独确认才会删除；
 DSH Center 远程清单契约由版本化夹具钉死，并以只读边界写入文档。
 
@@ -71,7 +71,7 @@ DSH Center 远程清单契约由版本化夹具钉死，并以只读边界写入
 - `claude`：Claude Code 项目 JSONL 会话记录，包括已知的 sidechain 和子 Agent
   关系。
 - `codex`：Codex CLI rollout JSONL，以及可用时的只读原生状态 SQLite。
-- `copilot`：仅支持 GitHub Copilot CLI 的 `workspace.yaml` 元数据。0.8.0 版本
+- `copilot`：仅支持 GitHub Copilot CLI 的 `workspace.yaml` 元数据。0.9.0 版本
   没有对应事件源，因此状态报告为 `idle`。
 - `dsh`：优先通过 DeepSeek DSH 投影缓存元数据进行列表和状态查询，并以有界的
   持久会话扫描补充发现缓存缺失的 headless 运行，也支持从压缩会话记录中监视
@@ -105,11 +105,11 @@ installer="$(mktemp)"
 curl --fail --location --proto '=https' --tlsv1.2 --output "$installer" \
   https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh
 ${PAGER:-less} "$installer"
-sh "$installer" --version v0.8.0
+sh "$installer" --version v0.9.0
 rm "$installer"
 ```
 
-省略 `--version v0.8.0` 时会解析最新稳定 GitHub Release。脚本使用 Python 解析
+省略 `--version v0.9.0` 时会解析最新稳定 GitHub Release。脚本使用 Python 解析
 Release 元数据，要求精确匹配带版本号的 zipapp 和 `SHA256SUMS` 资产，在 macOS
 上使用 `shasum -a 256`、在 Linux 上使用 `sha256sum` 验证校验和，之后才会原子
 替换 `~/.local/bin/agent-sidecar`。可用 `--prefix <path>` 选择其他前缀，用
@@ -140,17 +140,17 @@ pipx install .
 pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'
 ```
 
-如需安装已发布且不可变的修订版，可在对应标签可用后，将标签（例如 `@v0.8.0`）
+如需安装已发布且不可变的修订版，可在对应标签可用后，将标签（例如 `@v0.9.0`）
 附加到 Git URL 后。两种方式都会创建隔离环境并安装 `agent-sidecar`；该包没有
 Python 运行时依赖。
 
 ### 安装 GitHub Release zipapp
 
-如需手动安装，GitHub Releases 会发布可执行 zipapp 及其校验和文件。以 0.8.0
+如需手动安装，GitHub Releases 会发布可执行 zipapp 及其校验和文件。以 0.9.0
 版本为例：
 
 ```sh
-version=0.8.0
+version=0.9.0
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/agent-sidecar-${version}.pyz"
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -966,7 +966,7 @@ Changelog 和发布治理请参见[贡献指南](CONTRIBUTING.md)。
 
 ## 当前范围与后续工作
 
-0.8.0 版本为受支持数据源提供本地观察、Cursor CLI 事件监视、远程 `list`/`status`
+0.9.0 版本为受支持数据源提供本地观察、Cursor CLI 事件监视、远程 `list`/`status`
 快照、并发本地和远程 `watch --all --remote`，并为 Claude、Codex、Cursor CLI
 以及精确 Kimi Code 0.38.0 受保护 ACP 路径提供实验性本地发送。它可以为 pipx 和
 确定性 zipapp 使用场景打包 CLI，并加入显式 macOS LaunchAgent 管理和私有轮转

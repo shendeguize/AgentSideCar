@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
-CORE_THRESHOLD = 95.0
-CORE_BRANCH_THRESHOLD = 95.0
+CORE_THRESHOLD = 97.0
+CORE_BRANCH_THRESHOLD = 97.0
 RELAXED_THRESHOLD = 70.0
 OVERALL_THRESHOLD = 85.0
 RELAXED_MODULES = frozenset(
@@ -96,6 +96,42 @@ _IGNORED_DIRECTORY_NAMES = frozenset(
 
 class CoverageDataError(ValueError):
     """Raised when a coverage JSON document cannot support the gate."""
+
+
+def load_baseline(path: Path) -> Mapping[str, Mapping[str, float]]:
+    """Load the committed coverage floor used to detect regressions."""
+
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise CoverageDataError(
+            "cannot read coverage baseline {}: {}".format(path, error)
+        ) from error
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise CoverageDataError(
+            "invalid coverage baseline {}: {}".format(path, error)
+        ) from error
+    if not isinstance(document, Mapping) or document.get("version") != "0.9.0":
+        raise CoverageDataError("coverage baseline must declare version 0.9.0")
+    result: Dict[str, Mapping[str, float]] = {}
+    for tier in ("core", "relaxed", "overall"):
+        values = document.get(tier)
+        if not isinstance(values, Mapping):
+            raise CoverageDataError("coverage baseline missing {} metrics".format(tier))
+        checked: Dict[str, float] = {}
+        for name in ("lines", "branches"):
+            value = values.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0.0 <= float(value) <= 100.0
+            ):
+                raise CoverageDataError(
+                    "coverage baseline has invalid {} {} metric".format(tier, name)
+                )
+            checked[name] = float(value)
+        result[tier] = checked
+    return result
 
 
 @dataclass(frozen=True)
@@ -265,7 +301,10 @@ def coverage_metrics(document: object) -> Dict[str, CoverageMetric]:
     return metrics
 
 
-def evaluate_coverage(document: object) -> CoverageGateResult:
+def evaluate_coverage(
+    document: object,
+    baseline: Optional[Mapping[str, Mapping[str, float]]] = None,
+) -> CoverageGateResult:
     """Evaluate tiered line and core branch coverage thresholds."""
     metrics = coverage_metrics(document)
     thresholds = {
@@ -287,6 +326,22 @@ def evaluate_coverage(document: object) -> CoverageGateResult:
                 CORE_BRANCH_THRESHOLD,
             )
         )
+    if baseline is not None:
+        for name in ("core", "relaxed", "overall"):
+            for metric_name, actual in (
+                ("lines", metrics[name].line_percent),
+                ("branches", metrics[name].branch_percent),
+            ):
+                floor = baseline[name][metric_name]
+                if actual + 1e-12 < floor:
+                    failures.append(
+                        "{} {} coverage {:.2f}% is below baseline {:.2f}%".format(
+                            name,
+                            metric_name,
+                            actual,
+                            floor,
+                        )
+                    )
     return CoverageGateResult(metrics=metrics, failures=tuple(failures))
 
 
@@ -365,13 +420,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=ROOT,
         help="repository root used for suppression scanning",
     )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        help="committed coverage floor used for regression detection",
+    )
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        result = evaluate_coverage(load_coverage_json(args.coverage_json))
+        baseline = None if args.baseline is None else load_baseline(args.baseline)
+        result = evaluate_coverage(
+            load_coverage_json(args.coverage_json),
+            baseline=baseline,
+        )
     except CoverageDataError as error:
         print("coverage gate data error: {}".format(error), file=sys.stderr)
         return 2

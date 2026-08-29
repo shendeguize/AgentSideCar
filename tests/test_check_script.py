@@ -63,6 +63,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertEqual(
             [
+                ("matrix", False),
                 ("lint", False),
                 ("coverage", False),
                 ("pack", True),

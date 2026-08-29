@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import queue
+import socket
 import tempfile
 import threading
 import time
@@ -5357,6 +5358,212 @@ class SendAuditExceptionalBranchTests(unittest.TestCase):
                     "relative",
                 )
 
+    def test_send_audit_and_tailer_pool_exception_edges(self):
+        namespace = mock.Mock(transaction_fd=1)
+        namespace.validate.side_effect = KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            with audit.SendAuditStore()._locked(namespace):
+                pass
+
+        helper = mock.Mock()
+        helper._runtime_root.return_value = Path("/tmp/runtime")
+        helper._directory_flags.return_value = os.O_RDONLY
+        helper._validate_directory.side_effect = RuntimeError("moved")
+        with mock.patch.object(audit.os, "open", return_value=10), mock.patch.object(
+            audit.os, "fstat", return_value=mock.Mock()
+        ), mock.patch.object(audit.os, "close") as close:
+            with self.assertRaises(RuntimeError):
+                audit.SendAuditStore._open_existing_runtime(helper, None)
+        close.assert_called_once_with(10)
+
+        pool = tailer_pool.TailerPool(lambda _: None)
+        missing_key = ("missing", "session")
+        pool._tailers[missing_key] = mock.Mock()
+        pool._paths[missing_key] = "/tmp/missing"
+        pool._known_keys.add(missing_key)
+        session = daemon.Session(
+            "claude",
+            "session",
+            "/tmp",
+            "/tmp/events.jsonl",
+            1,
+        )
+        with mock.patch.object(pool, "_drop", return_value=True) as drop, mock.patch.object(
+            pool, "_update"
+        ):
+            self.assertTrue(
+                pool._refresh(
+                    [session],
+                    changed_keys=[("claude", "session")],
+                    initial=True,
+                    now=1,
+                )
+            )
+        self.assertEqual([mock.call(missing_key), mock.call(missing_key)], drop.call_args_list)
+
+        checkpoint_tailer = mock.Mock(
+            errors=[],
+            follower=None,
+            export_checkpoint=mock.Mock(return_value={"offset": 4}),
+            close=mock.Mock(),
+        )
+        checkpoint_key = ("claude", "checkpoint")
+        pool._tailers[checkpoint_key] = checkpoint_tailer
+        pool._paths[checkpoint_key] = "/tmp/checkpoint"
+        self.assertTrue(pool._drop(checkpoint_key, retain_checkpoint=True))
+        self.assertEqual(
+            ("/tmp/checkpoint", {"offset": 4}),
+            pool._checkpoints[checkpoint_key],
+        )
+
+    def test_daemon_log_open_cleanup_and_anchor_edges(self):
+        instance = daemon_log.DaemonLog(Path("/tmp/runtime"))
+        instance._open_directory = mock.Mock(return_value=10)
+        instance._validate_entry = mock.Mock()
+        instance._open_private_file = mock.Mock(
+            side_effect=KeyboardInterrupt()
+        )
+        with mock.patch.object(daemon_log.os, "close") as close:
+            with self.assertRaises(KeyboardInterrupt):
+                instance.open()
+        close.assert_called_once_with(10)
+
+    def test_small_core_module_branch_edges(self):
+        bus_instance = mock.Mock()
+        subscription = bus.Subscription(bus_instance, 1)
+        bus_instance.unsubscribe.side_effect = lambda value: value._finish()
+        subscription.close()
+        subscription._offer({"agent": "claude"})
+        self.assertTrue(subscription.closed)
+
+        first = daemon.Session("claude", "sid", "/tmp", "/tmp/a", 2)
+        older = daemon.Session("claude", "sid", "/tmp", "/tmp/a", 1)
+        indexed = index.IncrementalIndex()
+        indexed.update([first, older])
+        self.assertEqual(first, indexed.get(("claude", "sid")))
+
+        host = remote_types.RemoteHost("alpha", "ready")
+        with self.assertRaises(ValueError):
+            remote._selected_hosts([host, host], None)
+        with self.assertRaises(ValueError):
+            remote_types._parse_execution_response('{"ok": "yes"}', "alpha")
+
+        limits = json_limits.JSONLimits(
+            max_integer_bits=8,
+            max_string_bytes=8,
+        )
+        json_limits.validate_json(1, limits)
+        json_limits.validate_json("ok", limits)
+        with self.assertRaises(json_limits.JSONLimitError):
+            json_limits.validate_json(256, limits)
+
+        with mock.patch.object(
+            remote_watch_types, "MAX_WATCH_EXTRA_BYTES", 2
+        ):
+            with self.assertRaises(remote_watch_types.ProtocolResourceLimitError):
+                remote_watch_types._validate_extra({"value": "long"})
+        frozen = remote_watch_types._freeze_json(({"x": [1]},))
+        self.assertEqual([{"x": [1]}], remote_watch_types._thaw_json(frozen))
+
+        self.assertEqual(
+            "a�b",
+            text_utils.normalize_scalar_text("a\ud800b", errors="replace"),
+        )
+
+    def test_state_metadata_and_cursor_fallback_edges(self):
+        self.assertEqual(
+            {"status": "running"},
+            state.parse_terminal_metadata("ignored\nstatus: running\nbad"),
+        )
+        self.assertFalse(
+            state.terminal_metadata_is_active(
+                {"running_for_ms": "unknown", "command": "null"}
+            )
+        )
+        self.assertTrue(
+            state.terminal_metadata_is_active(
+                {"running_for_ms": "unknown", "current_command": "echo hi"}
+            )
+        )
+        self.assertTrue(
+            state.terminal_metadata_is_active(
+                {"last_command": "echo hi", "last_exit_code": "null"}
+            )
+        )
+
+    def test_tailer_pool_refresh_update_and_poll_edges(self):
+        pool = tailer_pool.TailerPool(lambda _: None, max_event_polls=2)
+        key = ("claude", "sid")
+        pool._pending.add(key)
+        session = daemon.Session("claude", "sid", "/tmp", "/tmp/events", 1)
+        self.assertTrue(
+            pool._refresh([session], changed_keys=(), initial=False, now=1)
+        )
+        self.assertNotIn(key, pool._pending)
+
+        no_exporter = mock.Mock(errors=[], follower=None, close=mock.Mock())
+        pool._tailers[key] = no_exporter
+        pool._paths[key] = "/tmp/events"
+        self.assertTrue(pool._drop(key, retain_checkpoint=True))
+
+        single = mock.Mock(
+            single_poll_per_refresh=True,
+            poll=mock.Mock(return_value=[]),
+            errors=[],
+            follower=None,
+            has_pending_records=False,
+        )
+        self.assertFalse(pool._poll(key, single))
+
+        replacement = mock.Mock(
+            errors=[],
+            follower=None,
+            poll=mock.Mock(return_value=[]),
+            close=mock.Mock(),
+        )
+        pool._tailers[key] = mock.Mock()
+        pool._paths[key] = "/tmp/old"
+        with mock.patch.object(pool, "should_tail", return_value=True), mock.patch.object(
+            pool, "_make_resumable_tailer", return_value=(replacement, False)
+        ), mock.patch.object(pool, "_drop", return_value=True) as drop, mock.patch.object(
+            pool, "_poll", return_value=False
+        ):
+            pool._update(
+                key,
+                session,
+                initial=False,
+                new_session=False,
+                now=1,
+            )
+        drop.assert_called_once_with(key)
+
+        session = daemon.Session(
+            "cursor-cli",
+            "sid",
+            "/tmp",
+            "/tmp/agent-transcripts/project/chat.jsonl",
+            1,
+            extra={
+                "terminals_root": "/tmp/terminals",
+                "project_slug": "project",
+            },
+        )
+        roots = state._cursor_terminal_roots(session, Path("/tmp/home"), None)
+        self.assertEqual(
+            (
+                Path("/tmp/terminals"),
+                Path("/tmp/home/.cursor/projects/project/terminals"),
+            ),
+            roots,
+        )
+        self.assertFalse(
+            state.cursor_terminal_active(
+                session,
+                terminals_root=Path("/tmp/does-not-exist"),
+            )
+        )
+
+    def test_send_audit_archive_link_failure_edges(self):
         details = [
             mock.Mock(st_dev=1, st_ino=1),
             mock.Mock(st_dev=1, st_ino=2),
@@ -5396,4 +5603,1585 @@ class SendAuditExceptionalBranchTests(unittest.TestCase):
         ):
             with self.assertRaises(audit.AuditError):
                 audit.SendAuditStore._archive_files(1, 2, ("audit",))
+
+    def test_process_parser_and_node_identity_edges(self):
+        self.assertEqual(
+            "",
+            process.parse_ps_output(
+                "123 00:01 /usr/bin/claude",
+                lambda _pid: (_ for _ in ()).throw(OSError("gone")),
+            )[0]["cwd"],
+        )
+        deadline = time.monotonic() + 5
+        with mock.patch.object(
+            process, "_candidate_token_identity", return_value=(1, 2)
+        ):
+            self.assertTrue(
+                process._node_tokens_have_kimi_hint(
+                    ("/usr/bin/node", "/tmp/kimi.js"),
+                    (1, 2),
+                    deadline,
+                )
+            )
+            self.assertEqual(
+                process._NodeKimiClassification.DEFINITE,
+                process._classify_node_kimi_candidate(
+                    "/usr/bin/node /tmp/kimi.js",
+                    (1, 2),
+                    deadline,
+                )[0],
+            )
+
+        with mock.patch.object(
+            process.os,
+            "stat",
+            return_value=mock.Mock(st_mode=process.stat.S_IFDIR),
+        ):
+            self.assertIsNone(
+                process._relative_candidate_token_identity("directory", 1)
+            )
+        with mock.patch.object(
+            process.os, "stat", side_effect=FileNotFoundError()
+        ):
+            self.assertIsNone(
+                process._relative_candidate_token_identity("missing", 1)
+            )
+        with mock.patch.object(
+            process,
+            "_candidate_token_identity",
+            side_effect=process.ProcessInspectionError(),
+        ):
+            self.assertTrue(
+                process._node_tokens_have_kimi_hint(
+                    ("/usr/bin/node", "/tmp/candidate"),
+                    (1, 2),
+                    deadline,
+                )
+            )
+        with mock.patch.object(
+            process.os, "stat", return_value=mock.Mock(st_mode=process.stat.S_IFLNK)
+        ), mock.patch.object(
+            process.os, "open", side_effect=FileNotFoundError()
+        ):
+            self.assertIsNone(
+                process._relative_candidate_token_identity("link", 1)
+            )
+
+    def test_send_audit_open_namespace_shared_lock_path(self):
+        store = audit.SendAuditStore("/runtime")
+        helpers = mock.Mock()
+        helpers._open_runtime_parent.return_value = (
+            [30],
+            ["runtime-link"],
+            31,
+            "runtime",
+            None,
+        )
+        helpers._open_directory_at.return_value = (32, "runtime-link")
+        marker = {
+            "schema_version": audit.AUDIT_SCHEMA_VERSION,
+            "namespace_epoch": "e_test",
+            "key_fingerprint": hashlib.sha256(b"k").hexdigest(),
+            "runtime_dev": 1,
+            "runtime_ino": 2,
+            "key_dev": 3,
+            "key_ino": 4,
+        }
+        namespace = mock.Mock(marker_fd=21)
+        namespace.validate.return_value = None
+        namespace.close.return_value = None
+        stat_values = iter(
+            (
+                mock.Mock(st_dev=1, st_ino=2),
+                mock.Mock(st_dev=3, st_ino=4),
+                mock.Mock(st_dev=5, st_ino=6),
+            )
+        )
+        with mock.patch.object(
+            audit, "_secure_helpers", return_value=helpers
+        ), mock.patch.object(
+            store, "_open_anchor", return_value=([10], ["anchor-link"], 20, "/runtime")
+        ), mock.patch.object(
+            audit,
+            "_open_named_file",
+            side_effect=((21, False), (22, False)),
+        ), mock.patch.object(
+            audit, "_validate_named_file"
+        ), mock.patch.object(
+            audit.fcntl,
+            "flock",
+            side_effect=(OSError(errno.EAGAIN, "shared"), None, None),
+        ), mock.patch.object(
+            audit, "_read_descriptor", return_value=(b"marker", mock.Mock())
+        ), mock.patch.object(
+            audit, "_parse_marker", return_value=marker
+        ), mock.patch.object(
+            audit.os, "fstat", side_effect=stat_values
+        ), mock.patch.object(
+            store,
+            "_existing_sensitive_file",
+            side_effect=(mock.Mock(), None),
+        ), mock.patch.object(
+            store, "_open_key", return_value=(33, b"k", (3, 4))
+        ), mock.patch.object(
+            audit, "_file_signature", return_value=(5, 6)
+        ), mock.patch.object(
+            audit, "AuditNamespace", return_value=namespace
+        ), mock.patch.object(
+            audit.os, "fsync"
+        ), mock.patch.object(
+            audit.os, "close"
+        ):
+            with store._open_namespace(hold_exclusive=False) as current:
+                self.assertIs(namespace, current)
+        namespace.downgrade_marker.assert_called_once()
+        namespace.close.assert_called_once()
+
+    def test_kimi_identity_successful_regular_file_paths(self):
+        parent = kimi_identity.DirectoryIdentity("/tmp", 1, 2, 0o700, os.geteuid())
+        details = mock.Mock(
+            st_dev=1,
+            st_ino=2,
+            st_mode=0o600,
+            st_uid=os.geteuid(),
+            st_size=3,
+            st_mtime_ns=4,
+            st_ctime_ns=5,
+            st_mtime=4.0,
+            st_ctime=5.0,
+        )
+        capture = kimi_identity._Capture()
+        with mock.patch.object(kimi_identity.os, "open", return_value=9), mock.patch.object(
+            kimi_identity.os, "stat", return_value=details
+        ), mock.patch.object(
+            kimi_identity.os, "fstat", return_value=details
+        ), mock.patch.object(
+            kimi_identity, "_same_object", return_value=True
+        ), mock.patch.object(
+            kimi_identity, "_owner_safe", return_value=True
+        ), mock.patch.object(
+            kimi_identity.os, "read", side_effect=(b"abc", b"")
+        ):
+            result = kimi_identity._open_regular_at(
+                capture, 1, parent, "file", 10
+            )
+        self.assertEqual(b"abc", result[-1])
+
+        capture = kimi_identity._Capture()
+        with mock.patch.object(kimi_identity.os, "open", return_value=9), mock.patch.object(
+            kimi_identity.os, "stat", return_value=details
+        ), mock.patch.object(
+            kimi_identity.os, "fstat", return_value=details
+        ), mock.patch.object(
+            kimi_identity, "_same_object", return_value=True
+        ), mock.patch.object(
+            kimi_identity, "_owner_safe", return_value=True
+        ), mock.patch.object(
+            kimi_identity, "_read_fd_tail", return_value=kimi_identity._TailRead(
+                b"abc", 0, False, True
+            )
+        ):
+            result = kimi_identity._open_regular_tail_at(
+                capture, 1, parent, "file", 10
+            )
+        self.assertEqual(b"abc", result[-1].payload)
+
+    def test_daemon_failed_adapter_and_diagnostic_edges(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = daemon.SidecarDaemon(
+                scanner=mock.Mock(failed_agent_names=("claude",)),
+                runtime_dir=Path(temporary),
+            )
+            self.assertEqual(
+                [],
+                instance._retain_failed_adapter_sessions(
+                    [],
+                    (("claude", "missing"),),
+                ),
+            )
+            with mock.patch.object(daemon, "MAX_SHUTDOWN_DIAGNOSTICS", 0), mock.patch.object(
+                daemon.sys, "stderr"
+            ):
+                instance._record_log_error("first")
+            instance._log_error = None
+            instance._shutdown_diagnostics = ()
+            instance._record_log_error("first")
+            instance._record_log_error("second")
+            self.assertEqual("first", instance._log_error)
+
+    def test_json_limits_finite_and_bounded_scalar_edges(self):
+        limits = json_limits.JSONLimits(
+            max_integer_bits=64,
+            max_string_bytes=16,
+        )
+        json_limits.validate_json(1.25, limits)
+        json_limits.validate_json(2 ** 32, limits)
+        json_limits.validate_json("short", limits)
+        json_limits.validate_json(
+            2 ** 128,
+            json_limits.JSONLimits(max_integer_bits=None),
+        )
+        json_limits.validate_json(
+            3.5,
+            json_limits.JSONLimits(max_integer_bits=64),
+        )
+        json_limits.validate_json(
+            "unbounded",
+            json_limits.JSONLimits(max_string_bytes=None),
+        )
+
+    def test_remote_aggregate_overflow_after_first_success(self):
+        hosts = (
+            remote_types.RemoteHost("one", "ready"),
+            remote_types.RemoteHost("two", "ready"),
+        )
+        with mock.patch.object(
+            remote, "execute_remote_host", return_value=([{"id": "row"}], None)
+        ), mock.patch.object(
+            remote, "_encoded_row", return_value=b"x"
+        ), mock.patch.object(
+            remote, "MAX_ROWS", 0
+        ):
+            result = remote.aggregate_remote(
+                hosts=hosts,
+                command="list",
+                artifact=b"artifact",
+                fleet_timeout=1,
+            )
+        self.assertEqual((), result.rows)
+
+    def test_inject_session_lock_with_existing_namespace(self):
+        namespace = mock.Mock(runtime_fd=10)
+        with mock.patch.object(
+            inject, "_open_directory_at", return_value=(11, (10, "lock", 11, True))
+        ), mock.patch.object(
+            inject, "_open_lock_file", return_value=12
+        ), mock.patch.object(
+            inject, "_verify_directory_link"
+        ), mock.patch.object(
+            inject, "_validate_lock_file"
+        ), mock.patch.object(
+            inject.fcntl, "flock"
+        ), mock.patch.object(
+            inject.os, "fsync"
+        ), mock.patch.object(
+            inject.os, "close"
+        ):
+            with inject._session_lock(
+                "claude", "sid", None, runtime_namespace=namespace
+            ) as validate:
+                validate()
+        self.assertGreaterEqual(namespace.validate.call_count, 2)
+
+    def test_inject_native_send_normalizes_unknown_overflow(self):
+        planned = mock.Mock(
+            transport="native",
+            agent="claude",
+            session_id="sid",
+            argv=("claude",),
+            input_data=b"message",
+            cwd="/tmp",
+        )
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = lambda: None
+        completed = mock.Mock(
+            stdout=b"",
+            stderr=b"",
+            overflow="unexpected",
+            returncode=1,
+            cleanup_incomplete=False,
+        )
+        with mock.patch.object(inject, "_session_lock", return_value=lock), mock.patch.object(
+            inject, "_refreshed_send_plan", return_value=planned
+        ), mock.patch.object(
+            inject, "_preflight_plan", return_value=(planned, "message")
+        ), mock.patch.object(
+            inject, "_render_output", return_value=("", "", False)
+        ):
+            result = inject._run_native_send(
+                planned,
+                "message",
+                bound_kimi_executable=None,
+                bounded_timeout=1,
+                refresher=lambda: (),
+                executable_resolver=lambda _: None,
+                runtime_dir=None,
+                runtime_namespace=mock.Mock(),
+                runner=mock.Mock(return_value=completed),
+                monotonic=time.monotonic,
+                request_id="request",
+                version_runner=mock.Mock(),
+                kimi_runner=mock.Mock(),
+                process_guard=mock.Mock(),
+            )
+        self.assertEqual("failed", result.outcome)
+        self.assertIsNone(result.overflow)
+
+    def test_send_audit_rotation_recovery_paths(self):
+        store = audit.SendAuditStore()
+        record = {"namespace_epoch": "epoch"}
+        with mock.patch.object(
+            audit, "_open_named_file", return_value=(12, False)
+        ), mock.patch.object(
+            store,
+            "_existing_sensitive_file",
+            side_effect=(None, mock.Mock()),
+        ), mock.patch.object(
+            audit, "_read_file", return_value=b"record"
+        ), mock.patch.object(
+            audit, "_parse_file", return_value=[record]
+        ), mock.patch.object(
+            audit, "_validate_histories"
+        ), mock.patch.object(
+            audit.os, "close"
+        ), mock.patch.object(
+            audit.os, "replace"
+        ), mock.patch.object(
+            audit.os, "fsync"
+        ):
+            store._recover_rotation(1, "epoch")
+
+        with mock.patch.object(
+            audit, "_open_named_file", return_value=(12, False)
+        ), mock.patch.object(
+            store,
+            "_existing_sensitive_file",
+            side_effect=(mock.Mock(), mock.Mock()),
+        ), mock.patch.object(
+            audit, "_read_file", return_value=b"bad"
+        ), mock.patch.object(
+            audit, "_parse_file", return_value=[]
+        ), mock.patch.object(
+            audit.os, "close"
+        ), mock.patch.object(
+            audit.os, "unlink"
+        ), mock.patch.object(
+            audit.os, "fsync"
+        ):
+            store._recover_rotation(1, "epoch")
+
+        with mock.patch.object(
+            audit, "_open_named_file", return_value=(12, False)
+        ), mock.patch.object(
+            store,
+            "_existing_sensitive_file",
+            side_effect=(None, None),
+        ), mock.patch.object(audit.os, "close"):
+            with self.assertRaises(audit.AuditError):
+                store._recover_rotation(1, "epoch")
+
+    def test_send_audit_history_and_key_guard_edges(self):
+        with mock.patch.object(
+            audit, "_record_identity", return_value=("identity",)
+        ):
+            with self.assertRaises(audit.AuditError):
+                audit._validate_histories(
+                    [{"request_id": "r", "outcome": "completed"}]
+                )
+
+        store = audit.SendAuditStore()
+        with mock.patch.object(
+            store, "_existing_sensitive_file", side_effect=(None, mock.Mock(st_size=1))
+        ):
+            with self.assertRaises(audit.AuditError):
+                store._open_key(1, allow_create=True)
+
+    def test_daemon_scan_loop_selects_all_interval_paths(self):
+        instance = daemon.SidecarDaemon(scanner=mock.Mock())
+        stop = threading.Event()
+        with mock.patch.object(
+            instance, "_stopping", side_effect=(False, False, False, True)
+        ), mock.patch.object(
+            instance, "_wait_for_stop", return_value=False
+        ), mock.patch.object(
+            instance,
+            "_scan_once",
+            side_effect=((True, False), (False, True), (False, False)),
+        ) as scan_once:
+            instance._scan_loop(stop, initial_working=False)
+        self.assertEqual(3, scan_once.call_count)
+
+    def test_daemon_socket_and_lock_race_edges(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            instance = daemon.SidecarDaemon(
+                scanner=mock.Mock(),
+                runtime_dir=Path(temporary),
+            )
+            listener = socket.socket(socket.AF_UNIX)
+            try:
+                listener.bind(str(instance.socket_path))
+                with mock.patch.object(
+                    daemon, "_socket_is_live", return_value=True
+                ):
+                    with self.assertRaises(daemon.DaemonAlreadyRunning):
+                        instance._prepare_runtime_paths()
+            finally:
+                listener.close()
+
+        instance = daemon.SidecarDaemon(scanner=mock.Mock(), runtime_dir=Path("/tmp"))
+        lock_path = mock.Mock()
+        instance.lockfile_path = lock_path
+        safe = mock.Mock(
+            st_mode=daemon.stat.S_IFREG | 0o600,
+            st_uid=os.geteuid(),
+            st_nlink=1,
+            st_dev=1,
+            st_ino=2,
+        )
+        lock_path.lstat.return_value = safe
+        with mock.patch.object(daemon.os, "open", return_value=10), mock.patch.object(
+            daemon.os, "fstat", return_value=safe
+        ), mock.patch.object(
+            daemon._fcntl,
+            "flock",
+            side_effect=OSError(errno.EBADF, "lock"),
+        ), mock.patch.object(
+            daemon.os, "close"
+        ):
+            with self.assertRaises(daemon.RuntimePathError):
+                instance._acquire_runtime_lock()
+
+        changed = mock.Mock(**safe.__dict__)
+        changed.st_dev = 9
+        lock_path.lstat.side_effect = (safe, changed)
+        with mock.patch.object(daemon.os, "open", return_value=10), mock.patch.object(
+            daemon.os, "fstat", return_value=safe
+        ), mock.patch.object(
+            daemon._fcntl, "flock"
+        ), mock.patch.object(
+            daemon.os, "close"
+        ):
+            with self.assertRaises(daemon.RuntimePathError):
+                instance._acquire_runtime_lock()
+
+        instance._client_threads.add(threading.current_thread())
+        instance._close_clients()
+
+        unsafe = mock.Mock(**{
+            "st_mode": daemon.stat.S_IFREG | 0o600,
+            "st_uid": os.geteuid(),
+            "st_nlink": 2,
+            "st_dev": 1,
+            "st_ino": 2,
+        })
+        lock_path.lstat.side_effect = None
+        lock_path.lstat.return_value = unsafe
+        with mock.patch.object(daemon.os, "open", return_value=10), mock.patch.object(
+            daemon.os, "fstat", return_value=unsafe
+        ), mock.patch.object(
+            daemon.os, "close"
+        ):
+            with self.assertRaises(daemon.RuntimePathError):
+                instance._acquire_runtime_lock()
+
+    def test_daemon_replay_skips_nonadvancing_sequences(self):
+        instance = daemon.SidecarDaemon(scanner=mock.Mock())
+        session = daemon.Session("claude", "sid", "/tmp", "/tmp/events", 1)
+        instance.index.update([session])
+        adapter = mock.Mock(
+            replay=mock.Mock(
+                return_value=(
+                    {"seq": 1},
+                    {"seq": 1},
+                )
+            ),
+            normalize=mock.Mock(return_value=()),
+        )
+        adapters = __import__("sidecar.adapters", fromlist=("registry",))
+        with mock.patch.object(
+            adapters, "registry", mock.Mock(get=mock.Mock(return_value=adapter))
+        ):
+            result = instance._replay_response(
+                {"session_id": "sid", "after_seq": 0, "limit": 10}
+            )
+        self.assertTrue(result["ok"])
+
+    def test_daemon_shutdown_diagnostic_limit(self):
+        instance = daemon.SidecarDaemon(scanner=mock.Mock())
+        with mock.patch.object(daemon, "MAX_SHUTDOWN_DIAGNOSTICS", 0):
+            instance._record_shutdown_diagnostic("shutdown")
+        self.assertTrue(instance._shutdown_timed_out)
+        self.assertEqual((), instance._shutdown_diagnostics)
+
+    def test_state_tail_and_inference_fallback_edges(self):
+        self.assertEqual(
+            0,
+            state._tail_state(
+                [
+                    {"type": "tool_use"},
+                    {"type": "tool_result"},
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": "system"}],
+                    },
+                ]
+            ).unmatched_tools,
+        )
+        tracker = state.StateEngine()
+        session = daemon.Session("claude", "sid", "/tmp", "", 1)
+        adapter = mock.Mock()
+        adapter.infer_status.side_effect = RuntimeError("infer")
+        self.assertEqual(
+            daemon.Status.DEAD,
+            tracker.infer_status(session, adapter=adapter, now=1),
+        )
+
+        self.assertEqual(
+            {"status": "running"},
+            state.parse_terminal_metadata(": ignored\nstatus: running"),
+        )
+        self.assertFalse(
+            state.terminal_metadata_is_active(
+                {"running_for_ms": "-1", "command": "cmd"}
+            )
+        )
+        cursor_session = daemon.Session(
+            "cursor",
+            "sid",
+            "/tmp",
+            "",
+            1,
+        )
+        entry = mock.Mock(name="events.txt", path="/tmp/events.txt")
+        entry.name = "events.txt"
+        entry.is_file.return_value = False
+        entries = mock.Mock(
+            __enter__=mock.Mock(),
+            __exit__=mock.Mock(return_value=False),
+        )
+        entries.__enter__.return_value = entries
+        entries.__iter__ = mock.Mock(return_value=iter((entry,)))
+        with mock.patch.object(state.os, "scandir", return_value=entries):
+            self.assertFalse(
+                state.cursor_terminal_active(
+                    cursor_session,
+                    terminals_root=Path("/tmp"),
+                )
+            )
+
+    def test_session_tailer_cursor_and_dsh_empty_paths(self):
+        cursor = tail.SessionTailer.__new__(tail.SessionTailer)
+        cursor._is_dsh = False
+        cursor.follower = None
+        self.assertEqual([], cursor._poll_cursor_records())
+        cursor._is_cursor_chat = True
+        cursor.from_start = False
+        cursor.follower = mock.Mock(
+            export_checkpoint=mock.Mock(
+                return_value={
+                    "kind": "cursor_chat",
+                    "initialized": False,
+                }
+            ),
+            last_error=tail.CursorChatError("baseline"),
+        )
+        with self.assertRaises(tail.CursorChatError):
+            cursor.export_checkpoint()
+
+        dsh = tail.SessionTailer.__new__(tail.SessionTailer)
+        dsh._is_dsh = True
+        dsh._dsh_force_replay = True
+        dsh._dsh_page_pending = False
+        dsh._dsh_signature = None
+        dsh._last_seq = None
+        dsh._dsh_initialized = False
+        dsh.max_records = 2
+        dsh.session = daemon.Session("dsh", "sid", "/tmp", "/tmp", 1)
+        dsh._replay = mock.Mock(return_value=(object(),))
+        dsh._normalize = mock.Mock(return_value=[])
+        with mock.patch.object(
+            dsh,
+            "_dsh_transcript_signature",
+            return_value=None,
+        ):
+            self.assertEqual([], dsh._poll_dsh())
+
+    def test_daemon_log_append_precondition_and_interrupt_edges(self):
+        instance = daemon_log.DaemonLog(Path("/tmp/runtime"))
+        self.assertFalse(instance.append("event"))
+        instance._opened = True
+        instance._encode = mock.Mock(side_effect=KeyboardInterrupt())
+        with self.assertRaises(KeyboardInterrupt):
+            instance.append("event")
+
+    def test_remote_watch_host_failure_edges(self):
+        host = remote_types.RemoteHost("remote", "ready")
+        session = remote_watch.RemoteWatchSession([], b"artifact")
+        session._publish_failure = mock.Mock()
+        session._host_opener = mock.Mock(
+            return_value=(None, remote.RemoteFailure("remote", "timeout"))
+        )
+        session._run_host(host)
+        session._publish_failure.assert_called_once()
+
+        session._host_opener = mock.Mock(side_effect=RuntimeError("worker"))
+        session._publish_failure.reset_mock()
+        session._run_host(host)
+        session._publish_failure.assert_called_once_with(
+            remote.RemoteFailure("remote", "remote")
+        )
+        session.close()
+
+    def test_tail_dsh_nonregular_and_reset_lock_error_edges(self):
+        tailer = tail.SessionTailer.__new__(tail.SessionTailer)
+        tailer.session = daemon.Session(
+            "dsh", "sid", "/tmp", "/tmp/events", 1
+        )
+        with mock.patch.object(
+            tail.Path,
+            "stat",
+            return_value=mock.Mock(st_mode=tail.stat_module.S_IFDIR),
+        ):
+            self.assertIsNone(tailer._dsh_transcript_signature())
+
+        store = audit.SendAuditStore("/runtime")
+        with mock.patch.object(
+            store,
+            "_open_anchor",
+            return_value=([10], [], 11, "/runtime"),
+        ), mock.patch.object(
+            audit, "_open_named_file", return_value=(12, True)
+        ), mock.patch.object(
+            audit.fcntl,
+            "flock",
+            side_effect=OSError(errno.EBADF, "bad lock"),
+        ), mock.patch.object(
+            audit.os, "close"
+        ):
+            with self.assertRaises(audit.AuditError):
+                store.reset()
+
+    def test_send_audit_anchor_and_named_file_exception_edges(self):
+        account = mock.Mock(pw_dir="relative")
+        with mock.patch.object(audit.pwd, "getpwuid", return_value=account):
+            with self.assertRaises(audit.AuditError):
+                audit.SendAuditStore._open_anchor(mock.Mock(), None)
+
+        helpers = mock.Mock()
+        helpers._open_runtime_parent.return_value = ([10], [], 11, "anchor", None)
+        details = mock.Mock(
+            st_mode=audit.stat.S_IFREG,
+            st_uid=os.geteuid(),
+        )
+        with mock.patch.object(
+            audit.pwd, "getpwuid", return_value=mock.Mock(pw_dir="/tmp")
+        ), mock.patch.object(
+            audit.os, "fstat", return_value=details
+        ), mock.patch.object(
+            audit.os, "close"
+        ):
+            with self.assertRaises(audit.AuditError):
+                audit.SendAuditStore._open_anchor(helpers, None)
+
+        helpers._validate_lock_file.side_effect = KeyboardInterrupt()
+        with mock.patch.object(
+            audit, "_secure_helpers", return_value=helpers
+        ), mock.patch.object(
+            audit.os, "open", return_value=12
+        ), mock.patch.object(
+            audit.os, "fchmod"
+        ), mock.patch.object(
+            audit.os, "close"
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                audit._open_named_file(1, "name", create=True)
+
+    def test_kimi_acp_nested_content_and_auth_edges(self):
+        acp._validate_content_block(
+            {
+                "type": "resource_link",
+                "name": "name",
+                "uri": "uri",
+                "size": 1,
+                "annotations": {},
+            }
+        )
+        acp._validate_auth_method(
+            {
+                "type": "terminal",
+                "id": "terminal",
+                "name": "Terminal",
+                "args": [],
+                "env": {},
+            }
+        )
+        acp._validate_agent_capabilities(
+            {
+                "loadSession": True,
+                "sessionCapabilities": {"list": {}, "resume": {}},
+                "auth": {"logout": None},
+                "mcpCapabilities": {"acp": True, "http": False, "sse": False},
+                "promptCapabilities": {
+                    "audio": False,
+                    "embeddedContext": False,
+                    "image": False,
+                },
+                "positionEncoding": None,
+            }
+        )
+
+    def test_inject_parser_and_plan_message_rejections(self):
+        self.assertEqual("", inject._assistant_record_text({"result": {}}))
+        self.assertEqual(
+            ("", ""),
+            inject._codex_record_text(
+                {"item": {"type": "agent_message", "content": {}}}
+            ),
+        )
+        with self.assertRaises(inject.SendError):
+            inject._plan_message(
+                mock.Mock(agent="claude", input_data=b"\xff")
+            )
+        with self.assertRaises(inject.SendError):
+            inject._plan_message(
+                mock.Mock(
+                    agent="cursor-cli",
+                    input_data=None,
+                    argv=("cursor", "a", "b"),
+                )
+            )
+
+    def test_kimi_identity_remaining_validation_edges(self):
+        with mock.patch.object(kimi_identity, "_JSONL_LINE_BYTES", 2):
+            with self.assertRaises(kimi_identity.KimiIdentityError):
+                kimi_identity._strict_jsonl(b"abc\n", allow_empty=False)
+
+        with mock.patch.object(
+            kimi_identity.os.path, "expanduser", return_value="relative"
+        ):
+            with self.assertRaises(kimi_identity.KimiIdentityError):
+                kimi_identity._project_source(
+                    kimi_identity._Capture(), "project", "~/project"
+                )
+
+        capture = kimi_identity._Capture()
+        with mock.patch.object(
+            kimi_identity.os.path, "realpath", return_value="/tmp/."
+        ):
+            with self.assertRaises(kimi_identity.KimiIdentityError):
+                kimi_identity._open_absolute_directory(
+                    capture, "/tmp/input", reject_symlink_leaf=False
+                )
+
+        details = mock.Mock(st_dev=1, st_ino=1, st_mode=0o700, st_uid=os.geteuid())
+        capture = kimi_identity._Capture()
+        with mock.patch.object(
+            kimi_identity.os.path, "realpath", return_value="/tmp"
+        ), mock.patch.object(
+            kimi_identity.os, "open", return_value=1
+        ), mock.patch.object(
+            kimi_identity.os, "fstat", return_value=details
+        ), mock.patch.object(
+            kimi_identity, "_owner_safe", return_value=False
+        ):
+            with self.assertRaises(kimi_identity.KimiIdentityError):
+                kimi_identity._open_absolute_directory(
+                    capture, "/tmp/input", reject_symlink_leaf=False
+                )
+
+    def test_watch_sessions_cancellation_and_close_edges(self):
+        session = daemon.Session("claude", "sid", "/tmp", "/tmp/events", 1)
+        cancel = threading.Event()
+        cancel.set()
+        with mock.patch.object(tail, "SessionTailer"):
+            self.assertEqual(
+                [],
+                list(tail.watch_sessions([session], cancel_event=cancel)),
+            )
+        cancel.clear()
+        event = daemon.Event("now", "claude", "sid", "text", "event")
+        fake = mock.Mock(
+            poll=mock.Mock(side_effect=lambda: (cancel.set(), [event])[1]),
+            close=None,
+            follower=mock.Mock(close=mock.Mock()),
+        )
+        with mock.patch.object(tail, "SessionTailer", return_value=fake):
+            self.assertEqual(
+                [event],
+                list(tail.watch_sessions([session], cancel_event=cancel)),
+            )
+        fake.follower.close.assert_called_once()
+
+    def test_send_audit_append_rotation_and_io_edges(self):
+        store = audit.SendAuditStore()
+        with mock.patch.object(
+            audit, "_encoded_record", return_value=b"x"
+        ), mock.patch.object(
+            store, "_active_pending_payload", return_value=b"p"
+        ), mock.patch.object(
+            audit, "MAX_AUDIT_BYTES", 1
+        ), mock.patch.object(
+            audit.os, "fstat", return_value=mock.Mock(st_size=1)
+        ), mock.patch.object(
+            audit, "_validate_named_file"
+        ), mock.patch.object(
+            audit, "_open_named_file", return_value=(3, True)
+        ), mock.patch.object(
+            audit, "_write_all"
+        ), mock.patch.object(
+            audit.os, "read", return_value=b"wrong"
+        ), mock.patch.object(
+            audit.os, "close"
+        ), mock.patch.object(
+            audit.os, "fsync"
+        ), mock.patch.object(
+            audit.os, "lseek"
+        ), mock.patch.object(
+            audit.os, "replace"
+        ):
+            with self.assertRaises(audit.AuditError):
+                store._append(
+                    1,
+                    2,
+                    None,
+                    {"request_id": "r", "outcome": "pending"},
+                    {},
+                )
+
+        pending = {"request_id": "r", "outcome": "pending"}
+        with mock.patch.object(
+            audit, "_encoded_record", return_value=b"x"
+        ), mock.patch.object(
+            store, "_active_pending_payload", return_value=b"p"
+        ), mock.patch.object(
+            audit, "MAX_AUDIT_BYTES", 10
+        ), mock.patch.object(
+            audit.os, "fstat", return_value=mock.Mock(st_size=10)
+        ), mock.patch.object(
+            audit, "_validate_named_file"
+        ), mock.patch.object(
+            audit, "_open_named_file", return_value=(3, True)
+        ), mock.patch.object(
+            audit, "_write_all"
+        ), mock.patch.object(
+            audit.os, "read", return_value=b"pxx"
+        ), mock.patch.object(
+            audit.os, "close"
+        ), mock.patch.object(
+            audit.os, "fsync"
+        ), mock.patch.object(
+            audit.os, "lseek"
+        ), mock.patch.object(
+            audit.os, "replace"
+        ):
+            store._append(
+                1,
+                2,
+                4,
+                {"request_id": "r", "outcome": "completed"},
+                {"r": [pending]},
+            )
+
+        with mock.patch.object(
+            audit, "_encoded_record", return_value=b"x"
+        ), mock.patch.object(
+            store, "_active_pending_payload", return_value=b"long"
+        ), mock.patch.object(
+            audit, "MAX_AUDIT_BYTES", 1
+        ), mock.patch.object(
+            audit.os, "fstat", return_value=mock.Mock(st_size=1)
+        ), mock.patch.object(
+            audit.os, "close"
+        ):
+            with self.assertRaises(audit.AuditError):
+                store._append(
+                    1,
+                    2,
+                    None,
+                    {"request_id": "r", "outcome": "pending"},
+                    {},
+                )
+
+
+    def test_kimi_identity_jsonl_and_project_edges(self):
+        self.assertEqual((), kimi_identity._strict_jsonl(b"", allow_empty=True))
+        with self.assertRaises(kimi_identity.KimiIdentityError):
+            kimi_identity._strict_jsonl(b"", allow_empty=False)
+        with self.assertRaises(kimi_identity.KimiIdentityError):
+            kimi_identity._strict_jsonl(b"{}", allow_empty=True)
+        self.assertEqual(({},), kimi_identity._strict_jsonl(b"{}\n", allow_empty=False))
+
+        with self.assertRaises(kimi_identity.KimiIdentityError):
+            kimi_identity._project_source(kimi_identity._Capture(), "project", " ")
+
+    def test_kimi_acp_optional_capability_edges(self):
+        self.assertFalse(acp._valid_meta_only(None))
+        acp._validate_content_block(
+            {"type": "resource_link", "name": "n", "uri": "u", "size": None}
+        )
+        acp._validate_nes_capabilities(
+            {
+                "context": {
+                    "editHistory": None,
+                    "recentFiles": None,
+                    "userActions": None,
+                },
+                "events": {
+                    "document": {
+                        "didChange": None,
+                        "didClose": None,
+                        "didFocus": None,
+                        "didOpen": None,
+                        "didSave": None,
+                    }
+                },
+            }
+        )
+        acp._validate_auth_method(
+            {"type": "terminal", "id": "terminal", "name": "Terminal"}
+        )
+        acp._validate_update(
+            {
+                "sessionUpdate": "usage_update",
+                "size": 1,
+                "used": 2,
+                "cost": {"amount": 3, "currency": "USD"},
+            }
+        )
+
+    def test_daemon_log_record_and_append_edges(self):
+        instance = daemon_log.DaemonLog(Path("/tmp/runtime"), version="v")
+        record = instance._record(
+            "event",
+            {
+                "level": "error",
+                "http_enabled": True,
+                "timed_out": False,
+                "http_port": 8080,
+                "count": 3,
+                "adapter": "adapter",
+                "agent": "agent",
+                "session_id": "session",
+                "code": "code",
+                "stage": "stage",
+            },
+        )
+        self.assertTrue(record["http_enabled"])
+        self.assertEqual(8080, record["http_port"])
+        self.assertEqual(3, record["count"])
+
+        instance._opened = True
+        instance._log_fd = None
+        instance._validate_current = mock.Mock(
+            return_value=mock.Mock(st_size=0)
+        )
+        self.assertFalse(instance.append("event"))
+        self.assertTrue(instance.disabled)
+
+    def test_jsonl_follower_checkpoint_and_poll_edges(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events.jsonl"
+            path.write_bytes(b"")
+            follower = tail.JSONLFollower(path, from_start=True)
+            follower._dropping_line = True
+            follower._consume_chunk(b"partial")
+            self.assertTrue(follower._dropping_line)
+
+            checkpoint = follower.export_checkpoint()
+            checkpoint["records"] = (object(),)
+            self.assertFalse(follower.restore_checkpoint(checkpoint))
+
+            path.write_bytes(b'{"x":1}\n')
+            with mock.patch.object(
+                Path,
+                "open",
+                return_value=mock.Mock(
+                    __enter__=mock.Mock(
+                        return_value=mock.Mock(
+                            seek=mock.Mock(),
+                            read=mock.Mock(return_value=b""),
+                        )
+                    ),
+                    __exit__=mock.Mock(return_value=False),
+                ),
+            ):
+                self.assertEqual([], follower.poll())
+
+    def test_tailer_pool_initial_checkpoint_edges(self):
+        pool = tailer_pool.TailerPool(lambda _: None)
+        invalid_dsh = daemon.Session(
+            "dsh",
+            "sid",
+            "/tmp",
+            "/tmp/events",
+            1,
+            extra={"seq": "invalid"},
+        )
+        pool._capture_initial_checkpoint(("dsh", "sid"), invalid_dsh)
+        self.assertNotIn(("dsh", "sid"), pool._checkpoints)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            transcript = Path(temporary) / "events.jsonl"
+            transcript.write_text("", encoding="utf-8")
+            session = daemon.Session(
+                "claude",
+                "sid",
+                temporary,
+                str(transcript),
+                1,
+            )
+            tailer = mock.Mock(
+                errors=[],
+                export_checkpoint=mock.Mock(return_value={"offset": 0}),
+                close=mock.Mock(),
+            )
+            with mock.patch.object(pool, "_make_tailer", return_value=tailer):
+                pool._capture_initial_checkpoint(("claude", "sid"), session)
+            self.assertEqual(
+                (str(transcript), {"offset": 0}),
+                pool._checkpoints[("claude", "sid")],
+            )
+
+    def test_daemon_log_rotate_and_close_edges(self):
+        instance = daemon_log.DaemonLog(Path("/tmp/runtime"), backups=2)
+        instance._directory_fd = 10
+        instance._log_fd = 11
+        instance._log_identity = (1, 1)
+        instance._validate_current = mock.Mock()
+        instance._validate_entry = mock.Mock()
+        instance._entry_stat = mock.Mock(side_effect=(None, mock.Mock()))
+        instance._open_private_file = mock.Mock(return_value=(12, (2, 2)))
+        with mock.patch.object(daemon_log.os, "fsync"), mock.patch.object(
+            daemon_log.os, "unlink"
+        ) as unlink, mock.patch.object(
+            daemon_log.os, "replace"
+        ), mock.patch.object(
+            daemon_log.os, "close"
+        ):
+            instance._rotate()
+        unlink.assert_called_once()
+
+        instance._log_fd = 20
+        instance._lock_fd = 21
+        instance._directory_fd = 22
+        with mock.patch.object(
+            daemon_log.os, "close", side_effect=OSError("close")
+        ), mock.patch.object(
+            daemon_log._fcntl, "flock", side_effect=OSError("unlock")
+        ):
+            instance.close()
+        instance.close()
+
+    def test_kimi_identity_generation_and_payload_mismatch_edges(self):
+        parent = kimi_identity.DirectoryIdentity("/tmp", 1, 2, 0o700, os.geteuid())
+        details = mock.Mock(
+            st_dev=1,
+            st_ino=2,
+            st_mode=0o600,
+            st_uid=os.geteuid(),
+            st_size=3,
+            st_mtime_ns=4,
+            st_ctime_ns=5,
+            st_mtime=4.0,
+            st_ctime=5.0,
+        )
+        changed = mock.Mock(**details.__dict__)
+        changed.st_mtime_ns = 9
+        for after in (changed, mock.Mock(**dict(details.__dict__, st_size=4))):
+            capture = kimi_identity._Capture()
+            with mock.patch.object(
+                kimi_identity.os, "open", return_value=9
+            ), mock.patch.object(
+                kimi_identity.os, "stat", return_value=details
+            ), mock.patch.object(
+                kimi_identity.os, "fstat", side_effect=(details, after)
+            ), mock.patch.object(
+                kimi_identity, "_same_object", return_value=True
+            ), mock.patch.object(
+                kimi_identity, "_owner_safe", return_value=True
+            ), mock.patch.object(
+                kimi_identity.os, "read", side_effect=(b"abc", b"")
+            ):
+                with self.assertRaises(kimi_identity.KimiIdentityError):
+                    kimi_identity._open_regular_at(
+                        capture, 1, parent, "file", 10
+                    )
+
+        capture = kimi_identity._Capture()
+        with mock.patch.object(
+            kimi_identity.os, "open", return_value=9
+        ), mock.patch.object(
+            kimi_identity.os, "stat", return_value=details
+        ), mock.patch.object(
+            kimi_identity.os, "fstat", side_effect=(details, changed)
+        ), mock.patch.object(
+            kimi_identity, "_same_object", return_value=True
+        ), mock.patch.object(
+            kimi_identity, "_owner_safe", return_value=True
+        ), mock.patch.object(
+            kimi_identity, "_read_fd_tail", return_value=kimi_identity._TailRead(
+                b"abc", 0, False, True
+            )
+        ):
+            with self.assertRaises(kimi_identity.KimiIdentityError):
+                kimi_identity._open_regular_tail_at(
+                    capture, 1, parent, "file", 10
+                )
+
+    def test_send_audit_append_missing_history_and_interrupt_edges(self):
+        store = audit.SendAuditStore()
+        with mock.patch.object(
+            audit, "_encoded_record", return_value=b"x"
+        ), mock.patch.object(
+            store, "_active_pending_payload", return_value=b""
+        ), mock.patch.object(
+            audit, "MAX_AUDIT_BYTES", 1
+        ), mock.patch.object(
+            audit.os, "fstat", return_value=mock.Mock(st_size=1)
+        ), mock.patch.object(
+            audit.os, "close"
+        ):
+            with self.assertRaises(audit.AuditError):
+                store._append(
+                    1,
+                    2,
+                    None,
+                    {"request_id": "r", "outcome": "completed"},
+                    {},
+                )
+
+        with mock.patch.object(
+            audit, "_encoded_record", return_value=b"x"
+        ), mock.patch.object(
+            store, "_active_pending_payload", return_value=b"p"
+        ), mock.patch.object(
+            audit.os, "fstat", side_effect=KeyboardInterrupt()
+        ), mock.patch.object(
+            audit.os, "close"
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                store._append(
+                    1,
+                    2,
+                    None,
+                    {"request_id": "r", "outcome": "pending"},
+                    {},
+                )
+
+    def test_kimi_protocol_optional_response_edges(self):
+        protocol = acp._Protocol(mock.Mock(), mock.Mock())
+        protocol.pending.add(1)
+        with self.assertRaises(acp._DriverFailure):
+            protocol.consume(
+                {"jsonrpc": "2.0", "id": 1, "result": {}},
+                expected_id=None,
+            )
+        with self.assertRaises(acp._DriverFailure):
+            protocol.consume({"jsonrpc": "2.0"}, expected_id=1)
+        acp._validate_update({"sessionUpdate": "session_info_update"})
+        acp._validate_nes_capabilities({})
+        acp._validate_nes_capabilities({"events": {}})
+
+    def test_send_audit_terminal_append_cleanup_edge(self):
+        store = audit.SendAuditStore()
+        namespace = mock.Mock(runtime_fd=1, namespace_epoch="epoch", key=b"k")
+        lock = mock.MagicMock()
+        lock.__enter__.return_value = None
+        identity = audit.AuditIdentity(
+            "claude", "sid", "/tmp", "claude", "allow_write", b"message"
+        )
+        with mock.patch.object(
+            store, "_locked", return_value=lock
+        ), mock.patch.object(
+            store, "_open_logs", return_value=(2, 3)
+        ), mock.patch.object(
+            store,
+            "_load",
+            return_value={"request": [{"outcome": "pending"}]},
+        ), mock.patch.object(
+            audit, "_record_identity", return_value=("identity",)
+        ), mock.patch.object(
+            audit, "_identity_tuple", return_value=("identity",)
+        ), mock.patch.object(
+            store, "_base_record", side_effect=RuntimeError("record")
+        ), mock.patch.object(
+            audit.os, "close"
+        ) as close:
+            with self.assertRaises(RuntimeError):
+                store._append_terminal(
+                    namespace,
+                    "request",
+                    identity,
+                    outcome="failed",
+                    delivery="unknown",
+                    error="error",
+                    returncode=1,
+                )
+        self.assertEqual([mock.call(2), mock.call(3)], close.call_args_list)
+
+    def test_small_scalar_and_source_path_branch_edges(self):
+        session = mock.Mock(transcript="", extra={})
+        self.assertEqual((), index._source_paths(session))
+
+        with self.assertRaises(json_limits.JSONLimitError):
+            json_limits.validate_json(
+                8,
+                json_limits.JSONLimits(max_integer_bits=2),
+            )
+        json_limits.validate_json(
+            1,
+            json_limits.JSONLimits(max_integer_bits=2),
+        )
+        json_limits.validate_json(1.0, json_limits.JSONLimits())
+        with self.assertRaises(json_limits.JSONLimitError):
+            json_limits.validate_json(
+                "long",
+                json_limits.JSONLimits(max_string_bytes=2),
+            )
+        json_limits.validate_json(
+            "short",
+            json_limits.JSONLimits(max_string_bytes=10),
+        )
+
+        self.assertEqual(
+            "\ufffd",
+            text_utils.normalize_scalar_text("\ud800", errors="replace"),
+        )
+        self.assertEqual(
+            "fallback",
+            text_utils.extract_cursor_title(
+                ["<user_query></user_query>"],
+                fallback="fallback",
+            ),
+        )
+        text_utils.extract_cursor_title(
+            ["x" * text_utils.CURSOR_TITLE_MAX_INPUT_CHARS, "ignored"]
+        )
+
+    def test_remote_watch_cancel_and_timeout_branches(self):
+        host = remote_types.RemoteHost("edge", "running")
+        cancelled = threading.Event()
+        cancelled.set()
+        failure_session = remote_watch.RemoteWatchSession(
+            [],
+            b"x",
+            cancel_event=cancelled,
+            host_opener=lambda *args, **kwargs: (
+                None,
+                remote.RemoteFailure("edge", "remote"),
+            ),
+        )
+        failure_session._publish_failure = mock.Mock()
+        failure_session._run_host(host)
+        failure_session._publish_failure.assert_not_called()
+
+        timeout_session = remote_watch.RemoteWatchSession([], b"x")
+        timeout_session.hosts = (host,)
+        timeout_session._workers = [mock.Mock()]
+        timeout_session._done_hosts.clear()
+        timeout_session._buffer = mock.Mock(
+            get=mock.Mock(
+                side_effect=(
+                    queue.Empty(),
+                    remote_watch_types.RemoteWatchFailure("edge", "remote"),
+                )
+            ),
+            empty=mock.Mock(return_value=False),
+            wake_all=mock.Mock(),
+        )
+        self.assertIsInstance(next(timeout_session), remote_watch_types.RemoteWatchFailure)
+        timeout_session.close()
+
+    def test_daemon_accept_oserror_stop_branches(self):
+        for stopping in (True, False):
+            instance = daemon.SidecarDaemon()
+            listener = mock.Mock()
+            listener.accept.side_effect = OSError("accept")
+            instance._prepare_runtime_paths = mock.Mock()
+            instance._bind_listener = mock.Mock(return_value=listener)
+            instance._open_daemon_log = mock.Mock()
+            instance._log_event = mock.Mock()
+            instance._scan_once = mock.Mock(return_value=(False, False))
+            instance._scan_loop = mock.Mock()
+            instance._start_http_server = mock.Mock()
+            instance._close_http_server = mock.Mock(return_value=True)
+            instance._close_clients = mock.Mock()
+            instance._join_scan_thread = mock.Mock()
+            instance._close_daemon_log = mock.Mock()
+            instance._remove_owned_paths = mock.Mock()
+            instance._release_runtime_lock = mock.Mock()
+            instance._stopping = mock.Mock(side_effect=(False, stopping, True))
+            if stopping:
+                instance.serve_forever()
+            else:
+                with self.assertRaises(OSError):
+                    instance.serve_forever()
+
+    def test_process_strict_and_node_identity_false_branches(self):
+        parsed = process.parse_ps_output(
+            "12 0:01 /usr/bin/kimi",
+            cwd_lookup=mock.Mock(side_effect=ValueError("cwd")),
+        )
+        self.assertEqual("", parsed[0]["cwd"])
+        with mock.patch.object(
+            process, "_strict_run", return_value=mock.Mock(
+                stdout=b"12 13 /usr/bin/kimi /usr/bin/kimi\n"
+            )
+        ):
+            self.assertEqual(
+                [(12, 13, "/usr/bin/kimi", "/usr/bin/kimi")],
+                process._strict_process_rows(),
+            )
+        with mock.patch.object(
+            process, "_strict_run", return_value=mock.Mock(stdout=b"kimi\n")
+        ):
+            with self.assertRaises(process.ProcessInspectionError):
+                process._strict_process_rows()
+        with mock.patch.object(
+            process, "_strict_run", return_value=mock.Mock(stdout=b"noise\n")
+        ):
+            self.assertEqual([], process._strict_process_rows())
+        with mock.patch.object(
+            process, "_strict_run", return_value=mock.Mock(
+                stdout=b"bad 13 /usr/bin/kimi\n"
+            )
+        ):
+            with self.assertRaises(process.ProcessInspectionError):
+                process._strict_process_rows()
+
+        with mock.patch.object(
+            process, "_candidate_token_identity", return_value=(3, 4)
+        ):
+            self.assertFalse(
+                process._node_tokens_have_kimi_hint(
+                    ("node", "/usr/bin/other"),
+                    (1, 2),
+                    time.monotonic() + 1,
+                )
+            )
+        with mock.patch.object(
+            process, "_candidate_token_identity", return_value=(1, 2)
+        ):
+            self.assertTrue(
+                process._node_tokens_have_kimi_hint(
+                    ("node", "/usr/bin/other"),
+                    (1, 2),
+                    time.monotonic() + 1,
+                )
+            )
+        self.assertFalse(
+            process._node_tokens_have_kimi_hint(
+                ("node", "relative"),
+                (1, 2),
+                time.monotonic() + 1,
+            )
+        )
+
+        descriptor = os.open("/tmp", os.O_RDONLY)
+        try:
+            with mock.patch.object(
+                process.os,
+                "fstat",
+                return_value=mock.Mock(st_mode=process.stat.S_IFDIR),
+            ), mock.patch.object(process.os, "close"):
+                self.assertIsNone(
+                    process._relative_candidate_token_identity("regular", descriptor)
+                )
+        finally:
+            os.close(descriptor)
+
+    def test_process_macos_cwd_without_name_branch(self):
+        with mock.patch.object(
+            process.subprocess,
+            "run",
+            return_value=mock.Mock(returncode=0, stdout=b"unexpected\n"),
+        ):
+            self.assertEqual("", process._macos_pid_cwd(12))
+
+    def test_kimi_index_metadata_stat_and_generation_edges(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "index.jsonl"
+            path.write_bytes(b"")
+            with mock.patch.object(
+                kimi_identity.os,
+                "fstat",
+                return_value=mock.Mock(st_mode=0, st_size=0),
+            ):
+                self.assertEqual(((), False), kimi_identity.read_kimi_index_metadata(path))
+
+            details = mock.Mock(
+                st_mode=kimi_identity.stat.S_IFREG,
+                st_size=1,
+                st_dev=1,
+                st_ino=2,
+                st_mtime_ns=3,
+                st_ctime_ns=4,
+            )
+            changed = mock.Mock(
+                st_mode=kimi_identity.stat.S_IFREG,
+                st_size=1,
+                st_dev=9,
+                st_ino=2,
+                st_mtime_ns=3,
+                st_ctime_ns=4,
+            )
+            with mock.patch.object(
+                kimi_identity.os, "fstat", side_effect=(details, changed)
+            ), mock.patch.object(
+                kimi_identity, "_read_fd_tail", return_value=kimi_identity._TailRead(
+                    b"", 0, False, True
+                )
+            ):
+                self.assertEqual(((), False), kimi_identity.read_kimi_index_metadata(path))
+
+    def test_tailer_pool_optional_checkpoint_branches(self):
+        key = ("claude", "sid")
+        pool = tailer_pool.TailerPool(mock.Mock())
+        tailer = mock.Mock(
+            errors=(),
+            export_checkpoint=None,
+            close=mock.Mock(),
+        )
+        pool._tailers[key] = tailer
+        pool._paths[key] = "/tmp/transcript"
+        self.assertTrue(pool._drop(key, retain_checkpoint=True))
+
+        session = daemon.Session("dsh", "sid", "/tmp", "", 1, extra={"seq": 1})
+        pool.supports_tailing = mock.Mock(return_value=True)
+        pool._make_tailer = mock.Mock(return_value=tailer)
+        pool._capture_initial_checkpoint(key, session)
+
+    def test_poll_sessions_cancelled_after_ready(self):
+        cancel = threading.Event()
+        session = daemon.Session("claude", "sid", "/tmp", "", 1)
+        with mock.patch.object(tail, "SessionTailer") as constructor:
+            constructor.return_value.poll.return_value = iter(())
+            with self.assertRaises(StopIteration):
+                next(
+                    tail.watch_sessions(
+                        [session],
+                        cancel_event=cancel,
+                        on_ready=cancel.set,
+                        poll_interval=1,
+                    )
+                )
+
+    def test_watch_sessions_cancelled_during_wait(self):
+        class CancelDuringWait:
+            def __init__(self):
+                self._checks = 0
+
+            def is_set(self):
+                self._checks += 1
+                return self._checks >= 6
+
+            def wait(self, _seconds):
+                return True
+
+        session = daemon.Session("claude", "sid", "/tmp", "", 1)
+        cancel = CancelDuringWait()
+        with mock.patch.object(tail, "SessionTailer") as constructor:
+            constructor.return_value.poll.return_value = iter(())
+            self.assertEqual(
+                [],
+                list(
+                    tail.watch_sessions(
+                        [session],
+                        cancel_event=cancel,
+                        poll_interval=1,
+                    )
+                )
+            )
+
+    def test_remote_submission_deadline_branch(self):
+        host = remote_types.RemoteHost("edge", "running")
+        clock = mock.Mock(side_effect=(0.0, 2.0, 2.0, 2.0))
+        result = remote.aggregate_remote(
+            "status",
+            hosts=(host,),
+            runner=mock.Mock(),
+            artifact=b"x",
+            fleet_timeout=0.1,
+            monotonic=clock,
+        )
+        self.assertEqual(("edge",), tuple(item.host for item in result.failures))
+
+    def test_kimi_transcript_binding_rejection_branches(self):
+        wire = kimi_identity.FileIdentity(
+            "/tmp/transcript", 1, 2, 0o600, os.geteuid()
+        )
+        for value in ("", "relative", "/tmp/other"):
+            with self.assertRaises(kimi_identity.KimiIdentityError):
+                kimi_identity._bind_session_transcript(
+                    kimi_identity._Capture(), value, wire
+                )
+        with mock.patch.object(kimi_identity.os, "O_NOFOLLOW", 0):
+            with self.assertRaises(kimi_identity.KimiIdentityError):
+                kimi_identity._bind_session_transcript(
+                    kimi_identity._Capture(), "/tmp/transcript", wire
+                )
+
+    def test_process_strict_cwd_and_platform_fallback_branches(self):
+        with mock.patch.object(
+            process.os, "open", return_value=7
+        ), mock.patch.object(
+            process.os, "fstat", return_value=mock.Mock(
+                st_mode=process.stat.S_IFDIR, st_dev=1, st_ino=2
+            )
+        ):
+            self.assertEqual(
+                (1, 2, 7),
+                process._strict_linux_cwd_identity(12),
+            )
+        with mock.patch.object(
+            process.os, "open", return_value=7
+        ), mock.patch.object(
+            process.os, "fstat", return_value=mock.Mock(st_mode=0)
+        ), mock.patch.object(process.os, "close") as close:
+            with self.assertRaises(process.ProcessInspectionError):
+                process._strict_linux_cwd_identity(12)
+            close.assert_called_once_with(7)
+
+        with mock.patch.object(process.sys, "platform", "other"):
+            with self.assertRaises(process.ProcessInspectionError):
+                process._strict_candidate_cwd(12, time.monotonic() + 1)
+            with self.assertRaises(process.ProcessInspectionError):
+                process._strict_pid_cwd(12)
+
+    def test_remaining_small_core_false_branches(self):
+        already_serving = daemon.SidecarDaemon()
+        already_serving._serving = True
+        with self.assertRaises(daemon.DaemonAlreadyRunning):
+            already_serving.serve_forever()
+
+        self.assertEqual(
+            (mock.sentinel.adapter,),
+            scan._unique_adapters([mock.sentinel.adapter, mock.sentinel.adapter]),
+        )
+        with self.assertRaises(ValueError):
+            scan.Scanner(adapters=[]).scan(recent=1, recent_seconds=1)
+        scan.Scanner(adapters=[]).scan(recent=1)
+
+        self.assertEqual(
+            "tool_result",
+            state._tail_state(
+                [{"role": "assistant", "content": [{"type": "tool_result"}]}]
+            ).last_kind,
+        )
+        state._tail_state(
+            [{"role": "system", "content": [{"type": "text", "text": "text"}]}]
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "records.jsonl"
+            path.write_bytes(b"")
+            follower = tail.JSONLFollower(path, from_start=True)
+            checkpoint = follower.export_checkpoint()
+            checkpoint["records"] = ({}, "invalid")
+            self.assertFalse(follower.restore_checkpoint(checkpoint))
+
+        parent = kimi_identity.DirectoryIdentity(
+            "/tmp", 1, 2, 0o700, os.geteuid()
+        )
+        with mock.patch.object(kimi_identity.os, "O_NOFOLLOW", 0):
+            with self.assertRaises(kimi_identity.KimiIdentityError):
+                kimi_identity._open_regular_at(
+                    kimi_identity._Capture(), 1, parent, "file", 10
+                )
+
+        cancelled = threading.Event()
+        cancelled.set()
+        session = remote_watch.RemoteWatchSession([], b"", cancel_event=cancelled)
+        session._host_opener = mock.Mock(side_effect=RuntimeError("cancelled"))
+        session._run_host(remote_types.RemoteHost("edge", "running"))
 

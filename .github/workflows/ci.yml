@@ -146,6 +146,9 @@ jobs:
           print("project runtime dependencies: 0")
           PY
 
+      - name: Validate functional/design matrix
+        run: python scripts/functional_matrix.py check
+
       - name: Run repository quality gate
         # Pull requests use the required 3.9 gate; Python 3.13 runs in the
         # push/weekly matrices so PR feedback does not repeat the full suite.
@@ -204,6 +207,20 @@ jobs:
             --only pack \
             --only cli \
             --only skill
+
+      - name: Publish quality summary
+        if: always()
+        env:
+          QUALITY_EXIT_CODE: ${{ steps.quality_gate.outputs.exit_code }}
+        run: |
+          {
+            echo "## Agent Sidecar quality gate"
+            echo ""
+            echo "- Matrix: \`${{ matrix.os }}, Python ${{ matrix.python-version }}\`"
+            echo "- Quality gate exit code: \`${QUALITY_EXIT_CODE:-not-run}\`"
+            echo "- Coverage redline: core lines and branches \`>=97%\`"
+            echo "- Baseline: \`docs/coverage-baseline.json\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   remote-python-3-8:
     name: Remote payload (Python 3.8)

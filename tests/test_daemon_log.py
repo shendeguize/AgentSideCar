@@ -468,6 +468,12 @@ print(callable(cli.main))
         self.assertEqual(65535, record["http_port"])
         self.assertEqual(0, record["count"])
         self.assertNotIn("http_enabled", record)
+        invalid_optionals = logger._record(
+            "event",
+            {"http_port": True, "count": False},
+        )
+        self.assertNotIn("http_port", invalid_optionals)
+        self.assertNotIn("count", invalid_optionals)
         with self.assertRaises(DaemonLogError) as raised:
             logger._encode("x" * 128, {})
         self.assertEqual("log_line_too_large", raised.exception.code)
@@ -528,6 +534,121 @@ print(callable(cli.main))
             self.assertEqual("log_repair_failed", raised.exception.code)
         finally:
             os.close(descriptor)
+
+    def test_close_is_best_effort_when_descriptors_and_unlock_fail(self):
+        logger = DaemonLog(self.runtime)
+        logger._log_fd = 11
+        logger._lock_fd = 12
+        logger._directory_fd = 13
+        with mock.patch.object(
+            daemon_log_module.os,
+            "close",
+            side_effect=OSError("close failed"),
+        ), mock.patch.object(
+            daemon_log_module._fcntl,
+            "flock",
+            side_effect=OSError("unlock failed"),
+        ):
+            logger.close()
+        self.assertTrue(logger._closed)
+
+    def test_rotation_removes_stale_destination_for_missing_backup_source(self):
+        logger = DaemonLog(self.runtime, backups=2)
+        logger._directory_fd = 7
+        logger._log_fd = 8
+        with mock.patch.object(logger, "_validate_current"), mock.patch.object(
+            logger,
+            "_validate_entry",
+            return_value=None,
+        ), mock.patch.object(
+            logger,
+            "_entry_stat",
+            side_effect=[None, object()],
+        ), mock.patch.object(
+            daemon_log_module.os,
+            "replace",
+        ), mock.patch.object(
+            daemon_log_module.os,
+            "unlink",
+        ) as unlink, mock.patch.object(
+            daemon_log_module.os,
+            "close",
+        ), mock.patch.object(
+            daemon_log_module.os,
+            "fsync",
+        ), mock.patch.object(
+            logger,
+            "_open_private_file",
+            return_value=(9, (1, 2)),
+        ):
+            logger._rotate()
+        unlink.assert_called_once_with(LOG_NAME + ".2", dir_fd=7)
+
+        logger = DaemonLog(self.runtime, backups=2)
+        logger._directory_fd = 7
+        logger._log_fd = 8
+        with mock.patch.object(logger, "_validate_current"), mock.patch.object(
+            logger,
+            "_validate_entry",
+            return_value=None,
+        ), mock.patch.object(
+            logger,
+            "_entry_stat",
+            return_value=None,
+        ), mock.patch.object(
+            daemon_log_module.os,
+            "replace",
+        ), mock.patch.object(
+            daemon_log_module.os,
+            "close",
+        ), mock.patch.object(
+            daemon_log_module.os,
+            "fsync",
+        ), mock.patch.object(
+            logger,
+            "_open_private_file",
+            return_value=(9, (1, 2)),
+        ):
+            logger._rotate()
+
+    def test_open_translates_unexpected_setup_failure_after_locking(self):
+        logger = DaemonLog(self.runtime, backups=0)
+        with mock.patch.object(logger, "_open_directory", return_value=7), mock.patch.object(
+            logger,
+            "_validate_entry",
+            return_value=None,
+        ), mock.patch.object(
+            logger,
+            "_entry_stat",
+            return_value=None,
+        ), mock.patch.object(
+            logger,
+            "_open_private_file",
+            side_effect=[(8, (1, 2)), (9, (3, 4))],
+        ), mock.patch.object(
+            logger,
+            "_repair_current",
+            side_effect=RuntimeError("unexpected"),
+        ), mock.patch.object(
+            daemon_log_module._fcntl,
+            "flock",
+        ), mock.patch.object(
+            daemon_log_module.os,
+            "close",
+        ) as close:
+            with self.assertRaises(DaemonLogError) as raised:
+                logger.open()
+        self.assertEqual("log_open_failed", raised.exception.code)
+        self.assertEqual([9, 8, 7], [call.args[0] for call in close.call_args_list])
+
+    def test_close_handles_missing_fcntl_and_empty_descriptor_state(self):
+        logger = DaemonLog(self.runtime)
+        logger._lock_fd = 12
+        with mock.patch.object(daemon_log_module, "_fcntl", None):
+            with mock.patch.object(daemon_log_module.os, "close") as close:
+                logger.close()
+        close.assert_called_once_with(12)
+        DaemonLog(self.runtime).close()
 
 
 if __name__ == "__main__":

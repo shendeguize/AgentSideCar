@@ -28,6 +28,10 @@ def document(files):
 
 
 class CoverageGateTests(unittest.TestCase):
+    def test_core_redline_is_97_for_lines_and_branches(self):
+        self.assertEqual(97.0, coverage_gate.CORE_THRESHOLD)
+        self.assertEqual(97.0, coverage_gate.CORE_BRANCH_THRESHOLD)
+
     def test_thresholds_pass_at_or_above_every_minimum(self):
         result = coverage_gate.evaluate_coverage(
             document(
@@ -64,7 +68,7 @@ class CoverageGateTests(unittest.TestCase):
                     "sidecar/model.py": summary(95, 100),
                     "sidecar/cli.py": summary(70, 100),
                 },
-                ("overall coverage",),
+                ("core coverage", "overall coverage"),
             ),
         )
         for files, expected_failures in cases:
@@ -142,6 +146,49 @@ class CoverageGateTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(coverage_gate.CoverageDataError):
                     coverage_gate.coverage_metrics(invalid)
+
+    def test_baseline_regression_is_reported_independently_of_absolute_gate(self):
+        baseline = {
+            "core": {"lines": 98.0, "branches": 98.0},
+            "relaxed": {"lines": 80.0, "branches": 70.0},
+            "overall": {"lines": 90.0, "branches": 80.0},
+        }
+        result = coverage_gate.evaluate_coverage(
+            document(
+                {
+                    "sidecar/model.py": summary(97, 100, 97, 100),
+                    "sidecar/cli.py": summary(80, 100, 70, 100),
+                }
+            ),
+            baseline=baseline,
+        )
+        self.assertFalse(result.passed)
+        self.assertTrue(
+            any("core lines coverage" in failure for failure in result.failures)
+        )
+        self.assertTrue(
+            any("core branches coverage" in failure for failure in result.failures)
+        )
+
+    def test_baseline_loader_rejects_wrong_version_and_invalid_metric(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "baseline.json"
+            path.write_text(json.dumps({"version": "0.8.0"}), encoding="utf-8")
+            with self.assertRaises(coverage_gate.CoverageDataError):
+                coverage_gate.load_baseline(path)
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": "0.9.0",
+                        "core": {"lines": 101, "branches": 97},
+                        "relaxed": {"lines": 70, "branches": 70},
+                        "overall": {"lines": 80, "branches": 80},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(coverage_gate.CoverageDataError):
+                coverage_gate.load_baseline(path)
 
     def test_missing_and_invalid_json_return_data_error(self):
         with tempfile.TemporaryDirectory() as temporary:

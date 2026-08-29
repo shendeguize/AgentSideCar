@@ -433,6 +433,133 @@ class PlanTests(InjectionTestCase):
                 self.assertEqual(code, raised.exception.code)
 
 
+class FunctionalSendPreflightTests(InjectionTestCase):
+    def test_real_plan_rejects_mutated_paths_and_payload(self):
+        plan = self.plan()
+        invalid_cwd = dataclasses.replace(
+            plan,
+            cwd="relative/project",
+            target=dataclasses.replace(plan.target, project="relative/project"),
+        )
+        with self.assertRaises(SendError) as raised:
+            inject_module._preflight_plan(invalid_cwd, filesystem=False)
+        self.assertEqual("invalid_plan", raised.exception.code)
+
+        invalid_executable = "relative-executable"
+        executable_identity = (
+            invalid_executable,
+        ) + plan.target.executable_identity[1:]
+        invalid_executable_plan = dataclasses.replace(
+            plan,
+            executable=invalid_executable,
+            target=dataclasses.replace(
+                plan.target,
+                executable_identity=executable_identity,
+            ),
+        )
+        with self.assertRaises(SendError) as raised:
+            inject_module._preflight_plan(invalid_executable_plan, filesystem=False)
+        self.assertEqual("invalid_plan", raised.exception.code)
+
+        changed_payload = dataclasses.replace(plan, input_data=b"\xff")
+        with self.assertRaises(SendError) as raised:
+            inject_module._preflight_plan(changed_payload, filesystem=False)
+        self.assertEqual("invalid_plan", raised.exception.code)
+
+    def test_real_plan_rejects_non_kimi_runtime_and_re_resolved_paths(self):
+        plan = self.plan()
+        with self.assertRaises(SendError) as raised:
+            inject_module._preflight_plan(
+                dataclasses.replace(
+                    plan,
+                    target=dataclasses.replace(plan.target, kimi_runtime=object()),
+                ),
+                filesystem=False,
+            )
+        self.assertEqual("invalid_plan", raised.exception.code)
+
+        with mock.patch.object(
+            inject_module,
+            "_resolve_project",
+            return_value=str(self.root / "other"),
+        ):
+            with self.assertRaises(SendError) as raised:
+                inject_module._preflight_plan(plan)
+        self.assertEqual("invalid_plan", raised.exception.code)
+
+        with mock.patch.object(
+            inject_module,
+            "_resolve_executable",
+            return_value=str(self.root / "other-executable"),
+        ):
+            with self.assertRaises(SendError) as raised:
+                inject_module._preflight_plan(plan)
+        self.assertEqual("invalid_executable", raised.exception.code)
+
+    def test_real_plan_rejects_transport_and_target_contract_mutations(self):
+        plan = self.plan()
+        mutations = (
+            dataclasses.replace(plan, agent="unknown"),
+            dataclasses.replace(plan, target=object()),
+            dataclasses.replace(plan, prompt_transport="argv"),
+            dataclasses.replace(plan, transport="ndjson"),
+            dataclasses.replace(plan, input_data=None),
+        )
+        for mutated in mutations:
+            with self.subTest(mutated=mutated):
+                with self.assertRaises(SendError) as raised:
+                    inject_module._preflight_plan(mutated, filesystem=False)
+                self.assertEqual("invalid_plan", raised.exception.code)
+
+        nul_cwd = dataclasses.replace(
+            plan,
+            cwd="/tmp/\x00project",
+            target=dataclasses.replace(plan.target, project="/tmp/\x00project"),
+        )
+        with self.assertRaises(SendError) as raised:
+            inject_module._preflight_plan(nul_cwd, filesystem=False)
+        self.assertEqual("invalid_plan", raised.exception.code)
+
+        nul_executable = "/tmp/\x00executable"
+        nul_executable_plan = dataclasses.replace(
+            plan,
+            executable=nul_executable,
+            target=dataclasses.replace(
+                plan.target,
+                executable_identity=(nul_executable,)
+                + plan.target.executable_identity[1:],
+            ),
+        )
+        with self.assertRaises(SendError) as raised:
+            inject_module._preflight_plan(nul_executable_plan, filesystem=False)
+        self.assertEqual("invalid_plan", raised.exception.code)
+
+    def test_real_session_lock_validates_anchored_runtime_during_lifecycle(self):
+        runtime = self.root / "functional-lock-runtime"
+        with inject_module._session_lock(
+            "claude",
+            "functional-lock-session",
+            runtime,
+        ) as validate:
+            validate()
+
+    def test_real_session_lock_reports_busy_runtime_without_replacing_owner(self):
+        runtime = self.root / "functional-busy-runtime"
+        with inject_module._session_lock(
+            "claude",
+            "functional-busy-session",
+            runtime,
+        ):
+            with self.assertRaises(SendError) as raised:
+                with inject_module._session_lock(
+                    "claude",
+                    "functional-busy-session",
+                    runtime,
+                ):
+                    pass
+            self.assertEqual("session_busy", raised.exception.code)
+
+
 class ExecutionTests(InjectionTestCase):
     def completed(
         self,
@@ -4226,6 +4353,202 @@ class NativeOutputTests(InjectionTestCase):
                 lambda _name: str(self.executable),
             )
         self.assertEqual("session_unavailable", raised.exception.code)
+
+    def test_codex_and_kimi_completion_helpers_accept_terminal_contracts(self):
+        text, final = inject_module._codex_record_text(
+            {"last_agent_message": "already-final", "item": {}}
+        )
+        self.assertEqual(("", "already-final"), (text, final))
+        records = [
+            {
+                "type": "turn.prompt",
+                "agentId": "main",
+                "input": [{"type": "text", "text": "hello"}],
+            },
+            {"type": "turn.ended", "agentId": "worker", "turnId": 1},
+            {"type": "turn.started", "agentId": "main"},
+            {
+                "type": "turn.ended",
+                "agentId": "main",
+                "turnId": 2,
+                "reason": "completed",
+            },
+        ]
+        self.assertTrue(inject_module._kimi_durable_completed(records, "hello", 1))
+
+    def test_kimi_plan_close_is_safe_for_non_kimi_targets(self):
+        inject_module._close_kimi_plan(self.plan())
+
+    def test_audit_failure_recording_does_not_mask_the_original_failure(self):
+        namespace = mock.Mock()
+        namespace.append_terminal.side_effect = RuntimeError("audit unavailable")
+        inject_module._append_audit_failure_terminal(
+            namespace,
+            "functional-request",
+            mock.Mock(),
+            "protocol_error",
+        )
+        namespace.append_terminal.assert_called_once()
+
+    def test_native_send_rejects_kimi_without_a_bound_executable(self):
+        plan = dataclasses.replace(self.plan(), transport="kimi_acp")
+        with self.assertRaises(SendError) as raised:
+            inject_module._run_native_send(
+                plan,
+                "message",
+                bound_kimi_executable=None,
+                bounded_timeout=1.0,
+                refresher=lambda: (),
+                executable_resolver=lambda _path: None,
+                runtime_dir=self.runtime,
+                runtime_namespace=mock.Mock(),
+                runner=mock.Mock(),
+                monotonic=time.monotonic,
+                request_id="functional-request",
+                version_runner=mock.Mock(),
+                kimi_runner=mock.Mock(),
+                process_guard=mock.Mock(),
+            )
+        self.assertEqual("unsupported_kimi", raised.exception.code)
+
+    def test_kimi_suffix_reader_rejects_generation_and_prefix_mutations(self):
+        evidence = mock.Mock()
+        boundary = mock.Mock(wire_offset=3)
+        evidence.root_wire_generation.size = 2
+        with self.assertRaises(SendError):
+            inject_module._kimi_suffix_records(evidence, boundary)
+
+        evidence.root_wire_generation.size = 6
+        evidence._anchors.descriptor.return_value = 9
+        boundary.evidence = evidence
+        with mock.patch.object(
+            inject_module.os,
+            "pread",
+            side_effect=[b"bad", b"xyz"],
+        ), mock.patch.object(inject_module, "_read_kimi_file", return_value=b"abc"):
+            with self.assertRaises(SendError):
+                inject_module._kimi_suffix_records(evidence, boundary)
+
+        with mock.patch.object(
+            inject_module.os,
+            "pread",
+            side_effect=[b"abc", b""],
+        ), mock.patch.object(inject_module, "_read_kimi_file", return_value=b"abc"):
+            with self.assertRaises(SendError):
+                inject_module._kimi_suffix_records(evidence, boundary)
+
+    def test_kimi_version_and_runtime_snapshot_guards_fail_closed(self):
+        identity = ("x", 1, 2, 3, 4, 5, 6, "digest")
+        with mock.patch.object(
+            inject_module,
+            "_executable_identity",
+            return_value=identity,
+        ):
+            with self.assertRaises(SendError):
+                inject_module._probe_kimi_version(
+                    "kimi",
+                    identity,
+                    mock.Mock(side_effect=RuntimeError("runner failed")),
+                )
+
+        before = mock.Mock(
+            st_mode=inject_module.stat.S_IFDIR,
+            st_uid=os.geteuid(),
+            st_size=0,
+        )
+        with mock.patch.object(inject_module.os, "open", return_value=41), mock.patch.object(
+            inject_module.os,
+            "fstat",
+            return_value=before,
+        ), mock.patch.object(inject_module.os, "close"):
+            with self.assertRaises(SendError):
+                inject_module._snapshot_runtime_asset_for_analysis(
+                    "/tmp/kimi",
+                    self.runtime / "snapshot",
+                    "snapshot",
+                )
+
+        regular = mock.Mock(
+            st_mode=inject_module.stat.S_IFREG | 0o600,
+            st_uid=os.geteuid(),
+            st_size=0,
+        )
+        with mock.patch.object(
+            inject_module,
+            "KIMI_RUNTIME_FILE_BYTES",
+            1,
+        ), mock.patch.object(
+            inject_module.os,
+            "open",
+            side_effect=[41, 42],
+        ), mock.patch.object(
+            inject_module.os,
+            "fstat",
+            return_value=regular,
+        ), mock.patch.object(
+            inject_module.os,
+            "read",
+            return_value=b"xx",
+        ), mock.patch.object(inject_module.os, "close"):
+            with self.assertRaises(SendError):
+                inject_module._snapshot_runtime_asset_for_analysis(
+                    "/tmp/kimi",
+                    self.runtime / "snapshot-overflow",
+                    "snapshot",
+                )
+
+        safe_source = mock.Mock(
+            st_mode=inject_module.stat.S_IFREG | 0o600,
+            st_uid=os.geteuid(),
+            st_size=1,
+        )
+        unsafe_snapshot = mock.Mock(
+            st_mode=inject_module.stat.S_IFREG | 0o600,
+            st_uid=os.geteuid(),
+            st_size=1,
+        )
+        with mock.patch.object(
+            inject_module.os,
+            "open",
+            side_effect=[41, 42],
+        ), mock.patch.object(
+            inject_module.os,
+            "fstat",
+            side_effect=[safe_source, unsafe_snapshot],
+        ), mock.patch.object(
+            inject_module.os,
+            "read",
+            side_effect=[b"x", b""],
+        ), mock.patch.object(
+            inject_module,
+            "_write_all",
+        ), mock.patch.object(inject_module.os, "fsync"), mock.patch.object(
+            inject_module.os,
+            "fchmod",
+        ), mock.patch.object(inject_module.os, "close"):
+            with self.assertRaises(SendError):
+                inject_module._snapshot_runtime_asset_for_analysis(
+                    "/tmp/kimi",
+                    self.runtime / "snapshot-mode",
+                    "snapshot",
+                )
+
+    def test_otool_dependency_probe_translates_unexpected_failures(self):
+        with mock.patch.object(
+            inject_module,
+            "run_bounded",
+            side_effect=RuntimeError("otool unavailable"),
+        ):
+            with self.assertRaises(SendError) as raised:
+                inject_module._otool_dependencies("/tmp/node")
+        self.assertEqual("unsupported_kimi", raised.exception.code)
+        with mock.patch.object(
+            inject_module,
+            "run_bounded",
+            side_effect=KeyboardInterrupt(),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                inject_module._otool_dependencies("/tmp/node")
 
 
 if __name__ == "__main__":
