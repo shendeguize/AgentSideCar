@@ -281,6 +281,36 @@ class PlanTests(InjectionTestCase):
         self.assertEqual(b"Codex prompt", plan.input_data)
         self.assertEqual("stdin", plan.prompt_transport)
 
+    def test_copilot_exact_argv_and_workspace(self):
+        calls = []
+        message = "Copilot prompt\nwith spaces"
+        plan = build_send_plan(
+            self.session(
+                "copilot",
+                extra={"workspace": str(self.transcript)},
+            ),
+            message,
+            executable_resolver=self.resolver(calls),
+        )
+
+        self.assertEqual(["copilot"], calls)
+        self.assertEqual(
+            (
+                plan.executable,
+                "--resume",
+                "session-123",
+                "--interactive",
+                message,
+                "--silent",
+                "--no-color",
+                "--no-auto-update",
+            ),
+            plan.argv,
+        )
+        self.assertIsNone(plan.input_data)
+        self.assertEqual("argv", plan.prompt_transport)
+        self.assertEqual(str(self.root), plan.cwd)
+
     def test_cursor_cli_exact_argv_and_argv_transport(self):
         calls = []
         message = "Cursor prompt\nwith spaces"
