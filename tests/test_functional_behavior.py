@@ -8,7 +8,13 @@ from unittest import mock
 from sidecar import cli
 from sidecar.cli import build_parser
 from sidecar.index import IncrementalIndex
-from sidecar.json_limits import JSONLimitError, JSONLimits, JSONSyntaxError, validate_json
+from sidecar.json_limits import (
+    JSONLimitError,
+    JSONLimits,
+    JSONSyntaxError,
+    parse_json,
+    validate_json,
+)
 from sidecar.model import Session
 from sidecar.remote import aggregate_remote
 from sidecar.send_audit import SendAuditStore, make_audit_identity
@@ -37,6 +43,9 @@ class FunctionalAuditBehaviorTests(unittest.TestCase):
         validate_json(7, JSONLimits())
         validate_json(1.25, JSONLimits())
         validate_json("functional", JSONLimits())
+        self.assertEqual(7, parse_json("7", JSONLimits()))
+        self.assertEqual(1.25, parse_json("1.25", JSONLimits()))
+        self.assertEqual("functional", parse_json('"functional"', JSONLimits()))
         validate_json(
             {"integer": 7, "real": 1.25, "text": "functional"},
             JSONLimits(),

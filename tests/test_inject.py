@@ -1,4 +1,5 @@
 import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -558,6 +559,22 @@ class FunctionalSendPreflightTests(InjectionTestCase):
                 ):
                     pass
             self.assertEqual("session_busy", raised.exception.code)
+
+    def test_real_session_lock_translates_unexpected_flock_failure(self):
+        runtime = self.root / "functional-flock-runtime"
+        with mock.patch.object(
+            inject_module.fcntl,
+            "flock",
+            side_effect=OSError(errno.EIO, "I/O failure"),
+        ):
+            with self.assertRaises(SendError) as raised:
+                with inject_module._session_lock(
+                    "claude",
+                    "functional-flock-session",
+                    runtime,
+                ):
+                    pass
+        self.assertEqual("unsafe_lock", raised.exception.code)
 
 
 class ExecutionTests(InjectionTestCase):
