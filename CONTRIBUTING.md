@@ -138,8 +138,8 @@ Releases run on two independent tracks with independent version lines:
   builds `lib/` once, verifies tracked bundles, and publishes with npm
   Trusted Publishing (OIDC); it does not use a long-lived `NPM_TOKEN`.
   Configure npm's Trusted Publisher once for
-  `shendeguize/AgentSideCar`, workflow
-  `.github/workflows/plugin-release.yml`, with no environment name. A
+  `shendeguize/AgentSideCar`, workflow filename `plugin-release.yml` (not the
+  `.github/workflows/` path), with no environment name. A
   `plugin-v*` tag never advances the `release` branch and makes no claim
   about the Python product.
 

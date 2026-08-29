@@ -381,6 +381,16 @@ class GovernanceContractTests(unittest.TestCase):
         )
         self.assertNotIn("NPM_TOKEN", document)
 
+    def test_plugin_package_repository_matches_github_identity(self):
+        package = json.loads(
+            (ROOT / "plugin" / "package.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(
+            "git+https://github.com/shendeguize/AgentSideCar.git",
+            package["repository"]["url"],
+        )
+
     def test_release_guard_requires_head_to_equal_the_peeled_tag_commit(self):
         document = (ROOT / "scripts" / "release_guard.py").read_text(
             encoding="utf-8"
