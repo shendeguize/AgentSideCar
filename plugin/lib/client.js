@@ -6,8 +6,8 @@ window.__ModuleLoader__.load({
 		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-generation")] = {};
 		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")] = /* @__PURE__ */ new Map();
 		Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
-		let react = require("react");
 		let _deepseek_ai_dsh_client_ui_primitives = require("@deepseek-ai/dsh-client-ui-primitives");
+		let react = require("react");
 		let react_jsx_runtime = require("react/jsx-runtime");
 		//#region src/client/api.ts
 		/**
@@ -630,6 +630,7 @@ window.__ModuleLoader__.load({
 			"project.loading": "正在加载项目关联…",
 			"project.errorTitle": "项目关联加载失败",
 			"analysis.title": "AI 分析",
+			"analysis.back": "返回",
 			"analysis.close": "关闭",
 			"analysis.disabledNote": "AI 旁路分析未开启;请在设置中开启「启用 AI 旁路分析」。",
 			"analysis.idleHint": "按需拉起一次 dsh 旁路分析,解读该会话的当前状态与走向(消耗模型 token)。",
@@ -1062,6 +1063,7 @@ window.__ModuleLoader__.load({
 			"project.loading": "Loading project correlation…",
 			"project.errorTitle": "Project correlation failed to load",
 			"analysis.title": "AI analysis",
+			"analysis.back": "Back",
 			"analysis.close": "Close",
 			"analysis.disabledNote": "AI bypass analysis is off; enable \"AI bypass analysis\" in Settings first.",
 			"analysis.idleHint": "Spin up one dsh bypass-analysis pass over this session on demand (consumes model tokens).",
@@ -4145,7 +4147,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:src/client/analysis/analysis.module.css.mjs
-		const css$8 = ".WYj1Qa_panel{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg);min-width:0;color:var(--agsc-fg);flex-direction:column;gap:8px;padding:10px 12px;display:flex}.WYj1Qa_head{align-items:center;gap:8px;min-width:0;display:flex}.WYj1Qa_title{color:var(--agsc-fg);font-size:13px;font-weight:600}.WYj1Qa_spacer{flex:1}.WYj1Qa_startButton{align-self:flex-start}.WYj1Qa_mutedLine{color:var(--agsc-fg-secondary);font-size:12px;line-height:18px}.WYj1Qa_noteCard,.WYj1Qa_errorCard,.WYj1Qa_noticeBar{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);padding:8px 10px;font-size:12px;line-height:18px}.WYj1Qa_errorCard{border-color:var(--agsc-err);color:var(--agsc-err)}.WYj1Qa_noticeBar{border-color:var(--agsc-warn);color:var(--agsc-warn)}.WYj1Qa_exchange{flex-direction:column;gap:4px;display:flex}.WYj1Qa_exchangeLabel{color:var(--agsc-fg-secondary);font-size:11px;font-weight:600}.WYj1Qa_question{border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg);white-space:pre-wrap;word-break:break-word;padding:6px 10px;font-size:12px;line-height:18px}.WYj1Qa_summary{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);max-height:320px;color:var(--agsc-fg);white-space:pre-wrap;word-break:break-word;margin:0;padding:8px 10px;font-family:inherit;font-size:12px;line-height:18px;overflow:auto}.WYj1Qa_truncated{color:var(--agsc-warn);font-size:11px}.WYj1Qa_message{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);white-space:pre-wrap;word-break:break-word;flex-direction:column;gap:4px;max-width:92%;padding:8px 10px;font-size:12px;line-height:18px;display:flex}.WYj1Qa_userMessage{background:var(--agsc-bg-raised);align-self:flex-end}.WYj1Qa_assistantMessage{background:var(--agsc-bg);align-self:flex-start}.WYj1Qa_messageLabel{color:var(--agsc-fg-secondary);font-size:11px;font-weight:600}.WYj1Qa_messageBody{color:var(--agsc-fg)}.WYj1Qa_message[data-pending=true] .WYj1Qa_messageBody{color:var(--agsc-fg-secondary);font-style:italic}.WYj1Qa_disclaimer{border-top:1px solid var(--agsc-border-strong);color:var(--agsc-fg-secondary);padding-top:6px;font-size:11px;line-height:16px}.WYj1Qa_followupForm{gap:6px;display:flex}.WYj1Qa_followupInput{flex:1;min-width:0}";
+		const css$8 = ".WYj1Qa_panel{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg);min-width:0;min-height:0;color:var(--agsc-fg);flex-direction:column;flex:1;gap:8px;padding:10px 12px;display:flex;overflow:hidden}.WYj1Qa_view{min-width:0;height:100%;min-height:0;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;display:flex;overflow:hidden}.WYj1Qa_viewHead{border-bottom:1px solid var(--agsc-border-strong);flex:none;align-items:center;gap:10px;padding:12px 16px;display:flex}.WYj1Qa_viewTitle{color:var(--agsc-fg);font-size:15px;font-weight:650}.WYj1Qa_viewBody{flex:1;min-width:0;min-height:0;padding:12px 16px 16px;display:flex;overflow:hidden}.WYj1Qa_messages{flex-direction:column;flex:1;gap:8px;min-height:0;display:flex;overflow:auto}.WYj1Qa_head{align-items:center;gap:8px;min-width:0;display:flex}.WYj1Qa_title{color:var(--agsc-fg);font-size:13px;font-weight:600}.WYj1Qa_spacer{flex:1}.WYj1Qa_startButton{align-self:flex-start}.WYj1Qa_mutedLine{color:var(--agsc-fg-secondary);font-size:12px;line-height:18px}.WYj1Qa_noteCard,.WYj1Qa_errorCard,.WYj1Qa_noticeBar{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);padding:8px 10px;font-size:12px;line-height:18px}.WYj1Qa_errorCard{border-color:var(--agsc-err);color:var(--agsc-err)}.WYj1Qa_noticeBar{border-color:var(--agsc-warn);color:var(--agsc-warn)}.WYj1Qa_truncated{color:var(--agsc-warn);font-size:11px}.WYj1Qa_message{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);white-space:pre-wrap;word-break:break-word;flex-direction:column;gap:4px;max-width:92%;padding:8px 10px;font-size:12px;line-height:18px;display:flex}.WYj1Qa_userMessage{background:var(--agsc-bg-raised);align-self:flex-end}.WYj1Qa_assistantMessage{background:var(--agsc-bg);align-self:flex-start}.WYj1Qa_messageLabel{color:var(--agsc-fg-secondary);font-size:11px;font-weight:600}.WYj1Qa_messageBody{color:var(--agsc-fg)}.WYj1Qa_message[data-pending=true] .WYj1Qa_messageBody{color:var(--agsc-fg-secondary);font-style:italic}.WYj1Qa_disclaimer{border-top:1px solid var(--agsc-border-strong);color:var(--agsc-fg-secondary);padding-top:6px;font-size:11px;line-height:16px}.WYj1Qa_followupForm{gap:6px;display:flex}.WYj1Qa_followupInput{flex:1;min-width:0}";
 		const tagId$8 = "@shendeguize/dsh-agent-sidecar/src/client/analysis/analysis.module.css";
 		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$8, css$8);
 		if (typeof document !== "undefined") {
@@ -4166,25 +4168,26 @@ window.__ModuleLoader__.load({
 			"assistantMessage": "WYj1Qa_assistantMessage",
 			"disclaimer": "WYj1Qa_disclaimer",
 			"errorCard": "WYj1Qa_errorCard",
-			"exchange": "WYj1Qa_exchange",
-			"exchangeLabel": "WYj1Qa_exchangeLabel",
 			"followupForm": "WYj1Qa_followupForm",
 			"followupInput": "WYj1Qa_followupInput",
 			"head": "WYj1Qa_head",
 			"message": "WYj1Qa_message",
 			"messageBody": "WYj1Qa_messageBody",
 			"messageLabel": "WYj1Qa_messageLabel",
+			"messages": "WYj1Qa_messages",
 			"mutedLine": "WYj1Qa_mutedLine",
 			"noteCard": "WYj1Qa_noteCard",
 			"noticeBar": "WYj1Qa_noticeBar",
 			"panel": "WYj1Qa_panel",
-			"question": "WYj1Qa_question",
 			"spacer": "WYj1Qa_spacer",
 			"startButton": "WYj1Qa_startButton",
-			"summary": "WYj1Qa_summary",
 			"title": "WYj1Qa_title",
 			"truncated": "WYj1Qa_truncated",
-			"userMessage": "WYj1Qa_userMessage"
+			"userMessage": "WYj1Qa_userMessage",
+			"view": "WYj1Qa_view",
+			"viewBody": "WYj1Qa_viewBody",
+			"viewHead": "WYj1Qa_viewHead",
+			"viewTitle": "WYj1Qa_viewTitle"
 		};
 		//#endregion
 		//#region src/client/analysis/AnalysisPanel.tsx
@@ -4279,7 +4282,7 @@ window.__ModuleLoader__.load({
 								"data-testid": "agent-sidecar-analysis-stop",
 								children: t("analysis.stop")
 							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							props.onClose !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 								type: "button",
 								size: "sm",
 								variant: "ghost",
@@ -4288,48 +4291,54 @@ window.__ModuleLoader__.load({
 							})
 						]
 					}),
-					!enabled && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: analysis_module_css_default["noteCard"],
-						"data-testid": "agent-sidecar-analysis-disabled",
-						children: t("analysis.disabledNote")
-					}),
-					messagesFromState(state).map((message, index) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Message, {
-						message,
-						progressStep: state.progressStep
-					}, `${message.role}:${index}`)),
-					state.phase === "failed" && state.errorCode !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: analysis_module_css_default["errorCard"],
-						"data-testid": "agent-sidecar-analysis-error",
-						children: errorText(state.errorCode)
-					}),
-					state.phase === "stopped" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: analysis_module_css_default["noteCard"],
-						children: t("analysis.stopped")
-					}),
-					state.noticeCode !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: analysis_module_css_default["noticeBar"],
-						"data-testid": "agent-sidecar-analysis-notice",
-						children: noticeText(state.noticeCode)
-					}),
-					enabled && showStart && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [state.phase === "idle" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: analysis_module_css_default["mutedLine"],
-						children: t("analysis.idleHint")
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-						type: "button",
-						size: "sm",
-						variant: "primary",
-						className: analysis_module_css_default["startButton"],
-						onClick: props.onStart,
-						"data-testid": "agent-sidecar-analysis-start",
-						children: state.phase === "idle" ? t("analysis.start") : t("analysis.restart")
-					})] }),
-					state.phase === "requesting" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: analysis_module_css_default["mutedLine"],
-						children: t("analysis.requesting")
-					}),
-					state.phase === "answering" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: analysis_module_css_default["mutedLine"],
-						children: t("analysis.answering")
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: analysis_module_css_default["messages"],
+						"data-testid": "agent-sidecar-analysis-messages",
+						children: [
+							!enabled && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								className: analysis_module_css_default["noteCard"],
+								"data-testid": "agent-sidecar-analysis-disabled",
+								children: t("analysis.disabledNote")
+							}),
+							messagesFromState(state).map((message, index) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Message, {
+								message,
+								progressStep: state.progressStep
+							}, `${message.role}:${index}`)),
+							state.phase === "failed" && state.errorCode !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								className: analysis_module_css_default["errorCard"],
+								"data-testid": "agent-sidecar-analysis-error",
+								children: errorText(state.errorCode)
+							}),
+							state.phase === "stopped" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								className: analysis_module_css_default["noteCard"],
+								children: t("analysis.stopped")
+							}),
+							state.noticeCode !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								className: analysis_module_css_default["noticeBar"],
+								"data-testid": "agent-sidecar-analysis-notice",
+								children: noticeText(state.noticeCode)
+							}),
+							enabled && showStart && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [state.phase === "idle" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								className: analysis_module_css_default["mutedLine"],
+								children: t("analysis.idleHint")
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+								type: "button",
+								size: "sm",
+								variant: "primary",
+								className: analysis_module_css_default["startButton"],
+								onClick: props.onStart,
+								"data-testid": "agent-sidecar-analysis-start",
+								children: state.phase === "idle" ? t("analysis.start") : t("analysis.restart")
+							})] }),
+							state.phase === "requesting" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								className: analysis_module_css_default["mutedLine"],
+								children: t("analysis.requesting")
+							}),
+							state.phase === "answering" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								className: analysis_module_css_default["mutedLine"],
+								children: t("analysis.answering")
+							})
+						]
 					}),
 					conversationLive && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: analysis_module_css_default["followupForm"],
@@ -8713,10 +8722,8 @@ window.__ModuleLoader__.load({
 			const { controller, integration, sessionId } = props;
 			const [detailStore] = (0, react.useState)(() => integration.createDetailStore(sessionId, props.hint));
 			const [searchStore] = (0, react.useState)(() => integration.createSearchStore());
-			const [analysisStore] = (0, react.useState)(() => integration.createAnalysisStore());
 			const [injectOpen, setInjectOpen] = (0, react.useState)(false);
 			const [injectEligibility, setInjectEligibility] = (0, react.useState)(INVALID_INJECT_ELIGIBILITY);
-			const [analysisOpen, setAnalysisOpen] = (0, react.useState)(false);
 			const [toolsOpen, setToolsOpen] = (0, react.useState)(false);
 			const detailRootRef = (0, react.useRef)(null);
 			const focusFrameRef = (0, react.useRef)(null);
@@ -8733,13 +8740,11 @@ window.__ModuleLoader__.load({
 					eligibilityRefresher.dispose();
 					detailStore.dispose();
 					searchStore.dispose();
-					analysisStore.dispose();
 				};
 			}, [
 				controller,
 				detailStore,
 				searchStore,
-				analysisStore,
 				sessionId
 			]);
 			(0, react.useEffect)(() => {
@@ -8761,7 +8766,6 @@ window.__ModuleLoader__.load({
 			}, [sessionId]);
 			const detail = (0, react.useSyncExternalStore)(detailStore.subscribe, detailStore.getState, detailStore.getState);
 			const search = (0, react.useSyncExternalStore)(searchStore.subscribe, searchStore.getState, searchStore.getState);
-			const analysis = (0, react.useSyncExternalStore)(analysisStore.subscribe, analysisStore.getState, analysisStore.getState);
 			const view = (0, react.useSyncExternalStore)((cb) => controller.subscribe(cb), () => controller.getState(), () => controller.getState());
 			const analysisEnabled = integration.getAnalysisEnabled();
 			const analysisDisabledHint = analysisEnabled ? void 0 : t("detail.actions.analyzeDisabledHint");
@@ -8804,7 +8808,10 @@ window.__ModuleLoader__.load({
 								title: analysisDisabledHint,
 								"aria-describedby": analysisEnabled ? void 0 : ANALYSIS_DISABLED_REASON_ID,
 								onClick: () => {
-									setAnalysisOpen(true);
+									props.onAnalyze({
+										targetKind: "session",
+										targetId: sessionId
+									});
 								},
 								"data-testid": "agent-sidecar-detail-analyze",
 								children: t("detail.actions.analyze")
@@ -8892,25 +8899,6 @@ window.__ModuleLoader__.load({
 							},
 							onClose: props.onClose
 						})
-					}),
-					analysisOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(AnalysisPanel, {
-						enabled: analysisEnabled,
-						state: analysis,
-						onStart: () => {
-							analysisStore.start({
-								targetKind: "session",
-								targetId: sessionId
-							});
-						},
-						onFollowup: (question) => {
-							analysisStore.followup(question);
-						},
-						onStop: () => {
-							analysisStore.stop();
-						},
-						onClose: () => {
-							setAnalysisOpen(false);
-						}
 					}),
 					injectIntegration !== void 0 && injectActions !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Modal, {
 						open: injectOpen,
@@ -9678,6 +9666,42 @@ window.__ModuleLoader__.load({
 				onReturnFocusConsumed: props.onReturnFocusConsumed
 			});
 		}
+		/** Full-page analysis route; the store stays owned by BoardContent. */
+		function AnalysisMainView(props) {
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("main", {
+				className: analysis_module_css_default["view"],
+				"data-testid": "agent-sidecar-analysis-view",
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
+					className: analysis_module_css_default["viewHead"],
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+						type: "button",
+						size: "sm",
+						variant: "outline",
+						onClick: props.onBack,
+						"data-testid": "agent-sidecar-analysis-back",
+						children: t("analysis.back")
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						className: analysis_module_css_default["viewTitle"],
+						children: t("analysis.title")
+					})]
+				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					className: analysis_module_css_default["viewBody"],
+					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(AnalysisPanel, {
+						enabled: props.enabled,
+						state: props.state,
+						onStart: () => {
+							props.store.start(props.target);
+						},
+						onFollowup: (question) => {
+							props.store.followup(question);
+						},
+						onStop: () => {
+							props.store.stop();
+						}
+					})
+				})]
+			});
+		}
 		/**
 		* Cross-agent board content and its project/detail routes:
 		*
@@ -9700,6 +9724,7 @@ window.__ModuleLoader__.load({
 				const filters = (0, react.useSyncExternalStore)(subscribe, getFilters, getFilters);
 				const [mainView, setMainView] = (0, react.useState)("board");
 				const [detail, setDetail] = (0, react.useState)(null);
+				const [analysisRoute, setAnalysisRoute] = (0, react.useState)(null);
 				const [returnFocusRequest, setReturnFocusRequest] = (0, react.useState)(null);
 				const viewRootsRef = (0, react.useRef)({
 					board: null,
@@ -9712,9 +9737,7 @@ window.__ModuleLoader__.load({
 				const returnRequestRef = (0, react.useRef)(null);
 				const pendingFocusCancelRef = (0, react.useRef)(null);
 				const [projectsStore] = (0, react.useState)(() => integration?.createProjectsStore() ?? null);
-				const [boardAnalysisStore] = (0, react.useState)(() => integration?.detail.createAnalysisStore() ?? null);
-				const [analysisTarget, setAnalysisTarget] = (0, react.useState)(null);
-				const [analysisOpen, setAnalysisOpen] = (0, react.useState)(false);
+				const [boardAnalysisStore] = (0, react.useState)(() => integration?.createAnalysisStore() ?? null);
 				(0, react.useEffect)(() => () => {
 					projectsStore?.dispose();
 				}, [projectsStore]);
@@ -9724,8 +9747,20 @@ window.__ModuleLoader__.load({
 				const analysisState = (0, react.useSyncExternalStore)(boardAnalysisStore?.subscribe ?? (() => () => {}), boardAnalysisStore?.getState ?? (() => EMPTY_ANALYSIS_STATE), boardAnalysisStore?.getState ?? (() => EMPTY_ANALYSIS_STATE));
 				const openAnalysis = (target) => {
 					if (boardAnalysisStore === null) return;
-					setAnalysisTarget(target);
-					setAnalysisOpen(true);
+					setAnalysisRoute({
+						target,
+						source: {
+							view: mainView === "analysis" ? "board" : mainView,
+							detail
+						}
+					});
+					setMainView("analysis");
+				};
+				const closeAnalysis = () => {
+					if (analysisRoute === null) return;
+					setAnalysisRoute(null);
+					setMainView(analysisRoute.source.view);
+					setDetail(analysisRoute.source.detail);
 				};
 				const cancelPendingFocus = (0, react.useCallback)(() => {
 					pendingFocusCancelRef.current?.();
@@ -9787,14 +9822,14 @@ window.__ModuleLoader__.load({
 					if (next === mainView) return;
 					cancelPendingFocus();
 					clearReturnFocus();
-					saveVisibleScroll(mainView);
+					if (mainView !== "analysis") saveVisibleScroll(mainView);
 					setMainView(next);
 				};
 				(0, react.useEffect)(() => {
-					if (detail !== null || typeof window === "undefined") return;
+					if (detail !== null || analysisRoute !== null || typeof window === "undefined") return;
 					cancelPendingFocus();
 					const request = returnRequestRef.current;
-					const view = request?.view ?? mainView;
+					const view = request?.view ?? (mainView === "analysis" ? "board" : mainView);
 					pendingFocusCancelRef.current = scheduleAfterLayout(window, () => {
 						pendingFocusCancelRef.current = null;
 						if (request !== null && returnRequestRef.current !== request) return;
@@ -9806,6 +9841,7 @@ window.__ModuleLoader__.load({
 					});
 					return cancelPendingFocus;
 				}, [
+					analysisRoute,
 					cancelPendingFocus,
 					detail,
 					mainView
@@ -9814,92 +9850,81 @@ window.__ModuleLoader__.load({
 					returnRequestRef.current = null;
 					cancelPendingFocus();
 				}, [cancelPendingFocus]);
+				if (analysisRoute !== null && boardAnalysisStore !== null) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(AnalysisMainView, {
+					enabled: integration?.detail.getAnalysisEnabled() === true,
+					state: analysisState,
+					store: boardAnalysisStore,
+					target: analysisRoute.target,
+					onBack: closeAnalysis
+				});
 				if (integration !== void 0 && detail !== null) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SidecarDetailView, {
 					sessionId: detail.id,
 					hint: detail.hint,
 					controller,
 					integration: integration.detail,
+					onAnalyze: openAnalysis,
 					onClose: closeDetail,
 					onSelectSession: switchDetailSession
 				}, `${detail.returnRequest.focusTarget?.agent ?? "internal"}:${detail.id}`);
-				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: detail_view_module_css_default["switcherBar"],
-						"data-testid": "agent-sidecar-view-switcher",
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: detail_view_module_css_default["switcherButton"],
-							"data-active": mainView === "board" || void 0,
-							"aria-pressed": mainView === "board",
-							onClick: () => {
-								switchMainView("board");
-							},
-							children: t("board.viewBoard")
-						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-							type: "button",
-							className: detail_view_module_css_default["switcherButton"],
-							"data-active": mainView === "projects" || void 0,
-							"aria-pressed": mainView === "projects",
-							onClick: () => {
-								switchMainView("projects");
-							},
-							children: t("board.viewProjects")
-						})]
-					}),
-					mainView === "projects" && projectsStore !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectsContainer, {
-						controller,
-						store: projectsStore,
-						onSelectSession: (target) => {
-							openDetail(target, "projects");
+				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: detail_view_module_css_default["switcherBar"],
+					"data-testid": "agent-sidecar-view-switcher",
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						className: detail_view_module_css_default["switcherButton"],
+						"data-active": mainView === "board" || void 0,
+						"aria-pressed": mainView === "board",
+						onClick: () => {
+							switchMainView("board");
 						},
-						onAnalyzeProject: openAnalysis,
-						rootRef: setProjectsRoot,
-						onScrollTopChange: (scrollTop) => {
-							scrollTopsRef.current.projects = scrollTop;
+						children: t("board.viewBoard")
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						className: detail_view_module_css_default["switcherButton"],
+						"data-active": mainView === "projects" || void 0,
+						"aria-pressed": mainView === "projects",
+						onClick: () => {
+							switchMainView("projects");
 						},
-						returnFocusTarget: returnFocusRequest?.view === "projects" ? returnFocusRequest.focusTarget ?? FALLBACK_FOCUS_TARGET : null,
-						onReturnFocusConsumed: consumeReturnFocus
-					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Board, {
-						daemonState: state.daemonState,
-						...state.daemonDetail !== void 0 ? { daemonDetail: state.daemonDetail } : {},
-						streamHealth: state.streamHealth,
-						lastReconcileAtMs: state.lastReconcileAtMs,
-						hasSnapshot: state.hasSnapshot,
-						initialLoadFailed: state.initialLoadFailed,
-						sessions: state.sessions,
-						filters,
-						onFiltersChange: (next) => {
-							controller.setFilters(next);
-						},
-						onRefresh: () => controller.refresh(),
-						onSelectSession: (target) => {
-							openDetail(target, "board");
-						},
-						onAnalyze: openAnalysis,
-						rootRef: setBoardRoot,
-						onScrollTopChange: (scrollTop) => {
-							scrollTopsRef.current.board = scrollTop;
-						},
-						returnFocusTarget: returnFocusRequest?.view === "board" ? returnFocusRequest.focusTarget ?? FALLBACK_FOCUS_TARGET : null,
-						onReturnFocusConsumed: consumeReturnFocus
-					}),
-					analysisOpen && boardAnalysisStore !== null && analysisTarget !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(AnalysisPanel, {
-						enabled: integration?.detail.getAnalysisEnabled() === true,
-						state: analysisState,
-						onStart: () => {
-							boardAnalysisStore.start(analysisTarget);
-						},
-						onFollowup: (question) => {
-							boardAnalysisStore.followup(question);
-						},
-						onStop: () => {
-							boardAnalysisStore.stop();
-						},
-						onClose: () => {
-							setAnalysisOpen(false);
-						}
-					})
-				] });
+						children: t("board.viewProjects")
+					})]
+				}), mainView === "projects" && projectsStore !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProjectsContainer, {
+					controller,
+					store: projectsStore,
+					onSelectSession: (target) => {
+						openDetail(target, "projects");
+					},
+					onAnalyzeProject: openAnalysis,
+					rootRef: setProjectsRoot,
+					onScrollTopChange: (scrollTop) => {
+						scrollTopsRef.current.projects = scrollTop;
+					},
+					returnFocusTarget: returnFocusRequest?.view === "projects" ? returnFocusRequest.focusTarget ?? FALLBACK_FOCUS_TARGET : null,
+					onReturnFocusConsumed: consumeReturnFocus
+				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Board, {
+					daemonState: state.daemonState,
+					...state.daemonDetail !== void 0 ? { daemonDetail: state.daemonDetail } : {},
+					streamHealth: state.streamHealth,
+					lastReconcileAtMs: state.lastReconcileAtMs,
+					hasSnapshot: state.hasSnapshot,
+					initialLoadFailed: state.initialLoadFailed,
+					sessions: state.sessions,
+					filters,
+					onFiltersChange: (next) => {
+						controller.setFilters(next);
+					},
+					onRefresh: () => controller.refresh(),
+					onSelectSession: (target) => {
+						openDetail(target, "board");
+					},
+					onAnalyze: openAnalysis,
+					rootRef: setBoardRoot,
+					onScrollTopChange: (scrollTop) => {
+						scrollTopsRef.current.board = scrollTop;
+					},
+					returnFocusTarget: returnFocusRequest?.view === "board" ? returnFocusRequest.focusTarget ?? FALLBACK_FOCUS_TARGET : null,
+					onReturnFocusConsumed: consumeReturnFocus
+				})] });
 			};
 		}
 		/** Bind board content to its independent React root and locale subscription. */
@@ -11070,10 +11095,10 @@ window.__ModuleLoader__.load({
 				detail: {
 					...base,
 					createDetailStore: (sessionId, hint) => new DetailStore(sessionId, { hint }),
-					createSearchStore: () => new SearchStore(),
-					createAnalysisStore: () => new AnalysisStore()
+					createSearchStore: () => new SearchStore()
 				},
-				createProjectsStore: () => new ProjectsStore()
+				createProjectsStore: () => new ProjectsStore(),
+				createAnalysisStore: () => new AnalysisStore()
 			};
 		}
 		//#endregion

@@ -13,7 +13,7 @@ export interface AnalysisPanelProps {
   onStart: () => void
   onFollowup: (question: string) => void
   onStop: () => void
-  onClose: () => void
+  onClose?: () => void
 }
 
 /** Terminal failure code → locale key ('' falls back to the generic). */
@@ -112,59 +112,67 @@ export function AnalysisPanel(props: AnalysisPanelProps): ReactElement {
             {t('analysis.stop')}
           </Button>
         )}
-        <Button type="button" size="sm" variant="ghost" onClick={props.onClose}>
-          {t('analysis.close')}
-        </Button>
+        {props.onClose !== undefined && (
+          <Button type="button" size="sm" variant="ghost" onClick={props.onClose}>
+            {t('analysis.close')}
+          </Button>
+        )}
       </div>
 
-      {!enabled && (
-        <div className={css['noteCard']} data-testid="agent-sidecar-analysis-disabled">
-          {t('analysis.disabledNote')}
-        </div>
-      )}
+      <div className={css['messages']} data-testid="agent-sidecar-analysis-messages">
+        {!enabled && (
+          <div className={css['noteCard']} data-testid="agent-sidecar-analysis-disabled">
+            {t('analysis.disabledNote')}
+          </div>
+        )}
 
-      {messagesFromState(state).map((message, index) => (
-        <Message key={`${message.role}:${index}`} message={message} progressStep={state.progressStep} />
-      ))}
+        {messagesFromState(state).map((message, index) => (
+          <Message
+            key={`${message.role}:${index}`}
+            message={message}
+            progressStep={state.progressStep}
+          />
+        ))}
 
-      {state.phase === 'failed' && state.errorCode !== null && (
-        <div className={css['errorCard']} data-testid="agent-sidecar-analysis-error">
-          {errorText(state.errorCode)}
-        </div>
-      )}
-      {state.phase === 'stopped' && (
-        <div className={css['noteCard']}>{t('analysis.stopped')}</div>
-      )}
-      {state.noticeCode !== null && (
-        <div className={css['noticeBar']} data-testid="agent-sidecar-analysis-notice">
-          {noticeText(state.noticeCode)}
-        </div>
-      )}
+        {state.phase === 'failed' && state.errorCode !== null && (
+          <div className={css['errorCard']} data-testid="agent-sidecar-analysis-error">
+            {errorText(state.errorCode)}
+          </div>
+        )}
+        {state.phase === 'stopped' && (
+          <div className={css['noteCard']}>{t('analysis.stopped')}</div>
+        )}
+        {state.noticeCode !== null && (
+          <div className={css['noticeBar']} data-testid="agent-sidecar-analysis-notice">
+            {noticeText(state.noticeCode)}
+          </div>
+        )}
 
-      {enabled && showStart && (
-        <>
-          {state.phase === 'idle' && (
-            <div className={css['mutedLine']}>{t('analysis.idleHint')}</div>
-          )}
-          <Button
-            type="button"
-            size="sm"
-            variant="primary"
-            className={css['startButton']}
-            onClick={props.onStart}
-            data-testid="agent-sidecar-analysis-start"
-          >
-            {state.phase === 'idle' ? t('analysis.start') : t('analysis.restart')}
-          </Button>
-        </>
-      )}
+        {enabled && showStart && (
+          <>
+            {state.phase === 'idle' && (
+              <div className={css['mutedLine']}>{t('analysis.idleHint')}</div>
+            )}
+            <Button
+              type="button"
+              size="sm"
+              variant="primary"
+              className={css['startButton']}
+              onClick={props.onStart}
+              data-testid="agent-sidecar-analysis-start"
+            >
+              {state.phase === 'idle' ? t('analysis.start') : t('analysis.restart')}
+            </Button>
+          </>
+        )}
 
-      {state.phase === 'requesting' && (
-        <div className={css['mutedLine']}>{t('analysis.requesting')}</div>
-      )}
-      {state.phase === 'answering' && (
-        <div className={css['mutedLine']}>{t('analysis.answering')}</div>
-      )}
+        {state.phase === 'requesting' && (
+          <div className={css['mutedLine']}>{t('analysis.requesting')}</div>
+        )}
+        {state.phase === 'answering' && (
+          <div className={css['mutedLine']}>{t('analysis.answering')}</div>
+        )}
+      </div>
 
       {conversationLive && (
         <div className={css['followupForm']}>

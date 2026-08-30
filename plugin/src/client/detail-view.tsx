@@ -16,9 +16,9 @@ import type { ReactElement, ReactNode } from 'react'
 import { SessionDetail } from './detail/SessionDetail.tsx'
 import { LineageTree } from './dsh-tools/LineageTree.tsx'
 import { SearchPanel } from './dsh-tools/SearchPanel.tsx'
-import { AnalysisPanel } from './analysis/AnalysisPanel.tsx'
 import { InjectPanel, injectErrorCopy } from './inject/InjectPanel.tsx'
 import { findCardHint, type DetailHeaderHint } from './detail-glue.ts'
+import type { AnalysisTarget } from './analysis-glue.ts'
 import type { SidecarController } from './controller.ts'
 import {
   fetchSession,
@@ -36,7 +36,6 @@ import type {
 import { isDeliveredResult } from './inject/logic.ts'
 import type { InjectActions } from './inject-glue.ts'
 import type {
-  AnalysisStorePort,
   DetailStorePort,
   DetailUiPort,
   SearchStorePort,
@@ -171,6 +170,8 @@ export interface SidecarDetailViewProps {
   controller: SidecarController
   integration: DetailUiPort
   onClose: () => void
+  /** Open the tab-scoped full-page analysis route for this session. */
+  onAnalyze: (target: AnalysisTarget) => void
   /** Provenance/search jump: navigate the detail view to another session. */
   onSelectSession: (sessionId: string) => void
 }
@@ -257,11 +258,9 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
     () => integration.createDetailStore(sessionId, props.hint),
   )
   const [searchStore] = useState<SearchStorePort>(() => integration.createSearchStore())
-  const [analysisStore] = useState<AnalysisStorePort>(() => integration.createAnalysisStore())
   const [injectOpen, setInjectOpen] = useState(false)
   const [injectEligibility, setInjectEligibility] =
     useState<InjectEligibility>(INVALID_INJECT_ELIGIBILITY)
-  const [analysisOpen, setAnalysisOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const detailRootRef = useRef<HTMLDivElement | null>(null)
   const focusFrameRef = useRef<number | null>(null)
@@ -285,9 +284,8 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
       eligibilityRefresher.dispose()
       detailStore.dispose()
       searchStore.dispose()
-      analysisStore.dispose()
     }
-  }, [controller, detailStore, searchStore, analysisStore, sessionId])
+  }, [controller, detailStore, searchStore, sessionId])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -316,8 +314,6 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
     detailStore.subscribe, detailStore.getState, detailStore.getState)
   const search = useSyncExternalStore(
     searchStore.subscribe, searchStore.getState, searchStore.getState)
-  const analysis = useSyncExternalStore(
-    analysisStore.subscribe, analysisStore.getState, analysisStore.getState)
   const view = useSyncExternalStore(
     (cb) => controller.subscribe(cb),
     () => controller.getState(),
@@ -370,7 +366,9 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
           disabled={!analysisEnabled}
           title={analysisDisabledHint}
           aria-describedby={analysisEnabled ? undefined : ANALYSIS_DISABLED_REASON_ID}
-          onClick={() => { setAnalysisOpen(true) }}
+          onClick={() => {
+            props.onAnalyze({ targetKind: 'session', targetId: sessionId })
+          }}
           data-testid="agent-sidecar-detail-analyze"
         >
           {t('detail.actions.analyze')}
@@ -453,19 +451,6 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
           onClose={props.onClose}
         />
       </TimelineAvailabilityBoundary>
-
-      {analysisOpen && (
-        <AnalysisPanel
-          enabled={analysisEnabled}
-          state={analysis}
-          onStart={() => {
-            void analysisStore.start({ targetKind: 'session', targetId: sessionId })
-          }}
-          onFollowup={(question) => { void analysisStore.followup(question) }}
-          onStop={() => { void analysisStore.stop() }}
-          onClose={() => { setAnalysisOpen(false) }}
-        />
-      )}
 
       {injectIntegration !== undefined && injectActions !== undefined && (
         <Modal
