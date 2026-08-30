@@ -280,6 +280,9 @@ class SystemdTests(unittest.TestCase):
             systemd._safe_path(Path("bad\0path"), name="test")
         with self.assertRaises(systemd.SystemdSecurityError):
             systemd._safe_path(Path("\ud800"), name="test")
+        with mock.patch.object(Path, "resolve", side_effect=RuntimeError("resolve failed")):
+            with self.assertRaises(systemd.SystemdSecurityError):
+                systemd._safe_path(self.home, name="test")
         with self.assertRaises(systemd.SystemdSecurityError):
             systemd._quote("")
         with self.assertRaises(systemd.SystemdSecurityError):
@@ -319,6 +322,18 @@ class SystemdTests(unittest.TestCase):
             )
         with self.assertRaises(systemd.SystemdControlError):
             systemd.service_paths(euid=True, home=self.home)
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._validate_directory(self.home / "missing", os.geteuid(), name="test")
+        regular_file = self.home / "regular-file"
+        regular_file.write_text("file\n", encoding="utf-8")
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._validate_directory(regular_file, os.geteuid(), name="test")
+        missing_paths = systemd.service_paths(
+            euid=os.geteuid(),
+            home=self.home,
+            config_home=self.home / "uncreated-config",
+        )
+        self.assertFalse(systemd._prepare_paths(missing_paths, os.geteuid(), create=False))
 
     def test_unit_and_control_helpers_fail_closed(self):
         with self.assertRaises(systemd.SystemdControlError):
@@ -365,6 +380,13 @@ class SystemdTests(unittest.TestCase):
             with self.assertRaises(systemd.SystemdSecurityError):
                 systemd._read_unit(self.unit, os.geteuid())
         with mock.patch.object(Path, "read_bytes", side_effect=OSError("read failed")):
+            with self.assertRaises(systemd.SystemdSecurityError):
+                systemd._read_unit(self.unit, os.geteuid())
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            return_value=b"short",
+        ):
             with self.assertRaises(systemd.SystemdSecurityError):
                 systemd._read_unit(self.unit, os.geteuid())
 
@@ -496,6 +518,18 @@ class SystemdTests(unittest.TestCase):
                 sleep=lambda _value: None,
             )
         )
+        with self.assertRaises(systemd.SystemdOperationError):
+            systemd._wait_ready(
+                FakeClient(
+                    FakeSystemctl(loaded=True, active=True, pid=100),
+                    pid=101,
+                ),
+                runner=FakeSystemctl(loaded=True, active=True, pid=100),
+                systemctl=self.systemctl,
+                timeout=0,
+                monotonic=lambda: 0.0,
+                sleep=lambda _value: None,
+            )
 
     def test_operation_lock_and_service_error_paths_are_bounded(self):
         with systemd._operation_lock(self.home / "lock", os.geteuid()):
@@ -503,6 +537,14 @@ class SystemdTests(unittest.TestCase):
         with mock.patch.object(systemd, "fcntl", None):
             with self.assertRaises(systemd.SystemdControlError):
                 with systemd._operation_lock(self.home / "lock", os.geteuid()):
+                    pass
+        with mock.patch.object(
+            systemd.fcntl,
+            "flock",
+            side_effect=BlockingIOError(),
+        ):
+            with self.assertRaises(systemd.SystemdControlError):
+                with systemd._operation_lock(self.home / "busy-lock", os.geteuid()):
                     pass
 
         runner = FakeSystemctl()
