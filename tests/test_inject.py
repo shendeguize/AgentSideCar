@@ -2600,6 +2600,38 @@ class KimiSendIntegrationTests(unittest.TestCase):
         self.assertEqual((), dylibs)
         self.assertEqual((), system_libraries)
 
+    def test_kimi_macho_closure_captures_loader_dependency(self):
+        node = self.root / "node"
+        dependency = self.root / "runtime.dylib"
+        node.write_bytes(b"node")
+        node.chmod(0o500)
+        dependency.write_bytes(b"dylib")
+        dependency.chmod(0o500)
+        node_asset = inject_module._runtime_asset(str(node), "bin/node")
+        dependency_asset = inject_module._runtime_asset(
+            str(dependency),
+            "lib/runtime.dylib",
+        )
+
+        def snapshot(source, _destination, _relative_path):
+            return node_asset if source == str(node) else dependency_asset
+
+        with mock.patch.object(inject_module.sys, "platform", "darwin"), mock.patch.object(
+            inject_module,
+            "_snapshot_runtime_asset_for_analysis",
+            side_effect=snapshot,
+        ), mock.patch.object(
+            inject_module,
+            "_otool_dependencies",
+            side_effect=(("@loader_path/runtime.dylib",), ()),
+        ):
+            captured_node, dylibs, system_libraries = (
+                inject_module._capture_macho_closure(str(node))
+            )
+        self.assertEqual(node_asset, captured_node)
+        self.assertEqual((dependency_asset,), dylibs)
+        self.assertEqual((), system_libraries)
+
     def test_kimi_private_node_snapshot_versions_and_initializes_acp(self):
         candidates = (shutil.which("node"), "/usr/bin/node", "/usr/local/bin/node")
         seen = set()
