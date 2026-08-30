@@ -870,7 +870,7 @@ export function apply(ctx: HostContext, config: Config): void {
       // The deployment persona's `{{cwd}}` variable reads session.header.cwd,
       // which only meta.cwd populates — same as dsh-headless's own create
       // call (A-1: without it prompt assembly errors and the summary is '').
-      meta: { cwd: process.cwd() },
+      meta: { cwd: process.cwd(), agentSidecarAnalysis: true },
     })
     const tracked: AnalysisSession = {
       agent: handle.agent,

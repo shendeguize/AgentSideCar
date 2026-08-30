@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import {
   SIDEBAR_ENTRY_SELECTOR,
@@ -12,6 +13,14 @@ import {
 import { PLUGIN_DOM_ID } from '../src/client/theme/parts.ts'
 
 const ENTRY_DISPATCHER = Symbol.for('@shendeguize/dsh-agent-sidecar/sidebar-entry-dispatcher')
+const SIDEBAR_SOURCE = readFileSync(
+  new URL('../src/client/navigation/sidebar-entry.ts', import.meta.url),
+  'utf8',
+)
+const SIDEBAR_CSS = readFileSync(
+  new URL('../src/client/navigation/sidebar-entry.module.css', import.meta.url),
+  'utf8',
+)
 
 class FakeButton {
   readonly tagName = 'BUTTON'
@@ -102,6 +111,17 @@ function stubSidebarDocument(initial: FakeButton): {
 }
 
 describe('sidebar entry', () => {
+  it('uses a 16px line-network icon and host-independent narrow centering', () => {
+    expect(SIDEBAR_SOURCE).toContain("viewBox: '0 0 16 16'")
+    expect(SIDEBAR_SOURCE).toContain("'stroke-width': '1.4'")
+    expect(SIDEBAR_SOURCE).toContain("M1.5 8h13")
+    expect(SIDEBAR_SOURCE).toContain("M4 8V4.5h8V8M6 8v3.5h6")
+    expect(SIDEBAR_SOURCE.match(/createElementNS\(SVG_NS, 'circle'\)/g)).toHaveLength(3)
+    expect(SIDEBAR_CSS).toContain('[class*=\'sidebarNarrow\']')
+    expect(SIDEBAR_CSS).toContain('@media (max-width: 640px)')
+    expect(SIDEBAR_CSS).toContain('justify-content: center')
+  })
+
   it('uses one plugin-specific DOM idempotency key', () => {
     expect(SIDEBAR_ENTRY_SELECTOR).toBe('[data-agent-sidecar-sidebar-entry]')
     expect(hasSidebarEntry({

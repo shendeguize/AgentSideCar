@@ -176,6 +176,26 @@
   color: var(--agsc-warn);
 }
 
+.idleSummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 4px 8px;
+  border: 1px solid var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-control);
+  background: var(--agsc-bg-raised);
+  color: var(--agsc-fg-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.idleSummary:hover {
+  color: var(--agsc-fg);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
 .showMore {
   align-self: flex-start;
 }

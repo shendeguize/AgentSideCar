@@ -149,7 +149,11 @@ export interface AnalysisCreateOptions {
    * only `meta.cwd` populates (same reason dsh-headless passes
    * `meta: { cwd: process.cwd() }` on its own create call).
    */
-  readonly meta?: { readonly cwd?: string }
+  readonly meta?: {
+    readonly cwd?: string
+    /** Explicit marker for board/fusion filters; analysis is not user work. */
+    readonly agentSidecarAnalysis?: true
+  }
 }
 
 /** Minimal `ctx.agents` face: the one factory entry point this engine uses. */
@@ -232,6 +236,8 @@ export const DEFAULT_ANALYSIS_TIMEOUT_MS = 60_000
 export const DEFAULT_MAX_ACTIVE_ANALYSES = 4
 /** `source.plugin` attribution and analysis session id prefix. */
 export const DEFAULT_PLUGIN_NAME = 'agent-sidecar'
+/** Prefix marker used to keep dedicated analysis sessions off the board. */
+export const ANALYSIS_SESSION_PREFIX = 'agent-sidecar-analysis-'
 
 /** Title chars kept in prompts and logs (titles are untrusted input too). */
 const MAX_TITLE_CHARS = 200
@@ -702,7 +708,7 @@ export class AnalysisEngine {
   }
 
   private mintSessionId(): string {
-    return `${this.pluginName}-analysis-${this.now().toString(36)}-${++this.mintCounter}`
+    return `${ANALYSIS_SESSION_PREFIX}${this.now().toString(36)}-${++this.mintCounter}`
   }
 
   private failResult(

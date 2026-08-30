@@ -5,6 +5,8 @@ import z from "@deepseek-ai/schemastery";
 import { createConnection } from "node:net";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { performance } from "node:perf_hooks";
+/** Prefix marker used to keep dedicated analysis sessions off the board. */
+const ANALYSIS_SESSION_PREFIX$2 = "agent-sidecar-analysis-";
 /** Title chars kept in prompts and logs (titles are untrusted input too). */
 const MAX_TITLE_CHARS = 200;
 /** Appended to the input text when it was cut at `maxInputChars`. */
@@ -366,7 +368,7 @@ var AnalysisEngine = class {
 		}
 	}
 	mintSessionId() {
-		return `${this.pluginName}-analysis-${this.now().toString(36)}-${++this.mintCounter}`;
+		return `${ANALYSIS_SESSION_PREFIX$2}${this.now().toString(36)}-${++this.mintCounter}`;
 	}
 	failResult(phase, ident, errorCode, opts) {
 		const result = {
@@ -2036,6 +2038,11 @@ function createDshInjectExecutor(deps) {
 }
 const DSH_AGENT = "dsh";
 const KEY_SEP = "\0";
+const ANALYSIS_SESSION_PREFIX$1 = "agent-sidecar-analysis-";
+/** Analysis sessions are private tool sessions and cannot become board data. */
+function isAnalysisSession$1(sessionId, extra) {
+	return sessionId.startsWith(ANALYSIS_SESSION_PREFIX$1) || extra?.["agentSidecarAnalysis"] === true;
+}
 function integerOrNull(value) {
 	return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
@@ -2297,6 +2304,7 @@ var FusionQuery = class {
 		const out = /* @__PURE__ */ new Map();
 		const mergedIds = /* @__PURE__ */ new Set();
 		for (const row of board.sessions) {
+			if (isAnalysisSession$1(row.session_id, row.extra)) continue;
 			const liveEntry = row.agent === DSH_AGENT ? this.live.get(row.session_id) : void 0;
 			if (liveEntry !== void 0) {
 				mergedIds.add(row.session_id);
@@ -2304,6 +2312,7 @@ var FusionQuery = class {
 			} else out.set(`${row.agent}${KEY_SEP}${row.session_id}`, fromSidecarRow(row));
 		}
 		for (const [id, entry] of this.live) {
+			if (isAnalysisSession$1(id)) continue;
 			if (mergedIds.has(id)) continue;
 			out.set(`${DSH_AGENT}${KEY_SEP}${id}`, fromDshLive(entry));
 		}
@@ -4262,6 +4271,7 @@ function createSendCliExecutor(deps) {
 /** Bound for the last-event text summary kept per session. */
 const EVENT_TEXT_LIMIT = 160;
 const INVALID_PROPERTY = Symbol("invalid-property");
+const ANALYSIS_SESSION_PREFIX = "agent-sidecar-analysis-";
 function ownValue(record, key) {
 	try {
 		const descriptor = Object.getOwnPropertyDescriptor(record, key);
@@ -4269,6 +4279,11 @@ function ownValue(record, key) {
 	} catch {
 		return INVALID_PROPERTY;
 	}
+}
+/** Dedicated analysis agents are internal tooling, never board sessions. */
+function isAnalysisSession(sessionId, extra) {
+	if (sessionId.startsWith(ANALYSIS_SESSION_PREFIX)) return true;
+	return typeof extra === "object" && extra !== null && extra["agentSidecarAnalysis"] === true;
 }
 /**
 * Copy only accessor-free board fields. Runtime callers are not allowed to
@@ -4326,6 +4341,8 @@ var SessionStore = class {
 		for (const row of rows) {
 			const projection = snapshotProjection(row);
 			if (projection === null) continue;
+			const rawExtra = ownValue(row, "extra");
+			if (isAnalysisSession(projection.session_id, rawExtra === INVALID_PROPERTY ? null : rawExtra)) continue;
 			const injectEligibility = deriveInjectEligibility(row);
 			next.set(sessionKey(projection.agent, projection.session_id), {
 				...projection,
@@ -5378,7 +5395,10 @@ function apply(ctx, config) {
 				provider: selection.provider,
 				model: selection.model
 			},
-			meta: { cwd: process.cwd() }
+			meta: {
+				cwd: process.cwd(),
+				agentSidecarAnalysis: true
+			}
 		});
 		const tracked = {
 			agent: handle.agent,

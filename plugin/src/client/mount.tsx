@@ -21,6 +21,7 @@ import type { ReactElement } from 'react'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { Board, type SessionFocusTarget } from './board/Board.tsx'
 import { ProjectView } from './board/project-view.tsx'
+import { AnalysisPanel } from './analysis/AnalysisPanel.tsx'
 import { SidecarWidget } from './widget.tsx'
 import { SettingsCard, type SettingsCardValues, type SidecarDaemonStatus } from './settings-card.tsx'
 import { countWorking, deriveWidgetConnection } from './board/logic.ts'
@@ -29,7 +30,8 @@ import type { SidecarController, SidecarViewState } from './controller.ts'
 import { SidecarDetailView } from './detail-view.tsx'
 import { findCardHint, type DetailHeaderHint } from './detail-glue.ts'
 import { findProjectSessionHint } from './project-glue.ts'
-import type { BoardUiPort, ProjectsStorePort } from './ui-integration.ts'
+import type { AnalysisStorePort, BoardUiPort, ProjectsStorePort } from './ui-integration.ts'
+import type { AnalysisGlueState, AnalysisTarget } from './analysis-glue.ts'
 import { detailErrorText } from './detail/logic.ts'
 import { t } from './locales/index.ts'
 import { useActiveLocale } from './locales/react.ts'
@@ -46,6 +48,17 @@ import {
 
 /** Board-tab main views (detail is an overlay route on top of either). */
 type MainView = 'board' | 'projects'
+
+const EMPTY_ANALYSIS_STATE: AnalysisGlueState = {
+  phase: 'idle',
+  analysisSessionId: null,
+  exchanges: [],
+  messages: [],
+  disclaimer: null,
+  errorCode: null,
+  noticeCode: null,
+  progressStep: 0,
+}
 
 type DetailRoute = {
   id: string
@@ -115,6 +128,7 @@ function ProjectsContainer(props: {
   controller: SidecarController
   store: ProjectsStorePort
   onSelectSession: (target: SessionFocusTarget) => void
+  onAnalyzeProject?: (target: AnalysisTarget) => void
   rootRef: (element: HTMLDivElement | null) => void
   onScrollTopChange: (scrollTop: number) => void
   returnFocusTarget: SessionFocusTarget | null
@@ -132,6 +146,7 @@ function ProjectsContainer(props: {
       loading={state.loading}
       error={state.error === null ? null : detailErrorText(state.error)}
       onSelectSession={props.onSelectSession}
+      onAnalyzeProject={props.onAnalyzeProject}
       rootRef={props.rootRef}
       onScrollTopChange={props.onScrollTopChange}
       returnFocusTarget={props.returnFocusTarget}
@@ -181,7 +196,23 @@ function createBoardContent(
     const [projectsStore] = useState<ProjectsStorePort | null>(
       () => integration?.createProjectsStore() ?? null,
     )
+    const [boardAnalysisStore] = useState<AnalysisStorePort | null>(
+      () => integration?.detail.createAnalysisStore() ?? null,
+    )
+    const [analysisTarget, setAnalysisTarget] = useState<AnalysisTarget | null>(null)
+    const [analysisOpen, setAnalysisOpen] = useState(false)
     useEffect(() => () => { projectsStore?.dispose() }, [projectsStore])
+    useEffect(() => () => { boardAnalysisStore?.dispose() }, [boardAnalysisStore])
+    const analysisState = useSyncExternalStore(
+      boardAnalysisStore?.subscribe ?? (() => () => {}),
+      boardAnalysisStore?.getState ?? (() => EMPTY_ANALYSIS_STATE),
+      boardAnalysisStore?.getState ?? (() => EMPTY_ANALYSIS_STATE),
+    )
+    const openAnalysis = (target: AnalysisTarget): void => {
+      if (boardAnalysisStore === null) return
+      setAnalysisTarget(target)
+      setAnalysisOpen(true)
+    }
 
     const cancelPendingFocus = useCallback((): void => {
       pendingFocusCancelRef.current?.()
@@ -330,6 +361,7 @@ function createBoardContent(
               controller={controller}
               store={projectsStore}
               onSelectSession={(target) => { openDetail(target, 'projects') }}
+              onAnalyzeProject={openAnalysis}
               rootRef={setProjectsRoot}
               onScrollTopChange={(scrollTop) => {
                 scrollTopsRef.current.projects = scrollTop
@@ -359,6 +391,7 @@ function createBoardContent(
               // in-flight state and a failure notice (UX-07).
               onRefresh={() => controller.refresh()}
               onSelectSession={(target) => { openDetail(target, 'board') }}
+              onAnalyze={openAnalysis}
               rootRef={setBoardRoot}
               onScrollTopChange={(scrollTop) => {
                 scrollTopsRef.current.board = scrollTop
@@ -371,6 +404,16 @@ function createBoardContent(
               onReturnFocusConsumed={consumeReturnFocus}
             />
           )}
+        {analysisOpen && boardAnalysisStore !== null && analysisTarget !== null && (
+          <AnalysisPanel
+            enabled={integration?.detail.getAnalysisEnabled() === true}
+            state={analysisState}
+            onStart={() => { void boardAnalysisStore.start(analysisTarget) }}
+            onFollowup={(question) => { void boardAnalysisStore.followup(question) }}
+            onStop={() => { void boardAnalysisStore.stop() }}
+            onClose={() => { setAnalysisOpen(false) }}
+          />
+        )}
       </>
     )
   }

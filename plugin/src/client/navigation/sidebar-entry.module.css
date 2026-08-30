@@ -54,7 +54,15 @@
   text-overflow: ellipsis;
 }
 
-[data-dsh-frame][data-sidebar-collapsed] .entry {
+/* Prefer the entry's own stable geometry and cover host variants. The
+ * data-sidebar-collapsed selector remains a host hint, not the only way to
+ * center the row. */
+:where(
+  [data-dsh-frame][data-sidebar-collapsed],
+  [data-dsh-frame][data-sidebar-collapsed='true'],
+  [data-dsh-frame][class*='sidebarCollapsed'],
+  [data-dsh-frame][class*='sidebarNarrow']
+) .entry {
   justify-content: center;
   width: 36px;
   padding: 0;
@@ -62,8 +70,29 @@
   border-radius: 50%;
 }
 
-[data-dsh-frame][data-sidebar-collapsed] .entryLabel {
+@media (max-width: 640px) {
+  .entry {
+    justify-content: center;
+    width: 36px;
+    padding: 0;
+    margin: 0 auto 12px;
+    border-radius: 50%;
+  }
+}
+
+:where(
+  [data-dsh-frame][data-sidebar-collapsed],
+  [data-dsh-frame][data-sidebar-collapsed='true'],
+  [data-dsh-frame][class*='sidebarCollapsed'],
+  [data-dsh-frame][class*='sidebarNarrow']
+) .entryLabel {
   display: none;
+}
+
+@media (max-width: 640px) {
+  .entryLabel {
+    display: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -24,9 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `scripts/copilot_compat.py` provides a bounded, no-credential Copilot CLI
   compatibility smoke for the authenticated `--resume --interactive` flag
   contract.
+- The plugin adds a line-network Agent Center sidebar icon, a persisted
+  per-project idle-session fold, project/cross-agent analysis entry points,
+  and a multi-turn analysis conversation with an honest segmented progress
+  fallback.
 
 ### Changed
 
+- Dedicated analysis sessions are explicitly marked and filtered out of
+  board and project correlation data.
 - The DSH plugin's send-cli execution timeout is now 180 seconds to cover
   bounded real-agent resume operations.
 - Copilot documentation now distinguishes stdin isolation at the Sidecar

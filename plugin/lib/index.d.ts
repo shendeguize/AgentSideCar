@@ -152,7 +152,8 @@ interface AnalysisCreateOptions {
    * `meta: { cwd: process.cwd() }` on its own create call).
    */
   readonly meta?: {
-    readonly cwd?: string;
+    readonly cwd?: string; /** Explicit marker for board/fusion filters; analysis is not user work. */
+    readonly agentSidecarAnalysis?: true;
   };
 }
 /** Minimal `ctx.agents` face: the one factory entry point this engine uses. */

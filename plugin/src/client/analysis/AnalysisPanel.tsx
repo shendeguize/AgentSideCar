@@ -2,7 +2,7 @@ import { Button, Input } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useState } from 'react'
 import type { ReactElement } from 'react'
 import { t } from '../locales/index.ts'
-import type { AnalysisExchange, AnalysisGlueState } from '../analysis-glue.ts'
+import type { AnalysisGlueState, AnalysisMessage } from '../analysis-glue.ts'
 import { surfaceProps } from '../theme/parts.ts'
 import css from './analysis.module.css'
 
@@ -41,20 +41,40 @@ function noticeText(code: string): string {
   return t('analysis.noticeNetwork')
 }
 
-function Exchange(props: { exchange: AnalysisExchange }): ReactElement {
-  const { exchange } = props
+function messagesFromState(state: AnalysisGlueState): AnalysisMessage[] {
+  if (state.messages.length > 0) return state.messages
+  return state.exchanges.flatMap((exchange) => [
+    ...(exchange.question === null
+      ? []
+      : [{ role: 'user' as const, content: exchange.question }]),
+    { role: 'assistant' as const, content: exchange.summary, truncated: exchange.truncated },
+  ])
+}
+
+function Message(props: { message: AnalysisMessage; progressStep: number }): ReactElement {
+  const { message } = props
+  const pendingText = t('analysis.streamingSegment', { n: props.progressStep + 1 })
   return (
-    <div className={css['exchange']} data-testid="agent-sidecar-analysis-exchange">
-      <span className={css['exchangeLabel']}>
-        {exchange.question === null ? t('analysis.exchangeInitial') : t('analysis.followupLabel')}
+    <div
+      className={`${css['message']} ${
+        message.role === 'user' ? css['userMessage'] : css['assistantMessage']
+      }`}
+      data-role={message.role}
+      data-pending={message.pending || undefined}
+      data-testid="agent-sidecar-analysis-message"
+      aria-busy={message.pending || undefined}
+    >
+      <span className={css['messageLabel']}>
+        {message.role === 'user' ? t('analysis.userLabel') : t('analysis.assistantLabel')}
       </span>
-      {exchange.question !== null && <div className={css['question']}>{exchange.question}</div>}
-      <pre className={css['summary']}>
-        {exchange.summary === '' ? t('analysis.emptySummary') : exchange.summary}
-      </pre>
-      {exchange.truncated && (
-        <span className={css['truncated']}>{t('analysis.truncatedNotice')}</span>
-      )}
+      <div className={css['messageBody']}>
+        {message.pending
+          ? pendingText
+          : message.content === '' && message.role === 'assistant'
+            ? t('analysis.emptySummary')
+            : message.content}
+      </div>
+      {message.truncated && <span className={css['truncated']}>{t('analysis.truncatedNotice')}</span>}
     </div>
   )
 }
@@ -65,6 +85,8 @@ export function AnalysisPanel(props: AnalysisPanelProps): ReactElement {
   const [question, setQuestion] = useState('')
 
   const conversationLive = state.phase === 'ready' || state.phase === 'answering'
+  const analysisActive =
+    state.phase === 'requesting' || state.phase === 'answering' || state.phase === 'ready'
   const showStart = state.phase === 'idle' || state.phase === 'failed' || state.phase === 'stopped'
 
   const submitFollowup = (): void => {
@@ -79,12 +101,11 @@ export function AnalysisPanel(props: AnalysisPanelProps): ReactElement {
       <div className={css['head']}>
         <span className={css['title']}>{t('analysis.title')}</span>
         <span className={css['spacer']} />
-        {conversationLive && (
+        {analysisActive && (
           <Button
             type="button"
             size="sm"
             variant="ghost"
-            disabled={!enabled}
             onClick={props.onStop}
             data-testid="agent-sidecar-analysis-stop"
           >
@@ -102,8 +123,8 @@ export function AnalysisPanel(props: AnalysisPanelProps): ReactElement {
         </div>
       )}
 
-      {state.exchanges.map((exchange, index) => (
-        <Exchange key={index} exchange={exchange} />
+      {messagesFromState(state).map((message, index) => (
+        <Message key={`${message.role}:${index}`} message={message} progressStep={state.progressStep} />
       ))}
 
       {state.phase === 'failed' && state.errorCode !== null && (
