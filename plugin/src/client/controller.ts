@@ -192,6 +192,7 @@ export function readStoredFilters(storage: StorageLike | null): BoardFilterState
     const candidate = parsed as {
       timeWindowHours?: unknown
       showDead?: unknown
+      collapseIdle?: unknown
       statusFilter?: unknown
       agentFilter?: unknown
     }
@@ -207,6 +208,7 @@ export function readStoredFilters(storage: StorageLike | null): BoardFilterState
       timeWindowHours: candidate.timeWindowHours,
       showDead: candidate.showDead,
     }
+    if (candidate.collapseIdle === true) filters.collapseIdle = true
     if (candidate.statusFilter === 'working' || candidate.statusFilter === 'waiting') {
       filters.statusFilter = candidate.statusFilter
     }
@@ -338,7 +340,12 @@ export class SidecarController {
 
   /** User filter change: persist (package-prefixed key) and notify. */
   setFilters(next: BoardFilterState): void {
-    this.filters = { ...next }
+    this.filters = {
+      timeWindowHours: next.timeWindowHours,
+      showDead: next.showDead,
+      ...(next.collapseIdle === true ? { collapseIdle: true } : {}),
+      ...(next.statusFilter !== undefined ? { statusFilter: next.statusFilter } : {}),
+    }
     const agentFilter = normalizeAgentFilter(next.agentFilter)
     if (agentFilter === null) delete this.filters.agentFilter
     else this.filters.agentFilter = agentFilter

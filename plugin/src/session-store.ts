@@ -74,6 +74,7 @@ interface StoredSession {
 }
 
 const INVALID_PROPERTY = Symbol('invalid-property')
+const ANALYSIS_SESSION_PREFIX = 'agent-sidecar-analysis-'
 
 function ownValue(record: object, key: string): unknown | typeof INVALID_PROPERTY {
   try {
@@ -84,6 +85,13 @@ function ownValue(record: object, key: string): unknown | typeof INVALID_PROPERT
   } catch {
     return INVALID_PROPERTY
   }
+}
+
+/** Dedicated analysis agents are internal tooling, never board sessions. */
+function isAnalysisSession(sessionId: string, extra: unknown): boolean {
+  if (sessionId.startsWith(ANALYSIS_SESSION_PREFIX)) return true
+  return typeof extra === 'object' && extra !== null
+    && (extra as Record<string, unknown>)['agentSidecarAnalysis'] === true
 }
 
 /**
@@ -159,6 +167,11 @@ export class SessionStore {
     for (const row of rows) {
       const projection = snapshotProjection(row)
       if (projection === null) continue
+      const rawExtra = ownValue(row, 'extra')
+      if (isAnalysisSession(
+        projection.session_id,
+        rawExtra === INVALID_PROPERTY ? null : rawExtra,
+      )) continue
       // Derive while the full row is still present, then discard raw
       // `extra`, topology, host provenance, and transcript data from cache.
       const injectEligibility = deriveInjectEligibility(row)

@@ -25,6 +25,7 @@ import {
   groupSessions,
   isSessionVisible,
   normalizeStatus,
+  partitionIdleCards,
   projectDisplayName,
   sliceCardsForDisplay,
   statusRank,
@@ -218,6 +219,19 @@ describe('sliceCardsForDisplay (UX-02 / UX-20 truncation)', () => {
 })
 
 describe('grouping and ordering', () => {
+  it('partitions idle cards without changing the order of either side', () => {
+    const input = [
+      card({ sessionId: 'working', status: 'working' }),
+      card({ sessionId: 'idle-1', status: 'idle' }),
+      card({ sessionId: 'waiting', status: 'waiting' }),
+      card({ sessionId: 'idle-2', status: 'Idle' }),
+    ]
+    expect(partitionIdleCards(input)).toEqual({
+      active: [input[0], input[2]],
+      idle: [input[1], input[3]],
+    })
+  })
+
   it('buckets empty/whitespace projects under 未知项目 with key ""', () => {
     const groups = groupSessions([card({ project: '' }), card({ project: '  ', sessionId: 's2' })])
     expect(groups).toHaveLength(1)

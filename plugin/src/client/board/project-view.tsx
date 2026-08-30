@@ -27,6 +27,8 @@ import {
   type ProjectGroupVM,
 } from './project-view-logic.ts'
 import { formatTemplate, sliceCardsForDisplay } from './logic.ts'
+import type { AnalysisTarget } from '../analysis-glue.ts'
+import { t } from '../locales/index.ts'
 import { surfaceProps } from '../theme/parts.ts'
 import styles from './project-view.module.css'
 
@@ -51,6 +53,7 @@ export interface ProjectViewProps {
   /** Human-readable fetch error, or null. */
   error: string | null
   onSelectSession: (target: SessionFocusTarget) => void
+  onAnalyzeProject?: (target: AnalysisTarget) => void
   /** Composite in-memory identity awaiting return-focus restoration. */
   returnFocusTarget: SessionFocusTarget | null
   /** Called only after the matching row or fallback heading has been focused. */
@@ -183,6 +186,7 @@ function AgentLane(props: {
 function ProjectSection(props: {
   group: DerivedProjectGroupVM
   onSelect: (target: SessionFocusTarget) => void
+  onAnalyzeProject?: (target: AnalysisTarget) => void
   returnFocusTarget: SessionFocusTarget | null
   onReturnFocusConsumed: () => void
 }): ReactElement {
@@ -212,6 +216,18 @@ function ProjectSection(props: {
         <span className={styles['spacer']} />
         <span className={styles['groupMeta']}>{group.sessionCountLabel}</span>
         <span className={styles['groupMeta']}>{group.lastActiveLabel}</span>
+        {props.onAnalyzeProject !== undefined && group.key !== '' && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              props.onAnalyzeProject?.({ targetKind: 'project', targetId: group.key })
+            }}
+            data-testid="agent-sidecar-analyze-project"
+          >
+            {t('project.analyze')}
+          </Button>
+        )}
       </div>
       <div className={styles['lanes']}>
         {group.lanes.map((lane) => (
@@ -288,6 +304,7 @@ export function ProjectView(props: ProjectViewProps): ReactElement {
             key={group.key === '' ? '\u0000unknown' : group.key}
             group={group}
             onSelect={props.onSelectSession}
+            onAnalyzeProject={props.onAnalyzeProject}
             returnFocusTarget={props.returnFocusTarget}
             onReturnFocusConsumed={props.onReturnFocusConsumed}
           />

@@ -69,6 +69,8 @@ import {
   type SessionCardVM,
 } from '../src/client/board/logic.ts'
 import { ProjectView } from '../src/client/board/project-view.tsx'
+import { AnalysisPanel } from '../src/client/analysis/AnalysisPanel.tsx'
+import type { AnalysisGlueState } from '../src/client/analysis-glue.ts'
 import {
   createInjectEligibilityRefresher,
   DetailInjectTrigger,
@@ -1257,6 +1259,111 @@ describe('board agent filtering and initial snapshot state', () => {
     expect(MOUNT_SOURCE).toContain('initialLoadFailed={state.initialLoadFailed}')
     expect(MOUNT_SOURCE.match(/<Board\s/g)).toHaveLength(1)
   })
+
+  it('renders the idle-fold toggle and one expandable idle summary per project', () => {
+    try {
+      setLocale('en')
+      const html = renderBoard({
+        sessions: [
+          session('idle-1', 'claude', 'idle'),
+          session('idle-2', 'dsh', 'idle'),
+          session('working', 'dsh', 'working'),
+        ],
+        filters: { timeWindowHours: 24, showDead: false, collapseIdle: true },
+      })
+      expect(html).toContain('data-testid="agent-sidecar-collapse-idle"')
+      expect(html).toContain('Fold idle')
+      expect(html).toContain('data-testid="agent-sidecar-idle-summary"')
+      expect(html).toContain('2 idle sessions')
+      expect(html).not.toContain('idle-1')
+      expect(html).not.toContain('idle-2')
+    } finally {
+      setLocale('zh')
+    }
+  })
+
+  it('adds the cross-agent and project analysis entry points with target kinds', () => {
+    try {
+      setLocale('en')
+      const crossAgent = vi.fn()
+      const project = vi.fn()
+      const boardHtml = renderBoard({ onAnalyze: crossAgent })
+      const projectHtml = renderToStaticMarkup(createElement(ProjectView, {
+      groups: [{
+        project: '/tmp/project',
+        agents: ['claude'],
+        sessions: [{
+          agent: 'claude',
+          sessionId: 'session-claude',
+          status: 'idle',
+          title: 'session',
+          lastActivityAt: nowMs,
+        }],
+        lastActivityAt: nowMs,
+      }],
+      loading: false,
+      error: null,
+      onSelectSession: () => {},
+      onAnalyzeProject: project,
+      returnFocusTarget: null,
+      onReturnFocusConsumed: () => {},
+      rootRef: () => {},
+      onScrollTopChange: () => {},
+      nowMs,
+      }))
+      expect(boardHtml).toContain('Cross-agent analysis')
+      expect(projectHtml).toContain('Analyze this project')
+      // Static rendering cannot activate buttons; the callbacks remain typed
+      // target seams, pinned by the source contract below.
+      expect(PROJECT_VIEW_SOURCE).toContain("targetKind: 'project'")
+      expect(BOARD_SOURCE).toContain("targetKind: 'cross-agent'")
+      expect(crossAgent).not.toHaveBeenCalled()
+      expect(project).not.toHaveBeenCalled()
+    } finally {
+      setLocale('zh')
+    }
+  })
+})
+
+describe('AnalysisPanel conversation rendering', () => {
+  it('renders explicit user/assistant messages and a segmented pending assistant update', () => {
+    const state: AnalysisGlueState = {
+      phase: 'answering',
+      analysisSessionId: 'agent-sidecar-analysis-test',
+      exchanges: [{
+        question: null,
+        summary: 'first insight',
+        truncated: false,
+        tokensHint: null,
+      }],
+      messages: [
+        { role: 'assistant', content: 'first insight' },
+        { role: 'user', content: 'What should happen next?' },
+        { role: 'assistant', content: '', pending: true },
+      ],
+      disclaimer: 'AI analysis is for reference only',
+      errorCode: null,
+      noticeCode: null,
+      progressStep: 2,
+    }
+    try {
+      setLocale('en')
+      const html = renderToStaticMarkup(createElement(AnalysisPanel, {
+        enabled: true,
+        state,
+        onStart: () => {},
+        onFollowup: () => {},
+        onStop: () => {},
+        onClose: () => {},
+      }))
+      expect(html).toContain('data-role="user"')
+      expect(html).toContain('data-role="assistant"')
+      expect(html).toContain('segment 3')
+      expect(html).toContain('data-pending="true"')
+    } finally {
+      setLocale('zh')
+    }
+  })
 })
 
 describe('copy feedback timer lifecycle', () => {
@@ -1801,6 +1908,24 @@ describe('readStoredFilters', () => {
     expect(readStoredFilters(storage)).toEqual({ timeWindowHours: 6, showDead: false })
   })
 
+  it('restores the persisted idle-fold toggle and drops malformed values', () => {
+    const storage = new FakeStorage()
+    storage.setItem(
+      FILTERS_STORAGE_KEY,
+      JSON.stringify({ timeWindowHours: 24, showDead: false, collapseIdle: true }),
+    )
+    expect(readStoredFilters(storage)).toEqual({
+      timeWindowHours: 24,
+      showDead: false,
+      collapseIdle: true,
+    })
+    storage.setItem(
+      FILTERS_STORAGE_KEY,
+      JSON.stringify({ timeWindowHours: 24, showDead: false, collapseIdle: 'yes' }),
+    )
+    expect(readStoredFilters(storage)).toEqual({ timeWindowHours: 24, showDead: false })
+  })
+
   it.each([
     ['unknown string', 'private-agent-token'],
     ['empty string', '   '],
@@ -2165,6 +2290,22 @@ describe('SidecarController', () => {
       statusFilter: 'working',
     })
     expect(controller.getFilters().statusFilter).toBe('working')
+  })
+
+  it('persists the idle-fold toggle through the existing safe storage seam', () => {
+    const storage = new FakeStorage()
+    const { controller } = build(storage)
+    controller.setFilters({ timeWindowHours: 24, showDead: false, collapseIdle: true })
+    expect(JSON.parse(storage.map.get(FILTERS_STORAGE_KEY) ?? '')).toEqual({
+      timeWindowHours: 24,
+      showDead: false,
+      collapseIdle: true,
+    })
+    controller.setFilters({ timeWindowHours: 24, showDead: false, collapseIdle: false })
+    expect(JSON.parse(storage.map.get(FILTERS_STORAGE_KEY) ?? '')).toEqual({
+      timeWindowHours: 24,
+      showDead: false,
+    })
   })
 
   it('start() is idempotent and pollNow()/stop() forward to the stream', () => {

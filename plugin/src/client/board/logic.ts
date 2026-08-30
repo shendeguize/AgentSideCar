@@ -65,6 +65,8 @@ export type BoardStatusFilter = 'working' | 'waiting'
 export interface BoardFilterState {
   timeWindowHours: number
   showDead: boolean
+  /** Fold idle sessions into one expandable row per project group. */
+  collapseIdle?: boolean
   /**
    * Canonical agent token selected in the toolbar. Absent means all agents.
    * Kept as a string at this boundary so stale persisted values can be
@@ -335,6 +337,19 @@ export function filterSessions<T extends SessionCardVM>(
   nowMs: number,
 ): T[] {
   return sessions.filter((s) => isSessionVisible(s, filters, nowMs))
+}
+
+/** Split a project's cards into visible cards and idle cards for the fold. */
+export function partitionIdleCards<T extends SessionCardVM>(
+  cards: readonly T[],
+): { active: T[]; idle: T[] } {
+  const active: T[] = []
+  const idle: T[] = []
+  for (const card of cards) {
+    if (normalizeStatus(card.status) === 'idle') idle.push(card)
+    else active.push(card)
+  }
+  return { active, idle }
 }
 
 // ---------------------------------------------------------------------------

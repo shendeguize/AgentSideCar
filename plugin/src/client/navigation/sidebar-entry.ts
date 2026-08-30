@@ -153,17 +153,26 @@ function createIcon(): SVGSVGElement {
   })) {
     icon.setAttribute(name, value)
   }
-  const orbit = document.createElementNS(SVG_NS, 'circle')
-  orbit.setAttribute('cx', '8')
-  orbit.setAttribute('cy', '8')
-  orbit.setAttribute('r', '5.5')
-  const center = document.createElementNS(SVG_NS, 'circle')
-  center.setAttribute('cx', '8')
-  center.setAttribute('cy', '8')
-  center.setAttribute('r', '1.75')
-  const path = document.createElementNS(SVG_NS, 'path')
-  path.setAttribute('d', 'M8 2.5v3.75M8 9.75v3.75M2.5 8h3.75M9.75 8h3.75')
-  icon.append(orbit, center, path)
+  // The icon is intentionally a small line diagram rather than a
+  // decorative glyph: one trunk, two parallel bypass branches, and
+  // observation nodes where the routes can be read.
+  const trunk = document.createElementNS(SVG_NS, 'path')
+  trunk.setAttribute('d', 'M1.5 8h13')
+  const bypass = document.createElementNS(SVG_NS, 'path')
+  bypass.setAttribute('d', 'M4 8V4.5h8V8M6 8v3.5h6')
+  const upperNode = document.createElementNS(SVG_NS, 'circle')
+  upperNode.setAttribute('cx', '4')
+  upperNode.setAttribute('cy', '4.5')
+  upperNode.setAttribute('r', '1.15')
+  const trunkNode = document.createElementNS(SVG_NS, 'circle')
+  trunkNode.setAttribute('cx', '8')
+  trunkNode.setAttribute('cy', '8')
+  trunkNode.setAttribute('r', '1.15')
+  const lowerNode = document.createElementNS(SVG_NS, 'circle')
+  lowerNode.setAttribute('cx', '6')
+  lowerNode.setAttribute('cy', '11.5')
+  lowerNode.setAttribute('r', '1.15')
+  icon.append(trunk, bypass, upperNode, trunkNode, lowerNode)
   return icon
 }
 

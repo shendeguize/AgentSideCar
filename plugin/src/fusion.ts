@@ -378,6 +378,16 @@ export const DEFAULT_MAX_BUFFERED_SESSIONS = 256
 
 const DSH_AGENT = 'dsh'
 const KEY_SEP = '\u0000'
+const ANALYSIS_SESSION_PREFIX = 'agent-sidecar-analysis-'
+
+/** Analysis sessions are private tool sessions and cannot become board data. */
+function isAnalysisSession(
+  sessionId: string,
+  extra?: Record<string, unknown>,
+): boolean {
+  return sessionId.startsWith(ANALYSIS_SESSION_PREFIX)
+    || extra?.['agentSidecarAnalysis'] === true
+}
 
 // ---------------------------------------------------------------------------
 // Internals.
@@ -747,6 +757,7 @@ export class FusionQuery {
     const out = new Map<string, UnifiedSession>()
     const mergedIds = new Set<string>()
     for (const row of board.sessions) {
+      if (isAnalysisSession(row.session_id, row.extra)) continue
       const liveEntry = row.agent === DSH_AGENT ? this.live.get(row.session_id) : undefined
       if (liveEntry !== undefined) {
         mergedIds.add(row.session_id)
@@ -756,6 +767,7 @@ export class FusionQuery {
       }
     }
     for (const [id, entry] of this.live) {
+      if (isAnalysisSession(id)) continue
       if (mergedIds.has(id)) continue
       out.set(`${DSH_AGENT}${KEY_SEP}${id}`, fromDshLive(entry))
     }
