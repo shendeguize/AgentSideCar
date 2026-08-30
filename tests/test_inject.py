@@ -2548,6 +2548,37 @@ class KimiSendIntegrationTests(unittest.TestCase):
         self.assertEqual(1, len(captured_paths))
         self.assertFalse(captured_paths[0].exists())
 
+    def test_kimi_binds_private_node_and_dylib_assets(self):
+        package_root = self.root / "synthetic-package"
+        main = package_root / "dist" / "main.mjs"
+        node = self.root / "node"
+        dylib = self.root / "lib" / "runtime.dylib"
+        for path, mode, content in (
+            (main, 0o400, b"main"),
+            (node, 0o500, b"node"),
+            (dylib, 0o500, b"dylib"),
+        ):
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_bytes(content)
+            path.chmod(mode)
+        manifest = inject_module._KimiRuntimeManifest(
+            package_root=str(package_root),
+            package_assets=(
+                inject_module._runtime_asset(str(main), "dist/main.mjs"),
+            ),
+            node=inject_module._runtime_asset(str(node), "bin/node"),
+            dylibs=(
+                inject_module._runtime_asset(str(dylib), "lib/runtime.dylib"),
+            ),
+        )
+
+        bound = inject_module._bind_kimi_executable(manifest)
+        self.addCleanup(bound.close)
+        bound_root = Path(bound.executable).parent
+        self.assertEqual(0o500, Path(bound.executable).stat().st_mode & 0o777)
+        self.assertTrue((bound_root / "bin" / "node").is_file())
+        self.assertTrue((bound_root / "lib" / "runtime.dylib").is_file())
+
     def test_kimi_private_node_snapshot_versions_and_initializes_acp(self):
         candidates = (shutil.which("node"), "/usr/bin/node", "/usr/local/bin/node")
         seen = set()
