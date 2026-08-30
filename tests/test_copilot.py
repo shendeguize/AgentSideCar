@@ -5,7 +5,11 @@ from pathlib import Path
 from unittest import mock
 
 from sidecar.adapters.base import timestamp_epoch
-from sidecar.adapters.copilot import CopilotAdapter, _WORKSPACE_BYTES
+from sidecar.adapters.copilot import (
+    CopilotAdapter,
+    _WORKSPACE_BYTES,
+    _workspace_metadata,
+)
 from sidecar.model import Session, Status
 
 
@@ -176,6 +180,15 @@ class CopilotAdapterTests(unittest.TestCase):
         self.assertEqual("/work/stable", session.project)
         self.assertEqual("", session.title)
         self.assertNotIn("title", session.extra)
+
+    def test_oversized_metadata_handles_both_truncation_boundaries(self):
+        newline_terminated = self.home / "newline.yaml"
+        newline_terminated.write_bytes(b"x" * (_WORKSPACE_BYTES - 1) + b"\n")
+        self.assertEqual({}, _workspace_metadata(newline_terminated))
+
+        without_separator = self.home / "without-separator.yaml"
+        without_separator.write_bytes(b"x" * (_WORKSPACE_BYTES + 1))
+        self.assertEqual({}, _workspace_metadata(without_separator))
 
     def test_permission_error_read_degrades_to_directory_metadata(self):
         workspace = self.write_workspace(

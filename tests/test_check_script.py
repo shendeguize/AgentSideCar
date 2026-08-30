@@ -1,10 +1,20 @@
 import io
+import runpy
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from scripts import check
 
 
 class CheckScriptTests(unittest.TestCase):
+    def test_module_entrypoint_propagates_cli_exit_code(self):
+        entrypoint = Path(__file__).parents[1] / "sidecar" / "__main__.py"
+        with mock.patch("sidecar.cli.main", return_value=7):
+            with self.assertRaises(SystemExit) as raised:
+                runpy.run_path(str(entrypoint), run_name="__main__")
+        self.assertEqual(7, raised.exception.code)
+
     def test_default_selection_uses_canonical_stage_order(self):
         self.assertEqual(check.STAGE_ORDER, check.select_stages(None))
 
