@@ -329,7 +329,7 @@ function detailWire(session: SessionView): SessionDetailWire {
 describe('client injection eligibility', () => {
   const allowed = { allowed: true, reason: 'eligible' } as const
 
-  it.each(['cursor-ide', 'copilot'])(
+  it.each(['cursor-ide'])(
     'consumes the host rejection for unsupported %s targets',
     (agent) => {
       const verdict = sessionInjectEligibility(eligibilitySession(agent, 'waiting', {

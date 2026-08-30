@@ -157,6 +157,8 @@ describe('registerSidecarSkillProvider', () => {
     expect(content).toContain('Replaying the same retained')
     expect(content).toContain('without spawning')
     expect(content).toContain('`unsupported_kimi`')
+    expect(content).toContain('Copilot')
+    expect(content).toContain('--resume --interactive')
     expect(content).toContain('`followup`')
     expect(content).toContain('guarded cold resume')
     expect(content).toContain('`dsh_model_unconfigured`')

@@ -8,3 +8,6 @@
 - insert:
     - id: agent-sidecar
       name: '@shendeguize/dsh-agent-sidecar'
+      config:
+        inject:
+          enabled: true

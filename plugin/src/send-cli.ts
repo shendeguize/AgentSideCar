@@ -1,7 +1,7 @@
 /**
  * Sidecar `send` CLI executor — injection path two of design §4.d
  * (.local/tasks/make_dsh_mode/design/dsh_plugin_design.md): external agents
- * (claude / codex / cursor-cli) are reached by spawning
+ * (claude / codex / cursor-cli / copilot) are reached by spawning
  * `agent-sidecar send <session_id> --agent <agent> --exact-session
  * --message-stdin --allow-write --json`.
  *

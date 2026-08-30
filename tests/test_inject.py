@@ -272,6 +272,7 @@ class PlanTests(InjectionTestCase):
                 "exec",
                 "resume",
                 "--json",
+                "--skip-git-repo-check",
                 "session-123",
                 "-",
             ),
@@ -279,6 +280,36 @@ class PlanTests(InjectionTestCase):
         )
         self.assertEqual(b"Codex prompt", plan.input_data)
         self.assertEqual("stdin", plan.prompt_transport)
+
+    def test_copilot_exact_argv_and_workspace(self):
+        calls = []
+        message = "Copilot prompt\nwith spaces"
+        plan = build_send_plan(
+            self.session(
+                "copilot",
+                extra={"workspace": str(self.transcript)},
+            ),
+            message,
+            executable_resolver=self.resolver(calls),
+        )
+
+        self.assertEqual(["copilot"], calls)
+        self.assertEqual(
+            (
+                plan.executable,
+                "--resume",
+                "session-123",
+                "--interactive",
+                message,
+                "--silent",
+                "--no-color",
+                "--no-auto-update",
+            ),
+            plan.argv,
+        )
+        self.assertIsNone(plan.input_data)
+        self.assertEqual("argv", plan.prompt_transport)
+        self.assertEqual(str(self.root), plan.cwd)
 
     def test_cursor_cli_exact_argv_and_argv_transport(self):
         calls = []
@@ -319,7 +350,7 @@ class PlanTests(InjectionTestCase):
     def test_explicitly_unsupported_agents_have_stable_reason_codes(self):
         expected = {
             "cursor-ide": "unsupported_cursor_ide",
-            "copilot": "unsupported_copilot",
+            "copilot": "session_unavailable",
             "dsh": "unsupported_dsh",
             "cursor": "unsupported_agent",
             "CLAUDE": "unsupported_agent",
@@ -2041,6 +2072,7 @@ class KimiSendIntegrationTests(unittest.TestCase):
         }
         self._write_fixture()
         self.executable = self.root / "kimi"
+
         self.executable.write_text(
             "#!/bin/sh\n"
             'if [ "$1" = "--version" ]; then\n'
@@ -2067,6 +2099,14 @@ class KimiSendIntegrationTests(unittest.TestCase):
         )
         account_home.start()
         self.addCleanup(account_home.stop)
+
+    def test_runtime_owner_allowed_accepts_root_and_current_user_only(self):
+        with mock.patch.object(inject_module.os, "geteuid", return_value=1000):
+            self.assertTrue(inject_module._runtime_owner_allowed(0))
+            self.assertTrue(inject_module._runtime_owner_allowed(1000))
+            self.assertFalse(inject_module._runtime_owner_allowed(1001))
+        with mock.patch.object(inject_module.os, "geteuid", None):
+            self.assertTrue(inject_module._runtime_owner_allowed(1001))
 
     def _write_json(self, path, value):
         path.write_text(
@@ -2508,6 +2548,96 @@ class KimiSendIntegrationTests(unittest.TestCase):
         self.assertEqual(1, len(captured_paths))
         self.assertFalse(captured_paths[0].exists())
 
+    def test_kimi_binds_private_node_and_dylib_assets(self):
+        package_root = self.root / "synthetic-package"
+        main = package_root / "dist" / "main.mjs"
+        node = self.root / "node"
+        dylib = self.root / "lib" / "runtime.dylib"
+        for path, mode, content in (
+            (main, 0o400, b"main"),
+            (node, 0o500, b"node"),
+            (dylib, 0o500, b"dylib"),
+        ):
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_bytes(content)
+            path.chmod(mode)
+        manifest = inject_module._KimiRuntimeManifest(
+            package_root=str(package_root),
+            package_assets=(
+                inject_module._runtime_asset(str(main), "dist/main.mjs"),
+            ),
+            node=inject_module._runtime_asset(str(node), "bin/node"),
+            dylibs=(
+                inject_module._runtime_asset(str(dylib), "lib/runtime.dylib"),
+            ),
+        )
+
+        bound = inject_module._bind_kimi_executable(manifest)
+        self.addCleanup(bound.close)
+        bound_root = Path(bound.executable).parent
+        self.assertEqual(0o500, Path(bound.executable).stat().st_mode & 0o777)
+        self.assertTrue((bound_root / "bin" / "node").is_file())
+        self.assertTrue((bound_root / "lib" / "runtime.dylib").is_file())
+
+    def test_kimi_macho_closure_handles_single_node_without_dependencies(self):
+        node = self.root / "node"
+        node.write_bytes(b"node")
+        node.chmod(0o500)
+        node_asset = inject_module._runtime_asset(str(node), "bin/node")
+        with mock.patch.object(inject_module.sys, "platform", "darwin"), mock.patch.object(
+            inject_module,
+            "_snapshot_runtime_asset_for_analysis",
+            return_value=node_asset,
+        ), mock.patch.object(
+            inject_module,
+            "_otool_dependencies",
+            return_value=(),
+        ):
+            captured_node, dylibs, system_libraries = (
+                inject_module._capture_macho_closure(str(node))
+            )
+        self.assertEqual(node_asset, captured_node)
+        self.assertEqual((), dylibs)
+        self.assertEqual((), system_libraries)
+
+    def test_kimi_macho_closure_captures_loader_dependency(self):
+        node = self.root / "node"
+        dependency = self.root / "runtime.dylib"
+        node.write_bytes(b"node")
+        node.chmod(0o500)
+        dependency.write_bytes(b"dylib")
+        dependency.chmod(0o500)
+        node_asset = inject_module._runtime_asset(str(node), "bin/node")
+        dependency_asset = inject_module._runtime_asset(
+            str(dependency),
+            "lib/runtime.dylib",
+        )
+
+        def snapshot(source, _destination, _relative_path):
+            return node_asset if source == str(node) else dependency_asset
+
+        with mock.patch.object(inject_module.sys, "platform", "darwin"), mock.patch.object(
+            inject_module,
+            "_snapshot_runtime_asset_for_analysis",
+            side_effect=snapshot,
+        ), mock.patch.object(
+            inject_module,
+            "_otool_dependencies",
+            side_effect=(
+                (
+                    "@loader_path/runtime.dylib",
+                    "@loader_path/runtime.dylib",
+                ),
+                (),
+            ),
+        ):
+            captured_node, dylibs, system_libraries = (
+                inject_module._capture_macho_closure(str(node))
+            )
+        self.assertEqual(node_asset, captured_node)
+        self.assertEqual((dependency_asset,), dylibs)
+        self.assertEqual((), system_libraries)
+
     def test_kimi_private_node_snapshot_versions_and_initializes_acp(self):
         candidates = (shutil.which("node"), "/usr/bin/node", "/usr/local/bin/node")
         seen = set()
@@ -2863,6 +2993,17 @@ class KimiSendIntegrationTests(unittest.TestCase):
         unsafe_directory.chmod(0o722)
         with self.assertRaises(SendError):
             inject_module._capture_package_assets(unsafe_directory)
+        symlink_directory = self.root / "symlink-package"
+        symlink_directory.mkdir(mode=0o700)
+        symlink_target = symlink_directory / "target"
+        symlink_target.write_bytes(b"target")
+        symlink_target.chmod(0o400)
+        (symlink_directory / "linked").symlink_to(symlink_target)
+        symlink_assets = inject_module._capture_package_assets(symlink_directory)
+        self.assertIn(
+            "linked",
+            tuple(asset.relative_path for asset in symlink_assets),
+        )
         fifo_directory = self.root / "fifo-package"
         fifo_directory.mkdir(mode=0o700)
         os.mkfifo(str(fifo_directory / "asset"))
