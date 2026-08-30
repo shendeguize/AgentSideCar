@@ -647,9 +647,9 @@ class ProcessRunnerTests(unittest.TestCase):
     @mock.patch("sidecar.process_runner.subprocess.Popen")
     def test_required_containment_unsupported_never_spawns_target(self, popen):
         with mock.patch.object(
-            _DarwinKqueueDescendantTracker,
-            "supported",
-            return_value=False,
+            process_runner_module,
+            "_containment_tracker_class",
+            return_value=None,
         ):
             with self.assertRaises(DescendantContainmentUnsupportedError):
                 run_bounded(
