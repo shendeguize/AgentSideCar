@@ -2623,7 +2623,13 @@ class KimiSendIntegrationTests(unittest.TestCase):
         ), mock.patch.object(
             inject_module,
             "_otool_dependencies",
-            side_effect=(("@loader_path/runtime.dylib",), ()),
+            side_effect=(
+                (
+                    "@loader_path/runtime.dylib",
+                    "@loader_path/runtime.dylib",
+                ),
+                (),
+            ),
         ):
             captured_node, dylibs, system_libraries = (
                 inject_module._capture_macho_closure(str(node))
