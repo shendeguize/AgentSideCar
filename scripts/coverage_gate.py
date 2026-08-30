@@ -39,6 +39,7 @@ RELAXED_MODULES = frozenset(
         "sidecar/remote_transport.py",
         "sidecar/remote_watch_transport.py",
         "sidecar/runtime_cmd.py",
+        "sidecar/systemd.py",
         "sidecar/tui.py",
     }
 )
@@ -67,6 +68,13 @@ ALLOWED_PRAGMAS = {
             "except ImportError:  "
             + PRAGMA_MARKER
             + " - unavailable on Windows": 1,
+        }
+    ),
+    "sidecar/systemd.py": Counter(
+        {
+            "except ImportError:  "
+            + PRAGMA_MARKER
+            + " - unavailable on non-POSIX platforms": 1,
         }
     ),
     "sidecar/send_audit.py": Counter(

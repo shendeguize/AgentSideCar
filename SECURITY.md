@@ -137,7 +137,9 @@ in shell history or process listings; `send --message-stdin` reads the message
 from standard input and keeps it out of the Sidecar command line. For Cursor
 CLI the prompt is still passed on the native child command line whichever
 source is used, because that upstream resume contract requires argv transport,
-so this residual exposure remains. Kimi's protected ACP path carries the
+so this residual exposure remains. Copilot's `--resume --interactive` path has
+the same residual child-argv exposure; `--message-stdin` protects only the
+Sidecar process command line. Kimi's protected ACP path carries the
 message only in the `session/prompt` NDJSON frame and does not place it in
 either Sidecar's or native Kimi's argv. Never send secrets. Private audit
 records avoid storing message and response content, but their key and logs

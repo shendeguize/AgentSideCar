@@ -4101,31 +4101,36 @@ function mapReceiptError(code) {
 function describeError$1(error) {
 	return error instanceof Error ? error.message : String(error);
 }
+/** Build the stable argv contract used by every external-agent injection. */
+function buildSendCliArgv(command, req, timeoutMs) {
+	const cliTimeoutSecs = Math.min(MAX_CLI_TIMEOUT_SECONDS, Math.max(1, Math.floor(timeoutMs / 1e3)));
+	return [
+		...command,
+		"send",
+		req.target.sessionId,
+		"--agent",
+		req.target.agent,
+		"--exact-session",
+		"--message-stdin",
+		"--allow-write",
+		"--json",
+		"--request-id",
+		req.requestId,
+		"--timeout",
+		String(cliTimeoutSecs)
+	];
+}
 function createSendCliExecutor(deps) {
 	const command = deps.opts?.command ?? DEFAULT_SEND_CLI_COMMAND;
 	const timeoutMs = deps.opts?.timeoutMs ?? 3e4;
 	const bufferMs = deps.opts?.hardTimeoutBufferMs ?? 5e3;
 	const log = deps.log ?? (() => {});
-	const cliTimeoutSecs = Math.min(MAX_CLI_TIMEOUT_SECONDS, Math.max(1, Math.floor(timeoutMs / 1e3)));
 	const hardTimeoutMs = timeoutMs + bufferMs;
+	const cliTimeoutSecs = Math.min(MAX_CLI_TIMEOUT_SECONDS, Math.max(1, Math.floor(timeoutMs / 1e3)));
 	return {
 		kind: "send-cli",
 		async execute(req) {
-			const argv = [
-				...command,
-				"send",
-				req.target.sessionId,
-				"--agent",
-				req.target.agent,
-				"--exact-session",
-				"--message-stdin",
-				"--allow-write",
-				"--json",
-				"--request-id",
-				req.requestId,
-				"--timeout",
-				String(cliTimeoutSecs)
-			];
+			const argv = buildSendCliArgv(command, req, timeoutMs);
 			log("debug", "spawning sidecar send CLI", {
 				requestId: req.requestId,
 				agent: req.target.agent,

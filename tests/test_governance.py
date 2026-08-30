@@ -56,7 +56,7 @@ README_HEADING_PAIRS = (
     (3, "Remote list and status", "远程列表与状态"),
     (3, "Remote watch", "远程监视"),
     (3, "Experimental local send", "实验性本地发送"),
-    (3, "Persistent macOS user service", "持久化 macOS 用户服务"),
+    (3, "Persistent user service", "持久化用户服务"),
     (2, "Status semantics", "状态语义"),
     (2, "Daemon, fallback, and local protocol", "守护进程、回退与本地协议"),
     (3, "Opt-in loopback HTTP", "可选启用的回环 HTTP"),

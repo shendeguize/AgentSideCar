@@ -41,7 +41,7 @@ from sidecar.inject import (
     build_send_plan,
     execute_send,
 )
-from sidecar.launchd import (
+from sidecar.service import (
     ServiceResult,
     install_service,
     service_status,
@@ -506,7 +506,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     service_parser = commands.add_parser(
         "service",
-        help="manage the explicit macOS user LaunchAgent",
+        help="manage the explicit macOS LaunchAgent or Linux systemd user service",
     )
     service_commands = service_parser.add_subparsers(
         dest="service_command",
@@ -514,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     service_install_parser = service_commands.add_parser(
         "install",
-        help="install and start the user LaunchAgent",
+        help="install and start the current-user service",
         allow_abbrev=False,
     )
     _add_http_arguments(service_install_parser)
@@ -525,12 +525,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     service_commands.add_parser(
         "uninstall",
-        help="stop and remove the validated user LaunchAgent",
+        help="stop and remove the validated current-user service",
         allow_abbrev=False,
     )
     service_commands.add_parser(
         "status",
-        help="show combined LaunchAgent and daemon health",
+        help="show combined service and daemon health",
         allow_abbrev=False,
     )
 
