@@ -269,12 +269,17 @@ class SystemdTests(unittest.TestCase):
         with mock.patch.object(systemd.os, "geteuid", return_value=-1):
             with self.assertRaises(systemd.SystemdControlError):
                 systemd._effective_uid()
+        with mock.patch.object(systemd.os, "geteuid", return_value=1.0):
+            with self.assertRaises(systemd.SystemdControlError):
+                systemd._effective_uid()
         with self.assertRaises(systemd.SystemdControlError):
             systemd._selected_platform("darwin")
         with self.assertRaises(systemd.SystemdSecurityError):
             systemd._safe_path(Path("relative"), name="test")
         with self.assertRaises(systemd.SystemdSecurityError):
             systemd._safe_path(Path("bad\0path"), name="test")
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._safe_path(Path("\ud800"), name="test")
         with self.assertRaises(systemd.SystemdSecurityError):
             systemd._quote("")
         with self.assertRaises(systemd.SystemdSecurityError):
@@ -285,6 +290,15 @@ class SystemdTests(unittest.TestCase):
         )
         with self.assertRaises(systemd.SystemdSecurityError):
             systemd._validated_runtime_prefix(())
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._validated_runtime_prefix(("bad\n",))
+        with mock.patch.object(
+            systemd,
+            "resolve_runtime_prefix",
+            side_effect=systemd.RuntimeCommandError("unresolved"),
+        ):
+            with self.assertRaises(systemd.SystemdControlError):
+                systemd._resolve_prefix(None)
         with self.assertRaises(systemd.SystemdControlError):
             systemd._ready_timeout("not-a-timeout")
         with self.assertRaises(systemd.SystemdControlError):
@@ -313,6 +327,12 @@ class SystemdTests(unittest.TestCase):
             systemd.build_unit(self.prefix, http=True, http_port=True)
         with self.assertRaises(systemd.SystemdControlError):
             systemd.build_unit(self.prefix, http=True, http_port=65536)
+        http_unit = systemd.build_unit(
+            self.prefix,
+            runtime_dir=self.runtime,
+            http=True,
+        )
+        self.assertIn(b"--http", http_unit)
         with self.assertRaises(systemd.SystemdControlError):
             systemd.build_unit(("x" * 70000,))
         self.assertTrue(systemd._looks_managed(build_unit(self.prefix, runtime_dir=self.runtime)))
@@ -334,6 +354,12 @@ class SystemdTests(unittest.TestCase):
         with mock.patch.object(systemd, "_read_unit", side_effect=OSError("read failed")):
             with self.assertRaises(systemd.SystemdOperationError):
                 systemd._atomic_write(self.unit, b"payload", None)
+        with mock.patch.object(Path, "lstat", side_effect=OSError("stat failed")):
+            with self.assertRaises(systemd.SystemdSecurityError):
+                systemd._read_unit(self.unit, os.geteuid())
+        with mock.patch.object(Path, "read_bytes", side_effect=OSError("read failed")):
+            with self.assertRaises(systemd.SystemdSecurityError):
+                systemd._read_unit(self.unit, os.geteuid())
 
         runner = mock.Mock(side_effect=OSError("runner failed"))
         with self.assertRaises(systemd.SystemdControlError):
@@ -345,6 +371,10 @@ class SystemdTests(unittest.TestCase):
             systemd._control(lambda *_args, **_kwargs: overflowing, self.systemctl, ("show",))
         with self.assertRaises(systemd.SystemdControlError):
             systemd._ensure_supported("linux", self.home / "missing-systemctl")
+        not_executable = self.home / "not-executable"
+        not_executable.write_text("not executable\n", encoding="utf-8")
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._ensure_supported("linux", not_executable)
         with self.assertRaises(systemd.SystemdControlError):
             systemd._ensure_supported("darwin", self.systemctl)
 
@@ -356,6 +386,10 @@ class SystemdTests(unittest.TestCase):
         self.assertEqual(systemd._UnitState(False), systemd._parse_state(missing))
         with self.assertRaises(systemd.SystemdControlError):
             systemd._parse_state(subprocess.CompletedProcess((), 2, stderr=b"permission denied"))
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._parse_state(
+                subprocess.CompletedProcess((), 0, stdout=b"\xff")
+            )
         with self.assertRaises(systemd.SystemdControlError):
             systemd._parse_state(
                 subprocess.CompletedProcess((), 0, stdout=b"broken-line\n")
