@@ -2579,6 +2579,27 @@ class KimiSendIntegrationTests(unittest.TestCase):
         self.assertTrue((bound_root / "bin" / "node").is_file())
         self.assertTrue((bound_root / "lib" / "runtime.dylib").is_file())
 
+    def test_kimi_macho_closure_handles_single_node_without_dependencies(self):
+        node = self.root / "node"
+        node.write_bytes(b"node")
+        node.chmod(0o500)
+        node_asset = inject_module._runtime_asset(str(node), "bin/node")
+        with mock.patch.object(inject_module.sys, "platform", "darwin"), mock.patch.object(
+            inject_module,
+            "_snapshot_runtime_asset_for_analysis",
+            return_value=node_asset,
+        ), mock.patch.object(
+            inject_module,
+            "_otool_dependencies",
+            return_value=(),
+        ):
+            captured_node, dylibs, system_libraries = (
+                inject_module._capture_macho_closure(str(node))
+            )
+        self.assertEqual(node_asset, captured_node)
+        self.assertEqual((), dylibs)
+        self.assertEqual((), system_libraries)
+
     def test_kimi_private_node_snapshot_versions_and_initializes_acp(self):
         candidates = (shutil.which("node"), "/usr/bin/node", "/usr/local/bin/node")
         seen = set()
