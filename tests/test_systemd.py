@@ -3,9 +3,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from sidecar.client import SidecarClientError
 from sidecar.daemon import RUNTIME_ENV
+from sidecar import systemd
 from sidecar.service import (
     _backend,
     install_service as facade_install_service,
@@ -256,6 +258,200 @@ class SystemdTests(unittest.TestCase):
         ):
             result = operation(platform="freebsd")
             self.assertEqual(2, result.exit_code)
+
+    def test_validation_helpers_cover_rejected_inputs_and_environment(self):
+        with mock.patch.object(systemd.os, "geteuid", None):
+            with self.assertRaises(systemd.SystemdControlError):
+                systemd._effective_uid()
+        with mock.patch.object(systemd.os, "geteuid", return_value=True):
+            with self.assertRaises(systemd.SystemdControlError):
+                systemd._effective_uid()
+        with mock.patch.object(systemd.os, "geteuid", return_value=-1):
+            with self.assertRaises(systemd.SystemdControlError):
+                systemd._effective_uid()
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._selected_platform("darwin")
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._safe_path(Path("relative"), name="test")
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._safe_path(Path("bad\0path"), name="test")
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._quote("")
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._quote("bad\nvalue")
+        self.assertEqual(
+            '"a\\\\b\\"c%%d"',
+            systemd._quote('a\\b"c%d'),
+        )
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._validated_runtime_prefix(())
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._ready_timeout("not-a-timeout")
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._ready_timeout(float("inf"))
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._ready_timeout(-1)
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._ready_timeout(61)
+
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config)}):
+            paths = systemd.service_paths(euid=os.geteuid(), home=self.home)
+        self.assertEqual(self.config.resolve(), paths.config)
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd.service_paths(
+                euid=os.geteuid(),
+                home=self.home,
+                config_home=Path("relative"),
+            )
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd.service_paths(euid=True, home=self.home)
+
+    def test_unit_and_control_helpers_fail_closed(self):
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd.build_unit(self.prefix, http_port=8080)
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd.build_unit(self.prefix, http=True, http_port=True)
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd.build_unit(self.prefix, http=True, http_port=65536)
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd.build_unit(("x" * 70000,))
+        self.assertTrue(systemd._looks_managed(build_unit(self.prefix, runtime_dir=self.runtime)))
+        self.assertFalse(systemd._looks_managed(b"foreign"))
+        self.assertEqual(b"text", systemd._output(mock.Mock(stdout="text"), "stdout"))
+        self.assertEqual(b"", systemd._output(mock.Mock(stdout=object()), "stdout"))
+        self.assertEqual(3, systemd._returncode(mock.Mock(returncode="3")))
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._returncode(mock.Mock())
+
+        self.assertIsNone(systemd._read_unit(self.unit, os.geteuid()))
+        self.unit.parent.mkdir(mode=0o700, parents=True)
+        self.unit.write_text("foreign\n", encoding="utf-8")
+        self.unit.chmod(0o600)
+        with self.assertRaises(systemd.SystemdSecurityError):
+            systemd._read_unit(self.unit, os.geteuid())
+        self.unit.chmod(0o644)
+        self.assertEqual(b"foreign\n", systemd._read_unit(self.unit, os.geteuid()).payload)
+        with mock.patch.object(systemd, "_read_unit", side_effect=OSError("read failed")):
+            with self.assertRaises(systemd.SystemdOperationError):
+                systemd._atomic_write(self.unit, b"payload", None)
+
+        runner = mock.Mock(side_effect=OSError("runner failed"))
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._control(runner, self.systemctl, ("show",))
+        overflowing = subprocess.CompletedProcess(
+            (), 0, stdout=b"x" * (systemd.MAX_CONTROL_OUTPUT + 1), stderr=b""
+        )
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._control(lambda *_args, **_kwargs: overflowing, self.systemctl, ("show",))
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._ensure_supported("linux", self.home / "missing-systemctl")
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._ensure_supported("darwin", self.systemctl)
+
+    def test_systemctl_state_parsing_and_wait_helpers_cover_terminal_paths(self):
+        missing = subprocess.CompletedProcess((), 3, stdout=b"", stderr=b"Unit not found")
+        self.assertTrue(systemd._missing(missing))
+        self.assertFalse(systemd._missing(subprocess.CompletedProcess((), 2, stderr=b"not found")))
+        self.assertFalse(systemd._missing(subprocess.CompletedProcess((), 3, stderr=b"permission denied")))
+        self.assertEqual(systemd._UnitState(False), systemd._parse_state(missing))
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._parse_state(subprocess.CompletedProcess((), 2, stderr=b"permission denied"))
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._parse_state(
+                subprocess.CompletedProcess((), 0, stdout=b"broken-line\n")
+            )
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._parse_state(
+                subprocess.CompletedProcess((), 0, stdout=b"LoadState=loaded\nMainPID=nope\n")
+            )
+        with self.assertRaises(systemd.SystemdControlError):
+            systemd._parse_state(
+                subprocess.CompletedProcess(
+                    (), 0, stdout=b"LoadState=loaded\nMainPID=999999999999\n"
+                )
+            )
+        state = systemd._parse_state(
+            subprocess.CompletedProcess(
+                (),
+                0,
+                stdout=b"LoadState=loaded\nActiveState=active\n"
+                b"SubState=running\nMainPID=42\n",
+            )
+        )
+        self.assertEqual(systemd._UnitState(True, True, 42), state)
+
+        class PingClient:
+            def ping_info(self):
+                return {"ok": True, "op": "ping", "pid": 42}
+
+        self.assertEqual(42, systemd._ping(PingClient()).pid)
+        self.assertIsNone(systemd._ping(mock.Mock(ping=mock.Mock(side_effect=OSError()))))
+        self.assertIs(self.runtime, systemd._client_for_runtime(
+            self.runtime, self.runtime, None
+        ))
+        client = mock.Mock(socket_path=str(self.home / "other" / "sidecar.sock"))
+        self.assertIsNot(client, systemd._client_for_runtime(client, self.runtime, None))
+        factory = mock.Mock(return_value="factory-client")
+        self.assertEqual(
+            "factory-client",
+            systemd._client_for_runtime(None, self.runtime, factory),
+        )
+
+        runner = FakeSystemctl(loaded=False, active=False)
+        clock = iter((0.0, 1.0))
+        self.assertIsNone(
+            systemd._wait_ready(
+                FakeClient(runner, offline=True),
+                runner=runner,
+                systemctl=self.systemctl,
+                timeout=0.5,
+                monotonic=lambda: next(clock),
+                sleep=lambda _value: None,
+            )
+        )
+        stopped_clock = iter((0.0, 1.0))
+        self.assertFalse(
+            systemd._wait_stopped(
+                FakeClient(runner, always_running=True),
+                timeout=0.5,
+                monotonic=lambda: next(stopped_clock),
+                sleep=lambda _value: None,
+            )
+        )
+
+    def test_operation_lock_and_service_error_paths_are_bounded(self):
+        with systemd._operation_lock(self.home / "lock", os.geteuid()):
+            self.assertTrue((self.home / "lock").exists())
+        with mock.patch.object(systemd, "fcntl", None):
+            with self.assertRaises(systemd.SystemdControlError):
+                with systemd._operation_lock(self.home / "lock", os.geteuid()):
+                    pass
+
+        runner = FakeSystemctl()
+        result, _ = self.install(
+            runner=runner,
+            client=FakeClient(runner, offline=True),
+            ready_timeout=0,
+        )
+        self.assertEqual(1, result.exit_code)
+        self.assertFalse(self.unit.exists())
+        result = uninstall_service(
+            runner=runner,
+            client=FakeClient(runner, offline=True),
+            runtime_dir=self.runtime,
+            home=self.home,
+            config_home=self.config,
+            platform="linux",
+            systemctl_path=self.systemctl,
+            euid=os.geteuid(),
+            ready_timeout=0,
+        )
+        self.assertEqual(0, result.exit_code)
+
+        self.assertEqual(
+            systemd.ServiceResult(2, "bad"),
+            systemd._service_error_result(systemd.SystemdControlError("bad")),
+        )
 
 
 if __name__ == "__main__":
