@@ -333,6 +333,13 @@ class SystemdTests(unittest.TestCase):
             http=True,
         )
         self.assertIn(b"--http", http_unit)
+        http_port_unit = systemd.build_unit(
+            self.prefix,
+            runtime_dir=self.runtime,
+            http=True,
+            http_port=8080,
+        )
+        self.assertIn(b"--http-port", http_port_unit)
         with self.assertRaises(systemd.SystemdControlError):
             systemd.build_unit(("x" * 70000,))
         self.assertTrue(systemd._looks_managed(build_unit(self.prefix, runtime_dir=self.runtime)))
