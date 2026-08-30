@@ -453,6 +453,7 @@ export const en = {
 
   // ── AI bypass analysis panel ────────────────────────────────────────────
   'analysis.title': 'AI analysis',
+  'analysis.back': 'Back',
   'analysis.close': 'Close',
   'analysis.disabledNote':
     'AI bypass analysis is off; enable "AI bypass analysis" in Settings first.',

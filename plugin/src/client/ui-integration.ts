@@ -61,13 +61,14 @@ export interface DetailUiPort {
   getAnalysisEnabled: () => boolean
   createDetailStore: (sessionId: string, hint: DetailHeaderHint | null) => DetailStorePort
   createSearchStore: () => SearchStorePort
-  createAnalysisStore: () => AnalysisStorePort
 }
 
 /** Dependencies required by the board and the detail route it opens. */
 export interface BoardUiPort {
   detail: DetailUiPort
   createProjectsStore: () => ProjectsStorePort
+  /** One tab-scoped analysis conversation, retained across route switches. */
+  createAnalysisStore: () => AnalysisStorePort
 }
 
 type DetailIntegrationBase = Pick<DetailUiPort, 'inject' | 'getAnalysisEnabled'>
@@ -79,8 +80,8 @@ export function createDefaultIntegration(base: DetailIntegrationBase): BoardUiPo
       ...base,
       createDetailStore: (sessionId, hint) => new DetailStore(sessionId, { hint }),
       createSearchStore: () => new SearchStore(),
-      createAnalysisStore: () => new AnalysisStore(),
     },
     createProjectsStore: () => new ProjectsStore(),
+    createAnalysisStore: () => new AnalysisStore(),
   }
 }

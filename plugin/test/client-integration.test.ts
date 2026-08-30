@@ -134,6 +134,10 @@ const PROJECT_VIEW_SOURCE = readFileSync(
   new URL('../src/client/board/project-view.tsx', import.meta.url),
   'utf8',
 )
+const ANALYSIS_CSS_SOURCE = readFileSync(
+  new URL('../src/client/analysis/analysis.module.css', import.meta.url),
+  'utf8',
+)
 
 // ---------------------------------------------------------------------------
 // Fakes and fixtures.
@@ -1366,6 +1370,42 @@ describe('AnalysisPanel conversation rendering', () => {
   })
 })
 
+describe('full-page analysis navigation', () => {
+  it('replaces every source route and returns to its exact source route', () => {
+    expect(MOUNT_SOURCE).toContain("type MainView = SourceView | 'analysis'")
+    expect(MOUNT_SOURCE).toContain(
+      'if (analysisRoute !== null && boardAnalysisStore !== null)',
+    )
+    expect(MOUNT_SOURCE).toContain('setMainView(analysisRoute.source.view)')
+    expect(MOUNT_SOURCE).toContain('setDetail(analysisRoute.source.detail)')
+    expect(MOUNT_SOURCE).toContain('data-testid="agent-sidecar-analysis-back"')
+    expect(MOUNT_SOURCE).toContain('onAnalyze={openAnalysis}')
+    expect(DETAIL_VIEW_SOURCE).toContain(
+      "props.onAnalyze({ targetKind: 'session', targetId: sessionId })",
+    )
+    expect(DETAIL_VIEW_SOURCE).not.toContain('<AnalysisPanel')
+  })
+
+  it('keeps one tab-scoped analysis store alive across route switches', () => {
+    expect(MOUNT_SOURCE).toContain(
+      '() => integration?.createAnalysisStore() ?? null',
+    )
+    expect(MOUNT_SOURCE).toContain('boardAnalysisStore?.dispose()')
+    expect(MOUNT_SOURCE).not.toContain('integration.detail.createAnalysisStore()')
+    expect(DETAIL_VIEW_SOURCE).not.toContain('createAnalysisStore')
+  })
+
+  it('gives the full-page panel an independent message scroller', () => {
+    expect(ANALYSIS_CSS_SOURCE).toMatch(
+      /\.panel\s*\{[\s\S]*?flex:\s*1;[\s\S]*?min-height:\s*0;[\s\S]*?overflow:\s*hidden;/,
+    )
+    expect(ANALYSIS_CSS_SOURCE).toMatch(
+      /\.messages\s*\{[\s\S]*?flex:\s*1;[\s\S]*?min-height:\s*0;[\s\S]*?overflow:\s*auto;/,
+    )
+    expect(ANALYSIS_CSS_SOURCE).not.toMatch(/\.summary\s*\{/)
+  })
+})
+
 describe('copy feedback timer lifecycle', () => {
   it.each([
     ['board session card', BOARD_SOURCE],
@@ -1739,15 +1779,15 @@ describe('createDefaultIntegration', () => {
         getAnalysisEnabled: () => true,
         createDetailStore: () => detailStore,
         createSearchStore: () => searchStore,
-        createAnalysisStore: () => analysisStore,
       },
       createProjectsStore: () => projectsStore,
+      createAnalysisStore: () => analysisStore,
     }
 
     expect(integration.createProjectsStore()).toBe(projectsStore)
     expect(integration.detail.createDetailStore('sess-structural', null)).toBe(detailStore)
     expect(integration.detail.createSearchStore()).toBe(searchStore)
-    expect(integration.detail.createAnalysisStore()).toBe(analysisStore)
+    expect(integration.createAnalysisStore()).toBe(analysisStore)
   })
 
   it('assembles narrow board and detail ports over the production stores', () => {
@@ -1758,7 +1798,7 @@ describe('createDefaultIntegration', () => {
     const projects = integration.createProjectsStore()
     const detail = integration.detail.createDetailStore('sess-alpha', null)
     const search = integration.detail.createSearchStore()
-    const analysis = integration.detail.createAnalysisStore()
+    const analysis = integration.createAnalysisStore()
 
     expect(projects.getState()).toMatchObject({ groups: [], loading: false })
     expect(detail.getState()).toMatchObject({ sessionId: 'sess-alpha', ready: false })

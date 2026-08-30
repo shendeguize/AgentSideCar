@@ -455,6 +455,7 @@ export const zh = {
 
   // ── AI bypass analysis panel (T5.10b, design §4.e.3 / §5.1) ────────────
   'analysis.title': 'AI 分析',
+  'analysis.back': '返回',
   'analysis.close': '关闭',
   'analysis.disabledNote': 'AI 旁路分析未开启;请在设置中开启「启用 AI 旁路分析」。',
   'analysis.idleHint':
