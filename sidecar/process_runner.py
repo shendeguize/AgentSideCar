@@ -691,6 +691,14 @@ class _LinuxProcessGroupTracker:
         return (self._root_pid,) if self._has_live_group_member() else ()
 
     def terminate(self) -> bool:
+        if not self._has_live_group_member():
+            return True
+        try:
+            os.killpg(self._root_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
         return not self._has_live_group_member()
 
     def close(self) -> None:
