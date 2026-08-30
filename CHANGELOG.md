@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Linux `send` now has process-group containment for bounded child execution,
+  allowing supported local injection paths to run on Linux while retaining
+  fail-closed cleanup and timeout behavior.
+- Kimi Code 0.39.1 is supported by the protected ACP spawn-resume path.
+- Copilot CLI injection is supported through `--resume --interactive` for
+  authenticated, eligible sessions, including the DSH plugin's send-cli route.
+- `scripts/deploy-to-pod.sh` provides an explicit operator path for rsyncing
+  the zipapp and plugin, restarting the daemon, and installing the DSH plugin.
+
+### Changed
+
+- The DSH plugin's send-cli execution timeout is now 180 seconds to cover
+  bounded real-agent resume operations.
+- The plugin package uses its Trusted Publishing release workflow for npm
+  publication.
+
 ## [0.9.0] - 2026-08-29
 
 ### Fixed
@@ -420,6 +440,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI and terminal-dashboard workflows for session listing, status, watching,
   and process inspection.
 
+[Unreleased]: https://github.com/shendeguize/AgentSideCar/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.6.0...v0.7.0

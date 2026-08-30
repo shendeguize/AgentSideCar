@@ -50,6 +50,7 @@ README_HEADING_PAIRS = (
     (3, "Install a GitHub Release zipapp", "安装 GitHub Release zipapp"),
     (3, "Build the deterministic zipapp", "构建确定性 zipapp"),
     (3, "Use a repository checkout", "使用仓库检出版本"),
+    (3, "Deploy the pod-local E2E topology", "部署 pod 本地 E2E 拓扑"),
     (2, "Uninstall", "卸载"),
     (2, "Commands", "命令"),
     (3, "Remote list and status", "远程列表与状态"),
