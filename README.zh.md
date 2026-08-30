@@ -234,6 +234,27 @@ sh scripts/install-skill.sh
 目录。检出版本或 zipapp 正在使用时，请将其保留在解析得到的位置；移动或删除前，
 请遵循下文的服务更新流程。
 
+### 部署 pod 本地 E2E 拓扑
+
+对于明确由操作员控制的 E2E pod，请在 AgentSideCar 检出目录运行部署脚本：
+
+```sh
+cd /path/to/AgentSideCar
+scripts/deploy-to-pod.sh <ssh-alias>
+```
+
+脚本要求本机有 `ssh`、`rsync` 以及已配置的 pod-init-sync 扫描辅助脚本。
+它会先重新扫描 SSH，构建确定性 zipapp 和 DSH 插件 bundle，默认复制到
+`/home/caros/workspace/dsh_debug`，把插件安装进远端 `web` profile，并重启远端
+Sidecar daemon 直到就绪。可用 `--remote-dir <absolute-path>` 选择其他远端工作区，
+用 `--dry-run` 检查计划写入，或用 `--without-plugin` / `--without-daemon` 分别跳过
+对应步骤。
+
+这是开发/操作员流程，不是 Release 安装程序。它不会安装 `dsh`、配置 agent 凭据，
+也不会复制凭据内容。若远端用户已有 `copilot-byok.env`，生成的 wrapper 只会在
+远端子进程内引用该受保护文件。随后可选的 DSH 插件在明确开启并确认后，才会在
+pod 本地观察和执行注入；脚本自身不会把消息经本机转发。
+
 <a id="uninstall"></a>
 
 ## 卸载

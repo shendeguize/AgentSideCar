@@ -270,6 +270,32 @@ therefore starts independently of the shell's current working directory. Keep
 a checkout or zipapp at the resolved location while it is in use; follow the
 service update procedure below before moving or removing it.
 
+### Deploy the pod-local E2E topology
+
+For an explicitly operator-controlled E2E pod, run the deployment script from
+the AgentSideCar checkout:
+
+```sh
+cd /path/to/AgentSideCar
+scripts/deploy-to-pod.sh <ssh-alias>
+```
+
+The script requires `ssh`, `rsync`, and the configured pod-init-sync scan
+helpers. It performs a fresh SSH scan, builds the deterministic zipapp and DSH
+plugin bundles, copies them to `/home/caros/workspace/dsh_debug` by default,
+installs the plugin into the remote `web` profile, and restarts the remote
+Sidecar daemon until it is ready. Use `--remote-dir <absolute-path>` to choose
+another remote workspace, `--dry-run` to inspect the planned writes, or
+`--without-plugin` / `--without-daemon` to omit those respective steps.
+
+This is a development/operator workflow, not the release installer. It does
+not install `dsh`, configure agent credentials, or copy credential contents.
+When the remote user already has `copilot-byok.env`, the generated wrapper
+references that protected file only inside the remote child process. The
+optional DSH plugin then observes and, when explicitly enabled and confirmed,
+performs injection locally on the pod; the script itself never forwards a
+message through the local workstation.
+
 <a id="uninstall"></a>
 
 ## Uninstall
