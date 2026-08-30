@@ -2993,6 +2993,17 @@ class KimiSendIntegrationTests(unittest.TestCase):
         unsafe_directory.chmod(0o722)
         with self.assertRaises(SendError):
             inject_module._capture_package_assets(unsafe_directory)
+        symlink_directory = self.root / "symlink-package"
+        symlink_directory.mkdir(mode=0o700)
+        symlink_target = symlink_directory / "target"
+        symlink_target.write_bytes(b"target")
+        symlink_target.chmod(0o400)
+        (symlink_directory / "linked").symlink_to(symlink_target)
+        symlink_assets = inject_module._capture_package_assets(symlink_directory)
+        self.assertIn(
+            "linked",
+            tuple(asset.relative_path for asset in symlink_assets),
+        )
         fifo_directory = self.root / "fifo-package"
         fifo_directory.mkdir(mode=0o700)
         os.mkfifo(str(fifo_directory / "asset"))
