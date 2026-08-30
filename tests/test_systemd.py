@@ -388,6 +388,7 @@ class SystemdTests(unittest.TestCase):
     def test_systemctl_state_parsing_and_wait_helpers_cover_terminal_paths(self):
         missing = subprocess.CompletedProcess((), 3, stdout=b"", stderr=b"Unit not found")
         self.assertTrue(systemd._missing(missing))
+        self.assertTrue(systemd._missing(subprocess.CompletedProcess((), 1)))
         self.assertFalse(systemd._missing(subprocess.CompletedProcess((), 2, stderr=b"not found")))
         self.assertFalse(systemd._missing(subprocess.CompletedProcess((), 3, stderr=b"permission denied")))
         self.assertEqual(systemd._UnitState(False), systemd._parse_state(missing))
@@ -420,18 +421,54 @@ class SystemdTests(unittest.TestCase):
             )
         )
         self.assertEqual(systemd._UnitState(True, True, 42), state)
+        self.assertEqual(
+            systemd._UnitState(True, False, 42),
+            systemd._parse_state(
+                subprocess.CompletedProcess(
+                    (),
+                    0,
+                    stdout=b"LoadState=loaded\nActiveState=active\n"
+                    b"SubState=dead\nMainPID=42\n",
+                )
+            ),
+        )
+        self.assertEqual(
+            systemd._UnitState(True, False, None),
+            systemd._parse_state(
+                subprocess.CompletedProcess(
+                    (),
+                    0,
+                    stdout=b"LoadState=loaded\nActiveState=inactive\n"
+                    b"SubState=dead\nMainPID=0\n",
+                )
+            ),
+        )
 
         class PingClient:
             def ping_info(self):
                 return {"ok": True, "op": "ping", "pid": 42}
 
         self.assertEqual(42, systemd._ping(PingClient()).pid)
+        self.assertEqual(
+            42,
+            systemd._ping(
+                FakeClient(
+                    FakeSystemctl(loaded=True, active=True, pid=42),
+                    pid=42,
+                )
+            ).pid,
+        )
         self.assertIsNone(systemd._ping(mock.Mock(ping=mock.Mock(side_effect=OSError()))))
         self.assertIs(self.runtime, systemd._client_for_runtime(
             self.runtime, self.runtime, None
         ))
         client = mock.Mock(socket_path=str(self.home / "other" / "sidecar.sock"))
         self.assertIsNot(client, systemd._client_for_runtime(client, self.runtime, None))
+        invalid_client = mock.Mock(socket_path=object())
+        self.assertIsNot(
+            invalid_client,
+            systemd._client_for_runtime(invalid_client, self.runtime, None),
+        )
         factory = mock.Mock(return_value="factory-client")
         self.assertEqual(
             "factory-client",
