@@ -1,4 +1,5 @@
 import io
+import importlib
 import runpy
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ from scripts import check
 class CheckScriptTests(unittest.TestCase):
     def test_module_entrypoint_propagates_cli_exit_code(self):
         entrypoint = Path(__file__).parents[1] / "sidecar" / "__main__.py"
+        importlib.import_module("sidecar.__main__")
         with mock.patch("sidecar.cli.main", return_value=7):
             with self.assertRaises(SystemExit) as raised:
                 runpy.run_path(str(entrypoint), run_name="__main__")

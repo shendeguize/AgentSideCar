@@ -183,7 +183,9 @@ class CopilotAdapterTests(unittest.TestCase):
 
     def test_oversized_metadata_handles_both_truncation_boundaries(self):
         newline_terminated = self.home / "newline.yaml"
-        newline_terminated.write_bytes(b"x" * (_WORKSPACE_BYTES - 1) + b"\n")
+        newline_terminated.write_bytes(
+            b"x" * (_WORKSPACE_BYTES - 1) + b"\nZ"
+        )
         self.assertEqual({}, _workspace_metadata(newline_terminated))
 
         without_separator = self.home / "without-separator.yaml"
