@@ -61,7 +61,7 @@ pinned by a versioned fixture and documented as a read-only boundary.
 | Environment | Support boundary |
 | --- | --- |
 | macOS | Primary platform and full quality-gate target. Local observation, remote monitoring, the daemon and HTTP panel, deterministic zipapps, experimental local `send`, and the user LaunchAgent are supported. |
-| Linux | Portable observation, remote monitoring, daemon/HTTP, TUI, and packaging paths are exercised in CI. The macOS LaunchAgent is unavailable, and experimental `send` fails closed before execution because its required Darwin `kqueue` descendant containment is unavailable. Linux support is best-effort where agent-owned persistence formats or desktop integrations differ. |
+| Linux | Portable observation, remote monitoring, daemon/HTTP, TUI, packaging paths, and the current-user systemd service are exercised in CI. Experimental `send` fails closed before execution because its required Darwin `kqueue` descendant containment is unavailable. Linux support is best-effort where agent-owned persistence formats or desktop integrations differ. |
 | Windows | Unsupported. The current runtime and security contracts require POSIX permissions, file locking, process groups, Unix sockets, and related primitives. |
 | Python | Local installation and tooling require Python 3.9 or newer; the remote observation payload accepts Python 3.8 or newer on SSH targets. CI exercises the local product on Python 3.9 and 3.13; Agent Sidecar has zero runtime Python dependencies. |
 
@@ -666,8 +666,10 @@ or `copilot` sessions in `waiting` or `idle`. `working`, `dead`, child,
 sidechain, and remote sessions are rejected, as are `cursor-ide` and `dsh`.
 Claude and Codex receive the native prompt on stdin. Cursor CLI necessarily
 receives it in the child process argv. Kimi uses the protected ACP path below.
-Copilot uses its authenticated `--resume --interactive` path. Claude, Codex,
-and Cursor retain their existing resume and result semantics.
+Copilot uses its authenticated `--resume --interactive` path; the message is
+isolated from Sidecar's own argv by stdin, but the Copilot child receives it
+in argv as required by its upstream CLI contract. Claude, Codex, and Cursor
+retain their existing resume and result semantics.
 Direct CLI send still does not support DSH sessions; DSH injection exists only
 inside the DSH plugin.
 
@@ -806,9 +808,9 @@ ready. `start` and `daemon status` report the numeric-loopback URL and private
 token-file path, never the token. Starting with HTTP flags that do not match an
 already running daemon fails instead of silently changing its configuration.
 
-### Persistent macOS user service
+### Persistent user service
 
-On macOS, explicitly install the daemon as a current-user LaunchAgent:
+Explicitly install the daemon as a service owned by the current user:
 
 ```sh
 agent-sidecar service install [--http [--http-port PORT]] [--force]
@@ -819,12 +821,20 @@ agent-sidecar service status
 agent-sidecar service uninstall
 ```
 
-Service installation is never automatic. It writes the validated user plist
-at `~/Library/LaunchAgents/com.agent-sidecar.daemon.plist`, loads label
+Service installation is never automatic. On macOS it writes the validated user
+plist at `~/Library/LaunchAgents/com.agent-sidecar.daemon.plist`, loads label
 `com.agent-sidecar.daemon` in the `gui/<uid>` domain, and configures both
-`RunAtLoad` and `KeepAlive`. The stored runtime command is cwd-independent for
-pipx, executable zipapps, and the checkout shim. Service control is unsupported
-on non-Darwin systems and fails without changing service state.
+`RunAtLoad` and `KeepAlive`. On Linux it writes
+`~/.config/systemd/user/agent-sidecar.service` and uses only
+`systemctl --user`; it never writes `/etc`, invokes `sudo`, or changes user
+lingering. The Linux unit runs `daemon run` in the foreground with
+`Restart=on-failure`, `KillMode=control-group`, `NoNewPrivileges`, a read-only
+system/home policy with an explicit writable runtime directory, and journald
+output. The existing private `daemon.jsonl` size-bounded rotation remains the
+application log guarantee; journald retention follows host policy.
+The stored runtime command is cwd-independent for pipx, executable zipapps,
+and the checkout shim. Service control is unsupported on other systems and
+fails without changing service state.
 
 An identical install is idempotent. Changing a validated definition, including
 HTTP mode, port, or runtime directory, is refused unless `--force` is supplied:
@@ -835,12 +845,15 @@ agent-sidecar service install --http --http-port 43123 --force
 
 `--force` deliberately unloads and replaces the definition, causing an
 interruption; rollback is attempted on failure but can itself be incomplete.
-Use it only for an intentional configuration replacement. For a version
+Use it only for an intentional configuration replacement. Do not use it to
+replace a foreign unit or plist. Linux service installation requires a running
+user systemd manager; it does not enable lingering automatically. For a version
 update, use the old command to uninstall first, update or replace the pipx
 environment, zipapp, or checkout in place, and then reinstall with the desired
 HTTP flags. Uninstall before changing the runtime command's path. `service
-uninstall` removes the validated LaunchAgent and stops its daemon, but retains
-the private runtime directory and its diagnostic and HTTP-token data. Any
+uninstall` removes the validated LaunchAgent or systemd user unit and stops its
+daemon, but retains the private runtime directory and its diagnostic and
+HTTP-token data. Any
 send-audit files there are retained too, but are owned by the CLI `send`
 workflow rather than daemon observation.
 
@@ -1206,8 +1219,10 @@ Version 0.9.0 provides local observation for the supported sources, Cursor CLI
 event watching, remote `list`/`status` snapshots, concurrent local and remote
 `watch --all --remote`, and experimental local send for Claude, Codex, Cursor
 CLI, Copilot, and exact Kimi Code 0.38.0/0.39.1 protected ACP paths. It packages the CLI for
-pipx and deterministic zipapp use, and adds explicit macOS LaunchAgent
-management plus private rotating daemon diagnostics. Remote prefix watch and
+  pipx and deterministic zipapp use, and adds explicit macOS LaunchAgent and
+Linux systemd user-service management plus private rotating daemon diagnostics.
+`scripts/copilot_compat.py` provides a no-credential compatibility smoke for the
+Copilot resume flags. Remote prefix watch and
 remote send remain unsupported. `send` does not support dsh sessions, whose
 injection is available only through the dsh plugin; Cursor IDE send remains
 unsupported. The opt-in HTTP panel and read-only API remain

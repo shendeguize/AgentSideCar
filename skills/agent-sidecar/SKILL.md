@@ -44,7 +44,7 @@ headless-resume process.
    configuration changes. This normal start remains Unix-socket only.
 5. Stop the daemon with `agent-sidecar daemon stop` only when the user asks.
 
-## Packaging and macOS service boundaries
+## Packaging and persistent service boundaries
 
 `agent-sidecar package build --output dist/agent-sidecar.pyz` creates a
 deterministic, executable zipapp and prints its path, SHA-256 digest, and size.
@@ -53,17 +53,21 @@ zipapp, and checkout shim all resolve `daemon start` to a stable absolute
 runtime command, so background startup is independent of the caller's current
 working directory.
 
-On macOS, `agent-sidecar service status` is a read-only combined LaunchAgent
-and daemon health query and may be used when it helps answer a status or
-diagnostic request. Service label `com.agent-sidecar.daemon` is installed in
-the current user's `gui/<uid>` domain with `RunAtLoad` and `KeepAlive`.
+`agent-sidecar service status` is a read-only combined supervisor and daemon
+health query and may be used when it helps answer a status or diagnostic
+request. On macOS the supervisor is the current user's
+`com.agent-sidecar.daemon` LaunchAgent; on Linux it is the current user's
+`agent-sidecar.service` systemd user unit. The Linux unit uses
+`Restart=on-failure`, `KillMode=control-group`, bounded journald output, and a
+private writable runtime directory. It never writes `/etc`, invokes `sudo`, or
+enables lingering automatically.
 
 Never run `agent-sidecar service install`, `service install --force`, or
 `service uninstall` unless the user explicitly requests that service mutation
 in the current turn. Continuous monitoring, daemon start, HTTP, status, or
 packaging requests do not imply permission to install a persistent service.
 Service installation is never automatic. Service control is unsupported on
-non-Darwin systems.
+platforms other than macOS and Linux.
 
 When explicitly requested, install with `agent-sidecar service install`; add
 `--http` and optional `--http-port <port>` only when the user also explicitly
@@ -206,14 +210,17 @@ identity field, or exit `0` without a valid bound receipt, is terminal
 `delivery: "unknown"` even if other output looks successful. Never retry an
 unknown result.
 
-The eligible targets are local, top-level `claude`, `codex`, `cursor-cli`, and
-`kimi` sessions in `waiting` or `idle`. Never send to a remote, `working`,
-`dead`, child, or sidechain session. Never send to `cursor-ide`, `copilot`,
+The eligible targets are local, top-level `claude`, `codex`, `cursor-cli`,
+`copilot`, and `kimi` sessions in `waiting` or `idle`. Never send to a remote,
+`working`, `dead`, child, or sidechain session. Never send to `cursor-ide`,
 `dsh`, or another unsupported agent. Kimi child/remote/dead targets are
 invalid, not candidates for fallback. `send` performs its own direct local
 scan; it does not use the daemon or remote aggregation. Claude, Codex, and
 Cursor keep their existing send semantics. Direct CLI send does not support
-DSH; use the DSH plugin for DSH injection.
+DSH; use the DSH plugin for DSH injection. Copilot uses its authenticated
+`--resume --interactive` path: stdin protects the Sidecar command line, but
+the upstream Copilot child receives the message in argv. Run
+`python3 scripts/copilot_compat.py` for a no-credential version/flag smoke.
 
 A row returned by `list --remote` cannot be passed to `send`: if its session ID
 is absent from the local scan, `send` fails closed with exit `2` and

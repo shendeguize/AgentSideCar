@@ -256,6 +256,33 @@ type Settled =
 
 type StdinSubmissionBoundary = 'not-started' | 'started' | 'completed'
 
+/** Build the stable argv contract used by every external-agent injection. */
+export function buildSendCliArgv(
+  command: readonly string[],
+  req: InjectExecutionRequest,
+  timeoutMs: number,
+): string[] {
+  const cliTimeoutSecs = Math.min(
+    MAX_CLI_TIMEOUT_SECONDS,
+    Math.max(1, Math.floor(timeoutMs / 1000)),
+  )
+  return [
+    ...command,
+    'send',
+    req.target.sessionId,
+    '--agent',
+    req.target.agent,
+    '--exact-session',
+    '--message-stdin',
+    '--allow-write',
+    '--json',
+    '--request-id',
+    req.requestId,
+    '--timeout',
+    String(cliTimeoutSecs),
+  ]
+}
+
 export function createSendCliExecutor(deps: {
   spawn: SpawnLike
   log?: SendCliLog
@@ -266,11 +293,11 @@ export function createSendCliExecutor(deps: {
   const bufferMs = deps.opts?.hardTimeoutBufferMs ?? HARD_TIMEOUT_BUFFER_MS
   const log: SendCliLog = deps.log ?? (() => {})
 
+  const hardTimeoutMs = timeoutMs + bufferMs
   const cliTimeoutSecs = Math.min(
     MAX_CLI_TIMEOUT_SECONDS,
     Math.max(1, Math.floor(timeoutMs / 1000)),
   )
-  const hardTimeoutMs = timeoutMs + bufferMs
 
   return {
     kind: 'send-cli',
@@ -283,21 +310,7 @@ export function createSendCliExecutor(deps: {
       // machine trust boundary. Reordering to `send [flags] -- <prefix>`
       // is a CLI-contract change (argparse `--` handling must be verified
       // across the supported Python range first) deferred to its own PR.
-      const argv: string[] = [
-        ...command,
-        'send',
-        req.target.sessionId,
-        '--agent',
-        req.target.agent,
-        '--exact-session',
-        '--message-stdin',
-        '--allow-write',
-        '--json',
-        '--request-id',
-        req.requestId,
-        '--timeout',
-        String(cliTimeoutSecs),
-      ]
+      const argv = buildSendCliArgv(command, req, timeoutMs)
 
       // `mode` has no CLI flag: a sidecar send is a one-shot headless resume.
       log('debug', 'spawning sidecar send CLI', {

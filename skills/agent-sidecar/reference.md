@@ -249,7 +249,7 @@ matching numeric-loopback origin. Requests, responses, and deadlines are
 bounded; the listener permits at most 16 concurrent clients and four event
 streams.
 
-## Explicit macOS user service
+## Explicit persistent user service
 
 ```text
 agent-sidecar service install [--http [--http-port PORT]] [--force]
@@ -261,10 +261,10 @@ agent-sidecar service status
 agent-sidecar service uninstall
 ```
 
-Service control is supported only on macOS with `/bin/launchctl`; non-Darwin
-platforms return an unsupported control error without installing anything.
-Installation is explicit and never triggered by `daemon start` or any
-observation command.
+Service control is supported on macOS with `/bin/launchctl` and on Linux with
+`systemctl --user`; other platforms return an unsupported control error
+without installing anything. Installation is explicit and never triggered by
+`daemon start` or any observation command.
 
 The service is a current-user LaunchAgent:
 
@@ -277,10 +277,19 @@ The service is a current-user LaunchAgent:
 - command: the cwd-independent pipx console script, executable zipapp, or
   checkout shim resolved at installation time, followed by `daemon run`.
 
+On Linux the service is the current-user unit
+`~/.config/systemd/user/agent-sidecar.service`. It uses `Restart=on-failure`,
+`KillMode=control-group`, `NoNewPrivileges`, `ProtectSystem=strict`,
+`ProtectHome=read-only`, an explicit writable runtime directory, and journald
+for supervisor output. The daemon's private `daemon.jsonl` rotation remains
+the application log bound. Installation requires a running user systemd
+manager and never enables lingering or writes `/etc`.
+
 An identical install is idempotent. A different validated definition, such as
 a changed HTTP mode, port, or runtime directory, is rejected unless `--force`
 is present. Force unloads the existing job, atomically replaces the definition,
-bootstraps it, and waits for daemon readiness. It interrupts service and,
+loads it through the platform supervisor, and waits for daemon readiness. It
+interrupts service and,
 although rollback is attempted, a failure can report incomplete rollback. It
 must not be used without an explicit user request for the replacement.
 
@@ -289,10 +298,10 @@ upgrading, replacing, or moving that runtime, then run `service install` from
 the new version with the intended HTTP flags. This ensures the process reloads
 and prevents a retained plist from pointing to a missing command.
 
-Uninstall boots out only the validated managed job and removes its plist. It
-does not purge the private Agent Sidecar runtime directory or retained audit,
-HTTP-token, and daemon-log data. `service status` is read-only; install, force,
-and uninstall are mutating and require an explicit user request.
+Uninstall stops only the validated managed job and removes its plist or systemd
+unit. It does not purge the private Agent Sidecar runtime directory or retained
+audit, HTTP-token, and daemon-log data. `service status` is read-only; install,
+force, and uninstall are mutating and require an explicit user request.
 
 ## Process JSON
 
@@ -597,10 +606,12 @@ write should always use both options with `--message-stdin`, `--allow-write`,
 a caller-retained `--request-id`, and `--json`, as in the second example.
 
 The target must be a top-level `waiting` or `idle` session from `claude`,
-`codex`, `cursor-cli`, or `kimi`. Remote, `working`, `dead`, child, and
-sidechain sessions are rejected. `cursor-ide`, `copilot`, and `dsh` are
-unsupported. Claude, Codex, and Cursor retain their prior resume and result
-semantics; Kimi uses the special contract below.
+`codex`, `cursor-cli`, `copilot`, or `kimi`. Remote, `working`, `dead`, child,
+and sidechain sessions are rejected. `cursor-ide` and `dsh` are unsupported.
+Claude, Codex, and Cursor retain their prior resume and result semantics;
+Copilot uses authenticated `--resume --interactive` and receives the message
+in its child argv, while `--message-stdin` keeps it out of Sidecar's own argv.
+Kimi uses the special contract below.
 
 `send` resolves against its direct local scan only. A session row obtained from
 `list --remote` is not a send target; if its ID is absent from that local scan,
@@ -608,7 +619,7 @@ the command fails closed with exit `2` and JSON code `target_not_found`. The
 `remote_session` rejection applies when a row found by the local scanner carries
 remote provenance.
 
-### Kimi Code 0.38.0 protected ACP resume
+### Kimi Code 0.38.0 / 0.39.1 protected ACP resume
 
 Kimi support is exact-version and manual. Use the full composite binding and
 stdin message transport:

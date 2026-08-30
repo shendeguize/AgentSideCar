@@ -50,7 +50,7 @@ DSH Center 远程清单契约由版本化夹具钉死，并以只读边界写入
 | 环境 | 支持边界 |
 | --- | --- |
 | macOS | 主要平台和完整质量门禁的目标平台。支持本地观察、远程监控、守护进程和 HTTP 面板、确定性 zipapp、实验性本地 `send`，以及用户 LaunchAgent。 |
-| Linux | CI 会验证可移植的观察、远程监控、守护进程/HTTP、TUI 和打包路径。macOS LaunchAgent 不可用；实验性 `send` 所要求的 Darwin `kqueue` 后代进程遏制能力不可用，因此会在执行前关闭失败。在 Agent 自有持久化格式或桌面集成存在平台差异的地方，Linux 支持属于尽力支持。 |
+| Linux | CI 会验证可移植的观察、远程监控、守护进程/HTTP、TUI、打包路径和当前用户 systemd 服务。实验性 `send` 所要求的 Darwin `kqueue` 后代进程遏制能力不可用，因此会在执行前关闭失败。在 Agent 自有持久化格式或桌面集成存在平台差异的地方，Linux 支持属于尽力支持。 |
 | Windows | 不支持。当前运行时和安全契约依赖 POSIX 权限、文件锁、进程组、Unix 套接字及相关原语。 |
 | Python | 本地安装与工具要求 Python 3.9 或更高版本；SSH 目标上的远程观察载荷接受 Python 3.8 或更高版本。CI 使用 Python 3.9 和 3.13 验证本地产品；Agent Sidecar 没有 Python 运行时依赖。 |
 
@@ -267,7 +267,7 @@ agent-sidecar service uninstall
 agent-sidecar daemon stop
 ```
 
-`service uninstall` 仅适用于 macOS LaunchAgent。它会保留私有运行时目录、诊断
+`service uninstall` 适用于 macOS LaunchAgent 或 Linux systemd user unit。它会保留私有运行时目录、诊断
 信息、HTTP 令牌和所有发送审计文件。对于根目录 Release 安装程序安装的 zipapp，
 请以相同前缀重新运行已检查的脚本：
 
@@ -675,9 +675,9 @@ agent-sidecar daemon run --http
 `daemon status` 会报告数值回环 URL 和私有令牌文件路径，但绝不报告令牌。若 HTTP
 参数与已运行守护进程不一致，启动会失败，而不会静默改变其配置。
 
-### 持久化 macOS 用户服务
+### 持久化用户服务
 
-在 macOS 上，需要显式把守护进程安装为当前用户 LaunchAgent：
+需要显式把守护进程安装为当前用户拥有的服务：
 
 ```sh
 agent-sidecar service install [--http [--http-port PORT]] [--force]
@@ -688,11 +688,17 @@ agent-sidecar service status
 agent-sidecar service uninstall
 ```
 
-服务绝不会自动安装。它会把经过验证的用户 plist 写入
+服务绝不会自动安装。在 macOS 上，它会把经过验证的用户 plist 写入
 `~/Library/LaunchAgents/com.agent-sidecar.daemon.plist`，在 `gui/<uid>` 域
 加载标签 `com.agent-sidecar.daemon`，并同时配置 `RunAtLoad` 和 `KeepAlive`。
-对于 pipx、可执行 zipapp 和检出版本 shim，存储的运行时命令都与 cwd 无关。
-非 Darwin 系统不支持服务控制，且失败时不会改变服务状态。
+在 Linux 上，它会写入 `~/.config/systemd/user/agent-sidecar.service`，只使用
+`systemctl --user`，绝不写入 `/etc`、调用 `sudo` 或自动修改 user lingering。
+Linux unit 以前台 `daemon run` 运行，包含 `Restart=on-failure`、
+`KillMode=control-group`、`NoNewPrivileges`、只读系统/主目录策略、明确的
+运行时可写目录以及 journald 输出。现有私有 `daemon.jsonl` 的有界轮转仍是
+应用日志容量保证，journald 的保留策略由主机决定。对于 pipx、可执行 zipapp
+和检出版本 shim，存储的运行时命令都与 cwd 无关。其他系统不支持服务控制，
+且失败时不会改变服务状态。
 
 相同安装是幂等的。若更改经过验证的定义，包括 HTTP 模式、端口或运行时目录，
 除非提供 `--force`，否则会被拒绝：
@@ -702,10 +708,13 @@ agent-sidecar service install --http --http-port 43123 --force
 ```
 
 `--force` 会有意卸载并替换定义，造成服务中断；失败时会尝试回滚，但回滚本身也
-可能不完整。只能在有意替换配置时使用。版本更新时，应先用旧命令卸载服务，就地
+可能不完整。只能在有意替换配置时使用，不得用来覆盖外部 unit/plist。Linux 服务
+安装要求当前用户的 systemd manager 正在运行，不会自动启用 lingering。版本更新时，
+应先用旧命令卸载服务，就地
 更新或替换 pipx 环境、zipapp 或检出版本，再以所需 HTTP 参数重新安装。改变运行时
-命令路径之前必须卸载。`service uninstall` 会删除经过验证的 LaunchAgent 并停止
-其守护进程，但会保留私有运行时目录及其中的诊断和 HTTP 令牌数据。所有发送审计
+命令路径之前必须卸载。`service uninstall` 会删除经过验证的 LaunchAgent 或
+systemd user unit 并停止其守护进程，但会保留私有运行时目录及其中的诊断和 HTTP
+令牌数据。所有发送审计
 文件也会保留，不过它们归 CLI `send` 工作流所有，而不是守护进程观察路径所有。
 
 ## 状态语义
@@ -992,8 +1001,9 @@ Changelog 和发布治理请参见[贡献指南](CONTRIBUTING.md)。
 0.9.0 版本为受支持数据源提供本地观察、Cursor CLI 事件监视、远程 `list`/`status`
 快照、并发本地和远程 `watch --all --remote`，并为 Claude、Codex、Cursor CLI、
 Copilot 以及精确 Kimi Code 0.38.0/0.39.1 受保护 ACP 路径提供实验性本地发送。它可以为 pipx 和
-确定性 zipapp 使用场景打包 CLI，并加入显式 macOS LaunchAgent 管理和私有轮转
-守护进程诊断。远程前缀监视和远程发送仍不受支持。`send` 不支持 dsh 会话，dsh
+确定性 zipapp 使用场景打包 CLI，并加入显式 macOS LaunchAgent 与 Linux systemd
+user service 管理和私有轮转守护进程诊断。`scripts/copilot_compat.py` 提供不读取
+凭据的 Copilot 恢复旗标兼容性冒烟。远程前缀监视和远程发送仍不受支持。`send` 不支持 dsh 会话，dsh
 会话注入仅能通过 dsh 插件完成；Cursor IDE 发送不受支持。可选 HTTP
 面板和只读 API 仍严格限制在数值 IPv4 回环地址，既不扩展远程监控，也不提供控制
 平面。

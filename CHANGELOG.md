@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `agent-sidecar service install|status|uninstall` now supports an explicit
+  Linux current-user systemd unit. The unit runs the foreground daemon with
+  bounded restart, process-group cleanup, least-privilege hardening, and
+  journald output; it never changes system-wide service state or user lingering.
 - Linux `send` now has process-group containment for bounded child execution,
   allowing supported local injection paths to run on Linux while retaining
   fail-closed cleanup and timeout behavior.
@@ -17,11 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authenticated, eligible sessions, including the DSH plugin's send-cli route.
 - `scripts/deploy-to-pod.sh` provides an explicit operator path for rsyncing
   the zipapp and plugin, restarting the daemon, and installing the DSH plugin.
+- `scripts/copilot_compat.py` provides a bounded, no-credential Copilot CLI
+  compatibility smoke for the authenticated `--resume --interactive` flag
+  contract.
 
 ### Changed
 
 - The DSH plugin's send-cli execution timeout is now 180 seconds to cover
   bounded real-agent resume operations.
+- Copilot documentation now distinguishes stdin isolation at the Sidecar
+  boundary from the upstream Copilot child process's argv message transport.
 - The plugin package uses its Trusted Publishing release workflow for npm
   publication.
 
