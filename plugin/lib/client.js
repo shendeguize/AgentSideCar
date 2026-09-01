@@ -94,7 +94,19 @@ window.__ModuleLoader__.load({
 			"replay_unsupported",
 			"source_failed"
 		]);
-		const TIMELINE_FAILURE_OUTCOMES = /* @__PURE__ */ new Set(["replay_unsupported", "source_failed"]);
+		/**
+		* Mirror of the host's classification (fusion.ts `TIMELINE_FAILURE_OUTCOMES`)
+		* and must move with it. `replay_unsupported` is not a failure: it says the
+		* session's transcript shape has no history source, which belongs in the
+		* summary's "unavailable" column next to a source that was never wired.
+		*/
+		const TIMELINE_FAILURE_OUTCOMES = /* @__PURE__ */ new Set(["source_failed"]);
+		/** Outcomes that contributed nothing but broke nothing. */
+		const TIMELINE_INERT_OUTCOMES = /* @__PURE__ */ new Set([
+			"unavailable",
+			"not_found",
+			"replay_unsupported"
+		]);
 		const LEGACY_TIMELINE_HEALTH = Object.freeze({
 			kind: "healthy",
 			legacy: true,
@@ -147,7 +159,7 @@ window.__ModuleLoader__.load({
 			if (outcomes === null || !Array.isArray(entries) || typeof degraded !== "boolean") return UNVERIFIED_TIMELINE_HEALTH;
 			const values = Object.values(outcomes);
 			const failures = values.filter((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome));
-			const usable = values.filter((outcome) => outcome !== "unavailable" && outcome !== "not_found");
+			const usable = values.filter((outcome) => !TIMELINE_INERT_OUTCOMES.has(outcome));
 			const allSourcesFailed = entries.length === 0 && usable.length > 0 && usable.every((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome));
 			const summary = timelineSourceSummary(outcomes);
 			if (!degraded && reason === null && failures.length === 0) return {
@@ -277,6 +289,52 @@ window.__ModuleLoader__.load({
 				body: JSON.stringify(body)
 			}, opts);
 		}
+		/**
+		* Preview which sessions a batch archive would hide. The returned token is
+		* single-use and must be handed back verbatim to {@link archiveApply}, so
+		* the daemon can verify the confirmed set against what the user reviewed.
+		*/
+		async function archivePreview(idleSeconds, statuses, opts = {}) {
+			const body = {
+				type: "archive.preview",
+				idleSeconds
+			};
+			if (statuses !== void 0) body.statuses = [...statuses];
+			return await postAction(body, opts);
+		}
+		/** Archive a subset of one preview's candidates. */
+		async function archiveApply(targets, token, opts = {}) {
+			return await postAction({
+				type: "archive.apply",
+				targets: [...targets],
+				token
+			}, opts);
+		}
+		/**
+		* End one live dsh session. Unlike archiving this is irreversible and is
+		* therefore never issued in bulk without an explicit opt-in, and never at
+		* all for non-dsh agents (they have no supervised session to end).
+		*
+		* A settled attempt always resolves — including `failed` and `timeout`.
+		* Only transport/gate refusals reject with {@link ApiError}, notably 501
+		* `dispose_unavailable` on a host without the capability.
+		*/
+		async function dshDispose(sessionId, opts = {}) {
+			return await postAction({
+				type: "dsh.dispose",
+				sessionId
+			}, opts);
+		}
+		/** Return archived sessions to the board. */
+		async function archiveUnarchive(targets, opts = {}) {
+			return await postAction(targets === "all" ? {
+				type: "archive.unarchive",
+				all: true
+			} : {
+				type: "archive.unarchive",
+				targets: [...targets]
+			}, opts);
+		}
 		//#endregion
 		//#region src/client/locales/zh.ts
 		const zh = {
@@ -352,6 +410,17 @@ window.__ModuleLoader__.load({
 			"settings.uiTimeWindowHoursHint": "看板只显示该时间窗内活动过的会话。",
 			"settings.uiShowDeadLabel": "显示 dead 会话",
 			"settings.uiShowDeadHint": "把已结束(dead)的会话也列入看板。",
+			"settings.sectionArchive": "自动归档",
+			"settings.archiveExplain": "归档只影响看板展示:不改动任何 agent 的会话文件,也不结束进程;会话一旦重新有活动会自动解档。自动归档永不 dispose。",
+			"settings.archiveLiveLabel": "当前 daemon 策略",
+			"settings.archiveLiveOn": "已开启,阈值 {hours} 小时",
+			"settings.archiveLiveOff": "已关闭",
+			"settings.archiveLiveUnknown": "尚未连上 daemon,或该 daemon 版本不支持归档",
+			"settings.archiveAutoLabel": "自动归档空闲会话",
+			"settings.archiveAutoHint": "把空闲超过阈值的 idle / dead 会话从看板隐藏(默认关闭)。",
+			"settings.archiveAfterHoursLabel": "无活动阈值(小时)",
+			"settings.archiveAfterHoursHint": "默认 24 小时;保守取值,配合自动解档形成安全回路。",
+			"settings.archiveHostedOnlyNote": "该设置只作用于本插件拉起的 daemon,且在下次 daemon 启动时生效。领养的或由系统服务托管的 daemon 保持其启动时的策略,请用 agent-sidecar daemon start --auto-archive 指定。",
 			"settings.sectionSkill": "skill 模式",
 			"settings.skillProvideLabel": "内嵌提供 skill",
 			"settings.skillProvideHint": "经 registerProvider 向 dsh 提供 agent-sidecar skill(M4 启用;重启后生效)。",
@@ -408,6 +477,11 @@ window.__ModuleLoader__.load({
 			"inject.kimiResultReplayed": "安全重放：这是同一请求的缓存结果；未启动新的 Kimi ACP 进程，也未再次发送内容。",
 			"inject.reprepare": "重新准备",
 			"inject.observeListen": "开启监听观察反应",
+			"inject.verifying": "正在核对目标会话记录中是否出现这条消息…",
+			"inject.verifyConfirmed": "已在目标会话记录中找到该消息,说明确实投递成功。仍然不要重复发送。",
+			"inject.verifyAbsent": "目标会话记录中没有该消息,很可能并未送达;再次发送前请先自行到会话中确认。",
+			"inject.verifyUnavailable": "无法读取会话记录,本次核对没有得到结论;请打开目标会话人工确认。",
+			"inject.openTarget": "查看目标会话记录",
 			"inject.errInjectDisabled": "注入功能已在服务端关闭;请在设置中开启注入。",
 			"inject.errInvalidMessage": "消息未通过服务端校验。",
 			"inject.errTargetNotFound": "目标会话不存在或已离开观测范围。",
@@ -506,6 +580,44 @@ window.__ModuleLoader__.load({
 			"board.cluster.count": "{n} 个聚类",
 			"board.cluster.empty": "当前快照没有可聚类的会话",
 			"board.cluster.sessions": "{n} 个会话",
+			"board.archive.open": "批量归档",
+			"board.archive.openTitle": "按空闲时长批量归档 idle / dead 会话",
+			"board.archive.title": "批量归档空闲会话",
+			"board.archive.explain": "归档只影响本看板的展示:不会改动 agent 的会话文件,也不会结束任何进程。会话一旦重新有活动就会自动回到看板。",
+			"board.archive.threshold": "无活动超过",
+			"board.archive.threshold30m": "30 分钟",
+			"board.archive.threshold2h": "2 小时",
+			"board.archive.threshold24h": "24 小时",
+			"board.archive.thresholdCustom": "自定义(分钟)",
+			"board.archive.customMinutes": "分钟",
+			"board.archive.preview": "预览命中",
+			"board.archive.previewing": "预览中…",
+			"board.archive.previewEmpty": "没有会话满足该阈值",
+			"board.archive.previewCount": "命中 {n} 个会话,已勾选 {selected} 个",
+			"board.archive.selectAll": "全选",
+			"board.archive.selectNone": "全不选",
+			"board.archive.confirm": "归档所选 {n} 个",
+			"board.archive.confirming": "归档中…",
+			"board.archive.cancel": "取消",
+			"board.archive.done": "已归档 {n} 个会话",
+			"board.archive.failed": "归档失败:{reason}",
+			"board.archive.previewFailed": "预览失败:{reason}",
+			"board.archive.unavailable": "当前 daemon 不支持归档,请升级 agent-sidecar",
+			"board.archive.dispose": "同时关停这 {n} 个 DSH 会话",
+			"board.archive.disposeHint": "仅对 dsh 会话生效,会真正结束该会话,不可撤销",
+			"board.archive.doneDisposed": ",其中 {n} 个 DSH 会话已关停",
+			"board.archive.doneDisposeFailed": ",{n} 个会话关停失败(仍处于归档状态)",
+			"board.archived.summary": "已归档 {n} 个",
+			"board.archived.expand": "展开已归档会话",
+			"board.archived.collapse": "收起已归档会话",
+			"board.archived.reason.manual": "手动",
+			"board.archived.reason.batch": "批量",
+			"board.archived.reason.auto": "自动",
+			"board.archived.archivedAt": "归档于 {time}",
+			"board.archived.restore": "解档",
+			"board.archived.restoring": "解档中…",
+			"board.archived.restoreAll": "全部解档",
+			"board.archived.restoreFailed": "解档失败:{reason}",
 			"board.widget.label": "Sidecar",
 			"board.widget.connection.ok": "已连接",
 			"board.widget.connection.degraded": "连接不稳定",
@@ -523,6 +635,19 @@ window.__ModuleLoader__.load({
 			"detail.header.untitled": "(无标题)",
 			"detail.header.unknownProject": "未知项目",
 			"detail.header.observedDisclaimer": "状态为从持久化数据推断的观察值,可能滞后",
+			"detail.header.lastActivity": "最近活动 {time}",
+			"detail.header.duration": "会话时长 {span}",
+			"detail.header.durationUnderMinute": "不到 1 分钟",
+			"detail.header.durationMinutes": "{m} 分钟",
+			"detail.header.durationHours": "{h} 小时 {m} 分",
+			"detail.header.durationDays": "{d} 天 {h} 小时",
+			"detail.header.model": "模型 {name}",
+			"detail.header.transcript": "归档文件",
+			"detail.header.copyPathTitle": "点击复制完整路径",
+			"detail.header.copyProjectTitle": "点击复制工作目录",
+			"detail.header.loadedEvents": "已加载 {n} 条事件",
+			"detail.header.loadedEventsPartial": "已加载 {n} 条事件(还有更早的历史)",
+			"detail.header.kindCount": "{label} {n}",
 			"detail.status.working": "工作中",
 			"detail.status.waiting": "等待中",
 			"detail.status.idle": "空闲",
@@ -562,6 +687,8 @@ window.__ModuleLoader__.load({
 			"detail.timeline.degradedAll": "最近一次请求的可用时间线来源均读取失败,未能加载新事件。",
 			"detail.timeline.degradedUnverified": "无法确认时间线来源状态,当前事件可能不完整。",
 			"detail.timeline.degradedRetry": "可点击「刷新」重试时间线来源。",
+			"detail.timeline.daemonDownHint": "sidecar daemon 未在运行,历史时间线无人应答。可在设置卡重试,或手动运行 agent-sidecar daemon start 后点击「刷新」。",
+			"detail.timeline.daemonDeferHint": "插件让位于系统服务托管的 daemon,服务拉起后点击「刷新」即可加载历史。",
 			"detail.states.loadingTitle": "正在加载时间线…",
 			"detail.states.emptyTitle": "暂无事件",
 			"detail.states.emptyHint": "该会话还没有可展示的规范化事件。",
@@ -579,6 +706,16 @@ window.__ModuleLoader__.load({
 			"detail.actions.inject": "注入",
 			"detail.actions.analyze": "AI 分析",
 			"detail.actions.analyzeDisabledHint": "在设置中开启「启用 AI 旁路分析」后可用",
+			"detail.actions.dispose": "关停会话",
+			"detail.actions.disposeHint": "真正结束这个 DSH 会话,不可撤销",
+			"detail.dispose.title": "关停 DSH 会话",
+			"detail.dispose.explain": "这会真正结束该会话:与归档不同,它无法撤销,会话进程与上下文都会被释放。落盘的历史记录仍然保留。",
+			"detail.dispose.confirm": "确认关停",
+			"detail.dispose.disposing": "关停中…",
+			"detail.dispose.cancel": "取消",
+			"detail.dispose.outcome.unsupported": "当前 DSH 宿主不支持关停会话",
+			"detail.dispose.outcome.timeout": "关停请求超时,会话可能仍在运行,请刷新后确认",
+			"detail.dispose.outcome.failed": "关停失败,会话仍在运行",
 			"detail.tools.title": "谱系与检索",
 			"detail.tools.show": "展开",
 			"detail.tools.hide": "收起",
@@ -790,6 +927,17 @@ window.__ModuleLoader__.load({
 			"settings.uiTimeWindowHoursHint": "The board lists only sessions active within this window.",
 			"settings.uiShowDeadLabel": "Show dead sessions",
 			"settings.uiShowDeadHint": "Also list finished (dead) sessions on the board.",
+			"settings.sectionArchive": "Automatic archiving",
+			"settings.archiveExplain": "Archiving affects this board only: no agent transcript is touched and no process is ended, and a session that becomes active again is unarchived automatically. The automatic path never disposes anything.",
+			"settings.archiveLiveLabel": "Policy in force",
+			"settings.archiveLiveOn": "on, threshold {hours}h",
+			"settings.archiveLiveOff": "off",
+			"settings.archiveLiveUnknown": "no daemon reached yet, or it predates archiving",
+			"settings.archiveAutoLabel": "Archive idle sessions automatically",
+			"settings.archiveAutoHint": "Hide idle / dead sessions past the threshold from the board (off by default).",
+			"settings.archiveAfterHoursLabel": "Inactivity threshold (hours)",
+			"settings.archiveAfterHoursHint": "Defaults to 24h — conservative on purpose, and safe in a loop with automatic unarchiving.",
+			"settings.archiveHostedOnlyNote": "This setting applies only to daemons this plugin spawns, and takes effect at the next daemon start. An adopted or service-managed daemon keeps the policy it was started with; pass agent-sidecar daemon start --auto-archive there.",
 			"settings.sectionSkill": "Skill mode",
 			"settings.skillProvideLabel": "Provide the skill in-process",
 			"settings.skillProvideHint": "Provide the agent-sidecar skill to dsh via registerProvider (enabled in M4; applies after restart).",
@@ -846,6 +994,11 @@ window.__ModuleLoader__.load({
 			"inject.kimiResultReplayed": "Safe replay: this is the cached result for the same request. No new Kimi ACP process was spawned and no content was sent again.",
 			"inject.reprepare": "Prepare again",
 			"inject.observeListen": "Listen for the reaction",
+			"inject.verifying": "Checking the target transcript for the message…",
+			"inject.verifyConfirmed": "Found it: the message is in the target transcript, so it was delivered. Still do not send it again.",
+			"inject.verifyAbsent": "Not found in the target transcript. It most likely never arrived — confirm in the session yourself before sending anything again.",
+			"inject.verifyUnavailable": "The transcript could not be read, so nothing was learned; open the target session to check by hand.",
+			"inject.openTarget": "Show the target session's timeline",
 			"inject.errInjectDisabled": "Injection is disabled on the server; enable it in Settings.",
 			"inject.errInvalidMessage": "The message failed server-side validation.",
 			"inject.errTargetNotFound": "The target session does not exist or left the observation window.",
@@ -944,6 +1097,44 @@ window.__ModuleLoader__.load({
 			"board.cluster.count": "{n} clusters",
 			"board.cluster.empty": "No sessions are available to cluster",
 			"board.cluster.sessions": "{n} sessions",
+			"board.archive.open": "Batch archive",
+			"board.archive.openTitle": "Archive idle / dead sessions by inactivity threshold",
+			"board.archive.title": "Archive idle sessions",
+			"board.archive.explain": "Archiving only affects this board: it never edits an agent session file and never stops a process. A session that becomes active again returns automatically.",
+			"board.archive.threshold": "Inactive longer than",
+			"board.archive.threshold30m": "30 minutes",
+			"board.archive.threshold2h": "2 hours",
+			"board.archive.threshold24h": "24 hours",
+			"board.archive.thresholdCustom": "Custom (minutes)",
+			"board.archive.customMinutes": "minutes",
+			"board.archive.preview": "Preview",
+			"board.archive.previewing": "Previewing…",
+			"board.archive.previewEmpty": "No session matches this threshold",
+			"board.archive.previewCount": "{n} matched, {selected} selected",
+			"board.archive.selectAll": "Select all",
+			"board.archive.selectNone": "Select none",
+			"board.archive.confirm": "Archive {n} selected",
+			"board.archive.confirming": "Archiving…",
+			"board.archive.cancel": "Cancel",
+			"board.archive.done": "Archived {n} sessions",
+			"board.archive.failed": "Archive failed: {reason}",
+			"board.archive.previewFailed": "Preview failed: {reason}",
+			"board.archive.unavailable": "This daemon has no archive support; upgrade agent-sidecar",
+			"board.archive.dispose": "Also end the {n} DSH session(s)",
+			"board.archive.disposeHint": "dsh sessions only; this really ends the session and cannot be undone",
+			"board.archive.doneDisposed": ", {n} DSH session(s) ended",
+			"board.archive.doneDisposeFailed": ", {n} could not be ended (still archived)",
+			"board.archived.summary": "{n} archived",
+			"board.archived.expand": "Show archived sessions",
+			"board.archived.collapse": "Hide archived sessions",
+			"board.archived.reason.manual": "manual",
+			"board.archived.reason.batch": "batch",
+			"board.archived.reason.auto": "auto",
+			"board.archived.archivedAt": "Archived {time}",
+			"board.archived.restore": "Restore",
+			"board.archived.restoring": "Restoring…",
+			"board.archived.restoreAll": "Restore all",
+			"board.archived.restoreFailed": "Restore failed: {reason}",
 			"board.widget.label": "Sidecar",
 			"board.widget.connection.ok": "Connected",
 			"board.widget.connection.degraded": "Connection unstable",
@@ -961,6 +1152,19 @@ window.__ModuleLoader__.load({
 			"detail.header.untitled": "(untitled)",
 			"detail.header.unknownProject": "Unknown project",
 			"detail.header.observedDisclaimer": "Status is an observed value inferred from persisted data and may lag",
+			"detail.header.lastActivity": "Last activity {time}",
+			"detail.header.duration": "Session span {span}",
+			"detail.header.durationUnderMinute": "under a minute",
+			"detail.header.durationMinutes": "{m}m",
+			"detail.header.durationHours": "{h}h {m}m",
+			"detail.header.durationDays": "{d}d {h}h",
+			"detail.header.model": "Model {name}",
+			"detail.header.transcript": "Transcript",
+			"detail.header.copyPathTitle": "Click to copy the full path",
+			"detail.header.copyProjectTitle": "Click to copy the working directory",
+			"detail.header.loadedEvents": "{n} events loaded",
+			"detail.header.loadedEventsPartial": "{n} events loaded (older history remains)",
+			"detail.header.kindCount": "{label} {n}",
 			"detail.status.working": "Working",
 			"detail.status.waiting": "Waiting",
 			"detail.status.idle": "Idle",
@@ -1000,6 +1204,8 @@ window.__ModuleLoader__.load({
 			"detail.timeline.degradedAll": "All usable timeline sources failed for the latest request. No new events could be loaded.",
 			"detail.timeline.degradedUnverified": "Timeline source status could not be verified. Events may be incomplete.",
 			"detail.timeline.degradedRetry": "Use Refresh to try the timeline sources again.",
+			"detail.timeline.daemonDownHint": "The sidecar daemon is not running, so nothing can answer for history. Retry from the settings card, or run agent-sidecar daemon start and press Refresh.",
+			"detail.timeline.daemonDeferHint": "The plugin defers to a service-managed daemon; once the service is up, press Refresh to load history.",
 			"detail.states.loadingTitle": "Loading the timeline…",
 			"detail.states.emptyTitle": "No events yet",
 			"detail.states.emptyHint": "This session has no normalized events to show yet.",
@@ -1017,6 +1223,16 @@ window.__ModuleLoader__.load({
 			"detail.actions.inject": "Inject",
 			"detail.actions.analyze": "AI analysis",
 			"detail.actions.analyzeDisabledHint": "Enable \"AI bypass analysis\" in Settings to use this",
+			"detail.actions.dispose": "End session",
+			"detail.actions.disposeHint": "Really end this DSH session; cannot be undone",
+			"detail.dispose.title": "End this DSH session",
+			"detail.dispose.explain": "This really ends the session: unlike archiving it cannot be undone, and the session process and context are released. The persisted history stays on disk.",
+			"detail.dispose.confirm": "End the session",
+			"detail.dispose.disposing": "Ending…",
+			"detail.dispose.cancel": "Cancel",
+			"detail.dispose.outcome.unsupported": "This DSH host cannot end sessions",
+			"detail.dispose.outcome.timeout": "The request timed out; the session may still be running — refresh to check",
+			"detail.dispose.outcome.failed": "Could not end the session; it is still running",
 			"detail.tools.title": "Lineage & search",
 			"detail.tools.show": "Show",
 			"detail.tools.hide": "Hide",
@@ -1495,6 +1711,50 @@ window.__ModuleLoader__.load({
 				empty: "board.cluster.empty",
 				sessions: "board.cluster.sessions"
 			},
+			archive: {
+				open: "board.archive.open",
+				openTitle: "board.archive.openTitle",
+				title: "board.archive.title",
+				explain: "board.archive.explain",
+				threshold: "board.archive.threshold",
+				threshold30m: "board.archive.threshold30m",
+				threshold2h: "board.archive.threshold2h",
+				threshold24h: "board.archive.threshold24h",
+				thresholdCustom: "board.archive.thresholdCustom",
+				customMinutes: "board.archive.customMinutes",
+				preview: "board.archive.preview",
+				previewing: "board.archive.previewing",
+				previewEmpty: "board.archive.previewEmpty",
+				previewCount: "board.archive.previewCount",
+				selectAll: "board.archive.selectAll",
+				selectNone: "board.archive.selectNone",
+				confirm: "board.archive.confirm",
+				confirming: "board.archive.confirming",
+				cancel: "board.archive.cancel",
+				done: "board.archive.done",
+				failed: "board.archive.failed",
+				previewFailed: "board.archive.previewFailed",
+				unavailable: "board.archive.unavailable",
+				dispose: "board.archive.dispose",
+				disposeHint: "board.archive.disposeHint",
+				doneDisposed: "board.archive.doneDisposed",
+				doneDisposeFailed: "board.archive.doneDisposeFailed"
+			},
+			archived: {
+				summary: "board.archived.summary",
+				expand: "board.archived.expand",
+				collapse: "board.archived.collapse",
+				reason: {
+					manual: "board.archived.reason.manual",
+					batch: "board.archived.reason.batch",
+					auto: "board.archived.reason.auto"
+				},
+				archivedAt: "board.archived.archivedAt",
+				restore: "board.archived.restore",
+				restoring: "board.archived.restoring",
+				restoreAll: "board.archived.restoreAll",
+				restoreFailed: "board.archived.restoreFailed"
+			},
 			widget: {
 				label: "board.widget.label",
 				connection: {
@@ -1808,6 +2068,53 @@ window.__ModuleLoader__.load({
 		function timeWindowLabel(hours) {
 			if (hours >= 24 && hours % 24 === 0) return formatTemplate$2(BOARD_STRINGS.timeWindow.days, { n: hours / 24 });
 			return formatTemplate$2(BOARD_STRINGS.timeWindow.hours, { n: hours });
+		}
+		/** Seconds behind each preset; 'custom' reads the minutes input instead. */
+		const ARCHIVE_THRESHOLD_SECONDS = {
+			"30m": 1800,
+			"2h": 7200,
+			"24h": 86400
+		};
+		/**
+		* Resolve the dialog controls into the `idleSeconds` the daemon expects.
+		* Returns null when a custom value is empty or out of range, which the
+		* dialog renders as a disabled preview button rather than a silent clamp.
+		*/
+		function resolveArchiveSeconds(token, customMinutes) {
+			if (token !== "custom") return ARCHIVE_THRESHOLD_SECONDS[token];
+			const minutes = Number(customMinutes.trim());
+			if (!Number.isFinite(minutes)) return null;
+			const seconds = Math.round(minutes * 60);
+			if (seconds < 60 || seconds > 2592e3) return null;
+			return seconds;
+		}
+		/** Composite key used to address one card across preview/apply round-trips. */
+		function cardKey(card) {
+			return `${card.agent}\u0000${card.sessionId}`;
+		}
+		/** How many of these cards a real dispose could touch. */
+		function countDisposable(cards) {
+			return cards.filter((card) => card.agent === "dsh").length;
+		}
+		/**
+		* Whether the batch dialog should offer the dispose opt-in. Both halves
+		* matter: a host without the capability cannot dispose anything, and a
+		* selection without dsh rows has nothing to dispose — in either case the
+		* checkbox would promise an action that does nothing.
+		*/
+		function shouldOfferDispose(capable, selected) {
+			return capable && countDisposable(selected) > 0;
+		}
+		/** Provenance token → localized label; unknown tokens render verbatim. */
+		function archiveReasonLabel(reason) {
+			if (reason === "manual") return BOARD_STRINGS.archived.reason.manual;
+			if (reason === "batch") return BOARD_STRINGS.archived.reason.batch;
+			if (reason === "auto") return BOARD_STRINGS.archived.reason.auto;
+			return reason;
+		}
+		/** Newest archive decision first; the board shows the recent ones on top. */
+		function sortArchived(rows) {
+			return [...rows].sort((a, b) => b.archivedAtMs - a.archivedAtMs);
 		}
 		const DAEMON_TONE = {
 			probe: "neutral",
@@ -2667,7 +2974,10 @@ window.__ModuleLoader__.load({
 				streamStatus: "connecting",
 				lastReconcileAtMs: null,
 				sessions: [],
+				archived: [],
+				archivePolicy: null,
 				injectCapability: false,
+				disposeCapability: false,
 				hasSnapshot: false,
 				initialLoadFailed: false
 			};
@@ -2685,6 +2995,7 @@ window.__ModuleLoader__.load({
 				title: session.title,
 				project: session.project,
 				updatedAtMs: session.updated_at * 1e3,
+				...session.created_at !== void 0 ? { createdAtMs: session.created_at * 1e3 } : {},
 				...session.model !== void 0 ? { model: session.model } : {},
 				...session.model_provider !== void 0 ? { modelProvider: session.model_provider } : {},
 				lastEvent: session.last_event === null ? null : {
@@ -2693,6 +3004,18 @@ window.__ModuleLoader__.load({
 				},
 				gap: session.gap
 			}));
+		}
+		/** Archived wire rows → board cards (both clocks become epoch ms here). */
+		function mapArchived(rows) {
+			if (rows === void 0) return [];
+			return mapSessions(rows).map((card, index) => {
+				const row = rows[index];
+				return {
+					...card,
+					archivedAtMs: row.archived_at * 1e3,
+					archiveReason: row.archive_reason
+				};
+			});
 		}
 		/** Daemon badge hover detail from the last ping ("pid 123 · v0.6.0"). */
 		function daemonDetailOf(ping) {
@@ -2723,7 +3046,10 @@ window.__ModuleLoader__.load({
 				streamStatus: browserStatus,
 				lastReconcileAtMs: snapshot.board.lastReconcileAt,
 				sessions: mapSessions(snapshot.board.sessions),
+				archived: mapArchived(snapshot.board.archived),
+				archivePolicy: snapshot.board.archivePolicy ?? null,
 				injectCapability: snapshot.capabilities.inject,
+				disposeCapability: snapshot.capabilities.dispose === true,
 				hasSnapshot: true,
 				initialLoadFailed: false
 			};
@@ -2948,6 +3274,104 @@ window.__ModuleLoader__.load({
 			}
 		};
 		//#endregion
+		//#region src/client/detail/transport.ts
+		/**
+		* Transport helpers for the detail view's M3 read endpoints. api.ts (T2.1)
+		* predates M3: its `fetchSession` is typed for the M1 placeholder response
+		* and it has no timeline-pagination call — and per the task boundary its
+		* existing exports must not change (the S7 integration wave unifies the
+		* data layer). So this module carries the missing calls with the same
+		* posture as api.ts (same-origin relative paths, bounded timeout,
+		* normalized ApiError, injectable primitives), reusing api.ts's exported
+		* building blocks instead of redefining them.
+		*
+		* Read-only surface, no retry policy here (transport, not policy).
+		*
+		* @module
+		*/
+		const defaultSetTimeout$1 = (fn, ms) => globalThis.setTimeout(fn, ms);
+		const defaultClearTimeout$1 = (handle) => {
+			globalThis.clearTimeout(handle);
+		};
+		const defaultCreateAbortController$1 = () => new AbortController();
+		function resolveFetch$1(opts) {
+			if (opts.fetch !== void 0) return opts.fetch;
+			return globalThis.fetch;
+		}
+		async function getJson$1(path, opts) {
+			const doFetch = resolveFetch$1(opts);
+			const controller = (opts.createAbortController ?? defaultCreateAbortController$1)();
+			const setT = opts.setTimeout ?? defaultSetTimeout$1;
+			const clearT = opts.clearTimeout ?? defaultClearTimeout$1;
+			let timedOut = false;
+			let externallyAborted = false;
+			const timer = setT(() => {
+				timedOut = true;
+				controller.abort();
+			}, opts.timeoutMs ?? 15e3);
+			const external = opts.signal;
+			const onExternalAbort = () => {
+				externallyAborted = true;
+				controller.abort();
+			};
+			if (external !== void 0) if (external.aborted) onExternalAbort();
+			else external.addEventListener("abort", onExternalAbort);
+			try {
+				let res;
+				try {
+					res = await doFetch(path, {
+						method: "GET",
+						signal: controller.signal
+					});
+				} catch (err) {
+					if (timedOut) throw new ApiError("timeout", "request_timeout", null, err);
+					if (externallyAborted) throw new ApiError("aborted", "request_aborted", null, err);
+					throw new ApiError("network", "network_error", null, err);
+				}
+				if (!res.ok) {
+					let reason = `http_${res.status}`;
+					try {
+						const body = await res.json();
+						if (typeof body === "object" && body !== null) {
+							const value = body["reason"];
+							if (typeof value === "string" && value !== "") reason = value;
+						}
+					} catch {}
+					throw new ApiError("http", reason, res.status);
+				}
+				try {
+					return await res.json();
+				} catch (err) {
+					if (timedOut) throw new ApiError("timeout", "request_timeout", null, err);
+					throw new ApiError("parse", "invalid_json", res.status, err);
+				}
+			} finally {
+				clearT(timer);
+				if (external !== void 0) external.removeEventListener("abort", onExternalAbort);
+			}
+		}
+		/**
+		* `GET <prefix>/session/<id>` typed for the M3 body. Unknown ids reject
+		* with an ApiError carrying the server's `session_not_found` reason; a
+		* pre-M3 host answers `timeline: null` (the caller degrades honestly).
+		*/
+		async function fetchSessionDetail(sessionId, opts = {}) {
+			return await getJson$1(`${API_PREFIX}/session/${encodeURIComponent(sessionId)}`, opts);
+		}
+		/**
+		* `GET <prefix>/session/<id>/timeline?cursor=&limit=` — one older history
+		* page. `cursor` is the opaque `nextCursor` token from a previous page,
+		* passed through verbatim (the server rejects tampered tokens with 400
+		* `invalid_cursor`); omit it for the newest window (listen-mode refetch).
+		*/
+		async function fetchTimelinePage(sessionId, opts = {}) {
+			const params = new URLSearchParams();
+			if (opts.cursor !== void 0 && opts.cursor !== null && opts.cursor !== "") params.set("cursor", opts.cursor);
+			if (opts.limit !== void 0) params.set("limit", String(opts.limit));
+			const query = params.toString();
+			return await getJson$1(`${API_PREFIX}/session/${encodeURIComponent(sessionId)}/timeline${query === "" ? "" : `?${query}`}`, opts);
+		}
+		//#endregion
 		//#region src/client/inject-glue.ts
 		/**
 		* Inject integration glue (S5 wiring, T4.9): everything that stands between
@@ -2972,6 +3396,8 @@ window.__ModuleLoader__.load({
 		*   retryable notice for prepare, terminal unknown for execute — S6).
 		*   A delivered execute fires the optional `onDelivered` hook so the owner
 		*   can pull one fresh snapshot; failed/unknown never do.
+		* - {@link createVerifyProbe}: the read-only timeline probe behind the
+		*   panel's automatic check of an unknown delivery (inject/verify.ts).
 		* - {@link findInjectTarget}: board card selection → panel target (the
 		*   design §5.1 view-3 target summary comes from the selected SessionView
 		*   as mapped into the controller's card VMs). A session that has left the
@@ -3046,6 +3472,25 @@ window.__ModuleLoader__.load({
 				}
 			};
 		}
+		/**
+		* Probe the target's newest timeline window, for the panel's automatic
+		* check of an unknown delivery. Read-only by construction — nothing here
+		* can re-send — so it stays clear of the no-retry rule (S6).
+		*
+		* Transport failures propagate: {@link verifyInjection} reads a rejection
+		* as "the source could not answer", which must not be confused with an
+		* answered-but-empty page.
+		*
+		* @param sessionId - the injection target.
+		* @param deps - transport override (tests); defaults to the detail transport.
+		*/
+		function createVerifyProbe(sessionId, deps = {}) {
+			const fetchPage = deps.fetchPage ?? defaultFetchPage;
+			return async () => {
+				return (await fetchPage(sessionId, { limit: 40 })).entries;
+			};
+		}
+		const defaultFetchPage = (sessionId, opts) => fetchTimelinePage(sessionId, opts);
 		//#endregion
 		//#region \0dsh-css:src/client/theme/agsc.module.css.mjs
 		const css$11 = ".V4kgfa_root{--agsc-accent:var(--dsw-alias-brand-primary);--agsc-bg:var(--dsw-alias-bg-layer-1);--agsc-bg-raised:var(--dsw-alias-bg-layer-3);--agsc-fg:var(--dsw-alias-label-primary);--agsc-fg-secondary:var(--dsw-alias-label-secondary);--agsc-fg-dimmed:var(--dsw-alias-label-dimmed);--agsc-border:var(--dsw-alias-border-l1);--agsc-border-strong:var(--dsw-alias-border-l2);--agsc-ok:var(--dsw-alias-state-success-primary);--agsc-warn:var(--dsw-alias-state-warn-primary);--agsc-err:var(--dsw-alias-state-error-primary);--agsc-radius-card:12px;--agsc-radius-control:8px;--agsc-shadow-card:var(--dsw-shadow-lv2);--agsc-font-mono:var(--ds-font-family-code);color:var(--agsc-fg);font-family:inherit}";
@@ -3106,7 +3551,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:src/client/board/board.module.css.mjs
-		const css$10 = ".PLm6rG_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:12px;padding:16px 20px;display:flex;overflow-y:auto}.PLm6rG_topbar{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.PLm6rG_title{color:var(--agsc-fg);margin-right:2px;font-size:15px;font-weight:650}.PLm6rG_dot{background:var(--dsw-alias-label-tertiary);border-radius:50%;flex:none;width:8px;height:8px}.PLm6rG_dot[data-tone=neutral]{background:var(--dsw-alias-label-tertiary)}.PLm6rG_dot[data-tone=muted]{background:var(--agsc-fg-dimmed)}.PLm6rG_countBadge{white-space:nowrap}.PLm6rG_countTotal{color:var(--agsc-fg-secondary);white-space:nowrap;font-size:12px}.PLm6rG_spacer{flex:1}.PLm6rG_control{color:var(--agsc-fg-secondary);white-space:nowrap;align-items:center;gap:5px;font-size:12px;display:inline-flex}.PLm6rG_select{height:28px;color:var(--agsc-fg);background:var(--agsc-bg-raised);border:1px solid var(--agsc-border-strong);border-radius:14px;padding:0 10px;font-family:inherit;font-size:12px}.PLm6rG_checkbox{accent-color:var(--agsc-accent);margin:0}.PLm6rG_banner{border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);padding:6px 10px;font-size:12px;line-height:18px}.PLm6rG_banner[data-tone=warn]{color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border-color:var(--dsw-alias-state-warn-secondary)}.PLm6rG_banner[data-tone=danger]{color:var(--agsc-err);background:var(--dsw-alias-state-error-secondary);border-color:var(--dsw-alias-state-error-secondary)}.PLm6rG_clusterPanel{border:1px solid var(--agsc-border);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);flex-direction:column;gap:8px;padding:10px;display:flex}.PLm6rG_clusterHead,.PLm6rG_clusterSummary{flex-wrap:wrap;align-items:baseline;gap:8px;display:flex}.PLm6rG_clusterTitle{color:var(--agsc-fg);font-size:13px;font-weight:600}.PLm6rG_clusterList{flex-direction:column;gap:6px;display:flex}.PLm6rG_clusterCard{border:1px solid var(--agsc-border);border-radius:var(--agsc-radius-control);padding:7px 8px}.PLm6rG_clusterSummary span{color:var(--agsc-fg-secondary);font-size:12px}.PLm6rG_clusterMeta,.PLm6rG_clusterEmpty{color:var(--agsc-fg-dimmed);overflow-wrap:anywhere;font-size:11px}.PLm6rG_bannerDismiss{color:inherit;margin-left:10px;text-decoration:underline}.PLm6rG_empty{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:180px;padding:24px;display:flex}.PLm6rG_emptyTitle{color:var(--agsc-fg);font-size:14px;font-weight:600}.PLm6rG_emptyHint{max-width:420px;color:var(--agsc-fg-secondary);font-size:12px;line-height:20px}.PLm6rG_group{flex-direction:column;gap:8px;display:flex}.PLm6rG_groupHead{text-align:left;cursor:pointer;background:0 0;border:none;align-items:baseline;gap:8px;width:100%;min-width:0;padding:0;font-family:inherit;display:flex}.PLm6rG_chevron{color:var(--agsc-fg-dimmed);flex:none;font-size:10px}.PLm6rG_groupAttention{color:var(--agsc-warn);flex:none;font-size:11px}.PLm6rG_idleSummary{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);font:inherit;cursor:pointer;align-self:flex-start;align-items:center;gap:6px;padding:4px 8px;font-size:12px;display:flex}.PLm6rG_idleSummary:hover{color:var(--agsc-fg);background:var(--dsw-alias-interactive-bg-hover)}.PLm6rG_showMore{align-self:flex-start}.PLm6rG_groupName{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;overflow:hidden}.PLm6rG_groupCount{color:var(--agsc-fg-secondary);background:var(--dsw-alias-bg-layer-2);border-radius:999px;flex:none;padding:0 8px;font-size:11px;line-height:18px}.PLm6rG_grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;display:grid}.PLm6rG_card{border-radius:var(--agsc-radius-card);border:1px solid var(--agsc-border-strong);background:var(--agsc-bg-raised);flex-direction:column;gap:6px;min-width:0;padding:10px 12px;display:flex}.PLm6rG_card:hover{border-color:var(--dsw-alias-label-dimmed);background:var(--dsw-alias-interactive-bg-hover)}.PLm6rG_cardOpen{border-radius:var(--agsc-radius-control);width:100%;min-width:0;color:inherit;font:inherit;text-align:left;cursor:pointer;background:0 0;border:0;flex-direction:column;gap:6px;padding:0;display:flex}.PLm6rG_cardOpen:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:2px}.PLm6rG_cardHead{justify-content:space-between;align-items:center;gap:8px;min-width:0;display:flex}.PLm6rG_agent{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--agsc-fg);align-items:center;gap:5px;font-size:12px;font-weight:600;display:inline-flex;overflow:hidden}.PLm6rG_glyph{color:var(--agsc-accent);flex:none}.PLm6rG_statusPill{max-width:100%}.PLm6rG_attention{color:var(--agsc-warn);font-size:11px}.PLm6rG_attention[data-kind=gap]{color:var(--agsc-err)}.PLm6rG_cardTitle{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;overflow:hidden}.PLm6rG_cardId{max-width:100%;font-size:11px;font-family:var(--agsc-font-mono);color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;justify-content:flex-start;align-self:flex-start;overflow:hidden}.PLm6rG_copied{color:var(--agsc-ok);margin-left:6px;font-family:inherit}.PLm6rG_cardEvent{color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.PLm6rG_cardTime{color:var(--agsc-fg-secondary);font-size:11px}";
+		const css$10 = ".PLm6rG_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:12px;padding:16px 20px;display:flex;overflow-y:auto}.PLm6rG_topbar{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.PLm6rG_title{color:var(--agsc-fg);margin-right:2px;font-size:15px;font-weight:650}.PLm6rG_dot{background:var(--dsw-alias-label-tertiary);border-radius:50%;flex:none;width:8px;height:8px}.PLm6rG_dot[data-tone=neutral]{background:var(--dsw-alias-label-tertiary)}.PLm6rG_dot[data-tone=muted]{background:var(--agsc-fg-dimmed)}.PLm6rG_countBadge{white-space:nowrap}.PLm6rG_countTotal{color:var(--agsc-fg-secondary);white-space:nowrap;font-size:12px}.PLm6rG_spacer{flex:1}.PLm6rG_control{color:var(--agsc-fg-secondary);white-space:nowrap;align-items:center;gap:5px;font-size:12px;display:inline-flex}.PLm6rG_select{height:28px;color:var(--agsc-fg);background:var(--agsc-bg-raised);border:1px solid var(--agsc-border-strong);border-radius:14px;padding:0 10px;font-family:inherit;font-size:12px}.PLm6rG_checkbox{accent-color:var(--agsc-accent);margin:0}.PLm6rG_banner{border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);padding:6px 10px;font-size:12px;line-height:18px}.PLm6rG_banner[data-tone=warn]{color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border-color:var(--dsw-alias-state-warn-secondary)}.PLm6rG_banner[data-tone=danger]{color:var(--agsc-err);background:var(--dsw-alias-state-error-secondary);border-color:var(--dsw-alias-state-error-secondary)}.PLm6rG_clusterPanel{border:1px solid var(--agsc-border);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);flex-direction:column;gap:8px;padding:10px;display:flex}.PLm6rG_clusterHead,.PLm6rG_clusterSummary{flex-wrap:wrap;align-items:baseline;gap:8px;display:flex}.PLm6rG_clusterTitle{color:var(--agsc-fg);font-size:13px;font-weight:600}.PLm6rG_clusterList{flex-direction:column;gap:6px;display:flex}.PLm6rG_clusterCard{border:1px solid var(--agsc-border);border-radius:var(--agsc-radius-control);padding:7px 8px}.PLm6rG_clusterSummary span{color:var(--agsc-fg-secondary);font-size:12px}.PLm6rG_clusterMeta,.PLm6rG_clusterEmpty{color:var(--agsc-fg-dimmed);overflow-wrap:anywhere;font-size:11px}.PLm6rG_bannerDismiss{color:inherit;margin-left:10px;text-decoration:underline}.PLm6rG_archiveBody{flex-direction:column;gap:10px;min-width:0;display:flex}.PLm6rG_archiveControls{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.PLm6rG_archiveNumber{width:76px;height:28px;font:inherit;color:var(--agsc-fg);background:var(--agsc-bg-raised);border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);padding:0 8px;font-size:12px}.PLm6rG_archiveSummary{color:var(--agsc-fg-secondary);align-items:center;gap:6px;font-size:12px;display:flex}.PLm6rG_archiveEmpty{color:var(--agsc-fg-dimmed);padding:8px 0;font-size:12px}.PLm6rG_archiveList{flex-direction:column;gap:4px;max-height:320px;margin:0;padding:0;list-style:none;display:flex;overflow-y:auto}.PLm6rG_archiveRow{border:1px solid var(--agsc-border);border-radius:var(--agsc-radius-control);align-items:center;gap:8px;min-width:0;padding:5px 8px;display:flex}.PLm6rG_archiveRowLabel{cursor:pointer;align-items:center;gap:8px;width:100%;min-width:0;display:flex}.PLm6rG_archiveRowTitle{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;font-size:12px;overflow:hidden}.PLm6rG_archiveRowMeta{color:var(--agsc-fg-secondary);white-space:nowrap;flex:none;font-size:11px}.PLm6rG_archiveActions{justify-content:flex-end;align-items:center;gap:8px;display:flex}.PLm6rG_archivedPanel{border:1px dashed var(--agsc-border-strong);border-radius:var(--agsc-radius-control);flex-direction:column;gap:6px;padding:8px 10px;display:flex}.PLm6rG_archivedHead{align-items:center;gap:8px;display:flex}.PLm6rG_empty{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:180px;padding:24px;display:flex}.PLm6rG_emptyTitle{color:var(--agsc-fg);font-size:14px;font-weight:600}.PLm6rG_emptyHint{max-width:420px;color:var(--agsc-fg-secondary);font-size:12px;line-height:20px}.PLm6rG_group{flex-direction:column;gap:8px;display:flex}.PLm6rG_groupHead{text-align:left;cursor:pointer;background:0 0;border:none;align-items:baseline;gap:8px;width:100%;min-width:0;padding:0;font-family:inherit;display:flex}.PLm6rG_chevron{color:var(--agsc-fg-dimmed);flex:none;font-size:10px}.PLm6rG_groupAttention{color:var(--agsc-warn);flex:none;font-size:11px}.PLm6rG_idleSummary{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);font:inherit;cursor:pointer;align-self:flex-start;align-items:center;gap:6px;padding:4px 8px;font-size:12px;display:flex}.PLm6rG_idleSummary:hover{color:var(--agsc-fg);background:var(--dsw-alias-interactive-bg-hover)}.PLm6rG_showMore{align-self:flex-start}.PLm6rG_groupName{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;overflow:hidden}.PLm6rG_groupCount{color:var(--agsc-fg-secondary);background:var(--dsw-alias-bg-layer-2);border-radius:999px;flex:none;padding:0 8px;font-size:11px;line-height:18px}.PLm6rG_grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;display:grid}.PLm6rG_card{border-radius:var(--agsc-radius-card);border:1px solid var(--agsc-border-strong);background:var(--agsc-bg-raised);flex-direction:column;gap:6px;min-width:0;padding:10px 12px;display:flex}.PLm6rG_card:hover{border-color:var(--dsw-alias-label-dimmed);background:var(--dsw-alias-interactive-bg-hover)}.PLm6rG_cardOpen{border-radius:var(--agsc-radius-control);width:100%;min-width:0;color:inherit;font:inherit;text-align:left;cursor:pointer;background:0 0;border:0;flex-direction:column;gap:6px;padding:0;display:flex}.PLm6rG_cardOpen:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:2px}.PLm6rG_cardHead{justify-content:space-between;align-items:center;gap:8px;min-width:0;display:flex}.PLm6rG_agent{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--agsc-fg);align-items:center;gap:5px;font-size:12px;font-weight:600;display:inline-flex;overflow:hidden}.PLm6rG_glyph{color:var(--agsc-accent);flex:none}.PLm6rG_statusPill{max-width:100%}.PLm6rG_attention{color:var(--agsc-warn);font-size:11px}.PLm6rG_attention[data-kind=gap]{color:var(--agsc-err)}.PLm6rG_cardTitle{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;overflow:hidden}.PLm6rG_cardId{max-width:100%;font-size:11px;font-family:var(--agsc-font-mono);color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;justify-content:flex-start;align-self:flex-start;overflow:hidden}.PLm6rG_copied{color:var(--agsc-ok);margin-left:6px;font-family:inherit}.PLm6rG_cardEvent{color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.PLm6rG_cardTime{color:var(--agsc-fg-secondary);font-size:11px}";
 		const tagId$10 = "@shendeguize/dsh-agent-sidecar/src/client/board/board.module.css";
 		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$10, css$10);
 		if (typeof document !== "undefined") {
@@ -3125,6 +3570,19 @@ window.__ModuleLoader__.load({
 		}
 		var board_module_css_default = {
 			"agent": "PLm6rG_agent",
+			"archiveActions": "PLm6rG_archiveActions",
+			"archiveBody": "PLm6rG_archiveBody",
+			"archiveControls": "PLm6rG_archiveControls",
+			"archiveEmpty": "PLm6rG_archiveEmpty",
+			"archiveList": "PLm6rG_archiveList",
+			"archiveNumber": "PLm6rG_archiveNumber",
+			"archiveRow": "PLm6rG_archiveRow",
+			"archiveRowLabel": "PLm6rG_archiveRowLabel",
+			"archiveRowMeta": "PLm6rG_archiveRowMeta",
+			"archiveRowTitle": "PLm6rG_archiveRowTitle",
+			"archiveSummary": "PLm6rG_archiveSummary",
+			"archivedHead": "PLm6rG_archivedHead",
+			"archivedPanel": "PLm6rG_archivedPanel",
 			"attention": "PLm6rG_attention",
 			"banner": "PLm6rG_banner",
 			"bannerDismiss": "PLm6rG_bannerDismiss",
@@ -3169,6 +3627,388 @@ window.__ModuleLoader__.load({
 			"title": "PLm6rG_title",
 			"topbar": "PLm6rG_topbar"
 		};
+		//#endregion
+		//#region src/client/board/ArchivePanel.tsx
+		/**
+		* Batch-archive dialog and the board's archived section.
+		*
+		* Presentation-only, same contract as Board.tsx: no api/sse imports, every
+		* round-trip arrives as a {@link BoardArchiveApi} callback that already
+		* speaks board view models (epoch milliseconds, `SessionFocusTarget`).
+		*
+		* The flow is deliberately two-phase and mirrors the inject gateway:
+		* `preview(idleSeconds)` mints a single-use token alongside the candidate
+		* list, the operator unchecks whatever should stay, and `apply` hands that
+		* token back. A stale dialog therefore cannot replay an old confirmation.
+		*
+		* @module
+		*/
+		const THRESHOLD_ORDER = [
+			"30m",
+			"2h",
+			"24h",
+			"custom"
+		];
+		function thresholdLabel(token) {
+			if (token === "30m") return BOARD_STRINGS.archive.threshold30m;
+			if (token === "2h") return BOARD_STRINGS.archive.threshold2h;
+			if (token === "24h") return BOARD_STRINGS.archive.threshold24h;
+			return BOARD_STRINGS.archive.thresholdCustom;
+		}
+		/** Message text for a rejected round-trip; never surfaces a raw stack. */
+		function failureText(template, err) {
+			return formatTemplate$2(template, { reason: err instanceof Error && err.message !== "" ? err.message : String(err) });
+		}
+		/**
+		* Threshold → preview → confirm, with the candidate list checked by default
+		* (the operator excludes rather than includes: the preview already applied
+		* the idle+dead filter, so the common case is "yes, all of these").
+		*/
+		function ArchiveDialog(props) {
+			const [threshold, setThreshold] = (0, react.useState)("2h");
+			const [customMinutes, setCustomMinutes] = (0, react.useState)("");
+			const [phase, setPhase] = (0, react.useState)("idle");
+			const [preview, setPreview] = (0, react.useState)(null);
+			const [selected, setSelected] = (0, react.useState)(/* @__PURE__ */ new Set());
+			const [dispose, setDispose] = (0, react.useState)(false);
+			const [error, setError] = (0, react.useState)(null);
+			const [outcome, setOutcome] = (0, react.useState)(null);
+			const idleSeconds = resolveArchiveSeconds(threshold, customMinutes);
+			const candidates = preview?.candidates ?? [];
+			const selectedTargets = candidates.filter((card) => selected.has(cardKey(card)));
+			const disposableSelected = countDisposable(selectedTargets);
+			const offerDispose = shouldOfferDispose(props.disposeSupported, selectedTargets);
+			const reset = () => {
+				setPhase("idle");
+				setPreview(null);
+				setSelected(/* @__PURE__ */ new Set());
+				setDispose(false);
+				setError(null);
+				setOutcome(null);
+			};
+			const close = () => {
+				reset();
+				props.onClose();
+			};
+			const runPreview = () => {
+				if (idleSeconds === null || phase === "previewing" || phase === "applying") return;
+				setPhase("previewing");
+				setError(null);
+				props.api.preview(idleSeconds).then((result) => {
+					setPreview(result);
+					setSelected(new Set(result.candidates.map(cardKey)));
+					setPhase("review");
+				}, (err) => {
+					setError(failureText(BOARD_STRINGS.archive.previewFailed, err));
+					setPhase("idle");
+				});
+			};
+			const runApply = () => {
+				if (preview === null || selectedTargets.length === 0 || phase === "applying") return;
+				setPhase("applying");
+				setError(null);
+				props.api.apply(selectedTargets.map((card) => ({
+					agent: card.agent,
+					sessionId: card.sessionId
+				})), preview.token, { dispose: dispose && offerDispose }).then((result) => {
+					setOutcome(result);
+					setPhase("done");
+					props.onArchived();
+				}, (err) => {
+					setError(failureText(BOARD_STRINGS.archive.failed, err));
+					setPreview(null);
+					setSelected(/* @__PURE__ */ new Set());
+					setPhase("idle");
+				});
+			};
+			const toggle = (card) => {
+				setSelected((current) => {
+					const next = new Set(current);
+					const key = cardKey(card);
+					if (next.has(key)) next.delete(key);
+					else next.add(key);
+					return next;
+				});
+			};
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Modal, {
+				open: props.open,
+				onClose: close,
+				title: BOARD_STRINGS.archive.title,
+				closeLabel: BOARD_STRINGS.archive.cancel,
+				description: BOARD_STRINGS.archive.explain,
+				children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: board_module_css_default["archiveBody"],
+					"data-testid": "agent-sidecar-archive-dialog",
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: board_module_css_default["archiveControls"],
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
+									className: board_module_css_default["control"],
+									children: [BOARD_STRINGS.archive.threshold, /* @__PURE__ */ (0, react_jsx_runtime.jsx)("select", {
+										className: board_module_css_default["select"],
+										value: threshold,
+										disabled: phase === "previewing" || phase === "applying",
+										onChange: (ev) => {
+											setThreshold(ev.target.value);
+											setPreview(null);
+											setPhase("idle");
+										},
+										"data-testid": "agent-sidecar-archive-threshold",
+										children: THRESHOLD_ORDER.map((token) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", {
+											value: token,
+											children: thresholdLabel(token)
+										}, token))
+									})]
+								}),
+								threshold === "custom" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
+									className: board_module_css_default["control"],
+									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+										type: "number",
+										min: 1,
+										className: board_module_css_default["archiveNumber"],
+										value: customMinutes,
+										onChange: (ev) => {
+											setCustomMinutes(ev.target.value);
+											setPreview(null);
+											setPhase("idle");
+										},
+										"data-testid": "agent-sidecar-archive-custom"
+									}), BOARD_STRINGS.archive.customMinutes]
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+									size: "sm",
+									variant: "outline",
+									disabled: idleSeconds === null || phase === "previewing" || phase === "applying",
+									onClick: runPreview,
+									"data-testid": "agent-sidecar-archive-preview",
+									children: phase === "previewing" ? BOARD_STRINGS.archive.previewing : BOARD_STRINGS.archive.preview
+								})
+							]
+						}),
+						error !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							className: board_module_css_default["banner"],
+							"data-tone": "danger",
+							role: "alert",
+							children: error
+						}),
+						phase === "done" && outcome !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: board_module_css_default["banner"],
+							"data-tone": "warn",
+							role: "status",
+							children: [
+								formatTemplate$2(BOARD_STRINGS.archive.done, { n: outcome.archived }),
+								outcome.disposed > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: formatTemplate$2(BOARD_STRINGS.archive.doneDisposed, { n: outcome.disposed }) }),
+								outcome.disposeFailed > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									"data-testid": "agent-sidecar-archive-dispose-failed",
+									children: formatTemplate$2(BOARD_STRINGS.archive.doneDisposeFailed, { n: outcome.disposeFailed })
+								})
+							]
+						}),
+						preview !== null && candidates.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							className: board_module_css_default["archiveEmpty"],
+							role: "status",
+							children: BOARD_STRINGS.archive.previewEmpty
+						}),
+						candidates.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: board_module_css_default["archiveSummary"],
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: formatTemplate$2(BOARD_STRINGS.archive.previewCount, {
+										n: candidates.length,
+										selected: selectedTargets.length
+									}) }),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: board_module_css_default["spacer"] }),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+										size: "sm",
+										variant: "ghost",
+										onClick: () => {
+											setSelected(new Set(candidates.map(cardKey)));
+										},
+										children: BOARD_STRINGS.archive.selectAll
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+										size: "sm",
+										variant: "ghost",
+										onClick: () => {
+											setSelected(/* @__PURE__ */ new Set());
+										},
+										children: BOARD_STRINGS.archive.selectNone
+									})
+								]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+								className: board_module_css_default["archiveList"],
+								children: candidates.map((card) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("li", {
+									className: board_module_css_default["archiveRow"],
+									children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
+										className: board_module_css_default["archiveRowLabel"],
+										children: [
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+												type: "checkbox",
+												className: board_module_css_default["checkbox"],
+												checked: selected.has(cardKey(card)),
+												onChange: () => {
+													toggle(card);
+												}
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: board_module_css_default["glyph"],
+												"aria-hidden": true,
+												children: agentGlyph$1(card.agent)
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: board_module_css_default["archiveRowTitle"],
+												title: card.title,
+												children: card.title.trim() === "" ? BOARD_STRINGS.card.untitled : card.title
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: board_module_css_default["archiveRowMeta"],
+												children: abbreviateSessionId(card.sessionId)
+											}),
+											/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+												className: board_module_css_default["archiveRowMeta"],
+												children: formatRelativeTime$1(card.updatedAtMs, props.nowMs)
+											})
+										]
+									})
+								}, cardKey(card)))
+							}),
+							offerDispose && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
+								className: board_module_css_default["control"],
+								title: BOARD_STRINGS.archive.disposeHint,
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+									type: "checkbox",
+									className: board_module_css_default["checkbox"],
+									checked: dispose,
+									onChange: (ev) => {
+										setDispose(ev.target.checked);
+									},
+									"data-testid": "agent-sidecar-archive-dispose"
+								}), formatTemplate$2(BOARD_STRINGS.archive.dispose, { n: disposableSelected })]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								className: board_module_css_default["archiveActions"],
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+									size: "sm",
+									variant: "ghost",
+									onClick: close,
+									children: BOARD_STRINGS.archive.cancel
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+									size: "sm",
+									variant: "primary",
+									disabled: selectedTargets.length === 0 || phase === "applying",
+									onClick: runApply,
+									"data-testid": "agent-sidecar-archive-confirm",
+									children: phase === "applying" ? BOARD_STRINGS.archive.confirming : formatTemplate$2(BOARD_STRINGS.archive.confirm, { n: selectedTargets.length })
+								})]
+							})
+						] })
+					]
+				})
+			});
+		}
+		/** Collapsed-by-default drawer listing what the board is currently hiding. */
+		function ArchivedSection(props) {
+			const [open, setOpen] = (0, react.useState)(false);
+			const [busy, setBusy] = (0, react.useState)(null);
+			const [error, setError] = (0, react.useState)(null);
+			if (props.rows.length === 0) return null;
+			const rows = sortArchived(props.rows);
+			const restore = (targets, busyKey) => {
+				if (busy !== null) return;
+				setBusy(busyKey);
+				setError(null);
+				props.onUnarchive(targets).then(() => {
+					setBusy(null);
+					props.onRestored();
+				}, (err) => {
+					setBusy(null);
+					setError(failureText(BOARD_STRINGS.archived.restoreFailed, err));
+				});
+			};
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
+				...surfaceProps("board-card", board_module_css_default["archivedPanel"]),
+				"data-testid": "agent-sidecar-archived",
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: board_module_css_default["archivedHead"],
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+							type: "button",
+							className: board_module_css_default["groupHead"],
+							"aria-expanded": open,
+							title: open ? BOARD_STRINGS.archived.collapse : BOARD_STRINGS.archived.expand,
+							onClick: () => {
+								setOpen((visible) => !visible);
+							},
+							"data-testid": "agent-sidecar-archived-toggle",
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: board_module_css_default["chevron"],
+								"aria-hidden": true,
+								children: open ? "▾" : "▸"
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: board_module_css_default["groupName"],
+								children: formatTemplate$2(BOARD_STRINGS.archived.summary, { n: rows.length })
+							})]
+						}), open && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							size: "sm",
+							variant: "ghost",
+							disabled: busy !== null,
+							onClick: () => {
+								restore("all", "all");
+							},
+							"data-testid": "agent-sidecar-archived-restore-all",
+							children: busy === "all" ? BOARD_STRINGS.archived.restoring : BOARD_STRINGS.archived.restoreAll
+						})]
+					}),
+					error !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: board_module_css_default["banner"],
+						"data-tone": "danger",
+						role: "alert",
+						children: error
+					}),
+					open && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+						className: board_module_css_default["archiveList"],
+						children: rows.map((row) => {
+							const key = cardKey(row);
+							return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
+								className: board_module_css_default["archiveRow"],
+								children: [
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: board_module_css_default["glyph"],
+										"aria-hidden": true,
+										children: agentGlyph$1(row.agent)
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: board_module_css_default["archiveRowTitle"],
+										title: row.title,
+										children: row.title.trim() === "" ? BOARD_STRINGS.card.untitled : row.title
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, { children: archiveReasonLabel(row.archiveReason) }),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: board_module_css_default["archiveRowMeta"],
+										children: formatTemplate$2(BOARD_STRINGS.archived.archivedAt, { time: formatRelativeTime$1(row.archivedAtMs, props.nowMs) })
+									}),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: board_module_css_default["spacer"] }),
+									/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+										size: "sm",
+										variant: "outline",
+										disabled: busy !== null,
+										onClick: () => {
+											restore([{
+												agent: row.agent,
+												sessionId: row.sessionId
+											}], key);
+										},
+										children: busy === key ? BOARD_STRINGS.archived.restoring : BOARD_STRINGS.archived.restore
+									})
+								]
+							}, key);
+						})
+					})
+				]
+			});
+		}
 		//#endregion
 		//#region src/client/board/Board.tsx
 		/**
@@ -3441,6 +4281,8 @@ window.__ModuleLoader__.load({
 			const returnTargetVisible = props.returnFocusTarget !== null && vm.groups.some((group) => group.cards.some((card) => matchesSessionFocusTarget$1(card, props.returnFocusTarget)));
 			const [refreshing, setRefreshing] = (0, react.useState)(false);
 			const [refreshFailed, setRefreshFailed] = (0, react.useState)(false);
+			const [archiveOpen, setArchiveOpen] = (0, react.useState)(false);
+			const archivedRows = props.archived ?? [];
 			const onRefreshClick = () => {
 				if (refreshing) return;
 				setRefreshFailed(false);
@@ -3555,6 +4397,16 @@ window.__ModuleLoader__.load({
 								},
 								"data-testid": "agent-sidecar-analyze-cross-agent",
 								children: BOARD_STRINGS.topbar.analyzeCrossAgent
+							}),
+							props.archive !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+								size: "sm",
+								variant: "outline",
+								title: BOARD_STRINGS.archive.openTitle,
+								onClick: () => {
+									setArchiveOpen(true);
+								},
+								"data-testid": "agent-sidecar-archive-open",
+								children: BOARD_STRINGS.archive.open
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 								size: "sm",
@@ -3689,6 +4541,26 @@ window.__ModuleLoader__.load({
 								})]
 							}, cluster.key))
 						})]
+					}),
+					props.archive !== void 0 && archiveOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArchiveDialog, {
+						open: archiveOpen,
+						onClose: () => {
+							setArchiveOpen(false);
+						},
+						api: props.archive,
+						disposeSupported: props.disposeSupported === true,
+						onArchived: () => {
+							props.onRefresh();
+						},
+						nowMs
+					}),
+					props.archive !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArchivedSection, {
+						rows: archivedRows,
+						onUnarchive: props.archive.unarchive,
+						onRestored: () => {
+							props.onRefresh();
+						},
+						nowMs
 					}),
 					!props.hasSnapshot ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: board_module_css_default["empty"],
@@ -4760,6 +5632,16 @@ window.__ModuleLoader__.load({
 			if (state === "failed") return `${settings_card_module_css_default["statusDot"]} ${settings_card_module_css_default["statusError"]}`;
 			return settings_card_module_css_default["statusDot"] ?? "";
 		}
+		/**
+		* Seconds → hours for the live-policy readout. One decimal, trailing zero
+		* dropped: the daemon accepts any duration, so a policy of 90 minutes must
+		* not be rounded into a lie about 2 hours.
+		*/
+		function formatPolicyHours(seconds) {
+			if (!Number.isFinite(seconds) || seconds <= 0) return "0";
+			const hours = seconds / 3600;
+			return hours >= 10 || Number.isInteger(hours) ? String(Math.round(hours)) : String(Math.round(hours * 10) / 10);
+		}
 		function Section(props) {
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
 				className: settings_card_module_css_default["section"],
@@ -4835,6 +5717,8 @@ window.__ModuleLoader__.load({
 				provider: analysisRoute.provider,
 				model: analysisRoute.model
 			}) : t$2("settings.analysisRoutePartial");
+			const livePolicy = props.archivePolicy ?? null;
+			const archiveLive = livePolicy === null ? t$2("settings.archiveLiveUnknown") : livePolicy.auto ? t$2("settings.archiveLiveOn", { hours: formatPolicyHours(livePolicy.autoAfterSeconds) }) : t$2("settings.archiveLiveOff");
 			const daemonNote = props.daemon?.state === "defer" ? t$2("settings.daemonDeferNote") : props.daemon?.state === "failed" ? t$2("settings.daemonFailedNote") : void 0;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
 				...surfaceProps("settings-card", `${settings_card_module_css_default["card"]} ${open ? settings_card_module_css_default["cardOpen"] : ""}`),
@@ -5044,6 +5928,50 @@ window.__ModuleLoader__.load({
 								})
 							]
 						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
+							title: t$2("settings.sectionArchive"),
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+									className: settings_card_module_css_default["note"],
+									children: t$2("settings.archiveExplain")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+									className: settings_card_module_css_default["field"],
+									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: settings_card_module_css_default["label"],
+										children: t$2("settings.archiveLiveLabel")
+									}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: settings_card_module_css_default["statusText"],
+										"data-testid": "agent-sidecar-settings-archive-live",
+										children: archiveLive
+									})]
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ToggleField, {
+									label: t$2("settings.archiveAutoLabel"),
+									hint: t$2("settings.archiveAutoHint"),
+									checked: values.archiveAuto,
+									disabled,
+									onCommit: (checked) => {
+										props.onChange("archiveAuto", checked);
+									}
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(NumberField, {
+									label: t$2("settings.archiveAfterHoursLabel"),
+									hint: t$2("settings.archiveAfterHoursHint"),
+									invalidHint: t$2("settings.invalidNumber", { min: 1 }),
+									min: 1,
+									value: values.archiveAutoAfterHours,
+									disabled: disabled || !values.archiveAuto,
+									onCommit: (value) => {
+										props.onChange("archiveAutoAfterHours", value);
+									}
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+									className: settings_card_module_css_default["note"],
+									children: t$2("settings.archiveHostedOnlyNote")
+								})
+							]
+						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
 							title: t$2("settings.sectionSkill"),
 							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
@@ -5106,7 +6034,20 @@ window.__ModuleLoader__.load({
 				copied: "detail.header.copied",
 				untitled: "detail.header.untitled",
 				unknownProject: "detail.header.unknownProject",
-				observedDisclaimer: "detail.header.observedDisclaimer"
+				observedDisclaimer: "detail.header.observedDisclaimer",
+				lastActivity: "detail.header.lastActivity",
+				duration: "detail.header.duration",
+				durationUnderMinute: "detail.header.durationUnderMinute",
+				durationMinutes: "detail.header.durationMinutes",
+				durationHours: "detail.header.durationHours",
+				durationDays: "detail.header.durationDays",
+				model: "detail.header.model",
+				transcript: "detail.header.transcript",
+				copyPathTitle: "detail.header.copyPathTitle",
+				copyProjectTitle: "detail.header.copyProjectTitle",
+				loadedEvents: "detail.header.loadedEvents",
+				loadedEventsPartial: "detail.header.loadedEventsPartial",
+				kindCount: "detail.header.kindCount"
 			},
 			status: {
 				working: "detail.status.working",
@@ -5239,6 +6180,58 @@ window.__ModuleLoader__.load({
 			const now = new Date(nowMs);
 			const hhmm = `${pad2(then.getHours())}:${pad2(then.getMinutes())}`;
 			return then.getFullYear() === now.getFullYear() && then.getMonth() === now.getMonth() && then.getDate() === now.getDate() ? hhmm : `${pad2(then.getMonth() + 1)}-${pad2(then.getDate())} ${hhmm}`;
+		}
+		/**
+		* Coarse elapsed span for the header's session-duration row: whole
+		* minutes below an hour, then `Nh Mm`, then `Nd Mh`. Returns null for a
+		* non-finite or inverted span so the caller hides the row rather than
+		* printing a negative duration from clock skew.
+		*/
+		function formatDuration(spanMs) {
+			if (!Number.isFinite(spanMs) || spanMs < 0) return null;
+			if (spanMs < MINUTE_MS) return DETAIL_STRINGS.header.durationUnderMinute;
+			const minutes = Math.floor(spanMs / MINUTE_MS);
+			if (spanMs < HOUR_MS) return formatTemplate$1(DETAIL_STRINGS.header.durationMinutes, { m: minutes });
+			const hours = Math.floor(spanMs / HOUR_MS);
+			if (spanMs < DAY_MS) return formatTemplate$1(DETAIL_STRINGS.header.durationHours, {
+				h: hours,
+				m: minutes % 60
+			});
+			return formatTemplate$1(DETAIL_STRINGS.header.durationDays, {
+				d: Math.floor(spanMs / DAY_MS),
+				h: hours % 24
+			});
+		}
+		/**
+		* Count the entries currently loaded, by kind. Deliberately scoped to what
+		* is in memory — the header labels it as such, because history pages are
+		* fetched on demand and no source reports an authoritative total.
+		*/
+		function countTimelineKinds(entries) {
+			const counts = /* @__PURE__ */ new Map();
+			for (const entry of entries) counts.set(entry.kind, (counts.get(entry.kind) ?? 0) + 1);
+			const order = [
+				"user",
+				"assistant",
+				"thinking",
+				"toolCall",
+				"toolResult",
+				"turn",
+				"step",
+				"error",
+				"other"
+			];
+			const rows = [];
+			for (const kind of order) {
+				const count = counts.get(kind);
+				if (count === void 0 || count === 0) continue;
+				rows.push({
+					kind,
+					label: kindLabel(kind, kind),
+					count
+				});
+			}
+			return rows;
 		}
 		const KIND_GLYPHS = {
 			user: "▷",
@@ -5841,7 +6834,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:src/client/detail/detail.module.css.mjs
-		const css$6 = ".cBtswW_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:10px;padding:16px 20px;display:flex}.cBtswW_header{flex-direction:column;gap:6px;display:flex}.cBtswW_headerTop{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.cBtswW_agent{color:var(--dsw-alias-label-primary);align-items:center;gap:5px;font-size:13px;font-weight:650;display:inline-flex}.cBtswW_agentGlyph{color:var(--dsw-alias-brand-primary);flex:none}.cBtswW_badge{white-space:nowrap}.cBtswW_dot{background:var(--agsc-fg-dimmed);border-radius:50%;flex:none;width:8px;height:8px}.cBtswW_dot[data-tone=success]{background:var(--agsc-ok)}.cBtswW_dot[data-tone=warn]{background:var(--agsc-warn)}.cBtswW_dot[data-tone=danger]{background:var(--agsc-err)}.cBtswW_dot[data-tone=neutral]{background:var(--agsc-fg-secondary)}.cBtswW_dot[data-tone=muted]{background:var(--agsc-fg-dimmed)}.cBtswW_spacer{flex:1}.cBtswW_title{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:600;overflow:hidden}.cBtswW_meta{align-items:baseline;gap:10px;min-width:0;display:flex}.cBtswW_project{color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.cBtswW_sessionId{font-size:11px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:none;max-width:40%;overflow:hidden}.cBtswW_sessionId:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}.cBtswW_copiedBubble{color:var(--agsc-ok);flex:none}.cBtswW_copiedBubble>span,.cBtswW_sourceBadge>span{color:inherit}.cBtswW_metaRow{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.cBtswW_disclaimer{color:var(--dsw-alias-label-caption);font-size:11px}.cBtswW_sourceList{align-items:center;gap:4px;display:inline-flex}.cBtswW_sourceBadge{white-space:nowrap}.cBtswW_sourceBadge[data-tone=success]{color:var(--agsc-ok)}.cBtswW_sourceBadge[data-tone=muted]{color:var(--agsc-fg-dimmed)}.cBtswW_banner{border-radius:var(--agsc-radius-control);color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border:1px solid var(--dsw-alias-state-warn-secondary);padding:6px 10px;font-size:12px;line-height:18px}.cBtswW_bodyState{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:160px;padding:24px;display:flex}.cBtswW_bodyStateTitle{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:600}.cBtswW_bodyState[data-kind=error] .cBtswW_bodyStateTitle{color:var(--agsc-err)}.cBtswW_bodyStateHint{max-width:420px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}.cBtswW_filterRow{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.cBtswW_filterHiddenNote{color:var(--dsw-alias-label-tertiary);font-size:11px}.cBtswW_pager{justify-content:center;display:flex}.cBtswW_pagerNote{color:var(--dsw-alias-label-tertiary);font-size:11px}.cBtswW_hiddenNotice{color:var(--dsw-alias-label-tertiary);justify-content:center;align-items:center;gap:8px;font-size:11px;display:flex}.cBtswW_timeline{flex-direction:column;flex:1;gap:6px;margin:0;padding:0 2px 8px 0;list-style:none;display:flex;overflow-y:auto}.cBtswW_event{border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);background:var(--agsc-bg-raised);flex-direction:column;gap:4px;padding:6px 10px;display:flex}.cBtswW_event[data-new]{border-color:var(--agsc-accent);background:color-mix(in srgb, var(--agsc-accent) 6%, transparent)}.cBtswW_chunkRun{border-radius:var(--agsc-radius-control);color:var(--dsw-alias-label-tertiary);background:var(--agsc-bg-raised);border:1px dashed var(--agsc-border-strong);align-items:center;gap:8px;padding:4px 10px;font-size:11px;line-height:16px;display:flex}.cBtswW_chunkRun[data-new]{border-color:var(--agsc-accent)}.cBtswW_chunkRunLabel{flex:none}.cBtswW_eventHead{align-items:center;gap:6px;min-width:0;display:flex}.cBtswW_eventGlyph{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px}.cBtswW_event[data-kind=user] .cBtswW_eventGlyph,.cBtswW_event[data-kind=assistant] .cBtswW_eventGlyph{color:var(--dsw-alias-brand-primary)}.cBtswW_event[data-kind=error] .cBtswW_eventGlyph{color:var(--dsw-alias-state-error-primary)}.cBtswW_eventLabel{color:var(--dsw-alias-label-primary);white-space:nowrap;text-overflow:ellipsis;font-size:12px;font-weight:600;overflow:hidden}.cBtswW_eventSeq{font-size:10px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-tertiary);flex:none}.cBtswW_eventNew{color:var(--agsc-accent);flex:none}.cBtswW_eventSpacer{flex:1}.cBtswW_eventTime{color:var(--dsw-alias-label-caption);flex:none;font-size:11px}.cBtswW_eventSummary{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;font-size:12px;line-height:18px}.cBtswW_expandButton{align-self:flex-start}.cBtswW_eventBody{border-radius:var(--agsc-radius-control);font-size:11px;line-height:16px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;margin:0;padding:8px 10px;overflow-y:auto}.cBtswW_gap{border-radius:var(--agsc-radius-control);text-align:center;color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border:1px dashed var(--dsw-alias-state-warn-secondary);padding:4px 10px;font-size:11px;line-height:16px}";
+		const css$6 = ".cBtswW_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:10px;padding:16px 20px;display:flex}.cBtswW_header{flex-direction:column;gap:6px;display:flex}.cBtswW_headerTop{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.cBtswW_agent{color:var(--dsw-alias-label-primary);align-items:center;gap:5px;font-size:13px;font-weight:650;display:inline-flex}.cBtswW_agentGlyph{color:var(--dsw-alias-brand-primary);flex:none}.cBtswW_badge{white-space:nowrap}.cBtswW_dot{background:var(--agsc-fg-dimmed);border-radius:50%;flex:none;width:8px;height:8px}.cBtswW_dot[data-tone=success]{background:var(--agsc-ok)}.cBtswW_dot[data-tone=warn]{background:var(--agsc-warn)}.cBtswW_dot[data-tone=danger]{background:var(--agsc-err)}.cBtswW_dot[data-tone=neutral]{background:var(--agsc-fg-secondary)}.cBtswW_dot[data-tone=muted]{background:var(--agsc-fg-dimmed)}.cBtswW_spacer{flex:1}.cBtswW_title{color:var(--dsw-alias-label-primary);text-overflow:ellipsis;white-space:nowrap;font-size:15px;font-weight:600;overflow:hidden}.cBtswW_meta{align-items:baseline;gap:10px;min-width:0;display:flex}.cBtswW_project{color:var(--dsw-alias-label-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.cBtswW_sessionId{font-size:11px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;flex:none;max-width:40%;overflow:hidden}.cBtswW_sessionId:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}.cBtswW_copiedBubble{color:var(--agsc-ok);flex:none}.cBtswW_copiedBubble>span,.cBtswW_sourceBadge>span{color:inherit}.cBtswW_metaRow{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.cBtswW_disclaimer{color:var(--dsw-alias-label-caption);font-size:11px}.cBtswW_project:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}.cBtswW_fact{color:var(--dsw-alias-label-secondary);white-space:nowrap;font-size:11px}.cBtswW_factLabel{color:var(--dsw-alias-label-caption);flex:none;font-size:11px}.cBtswW_transcriptPath{font-size:11px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-tertiary);text-overflow:ellipsis;white-space:nowrap;text-align:left;direction:rtl;min-width:0;overflow:hidden}.cBtswW_transcriptPath:hover{color:var(--dsw-alias-label-primary);text-decoration:underline}.cBtswW_sourceList{align-items:center;gap:4px;display:inline-flex}.cBtswW_sourceBadge{white-space:nowrap}.cBtswW_sourceBadge[data-tone=success]{color:var(--agsc-ok)}.cBtswW_sourceBadge[data-tone=muted]{color:var(--agsc-fg-dimmed)}.cBtswW_banner{border-radius:var(--agsc-radius-control);color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border:1px solid var(--dsw-alias-state-warn-secondary);padding:6px 10px;font-size:12px;line-height:18px}.cBtswW_bodyState{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:160px;padding:24px;display:flex}.cBtswW_bodyStateTitle{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:600}.cBtswW_bodyState[data-kind=error] .cBtswW_bodyStateTitle{color:var(--agsc-err)}.cBtswW_bodyStateHint{max-width:420px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}.cBtswW_filterRow{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.cBtswW_filterHiddenNote{color:var(--dsw-alias-label-tertiary);font-size:11px}.cBtswW_pager{justify-content:center;display:flex}.cBtswW_pagerNote{color:var(--dsw-alias-label-tertiary);font-size:11px}.cBtswW_hiddenNotice{color:var(--dsw-alias-label-tertiary);justify-content:center;align-items:center;gap:8px;font-size:11px;display:flex}.cBtswW_timeline{flex-direction:column;flex:1;gap:6px;margin:0;padding:0 2px 8px 0;list-style:none;display:flex;overflow-y:auto}.cBtswW_event{border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);background:var(--agsc-bg-raised);flex-direction:column;gap:4px;padding:6px 10px;display:flex}.cBtswW_event[data-new]{border-color:var(--agsc-accent);background:color-mix(in srgb, var(--agsc-accent) 6%, transparent)}.cBtswW_chunkRun{border-radius:var(--agsc-radius-control);color:var(--dsw-alias-label-tertiary);background:var(--agsc-bg-raised);border:1px dashed var(--agsc-border-strong);align-items:center;gap:8px;padding:4px 10px;font-size:11px;line-height:16px;display:flex}.cBtswW_chunkRun[data-new]{border-color:var(--agsc-accent)}.cBtswW_chunkRunLabel{flex:none}.cBtswW_eventHead{align-items:center;gap:6px;min-width:0;display:flex}.cBtswW_eventGlyph{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px}.cBtswW_event[data-kind=user] .cBtswW_eventGlyph,.cBtswW_event[data-kind=assistant] .cBtswW_eventGlyph{color:var(--dsw-alias-brand-primary)}.cBtswW_event[data-kind=error] .cBtswW_eventGlyph{color:var(--dsw-alias-state-error-primary)}.cBtswW_eventLabel{color:var(--dsw-alias-label-primary);white-space:nowrap;text-overflow:ellipsis;font-size:12px;font-weight:600;overflow:hidden}.cBtswW_eventSeq{font-size:10px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-tertiary);flex:none}.cBtswW_eventNew{color:var(--agsc-accent);flex:none}.cBtswW_eventSpacer{flex:1}.cBtswW_eventTime{color:var(--dsw-alias-label-caption);flex:none;font-size:11px}.cBtswW_eventSummary{color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;font-size:12px;line-height:18px}.cBtswW_expandButton{align-self:flex-start}.cBtswW_eventBody{border-radius:var(--agsc-radius-control);font-size:11px;line-height:16px;font-family:var(--ds-font-family-code);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;margin:0;padding:8px 10px;overflow-y:auto}.cBtswW_gap{border-radius:var(--agsc-radius-control);text-align:center;color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border:1px dashed var(--dsw-alias-state-warn-secondary);padding:4px 10px;font-size:11px;line-height:16px}";
 		const tagId$6 = "@shendeguize/dsh-agent-sidecar/src/client/detail/detail.module.css";
 		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$6, css$6);
 		if (typeof document !== "undefined") {
@@ -5882,6 +6875,8 @@ window.__ModuleLoader__.load({
 			"eventSummary": "cBtswW_eventSummary",
 			"eventTime": "cBtswW_eventTime",
 			"expandButton": "cBtswW_expandButton",
+			"fact": "cBtswW_fact",
+			"factLabel": "cBtswW_factLabel",
 			"filterHiddenNote": "cBtswW_filterHiddenNote",
 			"filterRow": "cBtswW_filterRow",
 			"gap": "cBtswW_gap",
@@ -5899,7 +6894,8 @@ window.__ModuleLoader__.load({
 			"sourceList": "cBtswW_sourceList",
 			"spacer": "cBtswW_spacer",
 			"timeline": "cBtswW_timeline",
-			"title": "cBtswW_title"
+			"title": "cBtswW_title",
+			"transcriptPath": "cBtswW_transcriptPath"
 		};
 		//#endregion
 		//#region src/client/detail/SessionDetail.tsx
@@ -6023,7 +7019,7 @@ window.__ModuleLoader__.load({
 			const [expandedRuns, setExpandedRuns] = (0, react.useState)(/* @__PURE__ */ new Set());
 			const [filterMode, setFilterMode] = (0, react.useState)("conversation");
 			const [renderAll, setRenderAll] = (0, react.useState)(false);
-			const [copied, setCopied] = (0, react.useState)(false);
+			const [copied, setCopied] = (0, react.useState)(null);
 			const listRef = (0, react.useRef)(null);
 			const positionedRef = (0, react.useRef)(false);
 			const copyTimerRef = (0, react.useRef)(null);
@@ -6044,6 +7040,16 @@ window.__ModuleLoader__.load({
 			} : limitTimelineRows(aggregated, props.maxRenderRows ?? 400);
 			const entryCount = props.timeline.entries.length;
 			const listening = props.listening;
+			const lastActivity = props.header.updatedAtMs !== void 0 ? formatTemplate$1(DETAIL_STRINGS.header.lastActivity, { time: formatRelativeTime(props.header.updatedAtMs, nowMs) }) : null;
+			const durationSpan = props.header.createdAtMs !== void 0 && props.header.updatedAtMs !== void 0 ? formatDuration(props.header.updatedAtMs - props.header.createdAtMs) : null;
+			const duration = durationSpan !== null ? formatTemplate$1(DETAIL_STRINGS.header.duration, { span: durationSpan }) : null;
+			const modelLabel = props.header.model !== void 0 && props.header.model !== "" ? formatTemplate$1(DETAIL_STRINGS.header.model, { name: props.header.model }) : null;
+			const kindCounts = countTimelineKinds(props.timeline.entries);
+			const loadedEvents = formatTemplate$1(props.timeline.reachedStart ? DETAIL_STRINGS.header.loadedEvents : DETAIL_STRINGS.header.loadedEventsPartial, { n: entryCount });
+			const kindBreakdown = kindCounts.map((row) => formatTemplate$1(DETAIL_STRINGS.header.kindCount, {
+				label: row.label,
+				n: row.count
+			})).join(" · ");
 			(0, react.useEffect)(() => {
 				const list = listRef.current;
 				if (list === null) return;
@@ -6082,202 +7088,251 @@ window.__ModuleLoader__.load({
 					return next;
 				});
 			};
-			const copySessionId = async () => {
-				if (!await (0, _deepseek_ai_dsh_client_ui_primitives.writeClipboard)(props.sessionId)) return;
+			const copyValue = async (field, value) => {
+				if (!await (0, _deepseek_ai_dsh_client_ui_primitives.writeClipboard)(value)) return;
 				if (!copyAliveRef.current) return;
 				if (copyTimerRef.current !== null) clearTimeout(copyTimerRef.current);
-				setCopied(true);
+				setCopied(field);
 				copyTimerRef.current = setTimeout(() => {
 					copyTimerRef.current = null;
-					setCopied(false);
+					setCopied(null);
 				}, 2e3);
 			};
+			const boundary = props.timelineBoundary ?? ((body) => body);
 			const statusDotState = status.status === "working" ? "ongoing" : status.status === "waiting" ? "warning" : null;
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				...surfaceProps("timeline", detail_module_css_default["root"]),
 				"data-testid": "agent-sidecar-detail",
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
-						className: detail_module_css_default["header"],
-						children: [
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: detail_module_css_default["headerTop"],
-								children: [
-									props.onClose !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-										type: "button",
-										size: "sm",
-										variant: "outline",
-										onClick: props.onClose,
-										children: DETAIL_STRINGS.header.close
-									}),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-										className: detail_module_css_default["agent"],
-										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-											className: detail_module_css_default["agentGlyph"],
-											"aria-hidden": true,
-											children: agentGlyph(props.header.agent)
-										}), props.header.agent]
-									}),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(StaticPill, {
-										className: detail_module_css_default["badge"],
-										title: DETAIL_STRINGS.header.observedDisclaimer,
-										children: [statusDotState === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-											className: detail_module_css_default["dot"],
-											"data-tone": status.tone
-										}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
-											state: statusDotState,
-											size: 8
-										}), status.label]
-									}),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: detail_module_css_default["spacer"] }),
-									props.onRefresh !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-										type: "button",
-										size: "sm",
-										variant: "outline",
-										disabled: props.refreshing === true,
-										title: DETAIL_STRINGS.header.refreshHint,
-										onClick: props.onRefresh,
-										"data-testid": "agent-sidecar-detail-refresh",
-										children: props.refreshing === true ? DETAIL_STRINGS.header.refreshing : DETAIL_STRINGS.header.refresh
-									}),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
-										type: "button",
-										active: props.listening,
-										"aria-pressed": props.listening,
-										title: DETAIL_STRINGS.header.listenHint,
-										onClick: props.onToggleListen,
-										children: props.listening ? DETAIL_STRINGS.header.listenOn : DETAIL_STRINGS.header.listenOff
-									})
-								]
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-								className: detail_module_css_default["title"],
-								title: props.header.title,
-								children: props.header.title.trim() === "" ? DETAIL_STRINGS.header.untitled : props.header.title
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: detail_module_css_default["meta"],
-								children: [
-									/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-										className: detail_module_css_default["project"],
-										title: props.header.project,
-										children: props.header.project.trim() === "" ? DETAIL_STRINGS.header.unknownProject : props.header.project
-									}),
-									/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-										type: "button",
-										size: "sm",
-										variant: "ghost",
-										className: detail_module_css_default["sessionId"],
-										title: `${props.sessionId} · ${DETAIL_STRINGS.header.copyIdTitle}`,
-										onClick: () => {
-											copySessionId();
-										},
-										"data-testid": "agent-sidecar-detail-copy-id",
-										children: props.sessionId
-									}),
-									copied && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
-										className: detail_module_css_default["copiedBubble"],
-										role: "status",
-										children: DETAIL_STRINGS.header.copied
-									})
-								]
-							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								className: detail_module_css_default["metaRow"],
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: detail_module_css_default["disclaimer"],
-									children: DETAIL_STRINGS.header.observedDisclaimer
-								}), sourceBadges.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-									className: detail_module_css_default["sourceList"],
-									title: DETAIL_STRINGS.sources.title,
-									children: sourceBadges.map((badge) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
-										className: detail_module_css_default["sourceBadge"],
-										"data-tone": badge.tone,
-										children: badge.label
-									}, badge.id))
-								})]
-							})
-						]
-					}),
-					bodyState.errorBanner !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						className: detail_module_css_default["banner"],
-						role: "alert",
-						children: bodyState.errorBanner
-					}),
-					bodyState.kind !== "list" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						className: detail_module_css_default["bodyState"],
-						"data-kind": bodyState.kind,
-						role: bodyState.kind === "error" ? "alert" : bodyState.kind === "loading" ? "status" : void 0,
-						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-							className: detail_module_css_default["bodyStateTitle"],
-							children: bodyState.title
-						}), bodyState.hint !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-							className: detail_module_css_default["bodyStateHint"],
-							children: bodyState.hint
-						})]
-					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
+					className: detail_module_css_default["header"],
+					children: [
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-							className: detail_module_css_default["filterRow"],
-							"data-testid": "agent-sidecar-detail-filter",
-							children: [["conversation", "all"].map((mode) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
-								type: "button",
-								active: filterMode === mode,
-								"aria-pressed": filterMode === mode,
-								onClick: () => {
-									setFilterMode(mode);
-								},
-								children: DETAIL_STRINGS.filter[mode]
-							}, mode)), filtered.hiddenCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-								className: detail_module_css_default["filterHiddenNote"],
-								children: formatTemplate$1(DETAIL_STRINGS.filter.hiddenNotice, { n: filtered.hiddenCount })
-							})]
+							className: detail_module_css_default["headerTop"],
+							children: [
+								props.onClose !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+									type: "button",
+									size: "sm",
+									variant: "outline",
+									onClick: props.onClose,
+									"data-testid": "agent-sidecar-detail-back",
+									children: DETAIL_STRINGS.header.close
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+									className: detail_module_css_default["agent"],
+									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: detail_module_css_default["agentGlyph"],
+										"aria-hidden": true,
+										children: agentGlyph(props.header.agent)
+									}), props.header.agent]
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(StaticPill, {
+									className: detail_module_css_default["badge"],
+									title: DETAIL_STRINGS.header.observedDisclaimer,
+									children: [statusDotState === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										className: detail_module_css_default["dot"],
+										"data-tone": status.tone
+									}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.StateDot, {
+										state: statusDotState,
+										size: 8
+									}), status.label]
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: detail_module_css_default["spacer"] }),
+								props.onRefresh !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+									type: "button",
+									size: "sm",
+									variant: "outline",
+									disabled: props.refreshing === true,
+									title: DETAIL_STRINGS.header.refreshHint,
+									onClick: props.onRefresh,
+									"data-testid": "agent-sidecar-detail-refresh",
+									children: props.refreshing === true ? DETAIL_STRINGS.header.refreshing : DETAIL_STRINGS.header.refresh
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
+									type: "button",
+									active: props.listening,
+									"aria-pressed": props.listening,
+									title: DETAIL_STRINGS.header.listenHint,
+									onClick: props.onToggleListen,
+									children: props.listening ? DETAIL_STRINGS.header.listenOn : DETAIL_STRINGS.header.listenOff
+								})
+							]
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-							className: detail_module_css_default["pager"],
-							children: props.hasMore ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-								type: "button",
-								size: "sm",
-								variant: "outline",
-								disabled: props.loading,
-								onClick: props.onLoadMore,
-								children: props.loading ? DETAIL_STRINGS.timeline.loadingMore : DETAIL_STRINGS.timeline.loadMore
-							}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-								className: detail_module_css_default["pagerNote"],
-								children: DETAIL_STRINGS.timeline.noMore
-							})
+							className: detail_module_css_default["title"],
+							title: props.header.title,
+							children: props.header.title.trim() === "" ? DETAIL_STRINGS.header.untitled : props.header.title
 						}),
-						limited.notice !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-							className: detail_module_css_default["hiddenNotice"],
-							children: [limited.notice, /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: detail_module_css_default["meta"],
+							children: [
+								props.header.project.trim() === "" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: detail_module_css_default["project"],
+									children: DETAIL_STRINGS.header.unknownProject
+								}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+									type: "button",
+									size: "sm",
+									variant: "ghost",
+									className: detail_module_css_default["project"],
+									title: `${props.header.project} · ${DETAIL_STRINGS.header.copyProjectTitle}`,
+									onClick: () => {
+										copyValue("project", props.header.project);
+									},
+									"data-testid": "agent-sidecar-detail-copy-project",
+									children: props.header.project
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+									type: "button",
+									size: "sm",
+									variant: "ghost",
+									className: detail_module_css_default["sessionId"],
+									title: `${props.sessionId} · ${DETAIL_STRINGS.header.copyIdTitle}`,
+									onClick: () => {
+										copyValue("id", props.sessionId);
+									},
+									"data-testid": "agent-sidecar-detail-copy-id",
+									children: props.sessionId
+								}),
+								copied !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
+									className: detail_module_css_default["copiedBubble"],
+									role: "status",
+									children: DETAIL_STRINGS.header.copied
+								})
+							]
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: detail_module_css_default["metaRow"],
+							"data-testid": "agent-sidecar-detail-facts",
+							children: [
+								lastActivity !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: detail_module_css_default["fact"],
+									children: lastActivity
+								}),
+								duration !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: detail_module_css_default["fact"],
+									children: duration
+								}),
+								modelLabel !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: detail_module_css_default["fact"],
+									children: modelLabel
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									className: detail_module_css_default["fact"],
+									title: kindBreakdown,
+									children: loadedEvents
+								})
+							]
+						}),
+						props.header.transcript !== void 0 && props.header.transcript !== "" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: detail_module_css_default["metaRow"],
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: detail_module_css_default["factLabel"],
+								children: DETAIL_STRINGS.header.transcript
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 								type: "button",
 								size: "sm",
 								variant: "ghost",
-								onClick: () => setRenderAll(true),
-								children: DETAIL_STRINGS.timeline.showAll
+								className: detail_module_css_default["transcriptPath"],
+								title: `${props.header.transcript} · ${DETAIL_STRINGS.header.copyPathTitle}`,
+								onClick: () => {
+									copyValue("transcript", props.header.transcript ?? "");
+								},
+								"data-testid": "agent-sidecar-detail-copy-transcript",
+								children: props.header.transcript
 							})]
 						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("ol", {
-							className: detail_module_css_default["timeline"],
-							ref: listRef,
-							children: limited.rows.map((row) => row.type === "gap" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("li", {
-								className: detail_module_css_default["gap"],
-								role: "note",
-								"data-testid": "agent-sidecar-detail-gap",
-								children: row.label
-							}, row.key) : row.type === "chunks" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ChunkRunRow, {
-								row,
-								expanded: expandedRuns.has(row.key),
-								onToggleRun: toggleRun,
-								expandedKeys,
-								onToggleExpand: toggleExpand
-							}, row.key) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EventRow, {
-								row,
-								expanded: expandedKeys.has(row.key),
-								onToggleExpand: toggleExpand
-							}, row.key))
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: detail_module_css_default["metaRow"],
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: detail_module_css_default["disclaimer"],
+								children: DETAIL_STRINGS.header.observedDisclaimer
+							}), sourceBadges.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: detail_module_css_default["sourceList"],
+								title: DETAIL_STRINGS.sources.title,
+								children: sourceBadges.map((badge) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StaticPill, {
+									className: detail_module_css_default["sourceBadge"],
+									"data-tone": badge.tone,
+									children: badge.label
+								}, badge.id))
+							})]
 						})
-					] })
-				]
+					]
+				}), boundary(/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react.Fragment, { children: [bodyState.errorBanner !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					className: detail_module_css_default["banner"],
+					role: "alert",
+					children: bodyState.errorBanner
+				}), bodyState.kind !== "list" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: detail_module_css_default["bodyState"],
+					"data-kind": bodyState.kind,
+					role: bodyState.kind === "error" ? "alert" : bodyState.kind === "loading" ? "status" : void 0,
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: detail_module_css_default["bodyStateTitle"],
+						children: bodyState.title
+					}), bodyState.hint !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: detail_module_css_default["bodyStateHint"],
+						children: bodyState.hint
+					})]
+				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: detail_module_css_default["filterRow"],
+						"data-testid": "agent-sidecar-detail-filter",
+						children: [["conversation", "all"].map((mode) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Pill, {
+							type: "button",
+							active: filterMode === mode,
+							"aria-pressed": filterMode === mode,
+							onClick: () => {
+								setFilterMode(mode);
+							},
+							children: DETAIL_STRINGS.filter[mode]
+						}, mode)), filtered.hiddenCount > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: detail_module_css_default["filterHiddenNote"],
+							children: formatTemplate$1(DETAIL_STRINGS.filter.hiddenNotice, { n: filtered.hiddenCount })
+						})]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						className: detail_module_css_default["pager"],
+						children: props.hasMore ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							type: "button",
+							size: "sm",
+							variant: "outline",
+							disabled: props.loading,
+							onClick: props.onLoadMore,
+							children: props.loading ? DETAIL_STRINGS.timeline.loadingMore : DETAIL_STRINGS.timeline.loadMore
+						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							className: detail_module_css_default["pagerNote"],
+							children: DETAIL_STRINGS.timeline.noMore
+						})
+					}),
+					limited.notice !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						className: detail_module_css_default["hiddenNotice"],
+						children: [limited.notice, /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							type: "button",
+							size: "sm",
+							variant: "ghost",
+							onClick: () => setRenderAll(true),
+							children: DETAIL_STRINGS.timeline.showAll
+						})]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("ol", {
+						className: detail_module_css_default["timeline"],
+						ref: listRef,
+						children: limited.rows.map((row) => row.type === "gap" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("li", {
+							className: detail_module_css_default["gap"],
+							role: "note",
+							"data-testid": "agent-sidecar-detail-gap",
+							children: row.label
+						}, row.key) : row.type === "chunks" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ChunkRunRow, {
+							row,
+							expanded: expandedRuns.has(row.key),
+							onToggleRun: toggleRun,
+							expandedKeys,
+							onToggleExpand: toggleExpand
+						}, row.key) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EventRow, {
+							row,
+							expanded: expandedKeys.has(row.key),
+							onToggleExpand: toggleExpand
+						}, row.key))
+					})
+				] })] }))]
 			});
 		}
 		//#endregion
@@ -7453,6 +8508,108 @@ window.__ModuleLoader__.load({
 			return errorCopy(notice.code);
 		}
 		//#endregion
+		//#region src/client/inject/verify.ts
+		/**
+		* Clock-skew allowance when deciding which transcript entries are recent
+		* enough to be this injection. The daemon's timestamps come from files
+		* written by other processes, so a small backward slack avoids missing a
+		* message that really is ours; keeping it small avoids crediting an
+		* identical message the operator sent moments earlier.
+		*/
+		const VERIFY_SKEW_MS = 3e4;
+		const VERIFY_COPY = {
+			confirmed: "inject.verifyConfirmed",
+			absent: "inject.verifyAbsent",
+			unavailable: "inject.verifyUnavailable"
+		};
+		/** Copy for the automatic check, or null when there is nothing to say. */
+		function verifyCopyKey(view) {
+			if (view.phase === "off") return null;
+			return view.phase === "running" ? "inject.verifying" : VERIFY_COPY[view.outcome];
+		}
+		/**
+		* Whether the automatic check applies to the current panel state: only a
+		* terminal `unknown` outcome, only with a probe bound, and only with a
+		* usable needle. Anything else is either already answered (delivered /
+		* failed) or unanswerable, and must be left to the operator.
+		*/
+		function shouldVerifyDelivery(state, hasProbe) {
+			if (!hasProbe || state.phase !== "result") return false;
+			if (state.result.outcome !== "unknown") return false;
+			return injectedHead(state).trim() !== "";
+		}
+		/** The previewed message head of a terminal result, or `''`. */
+		function injectedHead(state) {
+			return state.phase === "result" ? state.plan?.messagePreview.head ?? "" : "";
+		}
+		/**
+		* Kinds that can carry an injected message. The injected text arrives as a
+		* user turn; a `prompt`/`input` kind is the same thing under adapters with
+		* their own vocabulary. Assistant output is excluded: an agent quoting the
+		* prompt back is not evidence that the prompt was delivered by us.
+		*/
+		const INJECTED_KINDS = /* @__PURE__ */ new Set([
+			"user",
+			"prompt",
+			"input",
+			"user_message"
+		]);
+		/** Collapse whitespace so re-wrapped transcript text still matches. */
+		function normalize(text) {
+			return text.replace(/\s+/g, " ").trim();
+		}
+		/**
+		* Whether these entries contain the injected message.
+		*
+		* Containment either way: the transcript may hold more than the previewed
+		* head (the full body), and it may also hold less (an adapter that
+		* truncates). A blank or whitespace-only head matches nothing — that is an
+		* unusable needle, not a wildcard.
+		*/
+		function matchesInjectedMessage(entries, head, sinceMs) {
+			const needle = normalize(head);
+			if (needle === "") return false;
+			return entries.some((entry) => {
+				if (!INJECTED_KINDS.has(entry.kind.trim().toLowerCase())) return false;
+				if (sinceMs !== void 0 && Number.isFinite(entry.ts) && entry.ts < sinceMs) return false;
+				const text = normalize(entry.text);
+				if (text === "") return false;
+				return text.includes(needle) || needle.includes(text);
+			});
+		}
+		const defaultSleep = (ms) => new Promise((resolve) => {
+			setTimeout(resolve, ms);
+		});
+		/**
+		* Look for the injected message in the target transcript, a bounded number
+		* of times. Returns as soon as it is found; retries exist because a
+		* queued injection reaches the transcript slightly after the execute call
+		* gives up on us.
+		*/
+		async function verifyInjection(opts) {
+			const attempts = Math.max(1, opts.attempts ?? 3);
+			const delayMs = Math.max(0, opts.delayMs ?? 1500);
+			const sleep = opts.sleep ?? defaultSleep;
+			let answered = false;
+			for (let attempt = 0; attempt < attempts; attempt += 1) {
+				if (opts.cancelled?.() === true) return "unavailable";
+				if (attempt > 0) {
+					await sleep(delayMs);
+					if (opts.cancelled?.() === true) return "unavailable";
+				}
+				let entries;
+				try {
+					entries = await opts.probe();
+				} catch {
+					entries = null;
+				}
+				if (entries === null) continue;
+				answered = true;
+				if (matchesInjectedMessage(entries, opts.head, opts.sinceMs)) return "confirmed";
+			}
+			return answered ? "absent" : "unavailable";
+		}
+		//#endregion
 		//#region src/client/inject/InjectPanel.tsx
 		/** Countdown re-render cadence while a confirm token is live. */
 		const TICK_MS = 500;
@@ -7598,6 +8755,9 @@ window.__ModuleLoader__.load({
 			const [draft, setDraft] = (0, react.useState)("");
 			const [mode, setMode] = (0, react.useState)(() => props.target === null ? props.defaultMode : effectiveInjectMode(props.target.agent, props.defaultMode));
 			const [clock, setClock] = (0, react.useState)(() => now());
+			const [verify, setVerify] = (0, react.useState)({ phase: "off" });
+			/** When the execute call went out; bounds the transcript search window. */
+			const [injectedAt, setInjectedAt] = (0, react.useState)(null);
 			const textareaId = (0, react.useId)();
 			const modeGroup = (0, react.useId)();
 			const blockedReasonId = (0, react.useId)();
@@ -7622,6 +8782,36 @@ window.__ModuleLoader__.load({
 			(0, react.useEffect)(() => {
 				if (blockReason !== null) dispatch({ type: "ELIGIBILITY_BLOCKED" });
 			}, [blockReason]);
+			const verifyHead = injectedHead(state);
+			const verifiable = shouldVerifyDelivery(state, props.verifyProbe !== void 0);
+			(0, react.useEffect)(() => {
+				const probe = props.verifyProbe;
+				if (!verifiable || probe === void 0) {
+					setVerify({ phase: "off" });
+					return;
+				}
+				let cancelled = false;
+				setVerify({ phase: "running" });
+				verifyInjection({
+					probe,
+					head: verifyHead,
+					...injectedAt !== null ? { sinceMs: injectedAt - VERIFY_SKEW_MS } : {},
+					cancelled: () => cancelled
+				}).then((outcome) => {
+					if (!cancelled) setVerify({
+						phase: "done",
+						outcome
+					});
+				}, () => {
+					if (!cancelled) setVerify({
+						phase: "done",
+						outcome: "unavailable"
+					});
+				});
+				return () => {
+					cancelled = true;
+				};
+			}, [verifiable]);
 			const validation = validateMessage(draft);
 			const gate = deriveEditorGate({
 				injectEnabled: props.capability.inject && blockReason === null,
@@ -7653,6 +8843,7 @@ window.__ModuleLoader__.load({
 			const handleExecute = async () => {
 				if (state.phase !== "confirm" || blockReason !== null) return;
 				const { requestId, confirmToken, message } = state;
+				setInjectedAt(now());
 				dispatch({ type: "EXECUTE_START" });
 				let event;
 				try {
@@ -7732,6 +8923,8 @@ window.__ModuleLoader__.load({
 				const actions = resultActions(displayOutcome);
 				const toneClass = displayOutcome === "delivered" ? inject_module_css_default["resultOk"] : displayOutcome === "failed" ? inject_module_css_default["resultFail"] : inject_module_css_default["resultUnknown"];
 				const resultCopy = resultCopyKey(resultAgent, result.outcome);
+				const verifyCopy = verifyCopyKey(verify);
+				const jumpTarget = props.onOpenTarget !== void 0 ? state.plan?.target.sessionId ?? null : null;
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
 					...panelSurface,
 					"aria-label": t$1(isKimiResult ? "inject.kimiTitle" : "inject.title"),
@@ -7758,10 +8951,26 @@ window.__ModuleLoader__.load({
 								className: inject_module_css_default["resultDetail"],
 								children: t$1(isKimiResult ? "inject.kimiResultReplayed" : "inject.resultReplayed")
 							}) : null,
+							verifyCopy !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+								className: verify.phase === "done" && verify.outcome === "confirmed" ? inject_module_css_default["resultOk"] : inject_module_css_default["resultDetail"],
+								role: "status",
+								"data-testid": "agent-sidecar-inject-verify",
+								children: t$1(verifyCopy)
+							}) : null,
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								className: inject_module_css_default["footer"],
 								children: [
 									closeButton,
+									actions.showCheckSessionHint && jumpTarget !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+										type: "button",
+										size: "sm",
+										variant: "outline",
+										onClick: () => {
+											props.onOpenTarget?.(jumpTarget);
+										},
+										"data-testid": "agent-sidecar-inject-open-target",
+										children: t$1("inject.openTarget")
+									}) : null,
 									!isKimiResult && isDeliveredResult(result) && props.onObserve !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 										type: "button",
 										size: "sm",
@@ -7999,104 +9208,6 @@ window.__ModuleLoader__.load({
 					]
 				})]
 			});
-		}
-		//#endregion
-		//#region src/client/detail/transport.ts
-		/**
-		* Transport helpers for the detail view's M3 read endpoints. api.ts (T2.1)
-		* predates M3: its `fetchSession` is typed for the M1 placeholder response
-		* and it has no timeline-pagination call — and per the task boundary its
-		* existing exports must not change (the S7 integration wave unifies the
-		* data layer). So this module carries the missing calls with the same
-		* posture as api.ts (same-origin relative paths, bounded timeout,
-		* normalized ApiError, injectable primitives), reusing api.ts's exported
-		* building blocks instead of redefining them.
-		*
-		* Read-only surface, no retry policy here (transport, not policy).
-		*
-		* @module
-		*/
-		const defaultSetTimeout$1 = (fn, ms) => globalThis.setTimeout(fn, ms);
-		const defaultClearTimeout$1 = (handle) => {
-			globalThis.clearTimeout(handle);
-		};
-		const defaultCreateAbortController$1 = () => new AbortController();
-		function resolveFetch$1(opts) {
-			if (opts.fetch !== void 0) return opts.fetch;
-			return globalThis.fetch;
-		}
-		async function getJson$1(path, opts) {
-			const doFetch = resolveFetch$1(opts);
-			const controller = (opts.createAbortController ?? defaultCreateAbortController$1)();
-			const setT = opts.setTimeout ?? defaultSetTimeout$1;
-			const clearT = opts.clearTimeout ?? defaultClearTimeout$1;
-			let timedOut = false;
-			let externallyAborted = false;
-			const timer = setT(() => {
-				timedOut = true;
-				controller.abort();
-			}, opts.timeoutMs ?? 15e3);
-			const external = opts.signal;
-			const onExternalAbort = () => {
-				externallyAborted = true;
-				controller.abort();
-			};
-			if (external !== void 0) if (external.aborted) onExternalAbort();
-			else external.addEventListener("abort", onExternalAbort);
-			try {
-				let res;
-				try {
-					res = await doFetch(path, {
-						method: "GET",
-						signal: controller.signal
-					});
-				} catch (err) {
-					if (timedOut) throw new ApiError("timeout", "request_timeout", null, err);
-					if (externallyAborted) throw new ApiError("aborted", "request_aborted", null, err);
-					throw new ApiError("network", "network_error", null, err);
-				}
-				if (!res.ok) {
-					let reason = `http_${res.status}`;
-					try {
-						const body = await res.json();
-						if (typeof body === "object" && body !== null) {
-							const value = body["reason"];
-							if (typeof value === "string" && value !== "") reason = value;
-						}
-					} catch {}
-					throw new ApiError("http", reason, res.status);
-				}
-				try {
-					return await res.json();
-				} catch (err) {
-					if (timedOut) throw new ApiError("timeout", "request_timeout", null, err);
-					throw new ApiError("parse", "invalid_json", res.status, err);
-				}
-			} finally {
-				clearT(timer);
-				if (external !== void 0) external.removeEventListener("abort", onExternalAbort);
-			}
-		}
-		/**
-		* `GET <prefix>/session/<id>` typed for the M3 body. Unknown ids reject
-		* with an ApiError carrying the server's `session_not_found` reason; a
-		* pre-M3 host answers `timeline: null` (the caller degrades honestly).
-		*/
-		async function fetchSessionDetail(sessionId, opts = {}) {
-			return await getJson$1(`${API_PREFIX}/session/${encodeURIComponent(sessionId)}`, opts);
-		}
-		/**
-		* `GET <prefix>/session/<id>/timeline?cursor=&limit=` — one older history
-		* page. `cursor` is the opaque `nextCursor` token from a previous page,
-		* passed through verbatim (the server rejects tampered tokens with 400
-		* `invalid_cursor`); omit it for the newest window (listen-mode refetch).
-		*/
-		async function fetchTimelinePage(sessionId, opts = {}) {
-			const params = new URLSearchParams();
-			if (opts.cursor !== void 0 && opts.cursor !== null && opts.cursor !== "") params.set("cursor", opts.cursor);
-			if (opts.limit !== void 0) params.set("limit", String(opts.limit));
-			const query = params.toString();
-			return await getJson$1(`${API_PREFIX}/session/${encodeURIComponent(sessionId)}/timeline${query === "" ? "" : `?${query}`}`, opts);
 		}
 		//#endregion
 		//#region src/client/m3-transport.ts
@@ -8533,7 +9644,11 @@ window.__ModuleLoader__.load({
 				if (this.disposed) return;
 				if (card !== null) {
 					const h = this.state.header;
-					if (card.agent !== h.agent || card.title !== h.title || card.project !== h.project || card.status !== h.status) this.setState({ header: card });
+					const next = card.transcript === void 0 && h.transcript !== void 0 ? {
+						...card,
+						transcript: h.transcript
+					} : card;
+					if (next.agent !== h.agent || next.title !== h.title || next.project !== h.project || next.status !== h.status || next.updatedAtMs !== h.updatedAtMs || next.createdAtMs !== h.createdAtMs || next.transcript !== h.transcript || next.model !== h.model || next.modelProvider !== h.modelProvider) this.setState({ header: next });
 				}
 				this.scheduleDetailRefresh();
 				if (this.state.listening && this.state.ready) this.scheduleListenRefetch();
@@ -8647,19 +9762,32 @@ window.__ModuleLoader__.load({
 		* null when the body carries neither (caller keeps its hint).
 		*/
 		function headerFromDetailWire(wire) {
+			const metadata = wire.session === null ? {} : headerMetadata(wire.session);
 			if (wire.unified !== null) return {
 				agent: wire.unified.agent,
 				title: wire.unified.title,
 				project: wire.unified.project,
-				status: wire.unified.status
+				status: wire.unified.status,
+				...metadata
 			};
 			if (wire.session !== null) return {
 				agent: wire.session.agent,
 				title: wire.session.title,
 				project: wire.session.project,
-				status: wire.session.status
+				status: wire.session.status,
+				...metadata
 			};
 			return null;
+		}
+		/** Optional header metadata of one wire row, epoch seconds → milliseconds. */
+		function headerMetadata(session) {
+			return {
+				...typeof session.updated_at === "number" && Number.isFinite(session.updated_at) ? { updatedAtMs: session.updated_at * 1e3 } : {},
+				...typeof session.created_at === "number" && Number.isFinite(session.created_at) ? { createdAtMs: session.created_at * 1e3 } : {},
+				...session.transcript !== void 0 && session.transcript !== "" ? { transcript: session.transcript } : {},
+				...session.model !== void 0 ? { model: session.model } : {},
+				...session.model_provider !== void 0 ? { modelProvider: session.model_provider } : {}
+			};
 		}
 		/**
 		* Find the live board card of a session (controller SessionCardVM rows) →
@@ -8672,7 +9800,11 @@ window.__ModuleLoader__.load({
 				agent: card.agent,
 				title: card.title,
 				project: card.project,
-				status: card.status
+				status: card.status,
+				...card.updatedAtMs !== void 0 ? { updatedAtMs: card.updatedAtMs } : {},
+				...card.createdAtMs !== void 0 ? { createdAtMs: card.createdAtMs } : {},
+				...card.model !== void 0 ? { model: card.model } : {},
+				...card.modelProvider !== void 0 ? { modelProvider: card.modelProvider } : {}
 			};
 		}
 		//#endregion
@@ -8787,6 +9919,107 @@ window.__ModuleLoader__.load({
 				children: hint
 			})] });
 		}
+		/** The one agent whose sessions the host can actually end. */
+		const DISPOSABLE_AGENT$1 = "dsh";
+		/**
+		* Copy for the outcomes worth reporting. `disposed` and `not_found` are
+		* absent by design: both mean the session is gone, and the page closes
+		* instead of narrating.
+		*/
+		const DISPOSE_FAILURE_COPY = {
+			unsupported: "detail.dispose.outcome.unsupported",
+			timeout: "detail.dispose.outcome.timeout",
+			failed: "detail.dispose.outcome.failed"
+		};
+		/** The failure copy for an outcome, or null when the session is gone. */
+		function disposeFailureKey(outcome) {
+			return outcome === "disposed" || outcome === "not_found" ? null : DISPOSE_FAILURE_COPY[outcome];
+		}
+		/**
+		* Detail-page dispose: a confirm dialog in front of the only irreversible
+		* action this plugin offers.
+		*
+		* It renders nothing at all unless both the agent and the host can support
+		* it — a disabled "end session" button invites the operator to hunt for a
+		* setting, while archiving (which is right for almost every idle session)
+		* is already one click away on the board.
+		*/
+		function DetailDisposeButton(props) {
+			const [confirming, setConfirming] = (0, react.useState)(false);
+			const [busy, setBusy] = (0, react.useState)(false);
+			const [outcome, setOutcome] = (0, react.useState)(null);
+			if (props.agent !== DISPOSABLE_AGENT$1 || !props.capable) return null;
+			const failureKey = outcome === null ? null : disposeFailureKey(outcome);
+			const run = () => {
+				if (busy) return;
+				setBusy(true);
+				setOutcome(null);
+				props.onDispose().then((result) => {
+					setBusy(false);
+					setOutcome(result);
+					if (result === "disposed" || result === "not_found") {
+						setConfirming(false);
+						props.onDisposed();
+					}
+				}, () => {
+					setBusy(false);
+					setOutcome("failed");
+				});
+			};
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+					size: "sm",
+					variant: "outline",
+					title: t("detail.actions.disposeHint"),
+					onClick: () => {
+						setOutcome(null);
+						setConfirming(true);
+					},
+					"data-testid": "agent-sidecar-detail-dispose",
+					children: t("detail.actions.dispose")
+				}),
+				failureKey !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					className: detail_view_module_css_default["analysisDisabledReason"],
+					role: "alert",
+					"data-testid": "agent-sidecar-detail-dispose-outcome",
+					children: t(failureKey)
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Modal, {
+					open: confirming,
+					onClose: () => {
+						if (!busy) setConfirming(false);
+					},
+					title: t("detail.dispose.title"),
+					closeLabel: t("detail.dispose.cancel"),
+					description: t("detail.dispose.explain"),
+					children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": "agent-sidecar-detail-dispose-confirm",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							size: "sm",
+							variant: "ghost",
+							disabled: busy,
+							onClick: () => {
+								setConfirming(false);
+							},
+							children: t("detail.dispose.cancel")
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							size: "sm",
+							variant: "primary",
+							disabled: busy,
+							onClick: run,
+							"data-testid": "agent-sidecar-detail-dispose-confirm-run",
+							children: busy ? t("detail.dispose.disposing") : t("detail.dispose.confirm")
+						})]
+					})
+				})
+			] });
+		}
+		/** Daemon states in which no history source can answer until it comes back. */
+		const DAEMON_DOWN_STATES = /* @__PURE__ */ new Set([
+			"failed",
+			"backoff",
+			"defer"
+		]);
 		/**
 		* Content-free timeline degradation surface. A degraded empty page replaces
 		* the healthy-empty body; partial failures with entries keep those entries
@@ -8796,6 +10029,7 @@ window.__ModuleLoader__.load({
 			const { health } = props;
 			const degraded = health.kind !== "healthy";
 			const blocksHealthyEmpty = degraded && props.entryCount === 0;
+			const daemonDown = props.daemonState !== void 0 && DAEMON_DOWN_STATES.has(props.daemonState);
 			const messageKey = health.kind === "partial" ? "detail.timeline.degradedPartial" : health.kind === "failed" ? "detail.timeline.degradedAll" : "detail.timeline.degradedUnverified";
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [degraded && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: detail_view_module_css_default["toolsSection"],
@@ -8808,7 +10042,10 @@ window.__ModuleLoader__.load({
 						"data-testid": "agent-sidecar-timeline-source-summary",
 						children: t("detail.sources.healthSummary", { ...health.summary })
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("detail.timeline.degradedRetry") }),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						"data-testid": "agent-sidecar-timeline-degraded-hint",
+						children: daemonDown ? t(props.daemonState === "defer" ? "detail.timeline.daemonDeferHint" : "detail.timeline.daemonDownHint") : t("detail.timeline.degradedRetry")
+					}),
 					blocksHealthyEmpty && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: [props.onClose !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
 						type: "button",
 						size: "sm",
@@ -8884,6 +10121,7 @@ window.__ModuleLoader__.load({
 			const analysisEnabled = integration.getAnalysisEnabled();
 			const analysisDisabledHint = analysisEnabled ? void 0 : t("detail.actions.analyzeDisabledHint");
 			const injectIntegration = props.integration.inject;
+			const disposePort = props.integration.dispose;
 			const closeInject = () => {
 				setInjectOpen(false);
 			};
@@ -8898,6 +10136,11 @@ window.__ModuleLoader__.load({
 			};
 			const observeReaction = () => {
 				if (!detailStore.getState().listening) detailStore.toggleListen();
+				closeInject();
+			};
+			const verifyProbe = integration.inject?.createVerifyProbe?.(sessionId);
+			const inspectTarget = () => {
+				detailStore.refreshNewest();
 				closeInject();
 			};
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -8934,6 +10177,15 @@ window.__ModuleLoader__.load({
 								id: ANALYSIS_DISABLED_REASON_ID,
 								className: detail_view_module_css_default["analysisDisabledReason"],
 								children: analysisDisabledHint
+							}),
+							disposePort !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(DetailDisposeButton, {
+								agent: detail.header.agent,
+								capable: view.disposeCapability,
+								onDispose: () => disposePort.dispose(sessionId),
+								onDisposed: () => {
+									controller.refresh();
+									props.onClose();
+								}
 							})
 						]
 					}),
@@ -8985,33 +10237,34 @@ window.__ModuleLoader__.load({
 							onSelectSession: props.onSelectSession
 						})] })]
 					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(TimelineAvailabilityBoundary, {
-						health: detail.timelineHealth,
-						entryCount: detail.timeline.entries.length,
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionDetail, {
+						sessionId,
+						header: detail.header,
+						timeline: detail.timeline,
+						loading: detail.loading,
+						error: detail.error,
+						hasMore: detail.hasMore,
+						listening: detail.listening,
 						refreshing: detail.refreshing,
+						onLoadMore: () => {
+							detailStore.loadMore();
+						},
+						onToggleListen: () => {
+							detailStore.toggleListen();
+						},
 						onRefresh: () => {
 							detailStore.refreshNewest();
 						},
 						onClose: props.onClose,
-						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SessionDetail, {
-							sessionId,
-							header: detail.header,
-							timeline: detail.timeline,
-							loading: detail.loading,
-							error: detail.error,
-							hasMore: detail.hasMore,
-							listening: detail.listening,
+						timelineBoundary: (body) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TimelineAvailabilityBoundary, {
+							health: detail.timelineHealth,
+							entryCount: detail.timeline.entries.length,
 							refreshing: detail.refreshing,
-							onLoadMore: () => {
-								detailStore.loadMore();
-							},
-							onToggleListen: () => {
-								detailStore.toggleListen();
-							},
 							onRefresh: () => {
 								detailStore.refreshNewest();
 							},
-							onClose: props.onClose
+							daemonState: view.daemonState,
+							children: body
 						})
 					}),
 					injectIntegration !== void 0 && injectActions !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Modal, {
@@ -9033,7 +10286,9 @@ window.__ModuleLoader__.load({
 							onPrepare: injectActions.onPrepare,
 							onExecute: injectActions.onExecute,
 							onClose: closeInject,
-							onObserve: observeReaction
+							onObserve: observeReaction,
+							verifyProbe,
+							onOpenTarget: inspectTarget
 						})
 					})
 				]
@@ -9614,6 +10869,10 @@ window.__ModuleLoader__.load({
 				timeWindowHours: 24,
 				showDead: false
 			},
+			archive: {
+				auto: false,
+				autoAfterHours: 24
+			},
 			skill: { provide: true }
 		};
 		/** Whitespace-join an argv for the card's single-line command field. */
@@ -9640,6 +10899,8 @@ window.__ModuleLoader__.load({
 				analysisModel: config.analysis.model,
 				uiTimeWindowHours: config.ui.timeWindowHours,
 				uiShowDead: config.ui.showDead,
+				archiveAuto: config.archive.auto,
+				archiveAutoAfterHours: config.archive.autoAfterHours,
 				skillProvide: config.skill.provide
 			};
 		}
@@ -9670,6 +10931,10 @@ window.__ModuleLoader__.load({
 				ui: {
 					timeWindowHours: values.uiTimeWindowHours,
 					showDead: values.uiShowDead
+				},
+				archive: {
+					auto: values.archiveAuto,
+					autoAfterHours: values.archiveAutoAfterHours
 				},
 				skill: { provide: values.skillProvide }
 			};
@@ -9852,6 +11117,8 @@ window.__ModuleLoader__.load({
 				const pendingFocusCancelRef = (0, react.useRef)(null);
 				const [projectsStore] = (0, react.useState)(() => integration?.createProjectsStore() ?? null);
 				const [boardAnalysisStore] = (0, react.useState)(() => integration?.createAnalysisStore() ?? null);
+				const [archiveApi] = (0, react.useState)(() => integration?.createArchiveApi?.() ?? null);
+				const archiveEnabled = archiveApi !== null && state.archivePolicy !== null;
 				(0, react.useEffect)(() => () => {
 					projectsStore?.dispose();
 				}, [projectsStore]);
@@ -10032,6 +11299,11 @@ window.__ModuleLoader__.load({
 						openDetail(target, "board");
 					},
 					onAnalyze: openAnalysis,
+					...archiveEnabled && archiveApi !== null ? {
+						archive: archiveApi,
+						archived: state.archived,
+						disposeSupported: state.disposeCapability
+					} : {},
 					rootRef: setBoardRoot,
 					onScrollTopChange: (scrollTop) => {
 						scrollTopsRef.current.board = scrollTop;
@@ -10152,6 +11424,10 @@ window.__ModuleLoader__.load({
 							pid: state.lastPing.pid,
 							version: state.lastPing.version
 						} : {}
+					},
+					archivePolicy: state.archivePolicy === null ? null : {
+						auto: state.archivePolicy.auto,
+						autoAfterSeconds: state.archivePolicy.autoAfterSeconds
 					}
 				});
 			};
@@ -11077,6 +12353,101 @@ window.__ModuleLoader__.load({
 			}
 		};
 		//#endregion
+		//#region src/client/board/archive-glue.ts
+		/**
+		* Binds the browser archive api to the board's presentation-level
+		* {@link BoardArchiveApi}: wire rows become board card view models (epoch
+		* seconds → milliseconds, snake_case → camelCase) and `ApiError` reasons
+		* become the short tokens the dialog interpolates into its failure line.
+		*
+		* Kept out of Board.tsx on purpose — the board component stays free of
+		* api/sse imports, exactly like the rest of the presentation layer.
+		*
+		* @module
+		*/
+		/**
+		* Statuses a batch archive may touch. Working/waiting sessions are never
+		* candidates regardless of how long the daemon last saw an event: a long
+		* silent tool call is not an abandoned session.
+		*/
+		const ARCHIVE_STATUSES = ["idle", "dead"];
+		/** The only agent with a supervised session the host can actually end. */
+		const DISPOSABLE_AGENT = "dsh";
+		/** Rethrow with the api reason as the message, so the dialog can show it. */
+		function rethrowReason(err) {
+			if (isApiError(err)) throw new Error(err.reason);
+			throw err;
+		}
+		/**
+		* End each dsh session in turn, counting outcomes instead of failing the
+		* batch. Sequential on purpose: dispose ends a live session and the host
+		* serializes session-service work anyway, so a burst buys nothing and
+		* makes the failure attribution harder to read.
+		*
+		* A session already gone (`not_found`) counts as disposed — it is the state
+		* the operator asked for. Everything else counts as a failure and stays
+		* archived, which is the honest resting place for "hidden but maybe alive".
+		*/
+		async function disposeAll(targets, opts) {
+			let disposed = 0;
+			let disposeFailed = 0;
+			for (const target of targets) {
+				if (target.agent !== DISPOSABLE_AGENT) continue;
+				try {
+					const result = await dshDispose(target.sessionId, opts);
+					if (result.outcome === "disposed" || result.outcome === "not_found") disposed += 1;
+					else disposeFailed += 1;
+				} catch {
+					disposeFailed += 1;
+				}
+			}
+			return {
+				disposed,
+				disposeFailed
+			};
+		}
+		/** Bind the default (fetch-backed) archive round-trips. */
+		function createArchiveApi(opts = {}) {
+			return {
+				preview: async (idleSeconds) => {
+					try {
+						const result = await archivePreview(idleSeconds, ARCHIVE_STATUSES, opts);
+						return {
+							token: result.token,
+							idleSeconds: result.idle_seconds,
+							candidates: mapSessions(result.candidates)
+						};
+					} catch (err) {
+						return rethrowReason(err);
+					}
+				},
+				apply: async (targets, token, options = { dispose: false }) => {
+					let archived;
+					try {
+						archived = (await archiveApply(targets, token, opts)).count;
+					} catch (err) {
+						return rethrowReason(err);
+					}
+					if (!options.dispose) return {
+						archived,
+						disposed: 0,
+						disposeFailed: 0
+					};
+					return {
+						archived,
+						...await disposeAll(targets, opts)
+					};
+				},
+				unarchive: async (targets) => {
+					try {
+						return (await archiveUnarchive(targets, opts)).count;
+					} catch (err) {
+						return rethrowReason(err);
+					}
+				}
+			};
+		}
+		//#endregion
 		//#region src/client/search-glue.ts
 		/**
 		* Cross-agent search data glue (T5.10b): a framework-free store feeding
@@ -11203,16 +12574,30 @@ window.__ModuleLoader__.load({
 		*
 		* @module
 		*/
+		/**
+		* The default dispose binding. Always bound here — the host capability
+		* flag (`capabilities.dispose`), not the presence of this function, is
+		* what decides whether the control is offered.
+		*/
+		const defaultDisposePort = { dispose: async (sessionId) => {
+			try {
+				return (await dshDispose(sessionId)).outcome;
+			} catch {
+				return "failed";
+			}
+		} };
 		/** Bind the production store implementations at the client composition root. */
 		function createDefaultIntegration(base) {
 			return {
 				detail: {
 					...base,
+					dispose: defaultDisposePort,
 					createDetailStore: (sessionId, hint) => new DetailStore(sessionId, { hint }),
 					createSearchStore: () => new SearchStore()
 				},
 				createProjectsStore: () => new ProjectsStore(),
-				createAnalysisStore: () => new AnalysisStore()
+				createAnalysisStore: () => new AnalysisStore(),
+				createArchiveApi
 			};
 		}
 		//#endregion
@@ -11347,7 +12732,8 @@ window.__ModuleLoader__.load({
 					actions: createInjectActions({ onDelivered: () => {
 						controller.refresh();
 					} }),
-					getDefaultMode: () => injectPrefs.defaultMode
+					getDefaultMode: () => injectPrefs.defaultMode,
+					createVerifyProbe: (sessionId) => createVerifyProbe(sessionId)
 				},
 				getAnalysisEnabled: () => analysisPrefs.enabled
 			});
