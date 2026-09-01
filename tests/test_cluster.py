@@ -202,9 +202,9 @@ class ClusterTests(unittest.TestCase):
             stdout=stdout,
             stderr=stderr,
             remote_aggregator=lambda *_, **__: {
-                "rows": [],
+                "rows": [None],
                 "failures": [{"host": "pod-a", "code": "python_too_old"}],
-                "exit_code": 3,
+                "exit_code": "not-an-int",
             },
         )
         self.assertEqual(0, code)
