@@ -2468,7 +2468,7 @@ class KimiSendIntegrationTests(unittest.TestCase):
             version_runner=version_runner,
         )
 
-        self.assertEqual(("completed", "unknown"), (result.outcome, result.delivery))
+        self.assertEqual(("completed", "delivered"), (result.outcome, result.delivery))
         self.assertGreaterEqual(len(calls), 4)
         self.assertEqual((str(self.executable), "--version"), calls[0][0])
         self.assertTrue(all(call[0][1] == "--version" for call in calls))
@@ -2543,7 +2543,7 @@ class KimiSendIntegrationTests(unittest.TestCase):
             request_id="request-bound-snapshot",
             process_guard=guard,
         )
-        self.assertEqual(("completed", "unknown"), (result.outcome, result.delivery))
+        self.assertEqual(("completed", "delivered"), (result.outcome, result.delivery))
         self.assertEqual([None, 4321], guard_calls)
         self.assertEqual(1, len(captured_paths))
         self.assertFalse(captured_paths[0].exists())
@@ -3432,7 +3432,7 @@ class KimiSendIntegrationTests(unittest.TestCase):
             process_guard=guard,
         )
 
-        self.assertEqual(("completed", "unknown"), (result.outcome, result.delivery))
+        self.assertEqual(("completed", "delivered"), (result.outcome, result.delivery))
         self.assertEqual(0, result.returncode)
         self.assertEqual("synthetic response", result.response)
         self.assertEqual([None, 4321], [call[2] for call in guard_calls])
@@ -3625,7 +3625,7 @@ class KimiSendIntegrationTests(unittest.TestCase):
                 timeout=5,
             )
 
-        self.assertEqual(("completed", "unknown"), (result.outcome, result.delivery))
+        self.assertEqual(("completed", "delivered"), (result.outcome, result.delivery))
 
     def test_kimi_failed_and_wire_proof_races_are_unknown(self):
         cases = (
@@ -3709,8 +3709,8 @@ class KimiSendIntegrationTests(unittest.TestCase):
             lambda *args, **kwargs: self.fail("completed replay spawned"),
             request_id="request-kimi-completed",
         )
-        self.assertEqual(("completed", "unknown"), (first.outcome, first.delivery))
-        self.assertEqual(("completed", "unknown"), (replay.outcome, replay.delivery))
+        self.assertEqual(("completed", "delivered"), (first.outcome, first.delivery))
+        self.assertEqual(("completed", "delivered"), (replay.outcome, replay.delivery))
         self.assertTrue(replay.replayed)
         self.assertEqual(1, len(completed_calls))
 

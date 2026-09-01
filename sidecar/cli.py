@@ -23,6 +23,12 @@ from typing import Any, Iterable, List, Mapping, Optional, Sequence, TextIO
 import sidecar
 from sidecar.adapters.base import sanitize_terminal_text
 from sidecar.client import PingInfo, SidecarClient, SidecarClientError
+from sidecar.cluster import (
+    DEFAULT_CLUSTER_WINDOW_SECONDS,
+    MAX_CLUSTER_WINDOW_SECONDS,
+    cluster_sessions,
+    merge_cluster_results,
+)
 from sidecar.daemon import (
     PIDFILE_NAME,
     SOCKET_NAME,
@@ -72,6 +78,13 @@ from sidecar.send_audit import (
     SendAuditStore,
     generate_request_id,
     validate_request_id,
+)
+from sidecar.semantic import (
+    DEFAULT_SEMANTIC_RULES,
+    SEMANTIC_MAX_GROUPS,
+    SEMANTIC_RULES,
+    build_semantic_payload,
+    run_headless_report,
 )
 from sidecar.tail import watch_sessions
 from sidecar.tailer_pool import (
@@ -172,6 +185,51 @@ def _recent_seconds_argument(value: str) -> float:
             )
         )
     return seconds
+
+
+def _cluster_window_argument(value: str) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise argparse.ArgumentTypeError(
+            "cluster window must be a finite positive number"
+        ) from error
+    if (
+        not math.isfinite(seconds)
+        or not 0 < seconds <= MAX_CLUSTER_WINDOW_SECONDS
+    ):
+        raise argparse.ArgumentTypeError(
+            "cluster window must be positive and at most {}".format(
+                int(MAX_CLUSTER_WINDOW_SECONDS)
+            )
+        )
+    return seconds
+
+
+def _semantic_rules_argument(value: str) -> tuple[str, ...]:
+    rules = tuple(part.strip().lower() for part in str(value).split(",") if part.strip())
+    unknown = sorted(set(rules) - SEMANTIC_RULES)
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            "unknown semantic rule: {}".format(",".join(unknown))
+        )
+    if len(rules) != len(set(rules)):
+        raise argparse.ArgumentTypeError("semantic rules must not repeat")
+    return rules or DEFAULT_SEMANTIC_RULES
+
+
+def _semantic_max_groups_argument(value: str) -> int:
+    try:
+        groups = int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise argparse.ArgumentTypeError(
+            "semantic max-groups must be a positive integer"
+        ) from error
+    if groups <= 0 or groups > 10_000:
+        raise argparse.ArgumentTypeError(
+            "semantic max-groups must be from 1 through 10000"
+        )
+    return groups
 
 
 def _request_id_argument(value: str) -> str:
@@ -318,6 +376,68 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help="pin an absolute Python path on every remote host (requires --remote)",
+    )
+
+    cluster_parser = commands.add_parser(
+        "cluster",
+        help="group sessions by project, agent, model, and time window",
+    )
+    cluster_recency = cluster_parser.add_mutually_exclusive_group()
+    cluster_recency.add_argument(
+        "--all",
+        action="store_true",
+        help="include sessions older than 48h",
+    )
+    cluster_recency.add_argument(
+        "--recent-seconds",
+        type=_recent_seconds_argument,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    cluster_parser.add_argument(
+        "--window-seconds",
+        type=_cluster_window_argument,
+        default=DEFAULT_CLUSTER_WINDOW_SECONDS,
+        metavar="SEC",
+        help="deterministic time bucket size (default: 86400)",
+    )
+    cluster_parser.add_argument("--json", action="store_true", help="emit JSON")
+    cluster_parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="include eligible remote hosts",
+    )
+    cluster_parser.add_argument(
+        "--host",
+        action="append",
+        default=[],
+        metavar="ALIAS",
+        help="select an eligible remote host (repeatable; requires --remote)",
+    )
+    cluster_parser.add_argument(
+        "--remote-python",
+        default=None,
+        metavar="PATH",
+        help="pin an absolute Python path on every remote host (requires --remote)",
+    )
+    cluster_parser.add_argument(
+        "--semantic",
+        action="store_true",
+        help="optionally add a bounded local dsh headless summary",
+    )
+    cluster_parser.add_argument(
+        "--semantic-rules",
+        type=_semantic_rules_argument,
+        default=DEFAULT_SEMANTIC_RULES,
+        metavar="RULES",
+        help="comma-separated semantic selection rules",
+    )
+    cluster_parser.add_argument(
+        "--semantic-max-groups",
+        type=_semantic_max_groups_argument,
+        default=SEMANTIC_MAX_GROUPS,
+        metavar="N",
+        help="maximum clusters sent to semantic analysis (default: 100)",
     )
 
     watch_parser = commands.add_parser("watch", help="follow normalized session events")
@@ -1088,6 +1208,134 @@ def _report_remote_python_hint(
 def _report_empty_remote_fleet(stderr: TextIO) -> None:
     stderr.write("remote: no eligible hosts; showing local sessions only\n")
     stderr.flush()
+
+
+def _cluster_recent_seconds(args: argparse.Namespace) -> Optional[float]:
+    if args.recent_seconds is not None:
+        return args.recent_seconds
+    return None if args.all else RECENT_SECONDS
+
+
+def _print_clusters(
+    groups: Iterable[Mapping[str, Any]],
+    stdout: TextIO,
+) -> None:
+    for group in groups:
+        hosts = ",".join(
+            _bounded_terminal_field(host, 64)
+            for host in group.get("hosts", ())
+            if isinstance(host, str)
+        )
+        stdout.write(
+            "{cluster:<16} {count:>5} {agent:<11} {model:<24} "
+            "{project} [{hosts}]\n".format(
+                cluster=_bounded_terminal_field(group.get("cluster_id"), 16),
+                count=group.get("count", 0),
+                agent=_bounded_terminal_field(group.get("agent"), 11),
+                model=_bounded_terminal_field(group.get("model"), 24),
+                project=_bounded_terminal_field(group.get("project"), 120),
+                hosts=hosts or "local",
+            )
+        )
+    stdout.flush()
+
+
+def _run_cluster(
+    args: argparse.Namespace,
+    *,
+    scanner: Optional[Scanner],
+    client: SidecarClient,
+    stdout: TextIO,
+    stderr: TextIO,
+    remote_aggregator=None,
+) -> int:
+    local_args = argparse.Namespace(
+        all=args.all,
+        recent_seconds=args.recent_seconds,
+        agent=[],
+    )
+    local_rows = _acquire_local_snapshot(
+        "list",
+        local_args,
+        scanner=scanner,
+        client=client,
+        stderr=stderr,
+    )
+    local_values: List[Mapping[str, Any]] = []
+    for session in local_rows:
+        row = dict(_as_dict(session))
+        row["host"] = "local"
+        local_values.append(row)
+    local_groups = cluster_sessions(
+        local_values,
+        window_seconds=args.window_seconds,
+    )
+
+    groups: List[Mapping[str, Any]] = list(local_groups)
+    if args.remote:
+        from sidecar.remote import (
+            EXIT_NO_SUCCESS,
+            RemoteInventoryError,
+            aggregate_remote,
+        )
+
+        provider = aggregate_remote if remote_aggregator is None else remote_aggregator
+        try:
+            result = provider(
+                "cluster",
+                recent_seconds=_cluster_recent_seconds(args),
+                selected=args.host or None,
+                python_candidates=args.remote_python_candidates,
+            )
+        except RemoteInventoryError:
+            stderr.write("remote: inventory\n")
+            stderr.flush()
+            return 2
+        except (OSError, TypeError, ValueError) as error:
+            stderr.write(
+                "remote: {}\n".format(sanitize_terminal_text(str(error)))
+            )
+            stderr.flush()
+            return 2
+        failures = _aggregate_value(result, "failures", ())
+        _report_remote_failures(failures, stderr)
+        remote_groups = _aggregate_value(result, "rows", ())
+        groups.extend(
+            row
+            for row in remote_groups
+            if isinstance(row, Mapping)
+        )
+        try:
+            result_exit_code = int(
+                _aggregate_value(result, "exit_code", EXIT_NO_SUCCESS)
+            )
+        except (TypeError, ValueError):
+            result_exit_code = EXIT_NO_SUCCESS
+        if result_exit_code != 0 and not remote_groups:
+            groups = local_groups
+    merged = merge_cluster_results(groups)
+    semantic = None
+    if args.semantic:
+        semantic = run_headless_report(
+            build_semantic_payload(
+                merged,
+                rules=args.semantic_rules,
+                max_groups=args.semantic_max_groups,
+            )
+        )
+        if not semantic["ok"]:
+            stderr.write("semantic: unavailable; deterministic clusters retained\n")
+            stderr.flush()
+    if args.json:
+        _write_json(
+            {"clusters": merged, "semantic": semantic}
+            if args.semantic
+            else merged,
+            stdout,
+        )
+    else:
+        _print_clusters(merged, stdout)
+    return 0
 
 
 def _accepts_keyword_argument(provider: object, name: str) -> bool:
@@ -2846,7 +3094,7 @@ def main(
     args = build_parser().parse_args(argv)
 
     if (
-        args.command in ("list", "status", "watch")
+        args.command in ("list", "status", "watch", "cluster")
         and args.remote_python is not None
         and not args.remote
     ):
@@ -2858,7 +3106,7 @@ def main(
 
     args.remote_python_candidates = None
     if (
-        args.command in ("list", "status", "watch")
+        args.command in ("list", "status", "watch", "cluster")
         and args.remote
     ):
         remote_python = args.remote_python
@@ -2882,7 +3130,7 @@ def main(
             args.remote_python_candidates = (validated_remote_python,)
 
     if (
-        args.command in ("list", "status")
+        args.command in ("list", "status", "cluster")
         and args.host
         and not args.remote
     ):
@@ -3048,6 +3296,16 @@ def main(
             client=_TailReportingClient(active_client, errors),
             stdout=output,
             once=args.once,
+        )
+
+    if args.command == "cluster":
+        return _run_cluster(
+            args,
+            scanner=scanner,
+            client=active_client,
+            stdout=output,
+            stderr=errors,
+            remote_aggregator=remote_aggregator,
         )
 
     if args.command in ("list", "status"):

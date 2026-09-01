@@ -4303,7 +4303,7 @@ function snapshotProjection(row) {
 	const project = ownValue(row, "project");
 	const updatedAt = ownValue(row, "updated_at");
 	if (typeof agent !== "string" || agent === "" || typeof sessionId !== "string" || sessionId === "" || typeof status !== "string" || typeof title !== "string" || typeof project !== "string" || typeof updatedAt !== "number" || !Number.isFinite(updatedAt)) return null;
-	return {
+	const projected = {
 		agent,
 		session_id: sessionId,
 		status,
@@ -4311,6 +4311,14 @@ function snapshotProjection(row) {
 		project,
 		updated_at: updatedAt
 	};
+	const extra = ownValue(row, "extra");
+	if (typeof extra === "object" && extra !== null) {
+		const model = extra["model"];
+		const modelProvider = extra["model_provider"];
+		if (typeof model === "string" && model.trim() !== "") projected.model = model;
+		if (typeof modelProvider === "string" && modelProvider.trim() !== "") projected.model_provider = modelProvider;
+	}
+	return projected;
 }
 function sessionKey(agent, sessionId) {
 	return `${agent}\u0000${sessionId}`;
@@ -4961,6 +4969,7 @@ const ANALYSIS_CROSS_SESSIONS = 5;
 const ANALYSIS_LINE_CLAMP = 200;
 /** Clamp on the user question (placed at the head, so it survives truncation). */
 const ANALYSIS_QUESTION_CLAMP = 2e3;
+const ANALYSIS_INPUT_LIMIT = 8e3;
 /**
 * `service status` messages that mean "a LaunchAgent owns daemon liveness"
 * (sidecar/launchd.py `_status`): exit 0 is `service is running (pid N)`;
@@ -4986,6 +4995,10 @@ function resolveRuntimeDir(configured, env) {
 function clampAnalysisText(text, max = ANALYSIS_LINE_CLAMP) {
 	const flat = text.replace(/\s+/g, " ").trim();
 	return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
+}
+/** Redact semantic payloads before they reach a local or remote model. */
+function redactAnalysisText(text, max = ANALYSIS_INPUT_LIMIT) {
+	return clampAnalysisText(text, max).replace(/(?:sk-|gh[pousr]_)[A-Za-z0-9_-]{8,}/gu, "[secret]").replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu, "[email]").replace(/(?:\/Users\/|\/home\/|\/tmp\/|[A-Za-z]:\\)[^\s,)]+/gu, "[path]");
 }
 /** Same trailing-slash normalization fusion uses for project group keys. */
 function normalizeAnalysisProject(project) {
@@ -5427,7 +5440,7 @@ function apply(ctx, config) {
 	const buildAnalysisInput = async (req) => {
 		const questionLines = req.question !== void 0 && req.question.trim() !== "" ? [
 			"[用户问题 / question]",
-			clampAnalysisText(req.question, ANALYSIS_QUESTION_CLAMP),
+			redactAnalysisText(req.question, ANALYSIS_QUESTION_CLAMP),
 			""
 		] : [];
 		if (req.targetKind === "session") {
@@ -5436,7 +5449,7 @@ function apply(ctx, config) {
 			if (session === null) return null;
 			const page = await fusion.getSessionTimeline(targetId, { limit: ANALYSIS_TIMELINE_LIMIT });
 			const sources = page.sources;
-			const summaryText = [
+			const summaryText = redactAnalysisText([
 				...questionLines,
 				`[会话概览 / session] agent=${session.agent} status=${session.status} live=${session.live}`,
 				`title: ${session.title !== "" ? clampAnalysisText(session.title) : "(untitled)"}`,
@@ -5445,10 +5458,10 @@ function apply(ctx, config) {
 				"",
 				`[时间线 / timeline,最新在前 / newest first] ${page.entries.length} events (sources: dshLive=${sources.dshLive} dshCold=${sources.dshCold} replay=${sources.sidecarReplay} buffer=${sources.sidecarBuffer})`,
 				...[...page.entries].reverse().map((entry) => `- [${new Date(entry.ts).toISOString()}] ${entry.kind}${entry.seq !== null ? ` seq=${entry.seq}` : ""}${entry.text !== "" ? ` ${clampAnalysisText(entry.text)}` : ""}`)
-			].join("\n");
+			].join("\n"));
 			return {
 				kind: "session",
-				title: session.title !== "" ? session.title : `${session.agent} ${session.sessionId}`,
+				title: redactAnalysisText(session.title !== "" ? session.title : `${session.agent} ${session.sessionId}`),
 				summaryText,
 				meta: {
 					targetId,
@@ -5461,17 +5474,17 @@ function apply(ctx, config) {
 			const group = fusion.getProjectGroups().find((g) => normalizeAnalysisProject(g.project) === wanted) ?? null;
 			if (group === null) return null;
 			const omitted = group.sessions.length - ANALYSIS_MAX_SESSIONS;
-			const summaryText = [
+			const summaryText = redactAnalysisText([
 				...questionLines,
 				`[项目概览 / project] ${group.project}`,
 				`agents: ${group.agents.join(", ")} | sessions: ${group.sessions.length} | last activity: ${new Date(group.lastActivityAt).toISOString()}`,
 				"",
 				...group.sessions.slice(0, ANALYSIS_MAX_SESSIONS).map(describeUnifiedSession),
 				...omitted > 0 ? [`… ${omitted} more sessions omitted`] : []
-			].join("\n");
+			].join("\n"));
 			return {
 				kind: "project",
-				title: `project ${group.project}`,
+				title: `project ${redactAnalysisText(group.project)}`,
 				summaryText,
 				meta: { targetId: group.project }
 			};
@@ -5482,7 +5495,7 @@ function apply(ctx, config) {
 		return {
 			kind: "cross-agent",
 			title: "cross-agent overview",
-			summaryText: [
+			summaryText: redactAnalysisText([
 				...questionLines,
 				`[跨 agent 概览 / cross-agent overview] ${groups.length} projects, ${sessionsTotal} sessions in the correlation window`,
 				"",
@@ -5492,7 +5505,7 @@ function apply(ctx, config) {
 					""
 				]),
 				...omittedGroups > 0 ? [`… ${omittedGroups} more projects omitted`] : []
-			].join("\n")
+			].join("\n"))
 		};
 	};
 	const routes = createRoutes({

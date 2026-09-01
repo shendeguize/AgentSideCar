@@ -153,9 +153,9 @@ export function createPanelPrepareRequest(
   }
 }
 
-/** Kimi 0.38 never has a client-displayable delivered receipt. */
+/** Kimi ACP now exposes a durable completion receipt through Sidecar. */
 export function displayInjectOutcome(agent: string, outcome: InjectOutcome): InjectOutcome {
-  return isKimiAgent(agent) && outcome === 'delivered' ? 'unknown' : outcome
+  return outcome
 }
 
 /** Select the honest result headline for the target transport. */

@@ -285,6 +285,7 @@ const ANALYSIS_CROSS_SESSIONS = 5
 const ANALYSIS_LINE_CLAMP = 200
 /** Clamp on the user question (placed at the head, so it survives truncation). */
 const ANALYSIS_QUESTION_CLAMP = 2000
+const ANALYSIS_INPUT_LIMIT = 8000
 
 /**
  * `service status` messages that mean "a LaunchAgent owns daemon liveness"
@@ -321,6 +322,14 @@ function resolveRuntimeDir(configured: string, env: NodeJS.ProcessEnv): string {
 function clampAnalysisText(text: string, max = ANALYSIS_LINE_CLAMP): string {
   const flat = text.replace(/\s+/g, ' ').trim()
   return flat.length <= max ? flat : `${flat.slice(0, max)}…`
+}
+
+/** Redact semantic payloads before they reach a local or remote model. */
+function redactAnalysisText(text: string, max = ANALYSIS_INPUT_LIMIT): string {
+  return clampAnalysisText(text, max)
+    .replace(/(?:sk-|gh[pousr]_)[A-Za-z0-9_-]{8,}/gu, '[secret]')
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu, '[email]')
+    .replace(/(?:\/Users\/|\/home\/|\/tmp\/|[A-Za-z]:\\)[^\s,)]+/gu, '[path]')
 }
 
 /** Same trailing-slash normalization fusion uses for project group keys. */
@@ -908,7 +917,7 @@ export function apply(ctx: HostContext, config: Config): void {
       req.question !== undefined && req.question.trim() !== ''
         ? [
             '[用户问题 / question]',
-            clampAnalysisText(req.question, ANALYSIS_QUESTION_CLAMP),
+            redactAnalysisText(req.question, ANALYSIS_QUESTION_CLAMP),
             '',
           ]
         : []
@@ -922,7 +931,7 @@ export function apply(ctx: HostContext, config: Config): void {
         limit: ANALYSIS_TIMELINE_LIMIT,
       })
       const sources = page.sources
-      const summaryText = [
+      const summaryText = redactAnalysisText([
         ...questionLines,
         `[会话概览 / session] agent=${session.agent} status=${session.status} live=${session.live}`,
         `title: ${session.title !== '' ? clampAnalysisText(session.title) : '(untitled)'}`,
@@ -936,11 +945,12 @@ export function apply(ctx: HostContext, config: Config): void {
             `${entry.seq !== null ? ` seq=${entry.seq}` : ''}` +
             `${entry.text !== '' ? ` ${clampAnalysisText(entry.text)}` : ''}`,
         ),
-      ].join('\n')
+      ].join('\n'))
       return {
         kind: 'session',
-        title:
+        title: redactAnalysisText(
           session.title !== '' ? session.title : `${session.agent} ${session.sessionId}`,
+        ),
         summaryText,
         meta: { targetId, agent: session.agent },
       }
@@ -954,17 +964,17 @@ export function apply(ctx: HostContext, config: Config): void {
           .find((g) => normalizeAnalysisProject(g.project) === wanted) ?? null
       if (group === null) return null
       const omitted = group.sessions.length - ANALYSIS_MAX_SESSIONS
-      const summaryText = [
+      const summaryText = redactAnalysisText([
         ...questionLines,
         `[项目概览 / project] ${group.project}`,
         `agents: ${group.agents.join(', ')} | sessions: ${group.sessions.length} | last activity: ${new Date(group.lastActivityAt).toISOString()}`,
         '',
         ...group.sessions.slice(0, ANALYSIS_MAX_SESSIONS).map(describeUnifiedSession),
         ...(omitted > 0 ? [`… ${omitted} more sessions omitted`] : []),
-      ].join('\n')
+      ].join('\n'))
       return {
         kind: 'project',
-        title: `project ${group.project}`,
+        title: `project ${redactAnalysisText(group.project)}`,
         summaryText,
         meta: { targetId: group.project },
       }
@@ -974,7 +984,7 @@ export function apply(ctx: HostContext, config: Config): void {
     const groups = fusion.getProjectGroups()
     const sessionsTotal = groups.reduce((n, g) => n + g.sessions.length, 0)
     const omittedGroups = groups.length - ANALYSIS_MAX_GROUPS
-    const summaryText = [
+    const summaryText = redactAnalysisText([
       ...questionLines,
       `[跨 agent 概览 / cross-agent overview] ${groups.length} projects, ${sessionsTotal} sessions in the correlation window`,
       '',
@@ -984,7 +994,7 @@ export function apply(ctx: HostContext, config: Config): void {
         '',
       ]),
       ...(omittedGroups > 0 ? [`… ${omittedGroups} more projects omitted`] : []),
-    ].join('\n')
+    ].join('\n'))
     return { kind: 'cross-agent', title: 'cross-agent overview', summaryText }
   }
 

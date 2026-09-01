@@ -387,11 +387,18 @@ def pairs(items):
     return value
 
 def allowed_child_args(args):
-    if args in (["list", "--json", "--all"], ["status", "--json"]):
+    if args in (
+        ["list", "--json", "--all"],
+        ["status", "--json"],
+        ["cluster", "--json", "--all"],
+    ):
         return args
     if (
         len(args) == 4
-        and args[:3] == ["list", "--json", "--recent-seconds"]
+        and args[:3] in (
+            ["list", "--json", "--recent-seconds"],
+            ["cluster", "--json", "--recent-seconds"],
+        )
     ):
         try:
             seconds = float(args[3])
@@ -869,7 +876,11 @@ def execute_remote_host(
     if _completed_returncode(completed) != 0:
         return None, RemoteFailure(host.alias, _failure_code(completed))
     try:
-        rows = _parse_execution_response(_completed_stdout(completed), host.alias)
+        rows = _parse_execution_response(
+            _completed_stdout(completed),
+            host.alias,
+            command,
+        )
     except _RemoteResponseFailure as error:
         return None, RemoteFailure(host.alias, error.code)
     except ProtocolResourceLimitError:

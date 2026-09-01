@@ -7185,3 +7185,64 @@ class SendAuditExceptionalBranchTests(unittest.TestCase):
         session._host_opener = mock.Mock(side_effect=RuntimeError("cancelled"))
         session._run_host(remote_types.RemoteHost("edge", "running"))
 
+    def test_remote_cluster_protocol_validation_boundaries(self):
+        valid = {
+            "cluster_id": "cluster",
+            "project": "/work",
+            "agent": "claude",
+            "model": "model",
+            "model_provider": "provider",
+            "time_bucket": 10,
+            "count": 1,
+            "session_ids": ["sid"],
+            "hosts": ["pod"],
+        }
+        rows = remote_types._validate_protocol_cluster_rows([valid], "pod")
+        self.assertEqual("pod", rows[0]["host"])
+
+        for bad in (None, {}, [{"unexpected": True}]):
+            with self.subTest(bad=bad):
+                assert_rejected(
+                    self,
+                    remote_types._validate_protocol_cluster_rows,
+                    bad,
+                    "pod",
+                )
+        with mock.patch.object(remote_types, "MAX_ROWS", 0):
+            assert_rejected(
+                self,
+                remote_types._validate_protocol_cluster_rows,
+                [valid],
+                "pod",
+            )
+
+        for key, value in (
+            ("project", None),
+            ("count", -1),
+            ("count", True),
+            ("session_ids", "sid"),
+            ("hosts", [1]),
+        ):
+            bad = dict(valid, **{key: value})
+            with self.subTest(key=key, value=value):
+                assert_rejected(
+                    self,
+                    remote_types._validate_protocol_cluster_rows,
+                    [bad],
+                    "pod",
+                )
+        with self.subTest("surrogate text"):
+            assert_rejected(
+                self,
+                remote_types._validate_protocol_cluster_rows,
+                [dict(valid, model="\udcff")],
+                "pod",
+            )
+        with mock.patch.object(remote_types, "MAX_ROW_BYTES", 1):
+            assert_rejected(
+                self,
+                remote_types._validate_protocol_cluster_rows,
+                [valid],
+                "pod",
+            )
+

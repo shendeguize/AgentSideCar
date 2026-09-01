@@ -469,6 +469,7 @@ window.__ModuleLoader__.load({
 			"board.topbar.collapseIdle": "收起空闲",
 			"board.topbar.collapseIdleTitle": "按项目收纳空闲会话",
 			"board.topbar.analyzeCrossAgent": "跨 agent 分析",
+			"board.topbar.cluster": "会话聚类",
 			"board.topbar.timeWindow": "时间窗",
 			"board.topbar.agentFilter": "Agent",
 			"board.topbar.agentFilterAria": "按 agent 类型过滤会话",
@@ -501,6 +502,10 @@ window.__ModuleLoader__.load({
 			"board.timeWindow.days": "{n} 天",
 			"board.groupCount": "{n} 个会话",
 			"board.unknownProject": "未知项目",
+			"board.cluster.title": "Pod 内确定性会话聚类",
+			"board.cluster.count": "{n} 个聚类",
+			"board.cluster.empty": "当前快照没有可聚类的会话",
+			"board.cluster.sessions": "{n} 个会话",
 			"board.widget.label": "Sidecar",
 			"board.widget.connection.ok": "已连接",
 			"board.widget.connection.degraded": "连接不稳定",
@@ -902,6 +907,7 @@ window.__ModuleLoader__.load({
 			"board.topbar.collapseIdle": "Fold idle",
 			"board.topbar.collapseIdleTitle": "Group idle sessions by project",
 			"board.topbar.analyzeCrossAgent": "Cross-agent analysis",
+			"board.topbar.cluster": "Cluster sessions",
 			"board.topbar.timeWindow": "Time window",
 			"board.topbar.agentFilter": "Agent",
 			"board.topbar.agentFilterAria": "Filter sessions by agent type",
@@ -934,6 +940,10 @@ window.__ModuleLoader__.load({
 			"board.timeWindow.days": "{n} days",
 			"board.groupCount": "{n} sessions",
 			"board.unknownProject": "Unknown project",
+			"board.cluster.title": "Pod-local deterministic clusters",
+			"board.cluster.count": "{n} clusters",
+			"board.cluster.empty": "No sessions are available to cluster",
+			"board.cluster.sessions": "{n} sessions",
 			"board.widget.label": "Sidecar",
 			"board.widget.connection.ok": "Connected",
 			"board.widget.connection.degraded": "Connection unstable",
@@ -1441,6 +1451,7 @@ window.__ModuleLoader__.load({
 				collapseIdle: "board.topbar.collapseIdle",
 				collapseIdleTitle: "board.topbar.collapseIdleTitle",
 				analyzeCrossAgent: "board.topbar.analyzeCrossAgent",
+				cluster: "board.topbar.cluster",
 				timeWindow: "board.topbar.timeWindow",
 				countWorking: "board.topbar.countWorking",
 				countWaiting: "board.topbar.countWaiting",
@@ -1478,6 +1489,12 @@ window.__ModuleLoader__.load({
 			},
 			groupCount: "board.groupCount",
 			unknownProject: "board.unknownProject",
+			cluster: {
+				title: "board.cluster.title",
+				count: "board.cluster.count",
+				empty: "board.cluster.empty",
+				sessions: "board.cluster.sessions"
+			},
 			widget: {
 				label: "board.widget.label",
 				connection: {
@@ -1687,6 +1704,47 @@ window.__ModuleLoader__.load({
 				return newest(b) - newest(a) || a.key.localeCompare(b.key);
 			});
 			return groups;
+		}
+		/**
+		* Deterministic pod-local grouping for the analysis view. This deliberately
+		* stays metadata-only: semantic analysis is an explicit analysis action and
+		* never runs just because the board rendered.
+		*/
+		function clusterSessions(sessions, windowMs = DAY_MS$2) {
+			const bucketMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : DAY_MS$2;
+			const groups = /* @__PURE__ */ new Map();
+			for (const session of sessions) {
+				const project = session.project.trim() || BOARD_STRINGS.unknownProject;
+				const agent = session.agent.trim() || "unknown";
+				const model = session.model?.trim() || "unknown";
+				const modelProvider = session.modelProvider?.trim() || "unknown";
+				const key = [
+					project,
+					agent,
+					modelProvider,
+					model,
+					Math.floor(session.updatedAtMs / bucketMs)
+				].join("\0");
+				const current = groups.get(key);
+				if (current === void 0) groups.set(key, {
+					key,
+					project,
+					agent,
+					model,
+					modelProvider,
+					count: 1,
+					sessionIds: [session.sessionId],
+					updatedAtMs: session.updatedAtMs
+				});
+				else {
+					current.count += 1;
+					current.sessionIds.push(session.sessionId);
+					current.updatedAtMs = Math.max(current.updatedAtMs, session.updatedAtMs);
+				}
+			}
+			const result = [...groups.values()];
+			result.sort((a, b) => b.updatedAtMs - a.updatedAtMs || a.project.localeCompare(b.project) || a.agent.localeCompare(b.agent) || a.model.localeCompare(b.model) || a.key.localeCompare(b.key));
+			return result;
 		}
 		/**
 		* status + gap → badge tone/label/attention.
@@ -2627,6 +2685,8 @@ window.__ModuleLoader__.load({
 				title: session.title,
 				project: session.project,
 				updatedAtMs: session.updated_at * 1e3,
+				...session.model !== void 0 ? { model: session.model } : {},
+				...session.model_provider !== void 0 ? { modelProvider: session.model_provider } : {},
 				lastEvent: session.last_event === null ? null : {
 					kind: session.last_event.kind,
 					text: session.last_event.text
@@ -3046,7 +3106,7 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:src/client/board/board.module.css.mjs
-		const css$10 = ".PLm6rG_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:12px;padding:16px 20px;display:flex;overflow-y:auto}.PLm6rG_topbar{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.PLm6rG_title{color:var(--agsc-fg);margin-right:2px;font-size:15px;font-weight:650}.PLm6rG_dot{background:var(--dsw-alias-label-tertiary);border-radius:50%;flex:none;width:8px;height:8px}.PLm6rG_dot[data-tone=neutral]{background:var(--dsw-alias-label-tertiary)}.PLm6rG_dot[data-tone=muted]{background:var(--agsc-fg-dimmed)}.PLm6rG_countBadge{white-space:nowrap}.PLm6rG_countTotal{color:var(--agsc-fg-secondary);white-space:nowrap;font-size:12px}.PLm6rG_spacer{flex:1}.PLm6rG_control{color:var(--agsc-fg-secondary);white-space:nowrap;align-items:center;gap:5px;font-size:12px;display:inline-flex}.PLm6rG_select{height:28px;color:var(--agsc-fg);background:var(--agsc-bg-raised);border:1px solid var(--agsc-border-strong);border-radius:14px;padding:0 10px;font-family:inherit;font-size:12px}.PLm6rG_checkbox{accent-color:var(--agsc-accent);margin:0}.PLm6rG_banner{border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);padding:6px 10px;font-size:12px;line-height:18px}.PLm6rG_banner[data-tone=warn]{color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border-color:var(--dsw-alias-state-warn-secondary)}.PLm6rG_banner[data-tone=danger]{color:var(--agsc-err);background:var(--dsw-alias-state-error-secondary);border-color:var(--dsw-alias-state-error-secondary)}.PLm6rG_bannerDismiss{color:inherit;margin-left:10px;text-decoration:underline}.PLm6rG_empty{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:180px;padding:24px;display:flex}.PLm6rG_emptyTitle{color:var(--agsc-fg);font-size:14px;font-weight:600}.PLm6rG_emptyHint{max-width:420px;color:var(--agsc-fg-secondary);font-size:12px;line-height:20px}.PLm6rG_group{flex-direction:column;gap:8px;display:flex}.PLm6rG_groupHead{text-align:left;cursor:pointer;background:0 0;border:none;align-items:baseline;gap:8px;width:100%;min-width:0;padding:0;font-family:inherit;display:flex}.PLm6rG_chevron{color:var(--agsc-fg-dimmed);flex:none;font-size:10px}.PLm6rG_groupAttention{color:var(--agsc-warn);flex:none;font-size:11px}.PLm6rG_idleSummary{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);font:inherit;cursor:pointer;align-self:flex-start;align-items:center;gap:6px;padding:4px 8px;font-size:12px;display:flex}.PLm6rG_idleSummary:hover{color:var(--agsc-fg);background:var(--dsw-alias-interactive-bg-hover)}.PLm6rG_showMore{align-self:flex-start}.PLm6rG_groupName{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;overflow:hidden}.PLm6rG_groupCount{color:var(--agsc-fg-secondary);background:var(--dsw-alias-bg-layer-2);border-radius:999px;flex:none;padding:0 8px;font-size:11px;line-height:18px}.PLm6rG_grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;display:grid}.PLm6rG_card{border-radius:var(--agsc-radius-card);border:1px solid var(--agsc-border-strong);background:var(--agsc-bg-raised);flex-direction:column;gap:6px;min-width:0;padding:10px 12px;display:flex}.PLm6rG_card:hover{border-color:var(--dsw-alias-label-dimmed);background:var(--dsw-alias-interactive-bg-hover)}.PLm6rG_cardOpen{border-radius:var(--agsc-radius-control);width:100%;min-width:0;color:inherit;font:inherit;text-align:left;cursor:pointer;background:0 0;border:0;flex-direction:column;gap:6px;padding:0;display:flex}.PLm6rG_cardOpen:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:2px}.PLm6rG_cardHead{justify-content:space-between;align-items:center;gap:8px;min-width:0;display:flex}.PLm6rG_agent{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--agsc-fg);align-items:center;gap:5px;font-size:12px;font-weight:600;display:inline-flex;overflow:hidden}.PLm6rG_glyph{color:var(--agsc-accent);flex:none}.PLm6rG_statusPill{max-width:100%}.PLm6rG_attention{color:var(--agsc-warn);font-size:11px}.PLm6rG_attention[data-kind=gap]{color:var(--agsc-err)}.PLm6rG_cardTitle{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;overflow:hidden}.PLm6rG_cardId{max-width:100%;font-size:11px;font-family:var(--agsc-font-mono);color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;justify-content:flex-start;align-self:flex-start;overflow:hidden}.PLm6rG_copied{color:var(--agsc-ok);margin-left:6px;font-family:inherit}.PLm6rG_cardEvent{color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.PLm6rG_cardTime{color:var(--agsc-fg-secondary);font-size:11px}";
+		const css$10 = ".PLm6rG_root{box-sizing:border-box;height:100%;min-height:420px;color:var(--agsc-fg);background:var(--agsc-bg);flex-direction:column;gap:12px;padding:16px 20px;display:flex;overflow-y:auto}.PLm6rG_topbar{flex-wrap:wrap;align-items:center;gap:10px;display:flex}.PLm6rG_title{color:var(--agsc-fg);margin-right:2px;font-size:15px;font-weight:650}.PLm6rG_dot{background:var(--dsw-alias-label-tertiary);border-radius:50%;flex:none;width:8px;height:8px}.PLm6rG_dot[data-tone=neutral]{background:var(--dsw-alias-label-tertiary)}.PLm6rG_dot[data-tone=muted]{background:var(--agsc-fg-dimmed)}.PLm6rG_countBadge{white-space:nowrap}.PLm6rG_countTotal{color:var(--agsc-fg-secondary);white-space:nowrap;font-size:12px}.PLm6rG_spacer{flex:1}.PLm6rG_control{color:var(--agsc-fg-secondary);white-space:nowrap;align-items:center;gap:5px;font-size:12px;display:inline-flex}.PLm6rG_select{height:28px;color:var(--agsc-fg);background:var(--agsc-bg-raised);border:1px solid var(--agsc-border-strong);border-radius:14px;padding:0 10px;font-family:inherit;font-size:12px}.PLm6rG_checkbox{accent-color:var(--agsc-accent);margin:0}.PLm6rG_banner{border-radius:var(--agsc-radius-control);border:1px solid var(--agsc-border);padding:6px 10px;font-size:12px;line-height:18px}.PLm6rG_banner[data-tone=warn]{color:var(--agsc-warn);background:var(--dsw-alias-state-warn-tertiary);border-color:var(--dsw-alias-state-warn-secondary)}.PLm6rG_banner[data-tone=danger]{color:var(--agsc-err);background:var(--dsw-alias-state-error-secondary);border-color:var(--dsw-alias-state-error-secondary)}.PLm6rG_clusterPanel{border:1px solid var(--agsc-border);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);flex-direction:column;gap:8px;padding:10px;display:flex}.PLm6rG_clusterHead,.PLm6rG_clusterSummary{flex-wrap:wrap;align-items:baseline;gap:8px;display:flex}.PLm6rG_clusterTitle{color:var(--agsc-fg);font-size:13px;font-weight:600}.PLm6rG_clusterList{flex-direction:column;gap:6px;display:flex}.PLm6rG_clusterCard{border:1px solid var(--agsc-border);border-radius:var(--agsc-radius-control);padding:7px 8px}.PLm6rG_clusterSummary span{color:var(--agsc-fg-secondary);font-size:12px}.PLm6rG_clusterMeta,.PLm6rG_clusterEmpty{color:var(--agsc-fg-dimmed);overflow-wrap:anywhere;font-size:11px}.PLm6rG_bannerDismiss{color:inherit;margin-left:10px;text-decoration:underline}.PLm6rG_empty{text-align:center;flex-direction:column;flex:1;justify-content:center;align-items:center;gap:6px;min-height:180px;padding:24px;display:flex}.PLm6rG_emptyTitle{color:var(--agsc-fg);font-size:14px;font-weight:600}.PLm6rG_emptyHint{max-width:420px;color:var(--agsc-fg-secondary);font-size:12px;line-height:20px}.PLm6rG_group{flex-direction:column;gap:8px;display:flex}.PLm6rG_groupHead{text-align:left;cursor:pointer;background:0 0;border:none;align-items:baseline;gap:8px;width:100%;min-width:0;padding:0;font-family:inherit;display:flex}.PLm6rG_chevron{color:var(--agsc-fg-dimmed);flex:none;font-size:10px}.PLm6rG_groupAttention{color:var(--agsc-warn);flex:none;font-size:11px}.PLm6rG_idleSummary{border:1px solid var(--agsc-border-strong);border-radius:var(--agsc-radius-control);background:var(--agsc-bg-raised);color:var(--agsc-fg-secondary);font:inherit;cursor:pointer;align-self:flex-start;align-items:center;gap:6px;padding:4px 8px;font-size:12px;display:flex}.PLm6rG_idleSummary:hover{color:var(--agsc-fg);background:var(--dsw-alias-interactive-bg-hover)}.PLm6rG_showMore{align-self:flex-start}.PLm6rG_groupName{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;overflow:hidden}.PLm6rG_groupCount{color:var(--agsc-fg-secondary);background:var(--dsw-alias-bg-layer-2);border-radius:999px;flex:none;padding:0 8px;font-size:11px;line-height:18px}.PLm6rG_grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;display:grid}.PLm6rG_card{border-radius:var(--agsc-radius-card);border:1px solid var(--agsc-border-strong);background:var(--agsc-bg-raised);flex-direction:column;gap:6px;min-width:0;padding:10px 12px;display:flex}.PLm6rG_card:hover{border-color:var(--dsw-alias-label-dimmed);background:var(--dsw-alias-interactive-bg-hover)}.PLm6rG_cardOpen{border-radius:var(--agsc-radius-control);width:100%;min-width:0;color:inherit;font:inherit;text-align:left;cursor:pointer;background:0 0;border:0;flex-direction:column;gap:6px;padding:0;display:flex}.PLm6rG_cardOpen:focus-visible{outline:2px solid var(--agsc-accent);outline-offset:2px}.PLm6rG_cardHead{justify-content:space-between;align-items:center;gap:8px;min-width:0;display:flex}.PLm6rG_agent{text-overflow:ellipsis;white-space:nowrap;min-width:0;color:var(--agsc-fg);align-items:center;gap:5px;font-size:12px;font-weight:600;display:inline-flex;overflow:hidden}.PLm6rG_glyph{color:var(--agsc-accent);flex:none}.PLm6rG_statusPill{max-width:100%}.PLm6rG_attention{color:var(--agsc-warn);font-size:11px}.PLm6rG_attention[data-kind=gap]{color:var(--agsc-err)}.PLm6rG_cardTitle{color:var(--agsc-fg);text-overflow:ellipsis;white-space:nowrap;font-size:13px;overflow:hidden}.PLm6rG_cardId{max-width:100%;font-size:11px;font-family:var(--agsc-font-mono);color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;justify-content:flex-start;align-self:flex-start;overflow:hidden}.PLm6rG_copied{color:var(--agsc-ok);margin-left:6px;font-family:inherit}.PLm6rG_cardEvent{color:var(--agsc-fg-secondary);text-overflow:ellipsis;white-space:nowrap;font-size:12px;overflow:hidden}.PLm6rG_cardTime{color:var(--agsc-fg-secondary);font-size:11px}";
 		const tagId$10 = "@shendeguize/dsh-agent-sidecar/src/client/board/board.module.css";
 		globalThis[Symbol.for("@shendeguize/dsh-agent-sidecar/style-manifest")].set(tagId$10, css$10);
 		if (typeof document !== "undefined") {
@@ -3077,6 +3137,14 @@ window.__ModuleLoader__.load({
 			"cardTitle": "PLm6rG_cardTitle",
 			"checkbox": "PLm6rG_checkbox",
 			"chevron": "PLm6rG_chevron",
+			"clusterCard": "PLm6rG_clusterCard",
+			"clusterEmpty": "PLm6rG_clusterEmpty",
+			"clusterHead": "PLm6rG_clusterHead",
+			"clusterList": "PLm6rG_clusterList",
+			"clusterMeta": "PLm6rG_clusterMeta",
+			"clusterPanel": "PLm6rG_clusterPanel",
+			"clusterSummary": "PLm6rG_clusterSummary",
+			"clusterTitle": "PLm6rG_clusterTitle",
 			"control": "PLm6rG_control",
 			"copied": "PLm6rG_copied",
 			"countBadge": "PLm6rG_countBadge",
@@ -3367,6 +3435,8 @@ window.__ModuleLoader__.load({
 			const windowOptions = TIME_WINDOW_OPTIONS.includes(props.filters.timeWindowHours) ? TIME_WINDOW_OPTIONS : [...TIME_WINDOW_OPTIONS, props.filters.timeWindowHours].sort((a, b) => a - b);
 			const selectedAgent = normalizeAgentFilter(props.filters.agentFilter);
 			const availableAgents = agentFilterOptions(props.sessions, props.filters.agentFilter);
+			const [showClusters, setShowClusters] = (0, react.useState)(false);
+			const clusters = clusterSessions(vm.groups.flatMap((group) => group.cards));
 			const fallbackFocusRef = (0, react.useRef)(null);
 			const returnTargetVisible = props.returnFocusTarget !== null && vm.groups.some((group) => group.cards.some((card) => matchesSessionFocusTarget$1(card, props.returnFocusTarget)));
 			const [refreshing, setRefreshing] = (0, react.useState)(false);
@@ -3486,6 +3556,16 @@ window.__ModuleLoader__.load({
 								"data-testid": "agent-sidecar-analyze-cross-agent",
 								children: BOARD_STRINGS.topbar.analyzeCrossAgent
 							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+								size: "sm",
+								variant: "outline",
+								onClick: () => {
+									setShowClusters((visible) => !visible);
+								},
+								"aria-pressed": showClusters,
+								"data-testid": "agent-sidecar-cluster-toggle",
+								children: BOARD_STRINGS.topbar.cluster
+							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
 								className: board_module_css_default["control"],
 								children: [t("board.topbar.agentFilter"), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
@@ -3575,6 +3655,40 @@ window.__ModuleLoader__.load({
 						"data-tone": vm.banner.tone,
 						role: "status",
 						children: vm.banner.text
+					}),
+					showClusters && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("section", {
+						className: board_module_css_default["clusterPanel"],
+						"data-testid": "agent-sidecar-clusters",
+						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("header", {
+							className: board_module_css_default["clusterHead"],
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: board_module_css_default["clusterTitle"],
+								children: BOARD_STRINGS.cluster.title
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								className: board_module_css_default["groupCount"],
+								children: formatTemplate$2(BOARD_STRINGS.cluster.count, { n: clusters.length })
+							})]
+						}), clusters.length === 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							className: board_module_css_default["clusterEmpty"],
+							children: BOARD_STRINGS.cluster.empty
+						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							className: board_module_css_default["clusterList"],
+							children: clusters.map((cluster) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("article", {
+								className: board_module_css_default["clusterCard"],
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+									className: board_module_css_default["clusterSummary"],
+									children: [
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: cluster.project }),
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: cluster.agent }),
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: cluster.model }),
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: formatTemplate$2(BOARD_STRINGS.cluster.sessions, { n: cluster.count }) })
+									]
+								}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+									className: board_module_css_default["clusterMeta"],
+									children: [cluster.modelProvider !== "unknown" ? `${cluster.modelProvider} · ` : "", cluster.sessionIds.join(", ")]
+								})]
+							}, cluster.key))
+						})]
 					}),
 					!props.hasSnapshot ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: board_module_css_default["empty"],
@@ -7389,9 +7503,9 @@ window.__ModuleLoader__.load({
 				message
 			};
 		}
-		/** Kimi 0.38 never has a client-displayable delivered receipt. */
+		/** Kimi ACP now exposes a durable completion receipt through Sidecar. */
 		function displayInjectOutcome(agent, outcome) {
-			return isKimiAgent(agent) && outcome === "delivered" ? "unknown" : outcome;
+			return outcome;
 		}
 		/** Select the honest result headline for the target transport. */
 		function resultCopyKey(agent, outcome) {

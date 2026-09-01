@@ -226,6 +226,52 @@ class CursorAdapterTests(unittest.TestCase):
             self.writer.execute("SELECT key, value FROM meta ORDER BY key").fetchall(),
         )
 
+    def test_discovers_cursor_server_project_transcripts(self):
+        transcript = (
+            self.home
+            / ".cursor-server"
+            / "projects"
+            / "server-project"
+            / "agent-transcripts"
+            / "server-session.jsonl"
+        )
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(
+            '{"role":"user","content":"remote Cursor session"}\n',
+            encoding="utf-8",
+        )
+
+        sessions = [
+            session
+            for session in CursorAdapter().discover(self.home)
+            if session.extra.get("source") == "cursor-server"
+        ]
+
+        self.assertEqual(1, len(sessions))
+        self.assertEqual("cursor-ide", sessions[0].agent)
+        self.assertEqual("server-project", sessions[0].project)
+        self.assertEqual("cursor-server", sessions[0].extra["source"])
+        self.assertEqual(str(transcript), sessions[0].transcript)
+
+    def test_discovers_cursor_server_user_history(self):
+        history = self.home / ".cursor-server" / "data" / "User" / "History" / "abc123"
+        history.mkdir(parents=True)
+        (history / "entries.json").write_text(
+            '{"version":1,"resource":"/workspace/remote-app","entries":[]}',
+            encoding="utf-8",
+        )
+        (history / "turn.md").write_text("remote Cursor turn", encoding="utf-8")
+
+        sessions = [
+            session for session in CursorAdapter().discover(self.home)
+            if session.extra.get("source") == "cursor-server"
+        ]
+
+        self.assertEqual(1, len(sessions))
+        self.assertEqual("cursor-server:abc123", sessions[0].session_id)
+        self.assertEqual("/workspace/remote-app", sessions[0].project)
+        self.assertEqual("cursor-server-history", sessions[0].extra["transcript_kind"])
+
     def test_discovers_production_snapshot_metadata_without_source_mutation(self):
         self.writer.close()
         for path in self.sqlite_files:

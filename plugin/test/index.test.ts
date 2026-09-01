@@ -1856,7 +1856,7 @@ describe('M3 analysis wiring (T5.10a)', () => {
     // plus the fusion-assembled summary of the board row plus the question.
     const primedText = followups[0]!.content[0]!.text ?? ''
     expect(primedText).toContain('demo session') // title via fusion's unified view
-    expect(primedText).toContain('/tmp/proj') // project via fusion's unified view
+    expect(primedText).toContain('[path]') // semantic payload redacts project paths
     expect(primedText).toContain('anything odd?') // question rides the head
     expect(followups[0]!.source).toEqual({ kind: 'plugin', plugin: 'agent-sidecar' })
 
@@ -1877,7 +1877,7 @@ describe('M3 analysis wiring (T5.10a)', () => {
     expect(cross.status).toBe(200)
     expect(created).toHaveLength(2)
     const crossText = followups[1]!.content[0]!.text ?? ''
-    expect(crossText).toContain('/tmp/proj')
+    expect(crossText).toContain('[path]')
   })
 
   it('lists the session timeline newest-first in the analysis input (F5)', async () => {

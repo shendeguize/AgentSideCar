@@ -108,6 +108,14 @@ def _metadata_timestamp(metadata: Mapping[str, Any], *keys: str) -> Optional[flo
     return None
 
 
+def _metadata_string(metadata: Mapping[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 class CopilotAdapter(Adapter):
     name = "copilot"
     agent_names = ("copilot",)
@@ -137,6 +145,24 @@ class CopilotAdapter(Adapter):
             extra = dict(metadata)
             extra["source"] = "workspace"
             extra["workspace"] = str(workspace)
+            model = _metadata_string(
+                metadata,
+                "model",
+                "model_name",
+                "modelName",
+                "model_id",
+                "modelId",
+            )
+            model_provider = _metadata_string(
+                metadata,
+                "model_provider",
+                "modelProvider",
+                "provider",
+            )
+            if model:
+                extra["model"] = model
+            if model_provider:
+                extra["model_provider"] = model_provider
             sessions.append(
                 Session(
                     agent="copilot",
