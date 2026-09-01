@@ -202,7 +202,7 @@ class ClusterTests(unittest.TestCase):
             stdout=stdout,
             stderr=stderr,
             remote_aggregator=lambda *_, **__: {
-                "rows": [None],
+                "rows": [],
                 "failures": [{"host": "pod-a", "code": "python_too_old"}],
                 "exit_code": "not-an-int",
             },
