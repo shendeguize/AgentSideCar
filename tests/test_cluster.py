@@ -5,6 +5,8 @@ import unittest
 from unittest import mock
 
 import sidecar.cli as cli
+from sidecar.adapters.claude import _record_string
+from sidecar.adapters.copilot import _metadata_string
 from sidecar.cluster import cluster_sessions, merge_cluster_results
 from sidecar import semantic
 from sidecar.semantic import (
@@ -16,6 +18,25 @@ from sidecar.json_limits import JSONLimits, validate_json
 
 
 class ClusterTests(unittest.TestCase):
+    def test_model_metadata_helpers_prefer_nested_and_nonempty_values(self):
+        self.assertEqual(
+            "nested-model",
+            _record_string({"message": {"model": "nested-model"}}, "model"),
+        )
+        self.assertEqual(
+            "top-level",
+            _record_string(
+                {"model": "top-level", "message": {"model": "nested-model"}},
+                "model",
+            ),
+        )
+        self.assertEqual("", _record_string({"model": "  "}, "model"))
+        self.assertEqual(
+            "provider",
+            _metadata_string({"provider": " provider "}, "model_provider", "provider"),
+        )
+        self.assertEqual("", _metadata_string({"provider": None}, "provider"))
+
     def test_cluster_cli_merges_remote_rows_and_optional_semantic_report(self):
         local = {
             "agent": "dsh",
