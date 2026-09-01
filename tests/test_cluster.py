@@ -18,6 +18,23 @@ from sidecar.json_limits import JSONLimits, validate_json
 
 
 class ClusterTests(unittest.TestCase):
+    def test_semantic_cli_arguments_validate_and_default(self):
+        self.assertEqual(
+            ("largest", "recent"),
+            cli._semantic_rules_argument(""),
+        )
+        self.assertEqual(
+            ("agent", "model"),
+            cli._semantic_rules_argument(" Agent,model "),
+        )
+        for value in ("unknown", "agent,agent"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                cli._semantic_rules_argument(value)
+        self.assertEqual(10, cli._semantic_max_groups_argument("10"))
+        for value in ("not-an-int", "0", "10001"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                cli._semantic_max_groups_argument(value)
+
     def test_cluster_provider_keyword_detection_is_fail_closed(self):
         self.assertTrue(cli._accepts_keyword_argument(lambda **kwargs: None, "recent_seconds"))
         self.assertTrue(cli._accepts_keyword_argument(lambda recent_seconds: None, "recent_seconds"))
