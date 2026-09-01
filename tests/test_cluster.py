@@ -1,6 +1,10 @@
+import argparse
+import io
+import json
 import unittest
 from unittest import mock
 
+import sidecar.cli as cli
 from sidecar.cluster import cluster_sessions, merge_cluster_results
 from sidecar import semantic
 from sidecar.semantic import (
@@ -12,6 +16,100 @@ from sidecar.json_limits import JSONLimits, validate_json
 
 
 class ClusterTests(unittest.TestCase):
+    def test_cluster_cli_merges_remote_rows_and_optional_semantic_report(self):
+        local = {
+            "agent": "dsh",
+            "session_id": "local-session",
+            "project": "/work/local",
+            "updated_at": 100.0,
+            "extra": {"model": "deepseek"},
+        }
+        remote = {
+            "cluster_id": "remote-cluster",
+            "project": "/work/remote",
+            "agent": "codex",
+            "model": "gpt-5",
+            "model_provider": "openai",
+            "time_bucket": 60,
+            "count": 1,
+            "session_ids": ["remote-session"],
+            "hosts": ["pod-a"],
+        }
+        args = argparse.Namespace(
+            all=True,
+            recent_seconds=None,
+            window_seconds=60,
+            remote=True,
+            host=["pod-a"],
+            remote_python_candidates=None,
+            semantic=True,
+            semantic_rules=("largest", "recent"),
+            semantic_max_groups=100,
+            json=True,
+        )
+        scanner = mock.Mock()
+        scanner.scan.return_value = [local]
+        scanner.errors = []
+        client = mock.Mock()
+        client.status.side_effect = cli.SidecarClientError("offline")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(cli, "run_headless_report", return_value={
+            "ok": True,
+            "report": "deterministic summary",
+        }) as report:
+            code = cli._run_cluster(
+                args,
+                scanner=scanner,
+                client=client,
+                stdout=stdout,
+                stderr=stderr,
+                remote_aggregator=lambda *_, **__: {
+                    "rows": [remote],
+                    "failures": [],
+                    "exit_code": 0,
+                },
+            )
+        self.assertEqual(0, code)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(2, len(payload["clusters"]))
+        self.assertEqual("deterministic summary", payload["semantic"]["report"])
+        report.assert_called_once()
+
+    def test_cluster_cli_keeps_local_rows_when_remote_fails(self):
+        args = argparse.Namespace(
+            all=False,
+            recent_seconds=None,
+            window_seconds=60,
+            remote=True,
+            host=[],
+            remote_python_candidates=None,
+            semantic=False,
+            semantic_rules=("largest", "recent"),
+            semantic_max_groups=100,
+            json=False,
+        )
+        scanner = mock.Mock()
+        scanner.scan.return_value = [{
+            "agent": "dsh",
+            "session_id": "local-session",
+            "project": "/work/local",
+            "updated_at": 100.0,
+        }]
+        scanner.errors = []
+        client = mock.Mock()
+        client.status.side_effect = cli.SidecarClientError("offline")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        code = cli._run_cluster(
+            args,
+            scanner=scanner,
+            client=client,
+            stdout=stdout,
+            stderr=stderr,
+            remote_aggregator=mock.Mock(side_effect=cli.RemoteInventoryError()),
+        )
+        self.assertEqual(2, code)
+        self.assertIn("remote: inventory", stderr.getvalue())
+
     def test_groups_by_project_agent_model_provider_and_time_bucket(self):
         rows = [
             {
