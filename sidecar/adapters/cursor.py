@@ -27,12 +27,20 @@ from sidecar.adapters.base import (
     MetadataCache,
     compact_json,
     content_items,
+    created_at_extra,
     file_signature,
     read_json_object,
     local_timestamp,
     read_jsonl_prefix,
     snip,
     text_content,
+)
+from sidecar.adapters.replay import (
+    JSONL_REPLAY_RECORDS,
+    ReplayPage,
+    ReplayUnsupported,
+    is_jsonl_transcript,
+    replay_jsonl_transcript,
 )
 from sidecar.cursor_chat import (
     CursorChatError,
@@ -297,6 +305,7 @@ def _read_cli_snapshot_meta(
             "createdAt": state.metadata.created_at,
             "latestRoot": state.root_blob_id,
             "cursor_chat_snapshot": "production",
+            **created_at_extra(state.metadata.created_at),
             **(
                 {"model": snip(getattr(state.metadata, "model"), 160)}
                 if isinstance(getattr(state.metadata, "model", None), str)
@@ -722,6 +731,35 @@ class CursorAdapter(Adapter):
             )
         self._metadata_cache.prune(active_signatures)
         return sessions
+
+    def replay(
+        self,
+        session: Any,
+        after_seq: Optional[int] = None,
+        max_records: int = JSONL_REPLAY_RECORDS,
+    ) -> ReplayPage:
+        """Replay IDE transcripts; refuse the shapes that are not JSONL.
+
+        Cursor spans two storage designs: the IDE writes an append-only
+        JSONL transcript per agent session, while the CLI keeps chats in a
+        SQLite store and the server keeps a history directory. Only the
+        first can be paged by line ordinal, and answering an empty page for
+        the others would claim their history is gone rather than that this
+        route cannot read it.
+        """
+
+        transcript = getattr(session, "transcript", "")
+        if not is_jsonl_transcript(transcript):
+            raise ReplayUnsupported(
+                "cursor transcript kind {!r} has no ordinal replay".format(
+                    getattr(session, "extra", {}).get("transcript_kind")
+                )
+            )
+        return replay_jsonl_transcript(
+            transcript,
+            after_seq=after_seq,
+            max_records=max_records,
+        )
 
     def normalize(self, record: Mapping[str, Any], session: Session) -> Iterable[Event]:
         cursor_chat_value = record.get("_cursor_chat")

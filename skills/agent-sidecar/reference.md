@@ -402,6 +402,52 @@ host(s)`.
 
 Remote snapshots do not include `tui`, daemon aggregation, or `send`.
 
+Every host applies its own archive registry before answering, so a merged view
+is the union of per-host visible sets and archived rows appear in neither half.
+When the local registry is nonempty, remote snapshots emit one stderr note:
+`remote: {n} session(s) archived on this host are not listed; each remote host
+applies its own registry (ssh HOST agent-sidecar archive list)`. See
+[Session archive](#session-archive).
+
+## Session archive
+
+```text
+agent-sidecar archive --idle-longer-than 2h --json
+agent-sidecar archive --idle-longer-than 24h --yes --json
+agent-sidecar archive list --json
+agent-sidecar list --archived --json
+agent-sidecar unarchive <session-prefix> --json
+agent-sidecar unarchive --all --json
+```
+
+Archiving is observation-level and reversible: it writes only Agent Sidecar's
+own `archive.json` registry in the runtime directory, never a vendor
+transcript, and never signals a process. A row whose session shows activity
+newer than the archive decision is released automatically on the next scan, so
+an archived agent that speaks again returns to the board on its own.
+
+`archive` selects sessions idle for at least `--idle-longer-than` (`30m`, `2h`,
+`24h`, `7d`, or bare seconds; default `2h`) whose status is in `--status`
+(default `idle,dead`; `working` and `waiting` are refused). Without `--yes` the
+command only reports the selection; `--dry-run` states that explicitly.
+`archive --json` emits `{"idle_seconds", "statuses", "candidates", "count",
+"applied", "archived"}`; `archive list --json` emits `{"entries", "sessions"}`
+where each entry is `{"agent", "session_id", "archived_at", "reason"}` with
+`reason` one of `manual`, `batch`, or `auto`; `unarchive --json` emits
+`{"released", "count"}`.
+
+The daemon can archive on a timer with `daemon start --auto-archive
+[--auto-archive-after 24h]`: off by default, archive-only, and never a dispose.
+`--auto-archive-after` without `--auto-archive` is refused with exit `2` rather
+than silently ignored.
+
+Archiving is per host. There is no fleet-wide archive, and `archive` /
+`unarchive` refuse `--remote` / `--host` with exit `2`, printing the equivalent
+`ssh HOST agent-sidecar …` invocation; `list --archived --remote` is refused the
+same way. To act on a remote host's registry, run the command on that host over
+ssh. Archiving mutates only sidecar-owned state, but it changes what every
+listing shows, so run it only on an explicit user request.
+
 ## Remote watch
 
 ```text
@@ -881,6 +927,12 @@ agent-sidecar list --all --json
 agent-sidecar list --remote --json
 agent-sidecar list --remote --host <host-alias> --json
 agent-sidecar ps --json
+agent-sidecar archive --idle-longer-than 2h --json
+agent-sidecar archive --idle-longer-than 24h --yes --json
+agent-sidecar archive list --json
+agent-sidecar list --archived --json
+agent-sidecar unarchive <session-prefix> --json
+agent-sidecar unarchive --all --json
 agent-sidecar watch <session-prefix> --json
 agent-sidecar watch <session-prefix> --from-start --json
 agent-sidecar watch --all --json
@@ -919,4 +971,6 @@ Unix-daemon default and are readonly with respect to agent-owned stores. Run
 remote monitoring only when the user explicitly requests it. Surface remote
 watch failure and gap warnings, and never auto-retry a remote watch. Run `send`
 only for an explicit same-turn request for that exact message or action. Never
-retry unknown delivery, and never run audit rebind or reset automatically.
+retry unknown delivery, and never run audit rebind or reset automatically. Run
+`archive`/`unarchive` only on explicit request, always on the host that owns
+the sessions, and prefer showing the selection before applying it.

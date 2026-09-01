@@ -655,8 +655,11 @@ describe('pure helpers', () => {
         project: '/c', updated_at: 1, last_event: null, gap: false,
       },
     })
+    // `updated_at` is the one metadata field every adapter reports, so the
+    // fallback header always carries a last-activity clock.
     expect(headerFromDetailWire(sessionOnly)).toEqual({
       agent: 'claude', title: 'card', project: '/c', status: 'idle',
+      updatedAtMs: 1000,
     })
     expect(headerFromDetailWire(detailWire({ unified: null, session: null }))).toBeNull()
   })

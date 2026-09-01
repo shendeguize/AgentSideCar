@@ -9,6 +9,7 @@ import json
 import math
 import os
 import queue
+import shlex
 import signal
 import stat
 import subprocess
@@ -18,10 +19,29 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping, Optional, Sequence, TextIO
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    TextIO,
+    Tuple,
+)
 
 import sidecar
 from sidecar.adapters.base import sanitize_terminal_text
+from sidecar.archive import (
+    DEFAULT_IDLE_THRESHOLD_SECONDS,
+    ArchiveError,
+    ArchiveStore,
+    normalize_statuses,
+    parse_duration,
+    select_archivable,
+    session_target,
+)
 from sidecar.client import PingInfo, SidecarClient, SidecarClientError
 from sidecar.cluster import (
     DEFAULT_CLUSTER_WINDOW_SECONDS,
@@ -118,6 +138,7 @@ _REMOTE_SESSION_LINE = (
     "{branch}{host:<16} {agent:<11} {status:<7} {session:<16} {age:>4}"
     "  {updated:<25}  {title}\n"
 )
+_ARCHIVE_LINE = "{agent:<11} {session:<16} {archived:<25}  {reason:<7} {title}\n"
 
 
 @dataclass(frozen=True)
@@ -253,6 +274,109 @@ def _http_port_argument(value: str) -> int:
     return port
 
 
+# A threshold without the switch would be silently ignored, which reads as
+# "auto-archive is configured" when nothing is archiving at all.
+_AUTO_ARCHIVE_ORPHAN_THRESHOLD = (
+    "--auto-archive-after requires --auto-archive\n"
+)
+
+
+def _auto_archive_after_argument(value: str) -> float:
+    try:
+        return parse_duration(value)
+    except ArchiveError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
+def _add_auto_archive_arguments(parser: argparse.ArgumentParser) -> None:
+    """Auto-archive policy flags for the daemon-starting commands.
+
+    Default off, threshold conservative, and archive-only: the automatic
+    path never disposes anything, and a session that speaks again is
+    unarchived by the same scan that would have hidden it.
+    """
+
+    parser.add_argument(
+        "--auto-archive",
+        action="store_true",
+        help=(
+            "hide sessions idle longer than --auto-archive-after from the "
+            "board (observation only; reversed automatically on new activity)"
+        ),
+    )
+    parser.add_argument(
+        "--auto-archive-after",
+        type=_auto_archive_after_argument,
+        default=None,
+        metavar="DURATION",
+        help=(
+            "inactivity threshold for --auto-archive, e.g. 30m/2h/24h "
+            "(default: 24h)"
+        ),
+    )
+
+
+def _add_local_only_arguments(parser: argparse.ArgumentParser) -> None:
+    """Accept the fleet flags on a per-host command, in order to refuse them.
+
+    The archive registry belongs to the host that owns the sessions, so
+    there is no fleet-wide archive to operate on. Silently ignoring
+    `--remote` would be the dangerous reading ("I archived the fleet"), and
+    an argparse "unrecognized argument" would not say what to do instead —
+    so both flags parse and are answered with the ssh form that works
+    (see {@link _local_only_error}).
+    """
+
+    parser.add_argument("--remote", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--host",
+        action="append",
+        default=[],
+        metavar="ALIAS",
+        help=argparse.SUPPRESS,
+    )
+
+
+def _local_only_error(command: str, argv: Sequence[str]) -> str:
+    """The refusal text for a fleet flag on a per-host archive command."""
+
+    return (
+        "{command}: archiving is per host; --remote/--host are unsupported. "
+        "Run it on the host instead: ssh HOST agent-sidecar {argv}\n".format(
+            command=sanitize_terminal_text(command),
+            argv=sanitize_terminal_text(shlex.join(argv)),
+        )
+    )
+
+
+def _local_only_argv(args: argparse.Namespace) -> Tuple[str, ...]:
+    """Rebuild the refused request as the per-host argv that would work.
+
+    Echoing back the same selection means the suggested ssh line can be
+    copied as-is; only the fleet flags are dropped.
+    """
+
+    if args.command == "unarchive":
+        if args.all:
+            return ("unarchive", "--all")
+        prefix = args.session_prefix
+        return ("unarchive", str(prefix)) if prefix else ("unarchive",)
+    argv = ["archive", str(args.archive_action)]
+    if args.archive_action == "list":
+        return tuple(argv)
+    # The default threshold is a number set by the parser; only a value the
+    # caller actually typed is worth repeating.
+    if isinstance(args.idle_longer_than, str):
+        argv.extend(("--idle-longer-than", args.idle_longer_than))
+    if args.status is not None:
+        argv.extend(("--status", str(args.status)))
+    if args.dry_run:
+        argv.append("--dry-run")
+    if args.yes:
+        argv.append("--yes")
+    return tuple(argv)
+
+
 def _add_http_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--http",
@@ -334,6 +458,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="NAME",
         help="include exact agent name (repeatable, case-insensitive)",
+    )
+    list_parser.add_argument(
+        "--archived",
+        action="store_true",
+        help="list archived sessions instead of active ones (local only)",
     )
     list_parser.add_argument(
         "--remote",
@@ -586,6 +715,69 @@ def build_parser() -> argparse.ArgumentParser:
         help="must be exactly REBIND-SEND-AUDIT",
     )
 
+    archive_parser = commands.add_parser(
+        "archive",
+        help="hide idle or dead sessions from the board without touching them",
+        description=(
+            "Archiving is observation-level: it never edits a vendor "
+            "transcript and never stops a process. A session that becomes "
+            "active again is released automatically."
+        ),
+        allow_abbrev=False,
+    )
+    archive_parser.add_argument(
+        "archive_action",
+        nargs="?",
+        default="apply",
+        choices=("apply", "list"),
+        metavar="ACTION",
+        help="apply the threshold selection (default) or list archived sessions",
+    )
+    archive_parser.add_argument(
+        "--idle-longer-than",
+        default=DEFAULT_IDLE_THRESHOLD_SECONDS,
+        metavar="DURATION",
+        help="inactivity threshold such as 30m, 2h, or 24h (default: 2h)",
+    )
+    archive_parser.add_argument(
+        "--status",
+        default=None,
+        metavar="NAMES",
+        help="comma-separated statuses to archive (default: idle,dead)",
+    )
+    archive_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the selection without archiving anything",
+    )
+    archive_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="archive the selection instead of printing it for review",
+    )
+    archive_parser.add_argument("--json", action="store_true", help="emit JSON")
+    _add_local_only_arguments(archive_parser)
+
+    unarchive_parser = commands.add_parser(
+        "unarchive",
+        help="return archived sessions to the board",
+        allow_abbrev=False,
+    )
+    unarchive_parser.add_argument(
+        "session_prefix",
+        nargs="?",
+        default=None,
+        metavar="session-prefix",
+        help="exact archived session ID or unique prefix",
+    )
+    unarchive_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="release every archived session",
+    )
+    unarchive_parser.add_argument("--json", action="store_true", help="emit JSON")
+    _add_local_only_arguments(unarchive_parser)
+
     package_parser = commands.add_parser(
         "package",
         help="build release artifacts",
@@ -615,6 +807,7 @@ def build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     _add_http_arguments(daemon_start_parser)
+    _add_auto_archive_arguments(daemon_start_parser)
     daemon_commands.add_parser("stop", help="stop the verified running daemon")
     daemon_commands.add_parser("status", help="report whether the daemon is running")
     daemon_run_parser = daemon_commands.add_parser(
@@ -623,6 +816,7 @@ def build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     _add_http_arguments(daemon_run_parser)
+    _add_auto_archive_arguments(daemon_run_parser)
 
     service_parser = commands.add_parser(
         "service",
@@ -1142,13 +1336,14 @@ def _acquire_local_snapshot(
     if daemon_rows is not None:
         return list(daemon_rows)
     active_scanner = Scanner() if scanner is None else scanner
-    return list(
-        _scan_sessions(
-            active_scanner,
-            stderr,
-            _snapshot_recent_seconds(command, args),
-        )
+    sessions = _scan_sessions(
+        active_scanner,
+        stderr,
+        _snapshot_recent_seconds(command, args),
     )
+    # The daemon already hides archived sessions; the direct-scan fallback
+    # has to apply the same registry so both paths agree.
+    return _hide_archived(sessions, stderr)
 
 
 def _aggregate_value(result: object, name: str, default: object) -> object:
@@ -1168,6 +1363,32 @@ def _report_remote_failures(failures: Iterable[object], stderr: TextIO) -> None:
         host = sanitize_terminal_text(_aggregate_value(failure, "host", ""))
         code = sanitize_terminal_text(_aggregate_value(failure, "code", "remote"))
         stderr.write("remote {}: {}\n".format(host, code))
+    stderr.flush()
+
+
+def _report_archive_scope(stderr: TextIO) -> None:
+    """Say what the fleet view cannot show, and where to manage it.
+
+    A merged snapshot is a union of per-host VISIBLE sets: rows archived
+    here are absent, and every remote host applies its own registry before
+    answering. Stating that once, with the local count, keeps a hidden row
+    from reading as a lost session or a broken host — and names the only
+    command that can act on a remote registry.
+    """
+
+    try:
+        archived = len(ArchiveStore().entries())
+    except ArchiveError:
+        # A corrupt registry is already reported by the snapshot path; a
+        # second complaint here would add noise, not information.
+        return
+    if archived <= 0:
+        return
+    stderr.write(
+        "remote: {} session(s) archived on this host are not listed; each "
+        "remote host applies its own registry (ssh HOST agent-sidecar "
+        "archive list)\n".format(archived)
+    )
     stderr.flush()
 
 
@@ -1465,6 +1686,8 @@ def _run_remote_snapshot(
         stderr.write(control_error)
         stderr.flush()
 
+    _report_archive_scope(stderr)
+
     _render_snapshot(
         command,
         args,
@@ -1760,8 +1983,14 @@ def _daemon_start(
     *,
     http: bool = False,
     http_port: Optional[int] = None,
+    auto_archive: bool = False,
+    auto_archive_after: Optional[float] = None,
 ) -> int:
     requested_http_port = 0 if http_port is None else http_port
+    if auto_archive_after is not None and not auto_archive:
+        stderr.write(_AUTO_ARCHIVE_ORPHAN_THRESHOLD)
+        stderr.flush()
+        return 2
     try:
         info = _client_ping_info(client)
     except (SidecarClientError, OSError):
@@ -1792,6 +2021,14 @@ def _daemon_start(
         command.append("--http")
         if http_port is not None:
             command.extend(("--http-port", str(http_port)))
+    # An already-running daemon keeps whatever policy it was started with:
+    # there is no live reconfiguration op, and silently mutating another
+    # process's policy from a `start` that only adopted it would be worse
+    # than requiring a restart. These flags shape the child we spawn.
+    if auto_archive:
+        command.append("--auto-archive")
+        if auto_archive_after is not None:
+            command.extend(("--auto-archive-after", str(auto_archive_after)))
     try:
         process = subprocess.Popen(
             command,
@@ -1998,7 +2235,17 @@ def _daemon_status(client: SidecarClient, stdout: TextIO) -> int:
     return 0
 
 
-def _daemon_run(stderr: TextIO, http_port: Optional[int] = None) -> int:
+def _daemon_run(
+    stderr: TextIO,
+    http_port: Optional[int] = None,
+    *,
+    auto_archive: bool = False,
+    auto_archive_after: Optional[float] = None,
+) -> int:
+    if auto_archive_after is not None and not auto_archive:
+        stderr.write(_AUTO_ARCHIVE_ORPHAN_THRESHOLD)
+        stderr.flush()
+        return 2
     stop_event = threading.Event()
     received_signal: List[int] = []
     previous = {}
@@ -2012,10 +2259,14 @@ def _daemon_run(stderr: TextIO, http_port: Optional[int] = None) -> int:
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous[signum] = signal.getsignal(signum)
             signal.signal(signum, request_stop)
-        if http_port is None:
-            run_foreground(stop_event=stop_event)
-        else:
-            run_foreground(stop_event=stop_event, http_port=http_port)
+        options: Dict[str, Any] = {}
+        if http_port is not None:
+            options["http_port"] = http_port
+        if auto_archive:
+            options["auto_archive"] = True
+            if auto_archive_after is not None:
+                options["auto_archive_after"] = auto_archive_after
+        run_foreground(stop_event=stop_event, **options)
     except KeyboardInterrupt:
         stop_event.set()
         return 130
@@ -3079,6 +3330,331 @@ def _write_service_result(
     return code
 
 
+def _archive_statuses(value: Optional[str]) -> Optional[List[str]]:
+    if value is None:
+        return None
+    return [name for name in value.split(",") if name.strip()]
+
+
+def _print_archive_rows(rows: Sequence[object], stdout: TextIO) -> None:
+    _print_sessions([(row, 0) for row in rows], stdout)
+
+
+def _print_archive_entries(
+    entries: Sequence[Mapping[str, Any]],
+    sessions: Sequence[Mapping[str, Any]],
+    stdout: TextIO,
+) -> None:
+    titles = {
+        (str(row.get("agent", "")), str(row.get("session_id", ""))): row
+        for row in sessions
+        if isinstance(row, Mapping)
+    }
+    stdout.write(_ARCHIVE_LINE.format(
+        agent="AGENT",
+        session="SESSION",
+        archived="ARCHIVED",
+        reason="REASON",
+        title="TITLE",
+    ))
+    for entry in entries:
+        agent = str(entry.get("agent", ""))
+        session_id = str(entry.get("session_id", ""))
+        row = titles.get((agent, session_id), {})
+        try:
+            archived_at = float(entry.get("archived_at", 0.0))
+        except (TypeError, ValueError):
+            archived_at = 0.0
+        stdout.write(_ARCHIVE_LINE.format(
+            agent=sanitize_terminal_text(agent),
+            session=sanitize_terminal_text(session_id)[:16],
+            archived=_local_time(archived_at),
+            reason=sanitize_terminal_text(str(entry.get("reason", ""))),
+            title=sanitize_terminal_text(str(row.get("title", ""))),
+        ))
+    stdout.flush()
+
+
+def _hide_archived(sessions: Sequence[object], stderr: TextIO) -> List[object]:
+    try:
+        return list(ArchiveStore().partition(sessions).visible)
+    except ArchiveError as error:
+        stderr.write("archive: {}; showing every session\n".format(error))
+        stderr.flush()
+        return list(sessions)
+
+
+def _archive_targets(rows: Iterable[object]) -> List[Mapping[str, str]]:
+    targets = []
+    for row in rows:
+        agent, session_id = session_target(row)
+        targets.append({"agent": agent, "session_id": session_id})
+    return targets
+
+
+def _local_archive_candidates(
+    args: argparse.Namespace,
+    *,
+    scanner: Optional[Scanner],
+    idle_seconds: float,
+    statuses: Optional[Sequence[str]],
+    stderr: TextIO,
+) -> List[object]:
+    active_scanner = Scanner() if scanner is None else scanner
+    sessions = _scan_sessions(active_scanner, stderr, None)
+    store = ArchiveStore()
+    visible = store.partition(sessions).visible
+    return select_archivable(
+        visible,
+        idle_seconds=idle_seconds,
+        statuses=statuses,
+    )
+
+
+def _run_archive_list(
+    args: argparse.Namespace,
+    *,
+    client: SidecarClient,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    try:
+        response = client.archive_list()
+        entries = response.get("entries", [])
+        rows = response.get("sessions", [])
+    except (SidecarClientError, OSError):
+        try:
+            entries = [entry.to_dict() for entry in ArchiveStore().entries()]
+        except ArchiveError as error:
+            stderr.write("archive list: {}\n".format(error))
+            stderr.flush()
+            return 1
+        rows = entries
+    if args.json:
+        _write_json({"entries": entries, "sessions": rows}, stdout)
+        return 0
+    if not entries:
+        stdout.write("no archived sessions\n")
+        stdout.flush()
+        return 0
+    _print_archive_entries(entries, rows, stdout)
+    return 0
+
+
+def _run_archive(
+    args: argparse.Namespace,
+    *,
+    scanner: Optional[Scanner],
+    client: SidecarClient,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    if args.archive_action == "list":
+        return _run_archive_list(
+            args,
+            client=client,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    try:
+        idle_seconds = parse_duration(args.idle_longer_than)
+        statuses = normalize_statuses(_archive_statuses(args.status))
+    except ArchiveError as error:
+        stderr.write("archive: {}\n".format(error))
+        stderr.flush()
+        return 2
+
+    token: Optional[str] = None
+    try:
+        preview = client.archive_preview(
+            idle_seconds=idle_seconds,
+            statuses=statuses,
+        )
+        candidates: List[object] = list(preview.get("candidates", []))
+        token = preview.get("token")
+    except (SidecarClientError, OSError):
+        candidates = _local_archive_candidates(
+            args,
+            scanner=scanner,
+            idle_seconds=idle_seconds,
+            statuses=statuses,
+            stderr=stderr,
+        )
+
+    try:
+        targets = _archive_targets(candidates)
+    except ArchiveError as error:
+        stderr.write("archive: {}\n".format(error))
+        stderr.flush()
+        return 1
+
+    applied = bool(targets) and args.yes and not args.dry_run
+    if applied:
+        try:
+            if token is not None:
+                result = client.archive_apply(targets, token=token)
+                archived_count = int(result.get("count", 0))
+            else:
+                archived_count = len(
+                    ArchiveStore().archive(candidates, reason="batch")
+                )
+        except (ArchiveError, SidecarClientError, OSError) as error:
+            stderr.write("archive: {}\n".format(error))
+            stderr.flush()
+            return 1
+    else:
+        archived_count = 0
+
+    if args.json:
+        _write_json(
+            {
+                "idle_seconds": idle_seconds,
+                "statuses": list(statuses),
+                "candidates": [dict(_as_dict(row)) for row in candidates],
+                "count": len(candidates),
+                "applied": applied,
+                "archived": archived_count,
+            },
+            stdout,
+        )
+        return 0
+
+    if not candidates:
+        stdout.write("no sessions idle longer than the threshold\n")
+        stdout.flush()
+        return 0
+    _print_archive_rows(candidates, stdout)
+    if applied:
+        # "on this host" is the whole scope story: there is no fleet-wide
+        # archive, and the same command over ssh is what covers a pod.
+        stdout.write(
+            "archived {} session(s) on this host\n".format(archived_count)
+        )
+    elif args.dry_run:
+        stdout.write(
+            "dry run: {} session(s) would be archived\n".format(len(candidates))
+        )
+    else:
+        stdout.write(
+            "{} session(s) selected; rerun with --yes to archive\n".format(
+                len(candidates)
+            )
+        )
+    stdout.flush()
+    return 0
+
+
+def _resolve_archived_target(
+    prefix: str,
+    entries: Sequence[Mapping[str, Any]],
+    stderr: TextIO,
+) -> Optional[Mapping[str, str]]:
+    matches = [
+        entry
+        for entry in entries
+        if str(entry.get("session_id", "")).startswith(prefix)
+    ]
+    if not matches:
+        stderr.write("unarchive: no archived session matches {}\n".format(prefix))
+        stderr.flush()
+        return None
+    if len(matches) > 1:
+        stderr.write(
+            "unarchive: {} archived sessions match {}\n".format(
+                len(matches),
+                prefix,
+            )
+        )
+        stderr.flush()
+        return None
+    entry = matches[0]
+    return {
+        "agent": str(entry.get("agent", "")),
+        "session_id": str(entry.get("session_id", "")),
+    }
+
+
+def _run_unarchive(
+    args: argparse.Namespace,
+    *,
+    client: SidecarClient,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    if not args.all and not args.session_prefix:
+        stderr.write("unarchive: provide a session prefix or --all\n")
+        stderr.flush()
+        return 2
+    if args.all and args.session_prefix:
+        stderr.write("unarchive: session prefix and --all are exclusive\n")
+        stderr.flush()
+        return 2
+
+    daemon_available = True
+    try:
+        entries = list(client.archive_list().get("entries", []))
+    except (SidecarClientError, OSError):
+        daemon_available = False
+        try:
+            entries = [entry.to_dict() for entry in ArchiveStore().entries()]
+        except ArchiveError as error:
+            stderr.write("unarchive: {}\n".format(error))
+            stderr.flush()
+            return 1
+
+    if args.all:
+        targets = [
+            {
+                "agent": str(entry.get("agent", "")),
+                "session_id": str(entry.get("session_id", "")),
+            }
+            for entry in entries
+        ]
+    else:
+        resolved = _resolve_archived_target(
+            args.session_prefix,
+            entries,
+            stderr,
+        )
+        if resolved is None:
+            return 1
+        targets = [resolved]
+
+    if not targets:
+        if args.json:
+            _write_json({"released": [], "count": 0}, stdout)
+        else:
+            stdout.write("no archived sessions\n")
+            stdout.flush()
+        return 0
+
+    try:
+        if daemon_available:
+            result = client.unarchive(targets)
+            released = list(result.get("released", []))
+        else:
+            released = [
+                {"agent": agent, "session_id": session_id}
+                for agent, session_id in ArchiveStore().unarchive(
+                    [(target["agent"], target["session_id"]) for target in targets]
+                )
+            ]
+    except (ArchiveError, SidecarClientError, OSError) as error:
+        stderr.write("unarchive: {}\n".format(error))
+        stderr.flush()
+        return 1
+
+    if args.json:
+        _write_json({"released": released, "count": len(released)}, stdout)
+        return 0
+    stdout.write(
+        "released {} session(s) on this host\n".format(len(released))
+    )
+    stdout.flush()
+    return 0
+
+
 def main(
     argv: Optional[Sequence[str]] = None,
     *,
@@ -3148,6 +3724,16 @@ def main(
         and not args.remote
     ):
         errors.write("{}: --host requires --remote\n".format(args.command))
+        errors.flush()
+        return 2
+
+    if args.command == "list" and args.archived and args.remote:
+        errors.write(_local_only_error("list", ("archive", "list")))
+        errors.flush()
+        return 2
+
+    if args.command in ("archive", "unarchive") and (args.remote or args.host):
+        errors.write(_local_only_error(args.command, _local_only_argv(args)))
         errors.flush()
         return 2
 
@@ -3290,6 +3876,8 @@ def main(
                 errors,
                 http=args.http,
                 http_port=args.http_port,
+                auto_archive=args.auto_archive,
+                auto_archive_after=args.auto_archive_after,
             )
         if args.daemon_command == "stop":
             return _daemon_stop(active_client, output, errors)
@@ -3300,6 +3888,8 @@ def main(
             http_port=(
                 0 if args.http and args.http_port is None else args.http_port
             ),
+            auto_archive=args.auto_archive,
+            auto_archive_after=args.auto_archive_after,
         )
 
     if args.command == "tui":
@@ -3321,7 +3911,31 @@ def main(
             remote_aggregator=remote_aggregator,
         )
 
+    if args.command == "archive":
+        return _run_archive(
+            args,
+            scanner=scanner,
+            client=active_client,
+            stdout=output,
+            stderr=errors,
+        )
+
+    if args.command == "unarchive":
+        return _run_unarchive(
+            args,
+            client=active_client,
+            stdout=output,
+            stderr=errors,
+        )
+
     if args.command in ("list", "status"):
+        if args.command == "list" and args.archived:
+            return _run_archive_list(
+                args,
+                client=active_client,
+                stdout=output,
+                stderr=errors,
+            )
         if args.remote:
             return _run_remote_snapshot(
                 args.command,

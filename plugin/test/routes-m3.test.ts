@@ -403,7 +403,11 @@ describe('GET session/<id>/timeline', () => {
     expect(page.sources.sidecarReplay).toBe(true)
   })
 
-  it('degrades to remaining sources when the replay seam rejects (old daemon)', async () => {
+  it('records an unsupported replay without calling the page degraded', async () => {
+    // `replay_unsupported` is an answer, not a breakage: the session's
+    // transcript shape has no history source (or the daemon predates the
+    // op). The outcome is still reported for observability, but the page
+    // stays healthy so the detail view does not warn about lost data.
     const replay: SidecarReplayFace = {
       replay: async () => {
         throw new Error('replay_unsupported: daemon predates the op')
@@ -419,6 +423,23 @@ describe('GET session/<id>/timeline', () => {
     expect(page.sources.sidecarReplay).toBe(false)
     expect(page.sources.sidecarBuffer).toBe(true)
     expect(page.sourceOutcomes.sidecarReplay).toBe('replay_unsupported')
+    expect(page.degraded).toBe(false)
+    expect(page.reason).toBeNull()
+  })
+
+  it('still degrades when the replay seam fails for an unknown reason', async () => {
+    const replay: SidecarReplayFace = {
+      replay: async () => {
+        throw new Error('socket hung up')
+      },
+    }
+    const h = await startHarness(true, { replay })
+    h.store.applySnapshot([row('sf')])
+    h.fusion!.ingestSidecarEvent(sidecarEv('sf', 7))
+
+    const page = (await get(h.base, `${API_PREFIX}/session/sf/timeline`))
+      .json as unknown as TimelineReply
+    expect(page.sourceOutcomes.sidecarReplay).toBe('source_failed')
     expect(page.degraded).toBe(true)
     expect(page.reason).toBe('partial_source_failure')
   })

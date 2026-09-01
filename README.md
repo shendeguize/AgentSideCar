@@ -378,6 +378,51 @@ agent-sidecar status --remote --remote-python /usr/bin/python3.11 --json
 evidence and is not reliably attributable to one session. `status` includes
 only `working` and `waiting` sessions.
 
+<a id="archive-idle-sessions"></a>
+
+### Archive idle sessions
+
+Archiving hides a session from every listing without touching it. Nothing is
+edited and nothing is stopped: the vendor transcript stays byte-for-byte as it
+was, no process is signalled, and the only state written is Agent Sidecar's own
+registry at `archive.json` in the runtime directory. A session that becomes
+active again is released automatically, so archiving cannot lose work.
+
+```sh
+agent-sidecar archive --idle-longer-than 2h
+agent-sidecar archive --idle-longer-than 2h --dry-run
+agent-sidecar archive --idle-longer-than 24h --yes
+agent-sidecar archive --idle-longer-than 2h --status dead --yes
+agent-sidecar archive list
+agent-sidecar list --archived
+agent-sidecar unarchive <session-prefix>
+agent-sidecar unarchive --all
+```
+
+`archive` selects sessions with no activity for at least `--idle-longer-than`
+(`30m`, `2h`, `24h`, `7d`, or bare seconds; default `2h`) in an archivable
+status (`--status`, default `idle,dead`; `working` and `waiting` are refused).
+Without `--yes` it only prints what it would do. The daemon can also archive on
+a timer: `daemon start --auto-archive [--auto-archive-after 24h]`, off by
+default, archive-only, and never a dispose.
+
+Archiving is per host, always. There is no fleet-wide archive: the registry
+lives beside the sessions it describes, so a pod's archive is managed on the
+pod. `archive` and `unarchive` therefore refuse `--remote`/`--host` and print
+the invocation that works instead:
+
+```sh
+ssh <host> agent-sidecar archive --idle-longer-than 24h --yes
+ssh <host> agent-sidecar archive list
+ssh <host> agent-sidecar unarchive --all
+```
+
+Because every host applies its own registry before answering, a merged
+`list --remote` view is the union of per-host *visible* sets — archived rows are
+absent from both halves. When this machine has archived sessions, remote
+snapshots print one stderr note with the local count and the ssh form above, so
+a hidden row is never mistaken for a lost session or an unreachable host.
+
 ### Remote list and status
 
 `list --remote` and `status --remote` merge the local snapshot with eligible
@@ -1257,12 +1302,15 @@ No. Remote `list`, `status`, and `watch --all --remote` are observation-only.
 Remote prefix watch and remote message delivery are unsupported. Experimental
 `send` is local-only, limited to eligible sources, explicitly gated by
 `--allow-write`, and available only where its containment contract is
-supported.
+supported. Archiving is per host as well: run
+[`archive`/`unarchive`](#archive-idle-sessions) over ssh on the host that owns
+the sessions.
 
 ### Where does Agent Sidecar store its own state?
 
 The default runtime directory is `~/.agent_sidecar`. It can contain the Unix
 socket, PID file, bounded diagnostics, HTTP token and transient port record,
+the `archive.json` registry of [archived sessions](#archive-idle-sessions),
 and, only after mutating send operations, private audit state. See
 [Uninstall](#uninstall) before removing anything; normal uninstall deliberately
 retains security-relevant history.

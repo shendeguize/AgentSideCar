@@ -11,12 +11,14 @@ from sidecar.adapters.base import (
     MetadataCache,
     compact_json,
     content_items,
+    created_at_extra,
     file_signature,
     local_timestamp,
     read_jsonl_prefix,
     snip,
     text_content,
 )
+from sidecar.adapters.replay import JsonlReplayMixin
 from sidecar.model import Event, Session
 
 
@@ -64,7 +66,7 @@ def _record_string(record: Mapping[str, Any], *keys: str) -> str:
 
 def _claude_metadata(
     path: Path,
-) -> Tuple[str, str, str, bool, Optional[str], str, str]:
+) -> Tuple[str, str, str, bool, Optional[str], str, str, Any]:
     """Extract bounded discovery metadata; ai-title wins over prompt text."""
 
     cwd = ""
@@ -75,7 +77,10 @@ def _claude_metadata(
     explicit_parent: Optional[str] = None
     model = ""
     model_provider = ""
+    created_at: Any = None
     for record in read_jsonl_prefix(path):
+        if created_at is None:
+            created_at = record.get("timestamp")
         if not cwd and isinstance(record.get("cwd"), str):
             cwd = record["cwd"]
         if not session_id:
@@ -120,10 +125,11 @@ def _claude_metadata(
         explicit_parent,
         model,
         model_provider,
+        created_at,
     )
 
 
-class ClaudeAdapter(Adapter):
+class ClaudeAdapter(JsonlReplayMixin, Adapter):
     name = "claude"
     agent_names = ("claude",)
 
@@ -132,7 +138,7 @@ class ClaudeAdapter(Adapter):
         metadata_cache_size: int = DEFAULT_METADATA_CACHE_SIZE,
     ) -> None:
         self._metadata_cache: MetadataCache[
-            Tuple[str, str, str, bool, Optional[str], str, str]
+            Tuple[str, str, str, bool, Optional[str], str, str, Any]
         ] = MetadataCache(metadata_cache_size)
 
     def discover(self, home: Path) -> Iterable[Session]:
@@ -156,6 +162,7 @@ class ClaudeAdapter(Adapter):
                     explicit_parent,
                     model,
                     model_provider,
+                    created_at,
                 ) = self._metadata_cache.get_or_load(
                     signature, lambda: _claude_metadata(transcript)
                 )
@@ -177,7 +184,8 @@ class ClaudeAdapter(Adapter):
                     parent_id = stored_id
                 if parent_id == child_id:
                     parent_id = None
-                extra = {"source": "transcript", "sidechain": sidechain}
+                extra: dict = {"source": "transcript", "sidechain": sidechain}
+                extra.update(created_at_extra(created_at))
                 if model:
                     extra["model"] = model
                 if model_provider:

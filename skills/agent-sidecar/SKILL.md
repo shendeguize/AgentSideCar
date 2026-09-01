@@ -33,6 +33,12 @@ headless-resume process.
      sessions and eligible remote hosts, but use it only for an explicit remote
      or cross-host watch request.
    - `agent-sidecar tui` opens the interactive terminal dashboard; `q` exits.
+   - `agent-sidecar archive list --json` shows sessions hidden from every
+     listing by the local archive registry. Hiding them with
+     `agent-sidecar archive --idle-longer-than 2h [--yes]` or releasing them
+     with `agent-sidecar unarchive <session-prefix>` needs an explicit
+     request; both are per host, so a pod's registry is managed on the pod
+     over ssh. Show the selection before applying it.
 4. Start the daemon with `agent-sidecar daemon start` only when the user asks
    for continuous monitoring, the TUI, or explicitly asks to start it. The
    command is idempotent. Status and list queries work without it by falling

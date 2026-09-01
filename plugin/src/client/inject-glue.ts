@@ -21,6 +21,8 @@
  *   retryable notice for prepare, terminal unknown for execute — S6).
  *   A delivered execute fires the optional `onDelivered` hook so the owner
  *   can pull one fresh snapshot; failed/unknown never do.
+ * - {@link createVerifyProbe}: the read-only timeline probe behind the
+ *   panel's automatic check of an unknown delivery (inject/verify.ts).
  * - {@link findInjectTarget}: board card selection → panel target (the
  *   design §5.1 view-3 target summary comes from the selected SessionView
  *   as mapped into the controller's card VMs). A session that has left the
@@ -33,6 +35,7 @@
 import { isApiError, postAction } from './api.ts'
 import type { ExecuteActionBody, PrepareActionBody, RequestOptions } from './api.ts'
 import type { SessionCardVM } from './board/logic.ts'
+import { fetchTimelinePage } from './detail/transport.ts'
 import type { InjectPanelTarget } from './inject/InjectPanel.tsx'
 import type {
   ApiErrorLike,
@@ -144,6 +147,45 @@ export function createInjectActions(deps: InjectActionDeps = {}): InjectActions 
     },
   }
 }
+
+// ---------------------------------------------------------------------------
+// Delivery verification probe (§G).
+// ---------------------------------------------------------------------------
+
+/** Timeline window pulled per verification attempt. */
+export const VERIFY_PAGE_LIMIT = 40
+
+/** Transport seam: read the newest timeline window of one session. */
+export type FetchTimelinePageFn = (
+  sessionId: string,
+  opts: RequestOptions & { limit?: number },
+) => Promise<{ entries: readonly { kind: string; text: string; ts: number }[] }>
+
+/**
+ * Probe the target's newest timeline window, for the panel's automatic
+ * check of an unknown delivery. Read-only by construction — nothing here
+ * can re-send — so it stays clear of the no-retry rule (S6).
+ *
+ * Transport failures propagate: {@link verifyInjection} reads a rejection
+ * as "the source could not answer", which must not be confused with an
+ * answered-but-empty page.
+ *
+ * @param sessionId - the injection target.
+ * @param deps - transport override (tests); defaults to the detail transport.
+ */
+export function createVerifyProbe(
+  sessionId: string,
+  deps: { fetchPage?: FetchTimelinePageFn } = {},
+): () => Promise<readonly { kind: string; text: string; ts: number }[]> {
+  const fetchPage = deps.fetchPage ?? defaultFetchPage
+  return async () => {
+    const page = await fetchPage(sessionId, { limit: VERIFY_PAGE_LIMIT })
+    return page.entries
+  }
+}
+
+const defaultFetchPage: FetchTimelinePageFn = (sessionId, opts) =>
+  fetchTimelinePage(sessionId, opts)
 
 // ---------------------------------------------------------------------------
 // Target mapping.

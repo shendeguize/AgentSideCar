@@ -20,6 +20,7 @@ from sidecar import bus
 from sidecar.adapters.base import Adapter
 from sidecar.adapters.cursor import CursorAdapter
 from sidecar.adapters.dsh import ReplayPage
+from sidecar.adapters.replay import ReplayUnsupported
 from sidecar.client import SidecarClient, SidecarClientError
 from sidecar.cursor_chat import (
     default_snapshot_broker,
@@ -932,6 +933,23 @@ class DaemonIntegrationTests(unittest.TestCase):
             client.replay("one")
         self.assertEqual("replay_failed", failed.exception.code)
         self.assertNotIn("private", str(failed.exception))
+
+    def test_replay_unsupported_transcript_kind_is_a_capability_answer(self):
+        # An adapter that replays other sessions but not this transcript
+        # shape (Cursor's SQLite chat store) must not read as a failure:
+        # the board treats replay_unsupported as "this source has nothing
+        # to offer" and keeps the rest of the timeline healthy.
+        adapter = self._register_replay_adapter(
+            FakeReplayAdapter([{"seq": 1, "type": "assistant", "text": "kept"}])
+        )
+        adapter.failure = ReplayUnsupported("cursor-chat-sqlite")
+        client = SidecarClient(runtime_dir=self.runtime, timeout=2.0)
+
+        with self.assertRaises(SidecarClientError) as unsupported:
+            client.replay("one")
+
+        self.assertEqual("replay_unsupported", unsupported.exception.code)
+        self.assertNotIn("sqlite", str(unsupported.exception))
 
     def test_replay_invalid_parameters_reject_without_disconnecting(self):
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

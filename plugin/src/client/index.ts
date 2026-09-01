@@ -43,7 +43,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-runtime/client'
 import { registerSidecarCommand } from './commands.ts'
 import { PLUGIN_ID, SidecarController } from './controller.ts'
-import { createInjectActions } from './inject-glue.ts'
+import { createInjectActions, createVerifyProbe } from './inject-glue.ts'
 import type { InjectMode } from './inject/logic.ts'
 import {
   acquireWithHandoff,
@@ -280,6 +280,7 @@ export function apply(ctx: ClientContext): void {
         },
       }),
       getDefaultMode: () => injectPrefs.defaultMode,
+      createVerifyProbe: (sessionId) => createVerifyProbe(sessionId),
     },
     getAnalysisEnabled: () => analysisPrefs.enabled,
   })

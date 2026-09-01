@@ -4070,6 +4070,96 @@ class CLITests(unittest.TestCase):
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
     @mock.patch("sidecar.cli.subprocess.Popen")
+    def test_daemon_start_forwards_the_auto_archive_policy_to_the_child(self, popen):
+        class StartingClient:
+            def __init__(self):
+                self.calls = 0
+
+            def ping(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise SidecarClientError("offline", code="connection_failed")
+                return {"ok": True, "op": "ping", "pid": 4321}
+
+        popen.return_value.pid = 4321
+        popen.return_value.returncode = None
+        popen.return_value.poll.return_value = None
+
+        code = main(
+            ["daemon", "start", "--auto-archive", "--auto-archive-after", "2h"],
+            client=StartingClient(),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+        )
+
+        self.assertEqual(0, code)
+        command = popen.call_args.args[0]
+        # The threshold is normalized to seconds before it crosses the
+        # process boundary, so the child parses one canonical form.
+        self.assertEqual(
+            ["daemon", "run", "--auto-archive", "--auto-archive-after", "7200.0"],
+            command[-5:],
+        )
+
+    def test_daemon_run_defaults_to_no_auto_archive_and_accepts_a_threshold(self):
+        observed = []
+
+        def capture(**kwargs):
+            observed.append(kwargs)
+
+        with mock.patch("sidecar.cli.run_foreground", side_effect=capture):
+            self.assertEqual(
+                0,
+                main(
+                    ["daemon", "run"],
+                    client=OfflineClient(),
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                ),
+            )
+            self.assertEqual(
+                0,
+                main(
+                    ["daemon", "run", "--auto-archive", "--auto-archive-after", "90m"],
+                    client=OfflineClient(),
+                    stdout=io.StringIO(),
+                    stderr=io.StringIO(),
+                ),
+            )
+
+        # Default off: nothing is passed, so the daemon keeps its own default.
+        self.assertNotIn("auto_archive", observed[0])
+        self.assertTrue(observed[1]["auto_archive"])
+        self.assertEqual(5400.0, observed[1]["auto_archive_after"])
+
+    def test_daemon_run_rejects_an_out_of_range_auto_archive_threshold(self):
+        with self.assertRaises(SystemExit):
+            main(
+                ["daemon", "run", "--auto-archive-after", "1s"],
+                client=OfflineClient(),
+                stdout=io.StringIO(),
+                stderr=io.StringIO(),
+            )
+
+    def test_a_threshold_without_the_switch_is_refused_rather_than_ignored(self):
+        for argv in (
+            ["daemon", "run", "--auto-archive-after", "2h"],
+            ["daemon", "start", "--auto-archive-after", "2h"],
+        ):
+            with self.subTest(argv=argv):
+                stderr = io.StringIO()
+                with mock.patch("sidecar.cli.run_foreground") as foreground:
+                    code = main(
+                        argv,
+                        client=OfflineClient(),
+                        stdout=io.StringIO(),
+                        stderr=stderr,
+                    )
+                self.assertEqual(2, code)
+                self.assertIn("requires --auto-archive", stderr.getvalue())
+                foreground.assert_not_called()
+
+    @mock.patch("sidecar.cli.subprocess.Popen")
     def test_daemon_start_is_idempotent_when_already_running(self, popen):
         stdout = io.StringIO()
 
@@ -6815,6 +6905,204 @@ class FollowerTests(unittest.TestCase):
         self.assertEqual(["1", "2"], [event.text for event in tailer.poll()])
         self.assertEqual([], tailer.poll())
         self.assertEqual([None, 2], adapter.calls)
+
+
+class ArchiveOfflineClient(OfflineClient):
+    """A daemonless client for the archive commands' fallback path."""
+
+    def archive_list(self):
+        raise SidecarClientError("offline", code="connection_failed")
+
+    def archive_preview(self, **kwargs):
+        del kwargs
+        raise SidecarClientError("offline", code="connection_failed")
+
+    def unarchive(self, targets):
+        del targets
+        raise SidecarClientError("offline", code="connection_failed")
+
+
+class ArchiveScopeTests(unittest.TestCase):
+    """Archiving is per host: it works with nothing but a filesystem, and
+    the fleet flags are refused with the ssh form that does work."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.runtime = Path(self.temporary.name)
+        patch = mock.patch.dict(
+            os.environ,
+            {"AGENT_SIDECAR_RUNTIME_DIR": str(self.runtime)},
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(self.temporary.cleanup)
+
+    def run_cli(self, argv, scanner=None, remote_aggregator=None):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        extra = {} if remote_aggregator is None else {
+            "remote_aggregator": remote_aggregator,
+        }
+        code = main(
+            argv,
+            scanner=FakeScanner() if scanner is None else scanner,
+            client=ArchiveOfflineClient(),
+            stdout=stdout,
+            stderr=stderr,
+            **extra,
+        )
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def idle_session(self, session_id, agent="claude", age_hours=10.0):
+        return make_session(
+            session_id,
+            status=Status.IDLE,
+            agent=agent,
+            updated_at=time.time() - age_hours * 3600.0,
+        )
+
+    # -- pure-local operation ------------------------------------------------
+
+    def test_archive_and_unarchive_work_without_a_daemon_or_network(self):
+        session = self.idle_session("pod-idle")
+        scanner = FakeScanner([session])
+
+        code, stdout, stderr = self.run_cli(
+            ["archive", "--idle-longer-than", "2h", "--yes"],
+            scanner,
+        )
+        self.assertEqual(0, code)
+        self.assertIn("archived 1 session(s) on this host", stdout)
+        self.assertEqual("", stderr)
+        # The registry is a plain file next to the rest of the runtime state,
+        # which is what makes `ssh pod agent-sidecar archive` sufficient.
+        self.assertTrue((self.runtime / "archive.json").is_file())
+
+        code, stdout, _ = self.run_cli(["list", "--json"], scanner)
+        self.assertEqual(0, code)
+        self.assertEqual([], json.loads(stdout))
+
+        code, stdout, _ = self.run_cli(["archive", "list"], scanner)
+        self.assertEqual(0, code)
+        self.assertIn("pod-idle", stdout)
+
+        code, stdout, _ = self.run_cli(["unarchive", "pod-idle"], scanner)
+        self.assertEqual(0, code)
+        self.assertIn("released 1 session(s) on this host", stdout)
+
+        code, stdout, _ = self.run_cli(["list", "--json"], scanner)
+        self.assertEqual(
+            ["pod-idle"],
+            [row["session_id"] for row in json.loads(stdout)],
+        )
+
+    # -- fleet flags are refused, not ignored --------------------------------
+
+    def test_fleet_flags_are_refused_with_the_ssh_form_that_works(self):
+        cases = (
+            (
+                ["archive", "--idle-longer-than", "30m", "--yes", "--remote"],
+                "ssh HOST agent-sidecar archive apply "
+                "--idle-longer-than 30m --yes",
+            ),
+            (
+                ["archive", "list", "--host", "edge"],
+                "ssh HOST agent-sidecar archive list",
+            ),
+            (
+                ["unarchive", "--all", "--remote"],
+                "ssh HOST agent-sidecar unarchive --all",
+            ),
+            (
+                ["unarchive", "pod-idle", "--host", "edge"],
+                "ssh HOST agent-sidecar unarchive pod-idle",
+            ),
+            (
+                ["list", "--archived", "--remote"],
+                "ssh HOST agent-sidecar archive list",
+            ),
+        )
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                code, stdout, stderr = self.run_cli(
+                    argv,
+                    FakeScanner([self.idle_session("pod-idle")]),
+                    remote_aggregator=lambda *args, **kwargs: self.fail(
+                        "archiving must never reach the fleet transport"
+                    ),
+                )
+                self.assertEqual(2, code)
+                self.assertEqual("", stdout)
+                self.assertIn("archiving is per host", stderr)
+                self.assertIn(expected, stderr)
+        # Nothing was archived by any of the refused invocations.
+        self.assertFalse((self.runtime / "archive.json").exists())
+
+    # -- the fleet view says what it cannot show -----------------------------
+
+    def test_remote_list_annotates_the_per_host_archive_scope(self):
+        local = self.idle_session("local-idle")
+        scanner = FakeScanner([local])
+
+        def aggregate(command, selected=None, recent_seconds=None):
+            del selected, recent_seconds
+            return RemoteAggregate(command, hosts=("edge",), succeeded=("edge",))
+
+        code, _, stderr = self.run_cli(
+            ["list", "--remote", "--json"],
+            scanner,
+            remote_aggregator=aggregate,
+        )
+        self.assertEqual(0, code)
+        # Nothing archived yet: no note, because there is nothing missing.
+        self.assertNotIn("archived", stderr)
+
+        self.assertEqual(0, self.run_cli(
+            ["archive", "--idle-longer-than", "2h", "--yes"],
+            scanner,
+        )[0])
+
+        code, stdout, stderr = self.run_cli(
+            ["list", "--remote", "--json"],
+            scanner,
+            remote_aggregator=aggregate,
+        )
+        self.assertEqual(0, code)
+        # The archived row is absent from the merged view (per-host visible
+        # sets), and the note explains the gap instead of leaving it silent.
+        self.assertEqual([], json.loads(stdout))
+        self.assertIn(
+            "1 session(s) archived on this host are not listed",
+            stderr,
+        )
+        self.assertIn("ssh HOST agent-sidecar archive list", stderr)
+
+    def test_a_corrupt_registry_does_not_add_a_second_complaint(self):
+        (self.runtime / "archive.json").write_text("{", encoding="utf-8")
+        scanner = FakeScanner([self.idle_session("local-idle")])
+
+        def aggregate(command, selected=None, recent_seconds=None):
+            del selected, recent_seconds
+            return RemoteAggregate(command, hosts=("edge",), succeeded=("edge",))
+
+        code, stdout, stderr = self.run_cli(
+            ["list", "--remote", "--json"],
+            scanner,
+            remote_aggregator=aggregate,
+        )
+
+        self.assertEqual(0, code)
+        # The snapshot path already reported the corruption and showed every
+        # session; the scope note must not add a second line about it.
+        archive_lines = [
+            line for line in stderr.splitlines() if "archive" in line
+        ]
+        self.assertEqual(1, len(archive_lines), archive_lines)
+        self.assertIn("showing every session", archive_lines[0])
+        self.assertEqual(
+            ["local-idle"],
+            [row["session_id"] for row in json.loads(stdout)],
+        )
 
 
 if __name__ == "__main__":

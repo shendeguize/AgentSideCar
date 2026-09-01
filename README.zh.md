@@ -333,6 +333,46 @@ agent-sidecar status --remote --remote-python /usr/bin/python3.11 --json
 `ps` 报告受支持的本地 Agent 可执行进程；进程存在只是辅助证据，无法可靠归属到
 某一个会话。`status` 只包含 `working` 和 `waiting` 会话。
 
+<a id="archive-idle-sessions"></a>
+
+### 归档空闲会话
+
+归档只把会话从各类列表中隐藏，不动会话本身：不修改厂商 transcript（保持逐字节
+不变）、不向任何进程发信号，唯一写入的是 Agent Sidecar 自己的注册表，即运行时
+目录下的 `archive.json`。已归档会话一旦重新活跃会自动解档，因此归档不会丢工作。
+
+```sh
+agent-sidecar archive --idle-longer-than 2h
+agent-sidecar archive --idle-longer-than 2h --dry-run
+agent-sidecar archive --idle-longer-than 24h --yes
+agent-sidecar archive --idle-longer-than 2h --status dead --yes
+agent-sidecar archive list
+agent-sidecar list --archived
+agent-sidecar unarchive <session-prefix>
+agent-sidecar unarchive --all
+```
+
+`archive` 选中至少 `--idle-longer-than` 时长没有活动（`30m`、`2h`、`24h`、`7d`
+或裸秒数，默认 `2h`）且处于可归档状态的会话（`--status`，默认 `idle,dead`；
+`working` 与 `waiting` 会被拒绝）。不带 `--yes` 时只打印将要发生的事。守护进程也
+可以按时间自动归档：`daemon start --auto-archive [--auto-archive-after 24h]`，
+默认关闭、只归档、永不 dispose。
+
+归档始终是按主机的：不存在机群级归档，注册表与它描述的会话放在同一台机器上，
+所以 pod 的归档要在该 pod 上管理。因此 `archive` 与 `unarchive` 会拒绝
+`--remote`/`--host`，并直接打印可用的调用方式：
+
+```sh
+ssh <host> agent-sidecar archive --idle-longer-than 24h --yes
+ssh <host> agent-sidecar archive list
+ssh <host> agent-sidecar unarchive --all
+```
+
+由于每台主机都会先应用自己的注册表再作答，合并后的 `list --remote` 视图是各主机
+**可见集**的并集——已归档的行在本地与远程两侧都不会出现。当本机存在已归档会话
+时，远程快照会在 stderr 打印一行提示，包含本地数量与上面的 ssh 用法，避免把被
+隐藏的行误读成会话丢失或主机不可达。
+
 ### 远程列表与状态
 
 `list --remote` 和 `status --remote` 会把本地快照与 DSH Center 清单中符合条件的
@@ -1032,12 +1072,15 @@ macOS LaunchAgent 和实验性 `send` 明确排除在外。Windows 目前不受�
 
 不能。远程 `list`、`status` 和 `watch --all --remote` 仅用于观察。远程前缀
 监视和远程消息投递均不受支持。实验性 `send` 仅限本地、只支持符合条件的数据源、
-由 `--allow-write` 显式保护，并且只在其遏制契约受支持的平台可用。
+由 `--allow-write` 显式保护，并且只在其遏制契约受支持的平台可用。归档同样按
+主机进行：请在拥有这些会话的主机上通过 ssh
+执行[`archive`/`unarchive`](#archive-idle-sessions)。
 
 ### Agent Sidecar 在哪里存储自己的状态？
 
 默认运行时目录为 `~/.agent_sidecar`。其中可能包含 Unix 套接字、PID 文件、有界
-诊断、HTTP 令牌和临时端口记录，以及仅在可变更发送操作之后出现的私有审计状态。
+诊断、HTTP 令牌和临时端口记录、[已归档会话](#archive-idle-sessions)的
+`archive.json` 注册表，以及仅在可变更发送操作之后出现的私有审计状态。
 删除任何内容前请参见[卸载](#uninstall)；正常卸载会有意保留与安全有关的历史。
 
 ## 许可证

@@ -890,6 +890,7 @@ describe('timeline source outcome integration', () => {
     health: TimelineHealth,
     entryCount: number,
     child = 'healthy-empty-content',
+    extra: Record<string, unknown> = {},
   ): string => renderToStaticMarkup(createElement(TimelineAvailabilityBoundary, {
     health,
     entryCount,
@@ -897,6 +898,7 @@ describe('timeline source outcome integration', () => {
     onRefresh: () => {},
     onClose: () => {},
     children: createElement('div', { 'data-testid': 'timeline-content' }, child),
+    ...extra,
   }))
 
   it('keeps healthy empty distinct from an all-source failure with retry', () => {
@@ -916,9 +918,11 @@ describe('timeline source outcome integration', () => {
       })
 
       expect(healthy).toMatchObject({ kind: 'healthy', legacy: false })
+      // `replay_unsupported` counts as unavailable, not failed: the source
+      // answered that this session has no replayable transcript.
       expect(failed).toMatchObject({
         kind: 'failed',
-        summary: { available: 0, unavailable: 2, failed: 2 },
+        summary: { available: 0, unavailable: 3, failed: 1 },
       })
 
       const healthyHtml = renderBoundary(healthy, 0)
@@ -927,7 +931,7 @@ describe('timeline source outcome integration', () => {
       expect(healthyHtml).not.toContain('agent-sidecar-timeline-degraded')
       expect(failedHtml).toContain('role="alert"')
       expect(failedHtml).toContain('All usable timeline sources failed')
-      expect(failedHtml).toContain('0 available · 2 unavailable · 2 failed')
+      expect(failedHtml).toContain('0 available · 3 unavailable · 1 failed')
       expect(failedHtml).toContain('agent-sidecar-timeline-retry')
       expect(failedHtml).toContain('Back to board')
       expect(failedHtml).not.toContain('healthy-empty-content')
@@ -969,6 +973,28 @@ describe('timeline source outcome integration', () => {
     } finally {
       setLocale('zh')
     }
+  })
+
+  it('names the daemon as the cause when the supervisor is down', () => {
+    const failed = normalizeTimelineHealth({
+      entries: [],
+      sourceOutcomes: failedOutcomes,
+      degraded: true,
+      reason: 'all_sources_failed',
+    })
+
+    // The generic "press refresh" line is useless while nothing is
+    // listening; the actionable fact is that the daemon is not running.
+    const down = renderBoundary(failed, 0, 'ignored', { daemonState: 'failed' })
+    expect(down).toContain('agent-sidecar daemon start')
+    expect(down).not.toContain('可点击「刷新」重试时间线来源')
+
+    const deferred = renderBoundary(failed, 0, 'ignored', { daemonState: 'defer' })
+    expect(deferred).toContain('服务拉起后')
+
+    const running = renderBoundary(failed, 0, 'ignored', { daemonState: 'hosted' })
+    expect(running).toContain('可点击「刷新」重试时间线来源')
+    expect(running).not.toContain('agent-sidecar daemon start')
   })
 
   it('fails closed on an unknown outcome and keeps field-less legacy pages healthy', () => {
@@ -1415,8 +1441,11 @@ describe('copy feedback timer lifecycle', () => {
       /useEffect\(\(\) => \{\s*copyAliveRef\.current = true\s*return \(\) => \{\s*copyAliveRef\.current = false\s*if \(copyTimerRef\.current !== null\) \{\s*clearTimeout\(copyTimerRef\.current\)\s*copyTimerRef\.current = null/,
     )
     expect(source).toContain('if (!copyAliveRef.current) return')
+    // The detail header copies several values (id / project / transcript) so
+    // its copied state names the field instead of a bare boolean; the timer
+    // lifecycle being pinned here is identical either way.
     expect(source).toMatch(
-      /if \(copyTimerRef\.current !== null\) clearTimeout\(copyTimerRef\.current\)\s*setCopied\(true\)\s*copyTimerRef\.current = setTimeout\(\(\) => \{\s*copyTimerRef\.current = null\s*setCopied\(false\)/,
+      /if \(copyTimerRef\.current !== null\) clearTimeout\(copyTimerRef\.current\)\s*setCopied\((?:true|field)\)\s*copyTimerRef\.current = setTimeout\(\(\) => \{\s*copyTimerRef\.current = null\s*setCopied\((?:false|null)\)/,
     )
   })
 })
@@ -1718,6 +1747,57 @@ describe('SettingsCard', () => {
     } finally {
       setLocale('zh')
     }
+  })
+
+  it('reports the daemon-reported archive policy, not the staged config', () => {
+    const renderWithPolicy = (
+      archivePolicy: { auto: boolean; autoAfterSeconds: number } | null,
+      values = configToValues(DEFAULT_CONFIG_VIEW),
+    ): string => renderToStaticMarkup(createElement(SettingsCard, {
+      values,
+      onChange: () => {},
+      onSave: () => {},
+      onDiscard: () => {},
+      writable: true,
+      dirty: false,
+      saving: false,
+      defaultOpen: true,
+      archivePolicy,
+    }))
+
+    try {
+      setLocale('en')
+      // Staged "on" while the reached daemon still has it off: the readout
+      // must follow the daemon, or the card claims sessions are being
+      // archived when nothing is.
+      const staged = { ...configToValues(DEFAULT_CONFIG_VIEW), archiveAuto: true }
+      expect(renderWithPolicy({ auto: false, autoAfterSeconds: 86400 }, staged))
+        .toContain('off')
+
+      expect(renderWithPolicy({ auto: true, autoAfterSeconds: 86400 }))
+        .toContain('threshold 24h')
+      // A non-hour threshold is reported as it is, never rounded into a lie.
+      expect(renderWithPolicy({ auto: true, autoAfterSeconds: 5400 }))
+        .toContain('threshold 1.5h')
+      expect(renderWithPolicy(null)).toContain('no daemon reached yet')
+
+      // And the note must say whose daemon the toggle can actually reach.
+      expect(renderWithPolicy(null)).toContain('daemons this plugin spawns')
+    } finally {
+      setLocale('zh')
+    }
+  })
+
+  it('disables the threshold field until automatic archiving is on', () => {
+    // A distinct value so the assertion cannot match the board time window,
+    // whose default is also 24.
+    const base = { ...configToValues(DEFAULT_CONFIG_VIEW), archiveAutoAfterHours: 48 }
+    const thresholdField = (html: string): string =>
+      html.match(/<input[^>]*value="48"[^>]*>/)?.[0] ?? ''
+
+    expect(thresholdField(renderOpenSettings(base, true))).toContain('disabled')
+    expect(thresholdField(renderOpenSettings({ ...base, archiveAuto: true }, true)))
+      .not.toContain('disabled')
   })
 
   it('marks a partial route invalid and disables misleading saves', () => {

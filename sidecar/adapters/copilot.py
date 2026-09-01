@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 
-from sidecar.adapters.base import Adapter, snip, timestamp_epoch
+from sidecar.adapters.base import Adapter, created_at_extra, snip, timestamp_epoch
 from sidecar.model import Event, Session, Status
 
 _WORKSPACE_BYTES = 64 * 1024
@@ -145,6 +145,9 @@ class CopilotAdapter(Adapter):
             extra = dict(metadata)
             extra["source"] = "workspace"
             extra["workspace"] = str(workspace)
+            extra.update(
+                created_at_extra(metadata.get("created_at"), metadata.get("createdAt"))
+            )
             model = _metadata_string(
                 metadata,
                 "model",

@@ -42,6 +42,14 @@ import type {
   PanelState,
   PrepareSuccess,
 } from './logic.ts'
+import {
+  injectedHead,
+  shouldVerifyDelivery,
+  verifyCopyKey,
+  VERIFY_SKEW_MS,
+  verifyInjection,
+} from './verify.ts'
+import type { VerifyProbe, VerifyView } from './verify.ts'
 
 /** Translate seat the panel consumes (module-local t by default). */
 export type InjectTranslate = (
@@ -77,6 +85,15 @@ export interface InjectPanelProps {
    * the detail timeline and closes the panel).
    */
   onObserve?(): void
+  /**
+   * Reads one newest-window page of the target's timeline. When given, an
+   * `unknown` outcome is checked against it automatically instead of being
+   * left to the operator (see verify.ts). Absent, the unknown page keeps
+   * its manual "go look at the session" hint.
+   */
+  verifyProbe?: VerifyProbe
+  /** Navigate to the target session; offered on the unknown result page. */
+  onOpenTarget?(sessionId: string): void
   /** Clock injection for the token countdown; defaults to Date.now. */
   nowMs?: () => number
   /** Locale seat override; defaults to the module-local table. */
@@ -250,6 +267,9 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
       ? props.defaultMode
       : effectiveInjectMode(props.target.agent, props.defaultMode))
   const [clock, setClock] = useState(() => now())
+  const [verify, setVerify] = useState<VerifyView>({ phase: 'off' })
+  /** When the execute call went out; bounds the transcript search window. */
+  const [injectedAt, setInjectedAt] = useState<number | null>(null)
   const textareaId = useId()
   const modeGroup = useId()
   const blockedReasonId = useId()
@@ -281,6 +301,36 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
     if (blockReason !== null) dispatch({ type: 'ELIGIBILITY_BLOCKED' })
   }, [blockReason])
 
+  // Automatic delivery check for an unknown outcome (§G). This only reads
+  // the target transcript; there is no path from here back to a send, so
+  // the no-retry rule (S6) is untouched.
+  const verifyHead = injectedHead(state)
+  const verifiable = shouldVerifyDelivery(state, props.verifyProbe !== undefined)
+  useEffect(() => {
+    const probe = props.verifyProbe
+    if (!verifiable || probe === undefined) {
+      setVerify({ phase: 'off' })
+      return
+    }
+    let cancelled = false
+    setVerify({ phase: 'running' })
+    void verifyInjection({
+      probe,
+      head: verifyHead,
+      ...(injectedAt !== null ? { sinceMs: injectedAt - VERIFY_SKEW_MS } : {}),
+      cancelled: () => cancelled,
+    }).then(
+      (outcome) => { if (!cancelled) setVerify({ phase: 'done', outcome }) },
+      // verifyInjection swallows probe failures; a throw here would be a
+      // bug in it, and still must not blank the result page.
+      () => { if (!cancelled) setVerify({ phase: 'done', outcome: 'unavailable' }) },
+    )
+    return () => { cancelled = true }
+    // Entering the unknown-result phase is the trigger; the head and probe
+    // are fixed for the lifetime of that phase.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [verifiable])
+
   const validation = validateMessage(draft)
   const gate = deriveEditorGate({
     injectEnabled: props.capability.inject && blockReason === null,
@@ -310,6 +360,7 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
   const handleExecute = async (): Promise<void> => {
     if (state.phase !== 'confirm' || blockReason !== null) return
     const { requestId, confirmToken, message } = state
+    setInjectedAt(now())
     dispatch({ type: 'EXECUTE_START' })
     let event: PanelEvent
     try {
@@ -404,6 +455,10 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
         ? css['resultFail']
         : css['resultUnknown']
     const resultCopy = resultCopyKey(resultAgent, result.outcome)
+    const verifyCopy = verifyCopyKey(verify)
+    const jumpTarget = props.onOpenTarget !== undefined
+      ? state.plan?.target.sessionId ?? null
+      : null
     return (
       <section
         {...panelSurface}
@@ -431,8 +486,34 @@ export function InjectPanel(props: InjectPanelProps): ReactNode {
               </p>
             )
             : null}
+          {verifyCopy !== null
+            ? (
+              <p
+                className={verify.phase === 'done' && verify.outcome === 'confirmed'
+                  ? css['resultOk']
+                  : css['resultDetail']}
+                role="status"
+                data-testid="agent-sidecar-inject-verify"
+              >
+                {t(verifyCopy)}
+              </p>
+            )
+            : null}
           <div className={css['footer']}>
             {closeButton}
+            {actions.showCheckSessionHint && jumpTarget !== null
+              ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => { props.onOpenTarget?.(jumpTarget) }}
+                  data-testid="agent-sidecar-inject-open-target"
+                >
+                  {t('inject.openTarget')}
+                </Button>
+              )
+              : null}
             {!isKimiResult && isDeliveredResult(result) && props.onObserve !== undefined
               ? (
                 <Button
