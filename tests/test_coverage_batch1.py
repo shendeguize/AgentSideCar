@@ -14,6 +14,7 @@ from unittest import mock
 import sidecar.daemon as daemon
 import sidecar.adapters.base as adapter_base
 import sidecar.bus as bus
+import sidecar.cluster as cluster
 import sidecar.index as index
 import sidecar.inject as inject
 import sidecar.kimi_acp as acp
@@ -7199,6 +7200,7 @@ class SendAuditExceptionalBranchTests(unittest.TestCase):
         }
         rows = remote_types._validate_protocol_cluster_rows([valid], "pod")
         self.assertEqual("pod", rows[0]["host"])
+        self.assertEqual(["pod"], rows[0]["hosts"])
 
         for bad in (None, {}, [{"unexpected": True}]):
             with self.subTest(bad=bad):
@@ -7245,4 +7247,40 @@ class SendAuditExceptionalBranchTests(unittest.TestCase):
                 [valid],
                 "pod",
             )
+
+    def test_remote_cluster_rows_attribute_a_remote_self_label_to_its_alias(self):
+        # Every host clusters its own sessions under "local"; if that label
+        # survived the trip, each remote group would claim to exist locally.
+        template = {
+            "cluster_id": "cluster",
+            "project": "/work",
+            "agent": "claude",
+            "model": "model",
+            "model_provider": "provider",
+            "time_bucket": 10,
+            "count": 1,
+            "session_ids": ["sid"],
+            "hosts": ["local"],
+        }
+
+        rows = remote_types._validate_protocol_cluster_rows([template], "pod-a")
+        self.assertEqual(["pod-a"], rows[0]["hosts"])
+
+        cased = remote_types._validate_protocol_cluster_rows(
+            [dict(template, hosts=["LOCAL"])],
+            "pod-a",
+        )
+        self.assertEqual(["pod-a"], cased[0]["hosts"])
+
+        # A remote that already names itself must not be duplicated.
+        deduped = remote_types._validate_protocol_cluster_rows(
+            [dict(template, hosts=["local", "pod-a", "pod-b"])],
+            "pod-a",
+        )
+        self.assertEqual(["pod-a", "pod-b"], deduped[0]["hosts"])
+
+        # Merging must keep local and remote groups distinct.
+        local_group = dict(template, hosts=["local"], host="local")
+        merged = cluster.merge_cluster_results([local_group, dict(rows[0])])
+        self.assertEqual(["local", "pod-a"], merged[0]["hosts"])
 
