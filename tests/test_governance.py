@@ -44,7 +44,7 @@ EXPECTED_REQUIRED_CONTEXTS = {
 }
 README_HEADING_PAIRS = (
     (1, "Agent Sidecar", "Agent Sidecar"),
-    (2, "Version 0.9.0", "版本 0.9.0"),
+    (2, "Version 0.10.0", "版本 0.10.0"),
     (2, "Support matrix", "支持矩阵"),
     (2, "Supported local sources", "支持的本地数据源"),
     (2, "Installation", "安装"),
