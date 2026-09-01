@@ -18,6 +18,13 @@ from sidecar.json_limits import JSONLimits, validate_json
 
 
 class ClusterTests(unittest.TestCase):
+    def test_cluster_provider_keyword_detection_is_fail_closed(self):
+        self.assertTrue(cli._accepts_keyword_argument(lambda **kwargs: None, "recent_seconds"))
+        self.assertTrue(cli._accepts_keyword_argument(lambda recent_seconds: None, "recent_seconds"))
+        self.assertFalse(cli._accepts_keyword_argument(lambda other: None, "recent_seconds"))
+        with mock.patch.object(cli.inspect, "signature", side_effect=ValueError):
+            self.assertFalse(cli._accepts_keyword_argument(object(), "recent_seconds"))
+
     def test_model_metadata_helpers_prefer_nested_and_nonempty_values(self):
         self.assertEqual(
             "nested-model",
