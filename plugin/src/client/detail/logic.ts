@@ -133,6 +133,70 @@ export function formatEventTime(thenMs: number, nowMs: number): string {
   return sameDay ? hhmm : `${pad2(then.getMonth() + 1)}-${pad2(then.getDate())} ${hhmm}`
 }
 
+/**
+ * Coarse elapsed span for the header's session-duration row: whole
+ * minutes below an hour, then `Nh Mm`, then `Nd Mh`. Returns null for a
+ * non-finite or inverted span so the caller hides the row rather than
+ * printing a negative duration from clock skew.
+ */
+export function formatDuration(spanMs: number): string | null {
+  if (!Number.isFinite(spanMs) || spanMs < 0) return null
+  if (spanMs < MINUTE_MS) return DETAIL_STRINGS.header.durationUnderMinute
+  const minutes = Math.floor(spanMs / MINUTE_MS)
+  if (spanMs < HOUR_MS) return formatTemplate(DETAIL_STRINGS.header.durationMinutes, { m: minutes })
+  const hours = Math.floor(spanMs / HOUR_MS)
+  if (spanMs < DAY_MS) {
+    return formatTemplate(DETAIL_STRINGS.header.durationHours, {
+      h: hours,
+      m: minutes % 60,
+    })
+  }
+  return formatTemplate(DETAIL_STRINGS.header.durationDays, {
+    d: Math.floor(spanMs / DAY_MS),
+    h: hours % 24,
+  })
+}
+
+/** One conversation-shape count in the header's loaded-event summary. */
+export interface TimelineKindCount {
+  kind: TimelineKindToken
+  label: string
+  count: number
+}
+
+/**
+ * Count the entries currently loaded, by kind. Deliberately scoped to what
+ * is in memory — the header labels it as such, because history pages are
+ * fetched on demand and no source reports an authoritative total.
+ */
+export function countTimelineKinds(
+  entries: ReadonlyArray<{ kind: TimelineKindToken }>,
+): TimelineKindCount[] {
+  const counts = new Map<TimelineKindToken, number>()
+  for (const entry of entries) {
+    counts.set(entry.kind, (counts.get(entry.kind) ?? 0) + 1)
+  }
+  // Conversation shape first; the rest keep insertion order behind it.
+  const order: readonly TimelineKindToken[] = [
+    'user',
+    'assistant',
+    'thinking',
+    'toolCall',
+    'toolResult',
+    'turn',
+    'step',
+    'error',
+    'other',
+  ]
+  const rows: TimelineKindCount[] = []
+  for (const kind of order) {
+    const count = counts.get(kind)
+    if (count === undefined || count === 0) continue
+    rows.push({ kind, label: kindLabel(kind, kind), count })
+  }
+  return rows
+}
+
 // ---------------------------------------------------------------------------
 // Event-kind classification (icon + label).
 // ---------------------------------------------------------------------------

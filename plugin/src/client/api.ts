@@ -95,6 +95,10 @@ export interface SessionView {
   title: string
   project: string
   updated_at: number
+  /** Epoch SECONDS of session birth; absent when the adapter cannot tell. */
+  created_at?: number
+  /** Absolute transcript path; absent for adapters with no file on disk. */
+  transcript?: string
   model?: string
   model_provider?: string
   last_event: SessionEventSummary | null
@@ -166,9 +170,26 @@ export function injectBlockReason(
   return normalized.allowed ? null : normalized.reason
 }
 
+/** One archived board row (host: session-store.ts `ArchivedSessionView`). */
+export interface ArchivedSessionView extends SessionView {
+  /** Epoch SECONDS of the archive decision (same clock as `updated_at`). */
+  archived_at: number
+  archive_reason: string
+}
+
+/** Archive policy advertised by the daemon (host: session-store.ts). */
+export interface ArchivePolicy {
+  auto: boolean
+  autoAfterSeconds: number
+  defaultIdleSeconds: number
+}
+
 /** Full board state (host: session-store.ts). */
 export interface BoardState {
   sessions: SessionView[]
+  /** Absent on hosts that predate archiving; read as an empty list. */
+  archived?: ArchivedSessionView[]
+  archivePolicy?: ArchivePolicy | null
   streamHealth: StreamHealth
   lastReconcileAt: number | null
 }
@@ -177,7 +198,11 @@ export interface BoardState {
 export interface StateSnapshot {
   daemon: { state: SupervisorState; lastPing: PingInfo | null }
   board: BoardState
-  capabilities: { inject: boolean }
+  capabilities: {
+    inject: boolean
+    /** Whether `dsh.dispose` can succeed now; absent on older hosts. */
+    dispose?: boolean
+  }
 }
 
 /** Stable, content-free host result for one timeline source consultation. */
@@ -239,9 +264,21 @@ const TIMELINE_SOURCE_OUTCOMES: ReadonlySet<string> = new Set([
   'source_failed',
 ])
 
+/**
+ * Mirror of the host's classification (fusion.ts `TIMELINE_FAILURE_OUTCOMES`)
+ * and must move with it. `replay_unsupported` is not a failure: it says the
+ * session's transcript shape has no history source, which belongs in the
+ * summary's "unavailable" column next to a source that was never wired.
+ */
 const TIMELINE_FAILURE_OUTCOMES: ReadonlySet<TimelineSourceOutcome> = new Set([
-  'replay_unsupported',
   'source_failed',
+])
+
+/** Outcomes that contributed nothing but broke nothing. */
+const TIMELINE_INERT_OUTCOMES: ReadonlySet<TimelineSourceOutcome> = new Set([
+  'unavailable',
+  'not_found',
+  'replay_unsupported',
 ])
 
 export const LEGACY_TIMELINE_HEALTH: TimelineHealth = Object.freeze({
@@ -302,7 +339,7 @@ export function normalizeTimelineHealth(page: unknown): TimelineHealth {
 
   const values = Object.values(outcomes)
   const failures = values.filter((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome))
-  const usable = values.filter((outcome) => outcome !== 'unavailable' && outcome !== 'not_found')
+  const usable = values.filter((outcome) => !TIMELINE_INERT_OUTCOMES.has(outcome))
   const allSourcesFailed =
     entries.length === 0 &&
     usable.length > 0 &&
@@ -350,6 +387,82 @@ export interface DaemonRetryActionBody {
   type: 'daemon.retry'
 }
 
+/** One archive target (host: routes.ts `ArchiveTarget`). */
+export interface ArchiveTarget {
+  agent: string
+  sessionId: string
+}
+
+/** `POST action` body previewing a batch archive (host: routes.ts). */
+export interface ArchivePreviewActionBody {
+  type: 'archive.preview'
+  idleSeconds: number
+  statuses?: string[]
+}
+
+/** `POST action` body archiving a previewed subset (host: routes.ts). */
+export interface ArchiveApplyActionBody {
+  type: 'archive.apply'
+  targets: ArchiveTarget[]
+  /** Single-use token minted by the matching `archive.preview`. */
+  token: string
+}
+
+/** `POST action` body releasing archived sessions (host: routes.ts). */
+export interface ArchiveUnarchiveActionBody {
+  type: 'archive.unarchive'
+  targets?: ArchiveTarget[]
+  all?: true
+}
+
+/** `POST action` body reading the archive registry (host: routes.ts). */
+export interface ArchiveListActionBody {
+  type: 'archive.list'
+}
+
+/** `POST action` body ending one live dsh session (host: routes.ts). */
+export interface DshDisposeActionBody {
+  type: 'dsh.dispose'
+  sessionId: string
+}
+
+/**
+ * Outcome of one dispose attempt. Content-free by construction: host error
+ * text can name paths and prompts, so only the class of answer crosses the
+ * boundary (host: dsh-dispose.ts `DisposeOutcome`).
+ */
+export type DisposeOutcome =
+  | 'disposed'
+  | 'not_found'
+  | 'unsupported'
+  | 'timeout'
+  | 'failed'
+
+/** `dsh.dispose` result as it reaches the browser. */
+export interface DisposeResult {
+  outcome: DisposeOutcome
+}
+
+/** Daemon `archive_preview` result as it reaches the browser. */
+export interface ArchivePreviewResult {
+  idle_seconds: number
+  statuses: string[]
+  candidates: SessionView[]
+  count: number
+  token: string
+}
+
+/** Daemon `archive_apply` result as it reaches the browser. */
+export interface ArchiveApplyResult {
+  count: number
+  requested: number
+}
+
+/** Daemon `unarchive` result as it reaches the browser. */
+export interface UnarchiveResult {
+  count: number
+}
+
 /** Analysis target selector (host: routes.ts `AnalysisTargetRequest`). */
 export type AnalysisTargetKind = 'session' | 'project' | 'cross-agent'
 
@@ -387,6 +500,11 @@ export type ActionEnvelope =
   | AnalysisRequestActionBody
   | AnalysisFollowupActionBody
   | AnalysisCancelActionBody
+  | ArchivePreviewActionBody
+  | ArchiveApplyActionBody
+  | ArchiveUnarchiveActionBody
+  | ArchiveListActionBody
+  | DshDisposeActionBody
 
 // ---------------------------------------------------------------------------
 // Injectable browser primitives (structural, so node tests can fake them).
@@ -616,4 +734,62 @@ export async function postAction(
     },
     opts,
   )
+}
+
+/**
+ * Preview which sessions a batch archive would hide. The returned token is
+ * single-use and must be handed back verbatim to {@link archiveApply}, so
+ * the daemon can verify the confirmed set against what the user reviewed.
+ */
+export async function archivePreview(
+  idleSeconds: number,
+  statuses?: readonly string[],
+  opts: RequestOptions = {},
+): Promise<ArchivePreviewResult> {
+  const body: ArchivePreviewActionBody = { type: 'archive.preview', idleSeconds }
+  if (statuses !== undefined) body.statuses = [...statuses]
+  return (await postAction(body, opts)) as ArchivePreviewResult
+}
+
+/** Archive a subset of one preview's candidates. */
+export async function archiveApply(
+  targets: readonly ArchiveTarget[],
+  token: string,
+  opts: RequestOptions = {},
+): Promise<ArchiveApplyResult> {
+  return (await postAction(
+    { type: 'archive.apply', targets: [...targets], token },
+    opts,
+  )) as ArchiveApplyResult
+}
+
+/**
+ * End one live dsh session. Unlike archiving this is irreversible and is
+ * therefore never issued in bulk without an explicit opt-in, and never at
+ * all for non-dsh agents (they have no supervised session to end).
+ *
+ * A settled attempt always resolves — including `failed` and `timeout`.
+ * Only transport/gate refusals reject with {@link ApiError}, notably 501
+ * `dispose_unavailable` on a host without the capability.
+ */
+export async function dshDispose(
+  sessionId: string,
+  opts: RequestOptions = {},
+): Promise<DisposeResult> {
+  return (await postAction(
+    { type: 'dsh.dispose', sessionId },
+    opts,
+  )) as DisposeResult
+}
+
+/** Return archived sessions to the board. */
+export async function archiveUnarchive(
+  targets: readonly ArchiveTarget[] | 'all',
+  opts: RequestOptions = {},
+): Promise<UnarchiveResult> {
+  const body: ArchiveUnarchiveActionBody =
+    targets === 'all'
+      ? { type: 'archive.unarchive', all: true }
+      : { type: 'archive.unarchive', targets: [...targets] }
+  return (await postAction(body, opts)) as UnarchiveResult
 }

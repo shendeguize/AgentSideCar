@@ -72,6 +72,7 @@ import {
   type DshModelRoute,
   DshResumeGuardError,
 } from './dsh-inject.ts'
+import { createDshDisposer } from './dsh-dispose.ts'
 import {
   FusionQuery,
   type DshEventFace,
@@ -228,9 +229,16 @@ export interface SessionPersistenceFace {
   }>
 }
 
-/** `ctx.sessions` direct live-session lookup used by fusion on demand. */
+/**
+ * `ctx.sessions` direct live-session lookup used by fusion on demand, plus
+ * the optional dispose the `dsh.dispose` action drives (the in-process form
+ * of the host's `session.dispose` RPC). `dispose` is optional because a
+ * host without it must degrade to "capability absent", never to a call
+ * that throws at the moment the operator confirms it.
+ */
 export interface SessionsServiceFace {
   get(sessionId: string): DshSessionFace | undefined
+  dispose?(sessionId: string): void | Promise<void>
 }
 
 /** The plugin context with the two hard-injected services visible. */
@@ -441,10 +449,22 @@ export function apply(ctx: HostContext, config: Config): void {
     })
   }
 
+  /**
+   * Auto-archive flags for a daemon we are about to spawn. Read at spawn
+   * time from the live settings, so a saved policy applies to the next
+   * hosted daemon without a plugin reload — and never to a daemon we merely
+   * adopted, which owns whatever policy it was started with.
+   */
+  const autoArchiveArgv = (): string[] => {
+    const policy = effective.archive
+    if (!policy.auto) return []
+    return ['--auto-archive', '--auto-archive-after', `${policy.autoAfterHours}h`]
+  }
+
   /** Spawn `<command> daemon run` as a supervised foreground child. */
   const spawnDaemon = (): DaemonProcess => {
     const handle = ctx.subprocess.spawn({
-      argv: [...command, 'daemon', 'run'],
+      argv: [...command, 'daemon', 'run', ...autoArchiveArgv()],
       cwd: homedir(),
       stdio: { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' },
       graceMs: DAEMON_GRACE_MS,
@@ -535,6 +555,36 @@ export function apply(ctx: HostContext, config: Config): void {
       replay: replayFace,
     })
 
+  /**
+   * Current `sessions` service, resolved per call. The injected property is
+   * the production face; reflect `get` is a late-binding fallback for hosts
+   * that expose the current generation only there. Any foreign-service
+   * exception degrades to null rather than escaping through an HTTP route.
+   */
+  const currentSessionsService = (
+    sctx: HostContext & { sessions?: SessionsServiceFace },
+  ): SessionsServiceFace | null => {
+    try {
+      const direct = sctx.sessions
+      if (direct !== undefined && typeof direct.get === 'function') return direct
+      const getter = (sctx as { get?: (name: string) => unknown }).get
+      if (typeof getter !== 'function') return null
+      const current = getter.call(sctx, 'sessions') as SessionsServiceFace | null | undefined
+      return current !== undefined && current !== null && typeof current.get === 'function'
+        ? current
+        : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Installed by the lazy `sessions` binding below; null whenever no
+   * generation is live, which is exactly when `capabilities.dispose` must
+   * read false.
+   */
+  let sessionsResolver: (() => SessionsServiceFace | null) | null = null
+
   // DshEventFace is bound through the lazy `sessions` inject below, but
   // fusion must exist NOW (routes capture it). Holder pattern: construct
   // sidecar-only first, swap in a feed-backed instance when dsh-session
@@ -562,6 +612,9 @@ export function apply(ctx: HostContext, config: Config): void {
     {
       applySnapshot: (rows) => {
         store.applySnapshot(rows)
+      },
+      setArchived: (rows, policy) => {
+        store.setArchived(rows, policy)
       },
       applyEvent: (ev) => {
         store.applyEvent(ev)
@@ -998,6 +1051,11 @@ export function apply(ctx: HostContext, config: Config): void {
     return { kind: 'cross-agent', title: 'cross-agent overview', summaryText }
   }
 
+  const disposer = createDshDisposer({
+    resolve: () => sessionsResolver?.() ?? null,
+    log,
+  })
+
   const routes = createRoutes({
     store,
     supervisor,
@@ -1013,6 +1071,36 @@ export function apply(ctx: HostContext, config: Config): void {
       buildInput: buildAnalysisInput,
       available: () => liveAgents !== null,
       modelConfigured: () => resolveAnalysisModel() !== null,
+    },
+    // dsh dispose: in-process, capability-gated, and reconciled straight
+    // after so the board stops showing a session the host no longer has.
+    dispose: {
+      available: () => disposer.available(),
+      dispose: async (sessionId) => {
+        const result = await disposer.dispose(sessionId)
+        if (result.outcome === 'disposed' || result.outcome === 'not_found') {
+          await reconciler.reconcileNow()
+        }
+        return result
+      },
+    },
+    // Archive ops go straight to the daemon socket: the registry is the
+    // daemon's, so the board never keeps a second copy of the decision.
+    // A successful mutation reconciles immediately instead of waiting out
+    // the poll cadence.
+    archive: {
+      preview: (idleSeconds, statuses) => client.archivePreview(idleSeconds, statuses),
+      apply: async (targets, token) => {
+        const result = await client.archiveApply(targets, token)
+        await reconciler.reconcileNow()
+        return result
+      },
+      unarchive: async (targets) => {
+        const result = await client.unarchive(targets)
+        await reconciler.reconcileNow()
+        return result
+      },
+      list: () => client.archiveList(),
     },
     log,
   })
@@ -1066,6 +1154,13 @@ export function apply(ctx: HostContext, config: Config): void {
     const sctx = injected as HostContext & { sessions?: SessionsServiceFace }
     const bindingGeneration = ++dshFeedGeneration
     let bindingActive = true
+    // Same binding, second consumer: the dispose action. It resolves the
+    // service per call through the shared helper, so a swapped generation
+    // is never disposed against a captured stale reference.
+    sessionsResolver = () =>
+      bindingActive && bindingGeneration === dshFeedGeneration
+        ? currentSessionsService(sctx)
+        : null
     // 'session/*' keys live in dsh-session's Events augmentation, which
     // this package deliberately does not import (structural-faces rule);
     // the cast keeps the listener registration honest at runtime.
@@ -1083,25 +1178,7 @@ export function apply(ctx: HostContext, config: Config): void {
         if (!bindingActive || bindingGeneration !== dshFeedGeneration) {
           return undefined
         }
-        try {
-          const direct = sctx.sessions
-          if (direct !== undefined && typeof direct.get === 'function') {
-            return direct.get(sessionId)
-          }
-          const getter = (sctx as { get?: (name: string) => unknown }).get
-          if (typeof getter !== 'function') return undefined
-          const current = getter.call(sctx, 'sessions') as
-            | SessionsServiceFace
-            | undefined
-            | null
-          return current !== undefined &&
-            current !== null &&
-            typeof current.get === 'function'
-            ? current.get(sessionId)
-            : undefined
-        } catch {
-          return undefined
-        }
+        return currentSessionsService(sctx)?.get(sessionId)
       },
     }
     const withFeed = buildFusion(feed)
@@ -1111,6 +1188,10 @@ export function apply(ctx: HostContext, config: Config): void {
     previous.stop()
     sctx.effect(() => () => {
       bindingActive = false
+      // Drop the dispose resolver with the binding that installed it, so a
+      // departed service reports the capability as absent rather than
+      // failing at confirm time. A newer binding's resolver is left alone.
+      if (bindingGeneration === dshFeedGeneration) sessionsResolver = null
       // A stale disposer must never downgrade a newer sessions generation.
       if (
         bindingGeneration !== dshFeedGeneration ||

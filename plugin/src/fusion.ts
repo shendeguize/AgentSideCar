@@ -435,9 +435,24 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-const TIMELINE_FAILURE_OUTCOMES = new Set<TimelineSourceOutcome>([
+/**
+ * Which outcomes count as the page being degraded.
+ *
+ * `replay_unsupported` is deliberately NOT one of them. It means the daemon
+ * understood the request and answered that this session's transcript shape
+ * has no replay — the same category of answer as a source that was never
+ * wired, not a source that broke. Counting it as a failure painted every
+ * such session's timeline as degraded and, when it was the only usable
+ * source, as `all_sources_failed`, which told the operator their data was
+ * lost when nothing was wrong.
+ */
+const TIMELINE_FAILURE_OUTCOMES = new Set<TimelineSourceOutcome>(['source_failed'])
+
+/** Outcomes that mean "this source had nothing to contribute", not "it broke". */
+const TIMELINE_INERT_OUTCOMES = new Set<TimelineSourceOutcome>([
+  'unavailable',
+  'not_found',
   'replay_unsupported',
-  'source_failed',
 ])
 
 /**
@@ -493,9 +508,7 @@ function degradationOf(sourceOutcomes: TimelineSourceOutcomes, entriesEmpty: boo
   const outcomes = Object.values(sourceOutcomes)
   const failures = outcomes.filter((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome))
   if (failures.length === 0) return { degraded: false, reason: null }
-  const usable = outcomes.filter(
-    (outcome) => outcome !== 'unavailable' && outcome !== 'not_found',
-  )
+  const usable = outcomes.filter((outcome) => !TIMELINE_INERT_OUTCOMES.has(outcome))
   return {
     degraded: true,
     reason:

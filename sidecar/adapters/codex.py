@@ -17,6 +17,7 @@ from sidecar.adapters.base import (
     MetadataCache,
     as_mapping,
     compact_json,
+    created_at_extra,
     file_signature,
     local_timestamp,
     read_jsonl_prefix,
@@ -24,6 +25,7 @@ from sidecar.adapters.base import (
     snip,
     text_content,
 )
+from sidecar.adapters.replay import JsonlReplayMixin
 from sidecar.model import Event, Session, Status
 
 _DISCOVERY_BYTES = 512 * 1024
@@ -137,12 +139,15 @@ def _codex_metadata(path: Path) -> Tuple[str, str, str, Dict[str, Any]]:
     model = ""
     model_provider = ""
     cli_version = ""
+    created_at: Any = None
 
     for record in read_jsonl_prefix(
         path,
         max_bytes=_DISCOVERY_BYTES,
         max_records=_DISCOVERY_RECORDS,
     ):
+        if created_at is None:
+            created_at = record.get("timestamp")
         record_type = str(record.get("type") or "")
         payload = as_mapping(record.get("payload"))
         if record_type == "session_meta":
@@ -161,6 +166,7 @@ def _codex_metadata(path: Path) -> Tuple[str, str, str, Dict[str, Any]]:
             break
 
     extra: Dict[str, Any] = {"source": "rollout"}
+    extra.update(created_at_extra(created_at))
     for key, value in (
         ("originator", originator),
         ("model", model),
@@ -540,7 +546,7 @@ def _token_event(
     )
 
 
-class CodexAdapter(Adapter):
+class CodexAdapter(JsonlReplayMixin, Adapter):
     name = "codex"
     agent_names = ("codex",)
 

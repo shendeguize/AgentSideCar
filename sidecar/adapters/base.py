@@ -329,6 +329,29 @@ def timestamp_epoch(value: Any) -> Optional[float]:
     return timestamp_epoch(number)
 
 
+CREATED_AT_KEY = "created_at_epoch"
+
+
+def created_at_extra(*candidates: Any) -> Dict[str, float]:
+    """Return the uniform ``created_at_epoch`` extra for the first usable candidate.
+
+    Adapters read session birth time from wildly different native shapes
+    (ISO strings, epoch seconds, epoch milliseconds) under half a dozen key
+    spellings. The board needs ONE contract, so every adapter funnels its
+    candidates through here and the detail view can compute a session
+    duration without knowing which agent produced the row. Values that do
+    not parse, or that are not a plausible wall-clock instant, are omitted
+    rather than guessed — an absent duration beats a wrong one.
+    """
+
+    for candidate in candidates:
+        epoch = timestamp_epoch(candidate)
+        if epoch is None or not math.isfinite(epoch) or epoch <= 0:
+            continue
+        return {CREATED_AT_KEY: epoch}
+    return {}
+
+
 def local_timestamp(value: Any = None, fallback: Optional[float] = None) -> str:
     """Convert epoch seconds/milliseconds or an ISO UTC value to local ISO time."""
 
@@ -445,6 +468,7 @@ class Adapter(ABC):
 
 __all__ = [
     "Adapter",
+    "CREATED_AT_KEY",
     "ContentBlockEvent",
     "ContentBlockRenderer",
     "DEFAULT_METADATA_CACHE_SIZE",
@@ -455,6 +479,7 @@ __all__ = [
     "compact_json",
     "content_block_events",
     "content_items",
+    "created_at_extra",
     "epoch_seconds",
     "file_signature",
     "local_timestamp",

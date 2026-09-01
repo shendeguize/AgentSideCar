@@ -14,8 +14,9 @@
  *   closes it after the response; we mirror that semantic.
  * - `replay {session_id, after_seq, limit}` (T5.2) answers one bounded page
  *   `{events, last_seq, truncated, count, agent, ...}` sourced from the
- *   session adapter's own transcript replay (daemon `_replay_response`;
- *   today only dsh sessions provide one). Unlike ping/status, {@link
+ *   session adapter's own transcript replay (daemon `_replay_response`):
+ *   a compressed-stream decode for dsh, a line-ordinal scan of the
+ *   append-only JSONL for the other agents. Unlike ping/status, {@link
  *   SidecarSocketClient.replay} REJECTS with a coded
  *   {@link SidecarDaemonError} instead of resolving null: the daemon error
  *   vocabulary (`unknown_session` / `replay_unsupported` / `replay_failed`
@@ -90,9 +91,65 @@ export interface SidecarEvent {
   extra: Record<string, unknown>
 }
 
+/** One archived session identity from the daemon registry (`archive.py`). */
+export interface ArchiveEntry {
+  agent: string
+  session_id: string
+  /** Epoch seconds of the archive decision. */
+  archived_at: number
+  reason: string
+}
+
+/** A session row the daemon is currently hiding from the board. */
+export type ArchivedSessionRow = SessionRow & {
+  archived_at: number
+  archive_reason: string
+}
+
+/** Archive policy advertised by `status` (daemon `_status_response`). */
+export interface ArchivePolicy {
+  auto: boolean
+  autoAfterSeconds: number
+  defaultIdleSeconds: number
+}
+
+/** Parsed `archive_preview` response: the candidate set plus its token. */
+export interface ArchivePreview {
+  idleSeconds: number
+  statuses: string[]
+  candidates: SessionRow[]
+  count: number
+  /** Single-use confirmation token that `archive_apply` requires. */
+  token: string
+}
+
+/** Parsed `archive_apply` response. */
+export interface ArchiveApplyResult {
+  archived: ArchiveEntry[]
+  count: number
+  requested: number
+}
+
+/** Parsed `unarchive` response. */
+export interface UnarchiveResult {
+  released: Array<{ agent: string; session_id: string }>
+  count: number
+}
+
+/** Parsed `archive_list` response. */
+export interface ArchiveListResult {
+  entries: ArchiveEntry[]
+  sessions: ArchivedSessionRow[]
+  count: number
+}
+
 /** Parsed `status` response. */
 export interface StatusSnapshot {
   sessions: SessionRow[]
+  /** Sessions hidden by the archive registry; empty on pre-archive daemons. */
+  archived: ArchivedSessionRow[]
+  /** Null when the daemon predates the archive policy field. */
+  archivePolicy: ArchivePolicy | null
   scanErrors: Array<Record<string, unknown>>
   tailErrors: Array<Record<string, unknown>>
   diagnostics: Array<Record<string, unknown>>
@@ -318,22 +375,87 @@ function parseRecordList(value: unknown): Array<Record<string, unknown>> | null 
   return out
 }
 
-function parseStatusSnapshot(value: unknown): StatusSnapshot | null {
-  if (!isRecord(value) || value['ok'] !== true) return null
-  const rawSessions = value['sessions']
-  if (!Array.isArray(rawSessions)) return null
-  const sessions: SessionRow[] = []
-  for (const raw of rawSessions) {
+function parseSessionRows(value: unknown): SessionRow[] | null {
+  if (!Array.isArray(value)) return null
+  const rows: SessionRow[] = []
+  for (const raw of value) {
     // Mirror sidecar/client.py: a non-object row invalidates the response.
     if (!isRecord(raw)) return null
     const row = parseSessionRow(raw)
-    if (row !== null) sessions.push(row)
+    if (row !== null) rows.push(row)
   }
+  return rows
+}
+
+/**
+ * Archived rows are ordinary session rows carrying the registry decision.
+ * A row without a usable decision is dropped rather than shown as active:
+ * the daemon already excluded it from `sessions`.
+ */
+function parseArchivedRows(value: unknown): ArchivedSessionRow[] | null {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return null
+  const rows: ArchivedSessionRow[] = []
+  for (const raw of value) {
+    if (!isRecord(raw)) return null
+    const row = parseSessionRow(raw)
+    if (row === null) continue
+    const archivedAt = raw['archived_at']
+    const reason = raw['archive_reason']
+    if (typeof archivedAt !== 'number' || !Number.isFinite(archivedAt)) continue
+    if (typeof reason !== 'string' || reason === '') continue
+    rows.push({ ...row, archived_at: archivedAt, archive_reason: reason })
+  }
+  return rows
+}
+
+function parseArchivePolicy(value: unknown): ArchivePolicy | null {
+  if (!isRecord(value)) return null
+  const auto = value['auto']
+  const autoAfter = value['auto_after_seconds']
+  const defaultIdle = value['default_idle_seconds']
+  if (typeof auto !== 'boolean') return null
+  if (typeof autoAfter !== 'number' || !Number.isFinite(autoAfter)) return null
+  if (typeof defaultIdle !== 'number' || !Number.isFinite(defaultIdle)) return null
+  return { auto, autoAfterSeconds: autoAfter, defaultIdleSeconds: defaultIdle }
+}
+
+function parseArchiveEntries(value: unknown): ArchiveEntry[] | null {
+  if (!Array.isArray(value)) return null
+  const entries: ArchiveEntry[] = []
+  for (const raw of value) {
+    if (!isRecord(raw)) return null
+    const agent = raw['agent']
+    const sessionId = raw['session_id']
+    const archivedAt = raw['archived_at']
+    const reason = raw['reason']
+    if (typeof agent !== 'string' || agent === '') return null
+    if (typeof sessionId !== 'string' || sessionId === '') return null
+    if (typeof archivedAt !== 'number' || !Number.isFinite(archivedAt)) return null
+    if (typeof reason !== 'string' || reason === '') return null
+    entries.push({ agent, session_id: sessionId, archived_at: archivedAt, reason })
+  }
+  return entries
+}
+
+function parseStatusSnapshot(value: unknown): StatusSnapshot | null {
+  if (!isRecord(value) || value['ok'] !== true) return null
+  const sessions = parseSessionRows(value['sessions'])
+  if (sessions === null) return null
+  const archived = parseArchivedRows(value['archived'])
+  if (archived === null) return null
   const scanErrors = parseRecordList(value['scan_errors'])
   const tailErrors = parseRecordList(value['tail_errors'])
   if (scanErrors === null || tailErrors === null) return null
   const diagnostics = parseRecordList(value['diagnostics'])
-  return { sessions, scanErrors, tailErrors, diagnostics: diagnostics ?? [] }
+  return {
+    sessions,
+    archived,
+    archivePolicy: parseArchivePolicy(value['archive_policy']),
+    scanErrors,
+    tailErrors,
+    diagnostics: diagnostics ?? [],
+  }
 }
 
 function parseEvent(value: Record<string, unknown>): SidecarEvent | null {
@@ -546,6 +668,121 @@ export class SidecarSocketClient {
   }
 
   /**
+   * `archive_preview` op: the sessions a batch archive would hide, plus the
+   * single-use token {@link archiveApply} requires. Like {@link replay} it
+   * REJECTS with a coded {@link SidecarDaemonError} so the caller can tell
+   * "daemon absent" from "threshold rejected".
+   */
+  async archivePreview(idleSeconds: number, statuses?: readonly string[]): Promise<ArchivePreview> {
+    if (!Number.isFinite(idleSeconds) || idleSeconds <= 0) {
+      throw new RangeError('idleSeconds must be a positive number')
+    }
+    const payload: Record<string, unknown> = {
+      op: 'archive_preview',
+      idle_seconds: idleSeconds,
+    }
+    if (statuses !== undefined) payload['statuses'] = [...statuses]
+    const value = await this.requestObject(payload, this.timeoutMs)
+    if (isRecord(value) && value['ok'] === false) throw daemonError(value)
+    if (!isRecord(value) || value['op'] !== 'archive_preview') {
+      throw new SidecarDaemonError('invalid_response', 'daemon returned an invalid archive preview')
+    }
+    const candidates = parseSessionRows(value['candidates'])
+    const token = value['token']
+    const rawStatuses = value['statuses']
+    if (candidates === null || typeof token !== 'string' || token === '') {
+      throw new SidecarDaemonError('invalid_response', 'daemon returned an invalid archive preview')
+    }
+    return {
+      idleSeconds:
+        typeof value['idle_seconds'] === 'number' ? value['idle_seconds'] : idleSeconds,
+      statuses: Array.isArray(rawStatuses)
+        ? rawStatuses.filter((name): name is string => typeof name === 'string')
+        : [],
+      candidates,
+      count: candidates.length,
+      token,
+    }
+  }
+
+  /** `archive_apply` op: archive a subset of one preview's candidates. */
+  async archiveApply(
+    targets: ReadonlyArray<{ agent: string; sessionId: string }>,
+    token: string,
+  ): Promise<ArchiveApplyResult> {
+    if (targets.length === 0) throw new RangeError('targets must be nonempty')
+    if (typeof token !== 'string' || token === '') {
+      throw new RangeError('token must be a nonempty string')
+    }
+    const value = await this.requestObject(
+      {
+        op: 'archive_apply',
+        token,
+        targets: targets.map((target) => ({
+          agent: target.agent,
+          session_id: target.sessionId,
+        })),
+      },
+      this.timeoutMs,
+    )
+    if (isRecord(value) && value['ok'] === false) throw daemonError(value)
+    const entries = isRecord(value) ? parseArchiveEntries(value['archived']) : null
+    if (entries === null) {
+      throw new SidecarDaemonError('invalid_response', 'daemon returned an invalid archive result')
+    }
+    const requested = isRecord(value) && typeof value['requested'] === 'number'
+      ? value['requested']
+      : targets.length
+    return { archived: entries, count: entries.length, requested }
+  }
+
+  /** `unarchive` op: release specific targets, or every archived session. */
+  async unarchive(
+    targets: ReadonlyArray<{ agent: string; sessionId: string }> | 'all',
+  ): Promise<UnarchiveResult> {
+    const payload: Record<string, unknown> =
+      targets === 'all'
+        ? { op: 'unarchive', all: true }
+        : {
+            op: 'unarchive',
+            targets: targets.map((target) => ({
+              agent: target.agent,
+              session_id: target.sessionId,
+            })),
+          }
+    if (targets !== 'all' && targets.length === 0) {
+      throw new RangeError('targets must be nonempty')
+    }
+    const value = await this.requestObject(payload, this.timeoutMs)
+    if (isRecord(value) && value['ok'] === false) throw daemonError(value)
+    const rawReleased = isRecord(value) ? value['released'] : null
+    if (!Array.isArray(rawReleased)) {
+      throw new SidecarDaemonError('invalid_response', 'daemon returned an invalid unarchive result')
+    }
+    const released: Array<{ agent: string; session_id: string }> = []
+    for (const raw of rawReleased) {
+      if (!isRecord(raw)) continue
+      const agent = raw['agent']
+      const sessionId = raw['session_id']
+      if (typeof agent !== 'string' || typeof sessionId !== 'string') continue
+      released.push({ agent, session_id: sessionId })
+    }
+    return { released, count: released.length }
+  }
+
+  /** `archive_list` op: the current registry plus the rows it hides. */
+  async archiveList(): Promise<ArchiveListResult> {
+    const value = await this.requestObject({ op: 'archive_list' }, this.timeoutMs)
+    if (isRecord(value) && value['ok'] === false) throw daemonError(value)
+    const entries = isRecord(value) ? parseArchiveEntries(value['entries']) : null
+    const sessions = isRecord(value) ? parseArchivedRows(value['sessions']) : null
+    if (entries === null || sessions === null) {
+      throw new SidecarDaemonError('invalid_response', 'daemon returned an invalid archive list')
+    }
+    return { entries, sessions, count: entries.length }
+  }
+
+  /**
    * Open a subscribe stream: write the op, validate the ack, then deliver
    * each JSONL event through `handlers.onEvent`. After the ack the
    * connection may idle indefinitely (no timeout), matching
@@ -720,6 +957,8 @@ export class SidecarSocketClient {
 /** What the Reconciler needs from the session cache (structurally satisfied by SessionStore). */
 export interface ReconcilerStore {
   applySnapshot(rows: SessionRow[]): void
+  /** Optional so pre-archive store fakes stay assignable. */
+  setArchived?(rows: ArchivedSessionRow[], policy: ArchivePolicy | null): void
   applyEvent(ev: SidecarEvent): void
   setStreamHealth(health: StreamHealth): void
   hasWorkingSessions(): boolean
@@ -848,7 +1087,12 @@ export class Reconciler {
         this.failStreak += 1
       } else {
         this.failStreak = 0
-        if (this.running) this.store.applySnapshot(snapshot.sessions)
+        if (this.running) {
+          this.store.applySnapshot(snapshot.sessions)
+          // A daemon predating the archive ops answers status without the
+          // archive fields; treat that as "nothing archived, no policy".
+          this.store.setArchived?.(snapshot.archived ?? [], snapshot.archivePolicy ?? null)
+        }
       }
     } finally {
       this.reconcileInFlight = false

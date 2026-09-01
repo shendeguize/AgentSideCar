@@ -110,6 +110,23 @@ export const en = {
   'settings.uiShowDeadLabel': 'Show dead sessions',
   'settings.uiShowDeadHint': 'Also list finished (dead) sessions on the board.',
 
+  // ── auto archive ───────────────────────────────────────────────────────
+  'settings.sectionArchive': 'Automatic archiving',
+  'settings.archiveExplain':
+    'Archiving affects this board only: no agent transcript is touched and no process is ended, and a session that becomes active again is unarchived automatically. The automatic path never disposes anything.',
+  'settings.archiveLiveLabel': 'Policy in force',
+  'settings.archiveLiveOn': 'on, threshold {hours}h',
+  'settings.archiveLiveOff': 'off',
+  'settings.archiveLiveUnknown': 'no daemon reached yet, or it predates archiving',
+  'settings.archiveAutoLabel': 'Archive idle sessions automatically',
+  'settings.archiveAutoHint':
+    'Hide idle / dead sessions past the threshold from the board (off by default).',
+  'settings.archiveAfterHoursLabel': 'Inactivity threshold (hours)',
+  'settings.archiveAfterHoursHint':
+    'Defaults to 24h — conservative on purpose, and safe in a loop with automatic unarchiving.',
+  'settings.archiveHostedOnlyNote':
+    'This setting applies only to daemons this plugin spawns, and takes effect at the next daemon start. An adopted or service-managed daemon keeps the policy it was started with; pass agent-sidecar daemon start --auto-archive there.',
+
   // ── skill mode ─────────────────────────────────────────────────────────
   'settings.sectionSkill': 'Skill mode',
   'settings.skillProvideLabel': 'Provide the skill in-process',
@@ -190,6 +207,14 @@ export const en = {
     'Safe replay: this is the cached result for the same request. No new Kimi ACP process was spawned and no content was sent again.',
   'inject.reprepare': 'Prepare again',
   'inject.observeListen': 'Listen for the reaction',
+  'inject.verifying': 'Checking the target transcript for the message…',
+  'inject.verifyConfirmed':
+    'Found it: the message is in the target transcript, so it was delivered. Still do not send it again.',
+  'inject.verifyAbsent':
+    'Not found in the target transcript. It most likely never arrived — confirm in the session yourself before sending anything again.',
+  'inject.verifyUnavailable':
+    'The transcript could not be read, so nothing was learned; open the target session to check by hand.',
+  'inject.openTarget': "Show the target session's timeline",
 
   // ── inject panel: error vocabulary (gateway + transport) ─────────────
   'inject.errInjectDisabled': 'Injection is disabled on the server; enable it in Settings.',
@@ -306,6 +331,46 @@ export const en = {
   'board.cluster.count': '{n} clusters',
   'board.cluster.empty': 'No sessions are available to cluster',
   'board.cluster.sessions': '{n} sessions',
+  'board.archive.open': 'Batch archive',
+  'board.archive.openTitle': 'Archive idle / dead sessions by inactivity threshold',
+  'board.archive.title': 'Archive idle sessions',
+  'board.archive.explain':
+    'Archiving only affects this board: it never edits an agent session file and never stops a process. A session that becomes active again returns automatically.',
+  'board.archive.threshold': 'Inactive longer than',
+  'board.archive.threshold30m': '30 minutes',
+  'board.archive.threshold2h': '2 hours',
+  'board.archive.threshold24h': '24 hours',
+  'board.archive.thresholdCustom': 'Custom (minutes)',
+  'board.archive.customMinutes': 'minutes',
+  'board.archive.preview': 'Preview',
+  'board.archive.previewing': 'Previewing…',
+  'board.archive.previewEmpty': 'No session matches this threshold',
+  'board.archive.previewCount': '{n} matched, {selected} selected',
+  'board.archive.selectAll': 'Select all',
+  'board.archive.selectNone': 'Select none',
+  'board.archive.confirm': 'Archive {n} selected',
+  'board.archive.confirming': 'Archiving…',
+  'board.archive.cancel': 'Cancel',
+  'board.archive.done': 'Archived {n} sessions',
+  'board.archive.failed': 'Archive failed: {reason}',
+  'board.archive.previewFailed': 'Preview failed: {reason}',
+  'board.archive.unavailable': 'This daemon has no archive support; upgrade agent-sidecar',
+  'board.archive.dispose': 'Also end the {n} DSH session(s)',
+  'board.archive.disposeHint':
+    'dsh sessions only; this really ends the session and cannot be undone',
+  'board.archive.doneDisposed': ', {n} DSH session(s) ended',
+  'board.archive.doneDisposeFailed': ', {n} could not be ended (still archived)',
+  'board.archived.summary': '{n} archived',
+  'board.archived.expand': 'Show archived sessions',
+  'board.archived.collapse': 'Hide archived sessions',
+  'board.archived.reason.manual': 'manual',
+  'board.archived.reason.batch': 'batch',
+  'board.archived.reason.auto': 'auto',
+  'board.archived.archivedAt': 'Archived {time}',
+  'board.archived.restore': 'Restore',
+  'board.archived.restoring': 'Restoring…',
+  'board.archived.restoreAll': 'Restore all',
+  'board.archived.restoreFailed': 'Restore failed: {reason}',
   'board.widget.label': 'Sidecar',
   'board.widget.connection.ok': 'Connected',
   'board.widget.connection.degraded': 'Connection unstable',
@@ -326,6 +391,19 @@ export const en = {
   'detail.header.unknownProject': 'Unknown project',
   'detail.header.observedDisclaimer':
     'Status is an observed value inferred from persisted data and may lag',
+  'detail.header.lastActivity': 'Last activity {time}',
+  'detail.header.duration': 'Session span {span}',
+  'detail.header.durationUnderMinute': 'under a minute',
+  'detail.header.durationMinutes': '{m}m',
+  'detail.header.durationHours': '{h}h {m}m',
+  'detail.header.durationDays': '{d}d {h}h',
+  'detail.header.model': 'Model {name}',
+  'detail.header.transcript': 'Transcript',
+  'detail.header.copyPathTitle': 'Click to copy the full path',
+  'detail.header.copyProjectTitle': 'Click to copy the working directory',
+  'detail.header.loadedEvents': '{n} events loaded',
+  'detail.header.loadedEventsPartial': '{n} events loaded (older history remains)',
+  'detail.header.kindCount': '{label} {n}',
   'detail.status.working': 'Working',
   'detail.status.waiting': 'Waiting',
   'detail.status.idle': 'Idle',
@@ -370,6 +448,10 @@ export const en = {
   'detail.timeline.degradedUnverified':
     'Timeline source status could not be verified. Events may be incomplete.',
   'detail.timeline.degradedRetry': 'Use Refresh to try the timeline sources again.',
+  'detail.timeline.daemonDownHint':
+    'The sidecar daemon is not running, so nothing can answer for history. Retry from the settings card, or run agent-sidecar daemon start and press Refresh.',
+  'detail.timeline.daemonDeferHint':
+    'The plugin defers to a service-managed daemon; once the service is up, press Refresh to load history.',
   'detail.states.loadingTitle': 'Loading the timeline…',
   'detail.states.emptyTitle': 'No events yet',
   'detail.states.emptyHint': 'This session has no normalized events to show yet.',
@@ -390,6 +472,18 @@ export const en = {
   'detail.actions.analyze': 'AI analysis',
   'detail.actions.analyzeDisabledHint':
     'Enable "AI bypass analysis" in Settings to use this',
+  'detail.actions.dispose': 'End session',
+  'detail.actions.disposeHint': 'Really end this DSH session; cannot be undone',
+  'detail.dispose.title': 'End this DSH session',
+  'detail.dispose.explain':
+    'This really ends the session: unlike archiving it cannot be undone, and the session process and context are released. The persisted history stays on disk.',
+  'detail.dispose.confirm': 'End the session',
+  'detail.dispose.disposing': 'Ending…',
+  'detail.dispose.cancel': 'Cancel',
+  'detail.dispose.outcome.unsupported': 'This DSH host cannot end sessions',
+  'detail.dispose.outcome.timeout':
+    'The request timed out; the session may still be running — refresh to check',
+  'detail.dispose.outcome.failed': 'Could not end the session; it is still running',
   'detail.tools.title': 'Lineage & search',
   'detail.tools.show': 'Show',
   'detail.tools.hide': 'Hide',

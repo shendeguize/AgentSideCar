@@ -68,6 +68,17 @@ export interface DetailHeaderHint {
   title: string
   project: string
   status: string
+  /**
+   * Optional metadata the detail header renders when the source knows it.
+   * Every field is independently absent-able: adapters differ in what they
+   * can report, and a header that hides one unknown row is honest while a
+   * header that invents a value is not.
+   */
+  updatedAtMs?: number
+  createdAtMs?: number
+  transcript?: string
+  model?: string
+  modelProvider?: string
 }
 
 /** Lineage panel slice (mirrors LineageTree props). */
@@ -472,13 +483,26 @@ export class DetailStore {
     if (this.disposed) return
     if (card !== null) {
       const h = this.state.header
+      // A board frame cannot carry the transcript path — that is detail-only
+      // payload (session-store `getSessionDetail`) — so the card is merged
+      // over the header instead of replacing it; otherwise every reconcile
+      // would blank the path the detail fetch just resolved.
+      const next: DetailHeaderHint =
+        card.transcript === undefined && h.transcript !== undefined
+          ? { ...card, transcript: h.transcript }
+          : card
       if (
-        card.agent !== h.agent ||
-        card.title !== h.title ||
-        card.project !== h.project ||
-        card.status !== h.status
+        next.agent !== h.agent ||
+        next.title !== h.title ||
+        next.project !== h.project ||
+        next.status !== h.status ||
+        next.updatedAtMs !== h.updatedAtMs ||
+        next.createdAtMs !== h.createdAtMs ||
+        next.transcript !== h.transcript ||
+        next.model !== h.model ||
+        next.modelProvider !== h.modelProvider
       ) {
-        this.setState({ header: card })
+        this.setState({ header: next })
       }
     }
     this.scheduleDetailRefresh()
@@ -614,12 +638,17 @@ export class DetailStore {
  * null when the body carries neither (caller keeps its hint).
  */
 export function headerFromDetailWire(wire: SessionDetailWire): DetailHeaderHint | null {
+  // The fused row wins on identity, but only the sidecar board row carries
+  // the adapter metadata (transcript path, birth time, model), so the two
+  // are merged instead of one shadowing the other.
+  const metadata = wire.session === null ? {} : headerMetadata(wire.session)
   if (wire.unified !== null) {
     return {
       agent: wire.unified.agent,
       title: wire.unified.title,
       project: wire.unified.project,
       status: wire.unified.status,
+      ...metadata,
     }
   }
   if (wire.session !== null) {
@@ -628,9 +657,33 @@ export function headerFromDetailWire(wire: SessionDetailWire): DetailHeaderHint 
       title: wire.session.title,
       project: wire.session.project,
       status: wire.session.status,
+      ...metadata,
     }
   }
   return null
+}
+
+/** Optional header metadata of one wire row, epoch seconds → milliseconds. */
+function headerMetadata(session: {
+  updated_at?: number
+  created_at?: number
+  transcript?: string
+  model?: string
+  model_provider?: string
+}): Partial<DetailHeaderHint> {
+  return {
+    ...typeof session.updated_at === 'number' && Number.isFinite(session.updated_at)
+      ? { updatedAtMs: session.updated_at * 1000 }
+      : {},
+    ...typeof session.created_at === 'number' && Number.isFinite(session.created_at)
+      ? { createdAtMs: session.created_at * 1000 }
+      : {},
+    ...session.transcript !== undefined && session.transcript !== ''
+      ? { transcript: session.transcript }
+      : {},
+    ...session.model !== undefined ? { model: session.model } : {},
+    ...session.model_provider !== undefined ? { modelProvider: session.model_provider } : {},
+  }
 }
 
 /**
@@ -644,10 +697,23 @@ export function findCardHint(
     title: string
     project: string
     status: string
+    updatedAtMs?: number
+    createdAtMs?: number
+    model?: string
+    modelProvider?: string
   }>,
   sessionId: string,
 ): DetailHeaderHint | null {
   const card = sessions.find((s) => s.sessionId === sessionId)
   if (card === undefined) return null
-  return { agent: card.agent, title: card.title, project: card.project, status: card.status }
+  return {
+    agent: card.agent,
+    title: card.title,
+    project: card.project,
+    status: card.status,
+    ...card.updatedAtMs !== undefined ? { updatedAtMs: card.updatedAtMs } : {},
+    ...card.createdAtMs !== undefined ? { createdAtMs: card.createdAtMs } : {},
+    ...card.model !== undefined ? { model: card.model } : {},
+    ...card.modelProvider !== undefined ? { modelProvider: card.modelProvider } : {},
+  }
 }

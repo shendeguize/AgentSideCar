@@ -26,11 +26,13 @@ from sidecar.adapters.base import (
     as_mapping,
     compact_json,
     content_block_events,
+    created_at_extra,
     local_timestamp,
     read_json_object,
     snip,
     text_content,
 )
+from sidecar.adapters.replay import ReplayPage
 from sidecar.model import Event, Session, Status
 
 _ACTIVE_WINDOW_S = 120.0
@@ -934,6 +936,7 @@ def _durable_session(
         extra={
             "source": "session_store",
             "created_at": created_at,
+            **created_at_extra(created_at),
             "transcript_exists": True,
             "replay_available": True,
             "durable_only": True,
@@ -1074,28 +1077,6 @@ def _stop_process(
         except subprocess.TimeoutExpired:
             returncode = process.poll()
     return returncode, stopped
-
-
-class ReplayPage(List[Dict[str, Any]]):
-    """One bounded replay page plus an explicit end-of-transcript signal.
-
-    ``exhausted`` is ``True`` only when the scan truly consumed the
-    retrievable transcript: it reached the end of the decoded stream, or a
-    degraded source (missing file, missing ``zstd``, failed decoder start)
-    had nothing retrievable at all. It is ``False`` when the page stopped
-    early on the record, retained-byte, scan-byte, or time budget, so
-    callers know more retained records may remain past this page.
-    """
-
-    __slots__ = ("exhausted",)
-
-    def __init__(
-        self,
-        records: Iterable[Dict[str, Any]] = (),
-        exhausted: bool = True,
-    ) -> None:
-        super().__init__(records)
-        self.exhausted = bool(exhausted)
 
 
 def replay_dsh_events(
@@ -1375,6 +1356,7 @@ class DSHAdapter(Adapter):
                 "source": "session_projcache",
                 "index": str(index_path),
                 "created_at": created_at,
+                **created_at_extra(created_at),
                 "seq": seq,
                 "seq_grew": seq_grew,
                 "stats": stats,

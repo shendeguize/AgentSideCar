@@ -30,6 +30,7 @@ export interface SidecarConfigView {
   inject: { enabled: boolean; defaultMode: 'queue' | 'steer' }
   analysis: { enabled: boolean; provider: string; model: string }
   ui: { timeWindowHours: number; showDead: boolean }
+  archive: { auto: boolean; autoAfterHours: number }
   skill: { provide: boolean }
 }
 
@@ -41,6 +42,7 @@ export const DEFAULT_CONFIG_VIEW: SidecarConfigView = {
   inject: { enabled: false, defaultMode: 'queue' },
   analysis: { enabled: false, provider: '', model: '' },
   ui: { timeWindowHours: 24, showDead: false },
+  archive: { auto: false, autoAfterHours: 24 },
   skill: { provide: true },
 }
 
@@ -70,6 +72,8 @@ export function configToValues(config: SidecarConfigView): SettingsCardValues {
     analysisModel: config.analysis.model,
     uiTimeWindowHours: config.ui.timeWindowHours,
     uiShowDead: config.ui.showDead,
+    archiveAuto: config.archive.auto,
+    archiveAutoAfterHours: config.archive.autoAfterHours,
     skillProvide: config.skill.provide,
   }
 }
@@ -93,6 +97,10 @@ export function valuesToConfigView(values: SettingsCardValues): SidecarConfigVie
       model: values.analysisModel,
     },
     ui: { timeWindowHours: values.uiTimeWindowHours, showDead: values.uiShowDead },
+    archive: {
+      auto: values.archiveAuto,
+      autoAfterHours: values.archiveAutoAfterHours,
+    },
     skill: { provide: values.skillProvide },
   }
 }

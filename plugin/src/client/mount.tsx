@@ -32,6 +32,7 @@ import type { SidecarController, SidecarViewState } from './controller.ts'
 import { SidecarDetailView } from './detail-view.tsx'
 import { findCardHint, type DetailHeaderHint } from './detail-glue.ts'
 import { findProjectSessionHint } from './project-glue.ts'
+import type { BoardArchiveApi } from './board/ArchivePanel.tsx'
 import type { AnalysisStorePort, BoardUiPort, ProjectsStorePort } from './ui-integration.ts'
 import type { AnalysisGlueState, AnalysisTarget } from './analysis-glue.ts'
 import { detailErrorText } from './detail/logic.ts'
@@ -249,6 +250,13 @@ function createBoardContent(
     const [boardAnalysisStore] = useState<AnalysisStorePort | null>(
       () => integration?.createAnalysisStore() ?? null,
     )
+    // Gate on the daemon advertising a policy: an older daemon would answer
+    // the archive ops with unknown_op, and a button that can only fail is
+    // worse than no button.
+    const [archiveApi] = useState<BoardArchiveApi | null>(
+      () => integration?.createArchiveApi?.() ?? null,
+    )
+    const archiveEnabled = archiveApi !== null && state.archivePolicy !== null
     useEffect(() => () => { projectsStore?.dispose() }, [projectsStore])
     useEffect(() => () => { boardAnalysisStore?.dispose() }, [boardAnalysisStore])
     const analysisState = useSyncExternalStore(
@@ -465,6 +473,13 @@ function createBoardContent(
               onRefresh={() => controller.refresh()}
               onSelectSession={(target) => { openDetail(target, 'board') }}
               onAnalyze={openAnalysis}
+              {...archiveEnabled && archiveApi !== null
+                ? {
+                    archive: archiveApi,
+                    archived: state.archived,
+                    disposeSupported: state.disposeCapability,
+                  }
+                : {}}
               rootRef={setBoardRoot}
               onScrollTopChange={(scrollTop) => {
                 scrollTopsRef.current.board = scrollTop
@@ -631,6 +646,16 @@ export function createSettingsCardEntry(
         saving={saving}
         saveFailed={saveFailed}
         daemon={daemon}
+        // The policy the reached daemon reports, not the staged config: an
+        // adopted daemon owns whatever it was started with.
+        archivePolicy={
+          state.archivePolicy === null
+            ? null
+            : {
+                auto: state.archivePolicy.auto,
+                autoAfterSeconds: state.archivePolicy.autoAfterSeconds,
+              }
+        }
       />
     )
   }

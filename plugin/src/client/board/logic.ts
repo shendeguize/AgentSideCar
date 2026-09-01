@@ -52,6 +52,8 @@ export interface SessionCardVM {
   project: string
   /** Epoch milliseconds (mapping layer converts sidecar epoch seconds). */
   updatedAtMs: number
+  /** Epoch milliseconds of session birth; absent when the adapter cannot tell. */
+  createdAtMs?: number
   /** Most recent normalized event summary, if any. */
   lastEvent: { kind: string; text: string } | null
   /** True when a dsh seq discontinuity was observed since the last reconcile. */
@@ -59,6 +61,19 @@ export interface SessionCardVM {
   /** Optional model metadata; absent means the adapter did not expose it. */
   model?: string
   modelProvider?: string
+}
+
+/**
+ * One archived session as the board renders it. Archiving is observational:
+ * the row is hidden from the active board but the underlying agent session
+ * file and process are untouched, so an archived card can come back on its
+ * own the moment the session shows activity again.
+ */
+export interface ArchivedCardVM extends SessionCardVM {
+  /** Epoch milliseconds of the archive decision. */
+  archivedAtMs: number
+  /** Free-form provenance token; 'manual' | 'batch' | 'auto' get a label. */
+  archiveReason: string
 }
 
 /** Statuses the top-bar count badges can filter down to (UX-01). */
@@ -566,6 +581,84 @@ export function timeWindowLabel(hours: number): string {
     return formatTemplate(BOARD_STRINGS.timeWindow.days, { n: hours / 24 })
   }
   return formatTemplate(BOARD_STRINGS.timeWindow.hours, { n: hours })
+}
+
+// ---------------------------------------------------------------------------
+// Batch archive (threshold → preview → confirm).
+// ---------------------------------------------------------------------------
+
+/** Preset inactivity thresholds offered by the batch-archive dialog. */
+export type ArchiveThresholdToken = '30m' | '2h' | '24h' | 'custom'
+
+/** Seconds behind each preset; 'custom' reads the minutes input instead. */
+export const ARCHIVE_THRESHOLD_SECONDS: Readonly<
+  Record<Exclude<ArchiveThresholdToken, 'custom'>, number>
+> = { '30m': 1800, '2h': 7200, '24h': 86400 }
+
+/** Manual default: conservative enough that a lunch break survives it. */
+export const DEFAULT_ARCHIVE_THRESHOLD: ArchiveThresholdToken = '2h'
+
+/** Clamp for the custom-minutes input (1 minute … 30 days). */
+export const MIN_ARCHIVE_SECONDS = 60
+export const MAX_ARCHIVE_SECONDS = 30 * 24 * 3600
+
+/**
+ * Resolve the dialog controls into the `idleSeconds` the daemon expects.
+ * Returns null when a custom value is empty or out of range, which the
+ * dialog renders as a disabled preview button rather than a silent clamp.
+ */
+export function resolveArchiveSeconds(
+  token: ArchiveThresholdToken,
+  customMinutes: string,
+): number | null {
+  if (token !== 'custom') return ARCHIVE_THRESHOLD_SECONDS[token]
+  const minutes = Number(customMinutes.trim())
+  if (!Number.isFinite(minutes)) return null
+  const seconds = Math.round(minutes * 60)
+  if (seconds < MIN_ARCHIVE_SECONDS || seconds > MAX_ARCHIVE_SECONDS) return null
+  return seconds
+}
+
+/** Composite key used to address one card across preview/apply round-trips. */
+export function cardKey(card: { agent: string; sessionId: string }): string {
+  return `${card.agent}\u0000${card.sessionId}`
+}
+
+/**
+ * The one agent with a supervised session the host can really end. Every
+ * other agent is a transcript on disk plus a process nobody here owns.
+ */
+export const DISPOSABLE_AGENT = 'dsh'
+
+/** How many of these cards a real dispose could touch. */
+export function countDisposable(cards: readonly { agent: string }[]): number {
+  return cards.filter((card) => card.agent === DISPOSABLE_AGENT).length
+}
+
+/**
+ * Whether the batch dialog should offer the dispose opt-in. Both halves
+ * matter: a host without the capability cannot dispose anything, and a
+ * selection without dsh rows has nothing to dispose — in either case the
+ * checkbox would promise an action that does nothing.
+ */
+export function shouldOfferDispose(
+  capable: boolean,
+  selected: readonly { agent: string }[],
+): boolean {
+  return capable && countDisposable(selected) > 0
+}
+
+/** Provenance token → localized label; unknown tokens render verbatim. */
+export function archiveReasonLabel(reason: string): string {
+  if (reason === 'manual') return BOARD_STRINGS.archived.reason.manual
+  if (reason === 'batch') return BOARD_STRINGS.archived.reason.batch
+  if (reason === 'auto') return BOARD_STRINGS.archived.reason.auto
+  return reason
+}
+
+/** Newest archive decision first; the board shows the recent ones on top. */
+export function sortArchived<T extends ArchivedCardVM>(rows: readonly T[]): T[] {
+  return [...rows].sort((a, b) => b.archivedAtMs - a.archivedAtMs)
 }
 
 // ---------------------------------------------------------------------------

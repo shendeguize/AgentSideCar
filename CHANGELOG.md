@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `agent-sidecar daemon status` reports the running daemon's version and warns
   when it differs from the CLI. A long-lived daemon keeps serving the code it
   started with, so an upgrade would otherwise silently return stale sessions.
+- Sessions from non-DSH agents no longer open with an empty timeline. The
+  daemon now replays the on-disk transcript for every adapter, so a
+  claude/codex/copilot/cursor/kimi session shows its history immediately
+  instead of only the events that happen to arrive after the page is opened.
+  A transcript an adapter cannot replay reports `replay_unsupported` and is
+  presented as unavailable rather than as a failure.
+- The DSH plugin's session detail page keeps its header, and therefore its
+  Back button, when the timeline is unavailable. The degraded state used to
+  replace the whole page, leaving no way back to the board except browser
+  navigation.
+- The board's model column was always blank: the session projection dropped
+  `model` on the way to the view.
 
 ### Added
 
@@ -38,6 +50,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-project idle-session fold, project/cross-agent analysis entry points,
   and a multi-turn analysis conversation with an honest segmented progress
   fallback.
+- `agent-sidecar archive`, `archive list`, `unarchive`, and `list --archived`
+  hide idle or dead sessions from every listing without touching them. Nothing
+  is edited and no process is signalled: the only state written is a private
+  `archive.json` registry, and a session that becomes active again is released
+  automatically. `daemon start --auto-archive [--auto-archive-after 24h]` runs
+  the same selection on a timer, off by default and archive-only. Archiving is
+  per host; `--remote`/`--host` are refused with the equivalent ssh
+  invocation.
+- The plugin board can archive in bulk: pick an inactivity threshold, review
+  and deselect the matched sessions, then confirm. Archived sessions move to a
+  collapsible "archived N" section that can release them again.
+- DSH sessions can be ended from the plugin. The detail page offers an
+  explicit, confirmed end-session action, and the batch archive dialog offers
+  it as an opt-in checkbox for the DSH sessions in the selection. It is the
+  one destructive action the plugin exposes, so it is DSH-only, manual, and
+  behind the same write gate as injection.
+- The session detail header reports last activity, session duration, event
+  counts, model, and copyable project and transcript paths.
+- An injection whose delivery is reported as unknown is now checked
+  automatically: the plugin reads the target's transcript a bounded number of
+  times and reports whether the message actually landed. It never re-sends,
+  and it distinguishes "not in the transcript" from "the transcript could not
+  be read".
 
 ### Changed
 
@@ -54,6 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enrichment.
 - Cursor observation now includes Remote-SSH `cursor-server` history manifests
   and marks their provenance explicitly.
+- Every adapter now reports session creation time as `extra.created_at_epoch`
+  in seconds, so age and duration read the same key regardless of agent.
 
 ## [0.9.0] - 2026-08-29
 

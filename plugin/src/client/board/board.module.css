@@ -163,6 +163,119 @@
   text-decoration: underline;
 }
 
+/* ------------------------------------------------ batch archive dialog */
+
+.archiveBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.archiveControls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.archiveNumber {
+  width: 76px;
+  height: 28px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--agsc-fg);
+  background: var(--agsc-bg-raised);
+  border: 1px solid var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-control);
+  padding: 0 8px;
+}
+
+.archiveSummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--agsc-fg-secondary);
+}
+
+.archiveEmpty {
+  font-size: 12px;
+  color: var(--agsc-fg-dimmed);
+  padding: 8px 0;
+}
+
+.archiveList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.archiveRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--agsc-border);
+  border-radius: var(--agsc-radius-control);
+}
+
+.archiveRowLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  cursor: pointer;
+}
+
+.archiveRowTitle {
+  font-size: 12px;
+  color: var(--agsc-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.archiveRowMeta {
+  flex: none;
+  font-size: 11px;
+  color: var(--agsc-fg-secondary);
+  white-space: nowrap;
+}
+
+.archiveActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* --------------------------------------------------- archived section */
+
+.archivedPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-control);
+}
+
+.archivedHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* -------------------------------------------------------- empty states */
 
 .empty {

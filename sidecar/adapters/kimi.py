@@ -14,12 +14,14 @@ from sidecar.adapters.base import (
     as_mapping,
     compact_json,
     content_block_events,
+    created_at_extra,
     epoch_seconds,
     local_timestamp,
     read_json_object,
     snip,
     text_content,
 )
+from sidecar.adapters.replay import JsonlReplayMixin
 from sidecar.kimi_identity import read_kimi_index_metadata
 from sidecar.model import Event, Session, Status
 
@@ -295,7 +297,7 @@ def _loop_events(record: Mapping[str, Any], session: Session) -> List[Event]:
     return []
 
 
-class KimiAdapter(Adapter):
+class KimiAdapter(JsonlReplayMixin, Adapter):
     name = "kimi"
     agent_names = ("kimi",)
 
@@ -439,6 +441,7 @@ class KimiAdapter(Adapter):
                 "workspace": dict(workspace),
                 "agent_id": "main",
                 "subagents": subagents,
+                **created_at_extra(state.get("createdAt")),
             }
             if model:
                 common_extra["model"] = model

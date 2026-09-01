@@ -33,6 +33,7 @@ import {
   timeWindowLabel,
   withAgentFilter,
   GROUP_CARD_LIMIT,
+  type ArchivedCardVM,
   type BoardFilterState,
   type BoardStatusFilter,
   type DaemonStateToken,
@@ -41,6 +42,7 @@ import {
   type SessionCardVM,
   type StreamHealthToken,
 } from './logic.ts'
+import { ArchiveDialog, ArchivedSection, type BoardArchiveApi } from './ArchivePanel.tsx'
 import type { AnalysisTarget } from '../analysis-glue.ts'
 import { BOARD_STRINGS } from './strings.ts'
 import { t } from '../locales/index.ts'
@@ -89,6 +91,16 @@ export interface BoardProps {
   onRefresh: () => void | Promise<boolean>
   onSelectSession: (target: SessionFocusTarget) => void
   onAnalyze?: (target: AnalysisTarget) => void
+  /**
+   * Batch-archive round-trips. Absent on hosts whose daemon predates the
+   * archive ops, in which case the entry point is not rendered at all
+   * (a disabled button that never explains itself is worse than no button).
+   */
+  archive?: BoardArchiveApi
+  /** Sessions the daemon is currently hiding; empty when nothing is archived. */
+  archived?: readonly ArchivedCardVM[]
+  /** True while at least one dsh session could accept a real dispose. */
+  disposeSupported?: boolean
   /** Composite in-memory identity awaiting return-focus restoration. */
   returnFocusTarget: SessionFocusTarget | null
   /** Called only after the matching card or fallback heading has been focused. */
@@ -380,6 +392,8 @@ export function Board(props: BoardProps): ReactElement {
   // UX-07: manual-refresh feedback (in-flight + dismissible failure line).
   const [refreshing, setRefreshing] = useState(false)
   const [refreshFailed, setRefreshFailed] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  const archivedRows = props.archived ?? []
   const onRefreshClick = (): void => {
     if (refreshing) return
     setRefreshFailed(false)
@@ -491,6 +505,17 @@ export function Board(props: BoardProps): ReactElement {
             data-testid="agent-sidecar-analyze-cross-agent"
           >
             {BOARD_STRINGS.topbar.analyzeCrossAgent}
+          </Button>
+        )}
+        {props.archive !== undefined && (
+          <Button
+            size="sm"
+            variant="outline"
+            title={BOARD_STRINGS.archive.openTitle}
+            onClick={() => { setArchiveOpen(true) }}
+            data-testid="agent-sidecar-archive-open"
+          >
+            {BOARD_STRINGS.archive.open}
           </Button>
         )}
         <Button
@@ -628,6 +653,26 @@ export function Board(props: BoardProps): ReactElement {
               </div>
             )}
         </section>
+      )}
+
+      {props.archive !== undefined && archiveOpen && (
+        <ArchiveDialog
+          open={archiveOpen}
+          onClose={() => { setArchiveOpen(false) }}
+          api={props.archive}
+          disposeSupported={props.disposeSupported === true}
+          onArchived={() => { void props.onRefresh() }}
+          nowMs={nowMs}
+        />
+      )}
+
+      {props.archive !== undefined && (
+        <ArchivedSection
+          rows={archivedRows}
+          onUnarchive={props.archive.unarchive}
+          onRestored={() => { void props.onRefresh() }}
+          nowMs={nowMs}
+        />
       )}
 
       {!props.hasSnapshot ? (
