@@ -5,6 +5,8 @@ import z from "@deepseek-ai/schemastery";
 import { createConnection } from "node:net";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { performance } from "node:perf_hooks";
+/** Prefix marker used to keep dedicated analysis sessions off the board. */
+const ANALYSIS_SESSION_PREFIX$2 = "agent-sidecar-analysis-";
 /** Title chars kept in prompts and logs (titles are untrusted input too). */
 const MAX_TITLE_CHARS = 200;
 /** Appended to the input text when it was cut at `maxInputChars`. */
@@ -366,7 +368,7 @@ var AnalysisEngine = class {
 		}
 	}
 	mintSessionId() {
-		return `${this.pluginName}-analysis-${this.now().toString(36)}-${++this.mintCounter}`;
+		return `${ANALYSIS_SESSION_PREFIX$2}${this.now().toString(36)}-${++this.mintCounter}`;
 	}
 	failResult(phase, ident, errorCode, opts) {
 		const result = {
@@ -472,6 +474,10 @@ const Config = z.object({
 		timeWindowHours: z.natural().min(1).default(24).description("看板会话时间窗(小时)"),
 		showDead: z.boolean().default(false).description("是否显示 dead 会话")
 	}).description("看板界面"),
+	archive: z.object({
+		auto: z.boolean().default(false).description("自动归档:把空闲超过阈值的 idle/dead 会话从看板隐藏(只影响展示,不动会话文件与进程;会话一旦重新有活动自动解档)。仅对本插件拉起的 daemon 生效,且需 daemon 重启;默认关闭"),
+		autoAfterHours: z.natural().min(1).max(720).default(24).description("自动归档的无活动阈值(小时,默认 24;仅在自动归档开启时生效)")
+	}).description("自动归档策略"),
 	skill: z.object({ provide: z.boolean().default(true).description("是否经 registerProvider 内嵌提供 agent-sidecar skill(设计 §6 默认开;文件系统已装的同名 skill 自动优先;改动需重载插件生效)") }).description("skill 模式")
 });
 //#endregion
@@ -510,7 +516,8 @@ const EXTERNAL_AGENTS = /* @__PURE__ */ new Set([
 	"claude",
 	"codex",
 	"cursor-cli",
-	"kimi"
+	"kimi",
+	"copilot"
 ]);
 const KNOWN_STATUSES = /* @__PURE__ */ new Set([.../* @__PURE__ */ new Set([
 	"working",
@@ -699,8 +706,9 @@ function deriveInjectEligibility(row) {
 *   closes it after the response; we mirror that semantic.
 * - `replay {session_id, after_seq, limit}` (T5.2) answers one bounded page
 *   `{events, last_seq, truncated, count, agent, ...}` sourced from the
-*   session adapter's own transcript replay (daemon `_replay_response`;
-*   today only dsh sessions provide one). Unlike ping/status, {@link
+*   session adapter's own transcript replay (daemon `_replay_response`):
+*   a compressed-stream decode for dsh, a line-ordinal scan of the
+*   append-only JSONL for the other agents. Unlike ping/status, {@link
 *   SidecarSocketClient.replay} REJECTS with a coded
 *   {@link SidecarDaemonError} instead of resolving null: the daemon error
 *   vocabulary (`unknown_session` / `replay_unsupported` / `replay_failed`
@@ -850,24 +858,94 @@ function parseRecordList(value) {
 	}
 	return out;
 }
-function parseStatusSnapshot(value) {
-	if (!isRecord(value) || value["ok"] !== true) return null;
-	const rawSessions = value["sessions"];
-	if (!Array.isArray(rawSessions)) return null;
-	const sessions = [];
-	for (const raw of rawSessions) {
+function parseSessionRows(value) {
+	if (!Array.isArray(value)) return null;
+	const rows = [];
+	for (const raw of value) {
 		if (!isRecord(raw)) return null;
 		const row = parseSessionRow(raw);
-		if (row !== null) sessions.push(row);
+		if (row !== null) rows.push(row);
 	}
+	return rows;
+}
+/**
+* Archived rows are ordinary session rows carrying the registry decision.
+* A row without a usable decision is dropped rather than shown as active:
+* the daemon already excluded it from `sessions`.
+*/
+function parseArchivedRows(value) {
+	if (value === void 0) return [];
+	if (!Array.isArray(value)) return null;
+	const rows = [];
+	for (const raw of value) {
+		if (!isRecord(raw)) return null;
+		const row = parseSessionRow(raw);
+		if (row === null) continue;
+		const archivedAt = raw["archived_at"];
+		const reason = raw["archive_reason"];
+		if (typeof archivedAt !== "number" || !Number.isFinite(archivedAt)) continue;
+		if (typeof reason !== "string" || reason === "") continue;
+		rows.push({
+			...row,
+			archived_at: archivedAt,
+			archive_reason: reason
+		});
+	}
+	return rows;
+}
+function parseArchivePolicy(value) {
+	if (!isRecord(value)) return null;
+	const auto = value["auto"];
+	const autoAfter = value["auto_after_seconds"];
+	const defaultIdle = value["default_idle_seconds"];
+	if (typeof auto !== "boolean") return null;
+	if (typeof autoAfter !== "number" || !Number.isFinite(autoAfter)) return null;
+	if (typeof defaultIdle !== "number" || !Number.isFinite(defaultIdle)) return null;
+	return {
+		auto,
+		autoAfterSeconds: autoAfter,
+		defaultIdleSeconds: defaultIdle
+	};
+}
+function parseArchiveEntries(value) {
+	if (!Array.isArray(value)) return null;
+	const entries = [];
+	for (const raw of value) {
+		if (!isRecord(raw)) return null;
+		const agent = raw["agent"];
+		const sessionId = raw["session_id"];
+		const archivedAt = raw["archived_at"];
+		const reason = raw["reason"];
+		if (typeof agent !== "string" || agent === "") return null;
+		if (typeof sessionId !== "string" || sessionId === "") return null;
+		if (typeof archivedAt !== "number" || !Number.isFinite(archivedAt)) return null;
+		if (typeof reason !== "string" || reason === "") return null;
+		entries.push({
+			agent,
+			session_id: sessionId,
+			archived_at: archivedAt,
+			reason
+		});
+	}
+	return entries;
+}
+function parseStatusSnapshot(value) {
+	if (!isRecord(value) || value["ok"] !== true) return null;
+	const sessions = parseSessionRows(value["sessions"]);
+	if (sessions === null) return null;
+	const archived = parseArchivedRows(value["archived"]);
+	if (archived === null) return null;
 	const scanErrors = parseRecordList(value["scan_errors"]);
 	const tailErrors = parseRecordList(value["tail_errors"]);
 	if (scanErrors === null || tailErrors === null) return null;
+	const diagnostics = parseRecordList(value["diagnostics"]);
 	return {
 		sessions,
+		archived,
+		archivePolicy: parseArchivePolicy(value["archive_policy"]),
 		scanErrors,
 		tailErrors,
-		diagnostics: parseRecordList(value["diagnostics"]) ?? []
+		diagnostics: diagnostics ?? []
 	};
 }
 function parseEvent(value) {
@@ -1037,6 +1115,102 @@ var SidecarSocketClient = class {
 		const page = parseReplayPage(value);
 		if (page === null) throw new SidecarDaemonError("invalid_response", "daemon replay response has no valid events list");
 		return page;
+	}
+	/**
+	* `archive_preview` op: the sessions a batch archive would hide, plus the
+	* single-use token {@link archiveApply} requires. Like {@link replay} it
+	* REJECTS with a coded {@link SidecarDaemonError} so the caller can tell
+	* "daemon absent" from "threshold rejected".
+	*/
+	async archivePreview(idleSeconds, statuses) {
+		if (!Number.isFinite(idleSeconds) || idleSeconds <= 0) throw new RangeError("idleSeconds must be a positive number");
+		const payload = {
+			op: "archive_preview",
+			idle_seconds: idleSeconds
+		};
+		if (statuses !== void 0) payload["statuses"] = [...statuses];
+		const value = await this.requestObject(payload, this.timeoutMs);
+		if (isRecord(value) && value["ok"] === false) throw daemonError(value);
+		if (!isRecord(value) || value["op"] !== "archive_preview") throw new SidecarDaemonError("invalid_response", "daemon returned an invalid archive preview");
+		const candidates = parseSessionRows(value["candidates"]);
+		const token = value["token"];
+		const rawStatuses = value["statuses"];
+		if (candidates === null || typeof token !== "string" || token === "") throw new SidecarDaemonError("invalid_response", "daemon returned an invalid archive preview");
+		return {
+			idleSeconds: typeof value["idle_seconds"] === "number" ? value["idle_seconds"] : idleSeconds,
+			statuses: Array.isArray(rawStatuses) ? rawStatuses.filter((name) => typeof name === "string") : [],
+			candidates,
+			count: candidates.length,
+			token
+		};
+	}
+	/** `archive_apply` op: archive a subset of one preview's candidates. */
+	async archiveApply(targets, token) {
+		if (targets.length === 0) throw new RangeError("targets must be nonempty");
+		if (typeof token !== "string" || token === "") throw new RangeError("token must be a nonempty string");
+		const value = await this.requestObject({
+			op: "archive_apply",
+			token,
+			targets: targets.map((target) => ({
+				agent: target.agent,
+				session_id: target.sessionId
+			}))
+		}, this.timeoutMs);
+		if (isRecord(value) && value["ok"] === false) throw daemonError(value);
+		const entries = isRecord(value) ? parseArchiveEntries(value["archived"]) : null;
+		if (entries === null) throw new SidecarDaemonError("invalid_response", "daemon returned an invalid archive result");
+		const requested = isRecord(value) && typeof value["requested"] === "number" ? value["requested"] : targets.length;
+		return {
+			archived: entries,
+			count: entries.length,
+			requested
+		};
+	}
+	/** `unarchive` op: release specific targets, or every archived session. */
+	async unarchive(targets) {
+		const payload = targets === "all" ? {
+			op: "unarchive",
+			all: true
+		} : {
+			op: "unarchive",
+			targets: targets.map((target) => ({
+				agent: target.agent,
+				session_id: target.sessionId
+			}))
+		};
+		if (targets !== "all" && targets.length === 0) throw new RangeError("targets must be nonempty");
+		const value = await this.requestObject(payload, this.timeoutMs);
+		if (isRecord(value) && value["ok"] === false) throw daemonError(value);
+		const rawReleased = isRecord(value) ? value["released"] : null;
+		if (!Array.isArray(rawReleased)) throw new SidecarDaemonError("invalid_response", "daemon returned an invalid unarchive result");
+		const released = [];
+		for (const raw of rawReleased) {
+			if (!isRecord(raw)) continue;
+			const agent = raw["agent"];
+			const sessionId = raw["session_id"];
+			if (typeof agent !== "string" || typeof sessionId !== "string") continue;
+			released.push({
+				agent,
+				session_id: sessionId
+			});
+		}
+		return {
+			released,
+			count: released.length
+		};
+	}
+	/** `archive_list` op: the current registry plus the rows it hides. */
+	async archiveList() {
+		const value = await this.requestObject({ op: "archive_list" }, this.timeoutMs);
+		if (isRecord(value) && value["ok"] === false) throw daemonError(value);
+		const entries = isRecord(value) ? parseArchiveEntries(value["entries"]) : null;
+		const sessions = isRecord(value) ? parseArchivedRows(value["sessions"]) : null;
+		if (entries === null || sessions === null) throw new SidecarDaemonError("invalid_response", "daemon returned an invalid archive list");
+		return {
+			entries,
+			sessions,
+			count: entries.length
+		};
 	}
 	/**
 	* Open a subscribe stream: write the op, validate the ack, then deliver
@@ -1265,7 +1439,10 @@ var Reconciler = class {
 			if (snapshot === null) this.failStreak += 1;
 			else {
 				this.failStreak = 0;
-				if (this.running) this.store.applySnapshot(snapshot.sessions);
+				if (this.running) {
+					this.store.applySnapshot(snapshot.sessions);
+					this.store.setArchived?.(snapshot.archived ?? [], snapshot.archivePolicy ?? null);
+				}
 			}
 		} finally {
 			this.reconcileInFlight = false;
@@ -2033,8 +2210,87 @@ function createDshInjectExecutor(deps) {
 		dispose: disposeSlots
 	};
 }
+function disposeMember(service) {
+	if (service === null || service === void 0) return null;
+	const member = service.dispose;
+	return typeof member === "function" ? member.bind(service) : null;
+}
+/**
+* Whether the host still knows this session. Only consulted to tell
+* `not_found` from `failed` — a host without `get` skips the check and lets
+* the dispose call itself be the answer.
+*/
+function knownSession(service, sessionId) {
+	if (typeof service.get !== "function") return null;
+	try {
+		return service.get(sessionId) !== void 0 && service.get(sessionId) !== null;
+	} catch {
+		return null;
+	}
+}
+function createDshDisposer(opts) {
+	const timeoutMs = opts.timeoutMs ?? 3e4;
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError("dispose timeoutMs must be a positive number");
+	const log = opts.log ?? (() => {});
+	const resolveService = () => {
+		try {
+			return opts.resolve() ?? null;
+		} catch {
+			return null;
+		}
+	};
+	return {
+		available: () => disposeMember(resolveService()) !== null,
+		dispose: async (sessionId) => {
+			if (typeof sessionId !== "string" || sessionId === "") throw new RangeError("sessionId must be a nonempty string");
+			const service = resolveService();
+			const call = disposeMember(service);
+			if (service === null || call === null) return {
+				outcome: "unsupported",
+				sessionId
+			};
+			if (knownSession(service, sessionId) === false) return {
+				outcome: "not_found",
+				sessionId
+			};
+			let timer;
+			try {
+				const timeout = new Promise((resolve) => {
+					timer = setTimeout(() => {
+						resolve("timeout");
+					}, timeoutMs);
+				});
+				if (await Promise.race([Promise.resolve(call(sessionId)).then(() => "disposed"), timeout]) === "timeout") {
+					log("warn", "dsh dispose timed out", { timeoutMs });
+					return {
+						outcome: "timeout",
+						sessionId
+					};
+				}
+				log("info", "dsh session disposed");
+				return {
+					outcome: "disposed",
+					sessionId
+				};
+			} catch (error) {
+				log("warn", "dsh dispose failed", { error: error instanceof Error ? error.name : "unknown" });
+				return {
+					outcome: "failed",
+					sessionId
+				};
+			} finally {
+				if (timer !== void 0) clearTimeout(timer);
+			}
+		}
+	};
+}
 const DSH_AGENT = "dsh";
 const KEY_SEP = "\0";
+const ANALYSIS_SESSION_PREFIX$1 = "agent-sidecar-analysis-";
+/** Analysis sessions are private tool sessions and cannot become board data. */
+function isAnalysisSession$1(sessionId, extra) {
+	return sessionId.startsWith(ANALYSIS_SESSION_PREFIX$1) || extra?.["agentSidecarAnalysis"] === true;
+}
 function integerOrNull(value) {
 	return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
@@ -2062,7 +2318,24 @@ function normalizeProject(project) {
 function describeError$2(error) {
 	return error instanceof Error ? error.message : String(error);
 }
-const TIMELINE_FAILURE_OUTCOMES = /* @__PURE__ */ new Set(["replay_unsupported", "source_failed"]);
+/**
+* Which outcomes count as the page being degraded.
+*
+* `replay_unsupported` is deliberately NOT one of them. It means the daemon
+* understood the request and answered that this session's transcript shape
+* has no replay — the same category of answer as a source that was never
+* wired, not a source that broke. Counting it as a failure painted every
+* such session's timeline as degraded and, when it was the only usable
+* source, as `all_sources_failed`, which told the operator their data was
+* lost when nothing was wrong.
+*/
+const TIMELINE_FAILURE_OUTCOMES = /* @__PURE__ */ new Set(["source_failed"]);
+/** Outcomes that mean "this source had nothing to contribute", not "it broke". */
+const TIMELINE_INERT_OUTCOMES = /* @__PURE__ */ new Set([
+	"unavailable",
+	"not_found",
+	"replay_unsupported"
+]);
 /**
 * Extract only a bounded, known machine code for internal classification.
 * The returned timeline contract never includes this value or the upstream
@@ -2100,7 +2373,7 @@ function degradationOf(sourceOutcomes, entriesEmpty) {
 		degraded: false,
 		reason: null
 	};
-	const usable = outcomes.filter((outcome) => outcome !== "unavailable" && outcome !== "not_found");
+	const usable = outcomes.filter((outcome) => !TIMELINE_INERT_OUTCOMES.has(outcome));
 	return {
 		degraded: true,
 		reason: entriesEmpty && usable.length > 0 && usable.every((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome)) ? "all_sources_failed" : "partial_source_failure"
@@ -2296,6 +2569,7 @@ var FusionQuery = class {
 		const out = /* @__PURE__ */ new Map();
 		const mergedIds = /* @__PURE__ */ new Set();
 		for (const row of board.sessions) {
+			if (isAnalysisSession$1(row.session_id, row.extra)) continue;
 			const liveEntry = row.agent === DSH_AGENT ? this.live.get(row.session_id) : void 0;
 			if (liveEntry !== void 0) {
 				mergedIds.add(row.session_id);
@@ -2303,6 +2577,7 @@ var FusionQuery = class {
 			} else out.set(`${row.agent}${KEY_SEP}${row.session_id}`, fromSidecarRow(row));
 		}
 		for (const [id, entry] of this.live) {
+			if (isAnalysisSession$1(id)) continue;
 			if (mergedIds.has(id)) continue;
 			out.set(`${DSH_AGENT}${KEY_SEP}${id}`, fromDshLive(entry));
 		}
@@ -2727,7 +3002,8 @@ const SEND_CLI_AGENTS = /* @__PURE__ */ new Set([
 	"claude",
 	"codex",
 	"cursor-cli",
-	"kimi"
+	"kimi",
+	"copilot"
 ]);
 function digestMessage(message) {
 	const sha256 = createHash("sha256").update(message, "utf8").digest("hex");
@@ -3329,6 +3605,45 @@ const ANALYSIS_ACTION_TYPES = /* @__PURE__ */ new Set([
 	"analysis.followup",
 	"analysis.cancel"
 ]);
+const ARCHIVE_ACTION_TYPES = /* @__PURE__ */ new Set([
+	"archive.preview",
+	"archive.apply",
+	"archive.unarchive",
+	"archive.list"
+]);
+/**
+* Daemon archive error code → HTTP status. Transport codes and unknown
+* daemon vocabulary fall back to 502 (the daemon spoke, we could not).
+*/
+const ARCHIVE_ERROR_STATUS = {
+	invalid_request: 400,
+	invalid_token: 409,
+	archive_corrupt: 500,
+	archive_error: 500,
+	unknown_op: 501,
+	timeout: 504,
+	connection_failed: 503,
+	connection_closed: 503
+};
+/** Upper bound on targets one `archive.apply`/`archive.unarchive` may carry. */
+const MAX_ARCHIVE_TARGETS = 500;
+/** Parse `[{agent, sessionId}]`, or null when any entry is malformed. */
+function parseArchiveTargets(value) {
+	if (!Array.isArray(value) || value.length === 0) return null;
+	if (value.length > MAX_ARCHIVE_TARGETS) return null;
+	const targets = [];
+	for (const raw of value) {
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+		const { agent, sessionId } = raw;
+		if (typeof agent !== "string" || agent === "") return null;
+		if (typeof sessionId !== "string" || sessionId === "") return null;
+		targets.push({
+			agent,
+			sessionId
+		});
+	}
+	return targets;
+}
 function writeJson(res, status, body) {
 	res.writeHead(status, {
 		"content-type": "application/json; charset=utf-8",
@@ -3498,7 +3813,10 @@ function createRoutes(deps, opts = {}) {
 			lastPing: deps.supervisor.lastPing
 		},
 		board: deps.store.getBoardState(),
-		capabilities: { inject: deps.guardOptions.allowWriteActions() }
+		capabilities: {
+			inject: deps.guardOptions.allowWriteActions(),
+			dispose: deps.guardOptions.allowWriteActions() && deps.dispose !== void 0 && deps.dispose.available()
+		}
 	});
 	const cleanupClient = (client) => {
 		if (client.closed) return;
@@ -3580,7 +3898,7 @@ function createRoutes(deps, opts = {}) {
 	const handleSession = async (res, rawId) => {
 		const id = decodeId(res, rawId);
 		if (id === null) return;
-		const view = deps.store.getBoardState().sessions.find((s) => s.session_id === id);
+		const view = deps.store.getSessionDetail(id) ?? void 0;
 		const fusion = deps.fusion;
 		if (fusion === void 0) {
 			if (view === void 0) {
@@ -3848,6 +4166,104 @@ function createRoutes(deps, opts = {}) {
 			analysisSessionId
 		});
 	};
+	/**
+	* Run one daemon archive op and answer it. A coded daemon/transport
+	* failure becomes an honest status from {@link ARCHIVE_ERROR_STATUS};
+	* session titles and ids stay out of the route log (S8).
+	*/
+	const runArchiveOp = async (type, res, op) => {
+		try {
+			const result = await op();
+			logAction(type, 200);
+			writeJson(res, 200, result);
+		} catch (err) {
+			const code = typeof err?.code === "string" ? err.code : "archive_failed";
+			const status = ARCHIVE_ERROR_STATUS[code] ?? 502;
+			logAction(type, status, { errorCode: code });
+			writeJson(res, status, { reason: code });
+		}
+	};
+	const handleDispose = async (dispose, envelope, res) => {
+		const sessionId = envelope.sessionId;
+		if (typeof sessionId !== "string" || sessionId === "") {
+			logAction("dsh.dispose", 400, { reason: "invalid_request" });
+			writeJson(res, 400, {
+				reason: "invalid_request",
+				detail: "dsh.dispose needs a nonempty sessionId"
+			});
+			return;
+		}
+		let result;
+		try {
+			result = await dispose.dispose(sessionId);
+		} catch {
+			logAction("dsh.dispose", 500, { reason: "executor_error" });
+			writeJson(res, 500, { reason: "executor_error" });
+			return;
+		}
+		logAction("dsh.dispose", 200, { outcome: result.outcome });
+		writeJson(res, 200, { outcome: result.outcome });
+	};
+	const handleArchiveAction = async (archive, type, envelope, res) => {
+		if (type === "archive.list") {
+			await runArchiveOp(type, res, () => archive.list());
+			return;
+		}
+		if (type === "archive.preview") {
+			const idleSeconds = envelope.idleSeconds;
+			const rawStatuses = envelope.statuses;
+			if (typeof idleSeconds !== "number" || !Number.isFinite(idleSeconds) || idleSeconds <= 0) {
+				logAction(type, 400, { reason: "invalid_request" });
+				writeJson(res, 400, {
+					reason: "invalid_request",
+					detail: "archive.preview needs a positive idleSeconds"
+				});
+				return;
+			}
+			let statuses;
+			if (rawStatuses !== void 0) {
+				if (!Array.isArray(rawStatuses) || rawStatuses.some((name) => typeof name !== "string")) {
+					logAction(type, 400, { reason: "invalid_request" });
+					writeJson(res, 400, {
+						reason: "invalid_request",
+						detail: "archive.preview statuses must be an array of strings"
+					});
+					return;
+				}
+				statuses = rawStatuses;
+			}
+			await runArchiveOp(type, res, () => archive.preview(idleSeconds, statuses));
+			return;
+		}
+		if (type === "archive.apply") {
+			const targets = parseArchiveTargets(envelope.targets);
+			const token = envelope.token;
+			if (targets === null || typeof token !== "string" || token === "") {
+				logAction(type, 400, { reason: "invalid_request" });
+				writeJson(res, 400, {
+					reason: "invalid_request",
+					detail: "archive.apply needs a nonempty targets[{agent,sessionId}] and a preview token"
+				});
+				return;
+			}
+			await runArchiveOp(type, res, () => archive.apply(targets, token));
+			return;
+		}
+		if (envelope.all === true) {
+			await runArchiveOp(type, res, () => archive.unarchive("all"));
+			return;
+		}
+		const targets = parseArchiveTargets(envelope.targets);
+		if (targets === null) {
+			logAction(type, 400, { reason: "invalid_request" });
+			writeJson(res, 400, {
+				reason: "invalid_request",
+				detail: "archive.unarchive needs targets[{agent,sessionId}] or all=true"
+			});
+			return;
+		}
+		await runArchiveOp(type, res, () => archive.unarchive(targets));
+	};
 	/** M2 dispatcher over the action envelope (gateway present, guard 1-4 passed). */
 	const handleAction = async (gateway, verdict, req, res) => {
 		const body = await readActionBody(req);
@@ -3880,6 +4296,32 @@ function createRoutes(deps, opts = {}) {
 				const state = deps.supervisor.state;
 				logAction("daemon.retry", 200, { state });
 				writeJson(res, 200, { state });
+				return;
+			}
+			if (type !== null && ARCHIVE_ACTION_TYPES.has(type)) {
+				const archive = deps.archive;
+				if (archive === void 0) {
+					logAction(type, 501, { reason: "archive_unavailable" });
+					writeJson(res, 501, { reason: "archive_unavailable" });
+					return;
+				}
+				await handleArchiveAction(archive, type, envelope, res);
+				return;
+			}
+			if (type === "dsh.dispose") {
+				const writeVerdict = guardWriteAction(verdict, deps.guardOptions);
+				if (!writeVerdict.ok) {
+					logAction(type, writeVerdict.status, { reason: writeVerdict.reason });
+					writeJson(res, writeVerdict.status, { reason: writeVerdict.reason });
+					return;
+				}
+				const dispose = deps.dispose;
+				if (dispose === void 0 || !dispose.available()) {
+					logAction(type, 501, { reason: "dispose_unavailable" });
+					writeJson(res, 501, { reason: "dispose_unavailable" });
+					return;
+				}
+				await handleDispose(dispose, envelope, res);
 				return;
 			}
 			if (type === "inject.prepare" || type === "inject.execute") {
@@ -4099,31 +4541,36 @@ function mapReceiptError(code) {
 function describeError$1(error) {
 	return error instanceof Error ? error.message : String(error);
 }
+/** Build the stable argv contract used by every external-agent injection. */
+function buildSendCliArgv(command, req, timeoutMs) {
+	const cliTimeoutSecs = Math.min(MAX_CLI_TIMEOUT_SECONDS, Math.max(1, Math.floor(timeoutMs / 1e3)));
+	return [
+		...command,
+		"send",
+		req.target.sessionId,
+		"--agent",
+		req.target.agent,
+		"--exact-session",
+		"--message-stdin",
+		"--allow-write",
+		"--json",
+		"--request-id",
+		req.requestId,
+		"--timeout",
+		String(cliTimeoutSecs)
+	];
+}
 function createSendCliExecutor(deps) {
 	const command = deps.opts?.command ?? DEFAULT_SEND_CLI_COMMAND;
 	const timeoutMs = deps.opts?.timeoutMs ?? 3e4;
 	const bufferMs = deps.opts?.hardTimeoutBufferMs ?? 5e3;
 	const log = deps.log ?? (() => {});
-	const cliTimeoutSecs = Math.min(MAX_CLI_TIMEOUT_SECONDS, Math.max(1, Math.floor(timeoutMs / 1e3)));
 	const hardTimeoutMs = timeoutMs + bufferMs;
+	const cliTimeoutSecs = Math.min(MAX_CLI_TIMEOUT_SECONDS, Math.max(1, Math.floor(timeoutMs / 1e3)));
 	return {
 		kind: "send-cli",
 		async execute(req) {
-			const argv = [
-				...command,
-				"send",
-				req.target.sessionId,
-				"--agent",
-				req.target.agent,
-				"--exact-session",
-				"--message-stdin",
-				"--allow-write",
-				"--json",
-				"--request-id",
-				req.requestId,
-				"--timeout",
-				String(cliTimeoutSecs)
-			];
+			const argv = buildSendCliArgv(command, req, timeoutMs);
 			log("debug", "spawning sidecar send CLI", {
 				requestId: req.requestId,
 				agent: req.target.agent,
@@ -4255,6 +4702,7 @@ function createSendCliExecutor(deps) {
 /** Bound for the last-event text summary kept per session. */
 const EVENT_TEXT_LIMIT = 160;
 const INVALID_PROPERTY = Symbol("invalid-property");
+const ANALYSIS_SESSION_PREFIX = "agent-sidecar-analysis-";
 function ownValue(record, key) {
 	try {
 		const descriptor = Object.getOwnPropertyDescriptor(record, key);
@@ -4262,6 +4710,11 @@ function ownValue(record, key) {
 	} catch {
 		return INVALID_PROPERTY;
 	}
+}
+/** Dedicated analysis agents are internal tooling, never board sessions. */
+function isAnalysisSession(sessionId, extra) {
+	if (sessionId.startsWith(ANALYSIS_SESSION_PREFIX)) return true;
+	return typeof extra === "object" && extra !== null && extra["agentSidecarAnalysis"] === true;
 }
 /**
 * Copy only accessor-free board fields. Runtime callers are not allowed to
@@ -4281,7 +4734,7 @@ function snapshotProjection(row) {
 	const project = ownValue(row, "project");
 	const updatedAt = ownValue(row, "updated_at");
 	if (typeof agent !== "string" || agent === "" || typeof sessionId !== "string" || sessionId === "" || typeof status !== "string" || typeof title !== "string" || typeof project !== "string" || typeof updatedAt !== "number" || !Number.isFinite(updatedAt)) return null;
-	return {
+	const projected = {
 		agent,
 		session_id: sessionId,
 		status,
@@ -4289,6 +4742,18 @@ function snapshotProjection(row) {
 		project,
 		updated_at: updatedAt
 	};
+	const transcript = ownValue(row, "transcript");
+	if (typeof transcript === "string" && transcript !== "") projected.transcript = transcript;
+	const extra = ownValue(row, "extra");
+	if (typeof extra === "object" && extra !== null) {
+		const model = extra["model"];
+		const modelProvider = extra["model_provider"];
+		const createdAt = extra["created_at_epoch"];
+		if (typeof model === "string" && model.trim() !== "") projected.model = model;
+		if (typeof modelProvider === "string" && modelProvider.trim() !== "") projected.model_provider = modelProvider;
+		if (typeof createdAt === "number" && Number.isFinite(createdAt) && createdAt > 0 && createdAt <= updatedAt) projected.created_at = createdAt;
+	}
+	return projected;
 }
 function sessionKey(agent, sessionId) {
 	return `${agent}\u0000${sessionId}`;
@@ -4309,16 +4774,44 @@ function extractSeq(extra) {
 /** In-memory session cache reconciled by snapshots, hinted by events. */
 var SessionStore = class {
 	rows = /* @__PURE__ */ new Map();
+	archivedRows = [];
+	archivePolicy = null;
 	eventState = /* @__PURE__ */ new Map();
 	streamHealth = "unknown";
 	lastReconcileAt = null;
 	listeners = /* @__PURE__ */ new Set();
+	/**
+	* Replace the archive projection. Archived rows go through the same
+	* sanitizing projection as board rows; a row the projection rejects is
+	* dropped rather than surfaced with partial fields.
+	*/
+	setArchived(rows, policy) {
+		const next = [];
+		for (const row of rows) {
+			const projection = snapshotProjection(row);
+			if (projection === null) continue;
+			next.push({
+				...projection,
+				last_event: null,
+				gap: false,
+				inject_eligibility: deriveInjectEligibility(row),
+				archived_at: row.archived_at,
+				archive_reason: row.archive_reason
+			});
+		}
+		next.sort((a, b) => b.archived_at - a.archived_at || a.session_id.localeCompare(b.session_id));
+		this.archivedRows = next;
+		this.archivePolicy = policy;
+		this.notify();
+	}
 	/** Replace the full session set with an authoritative snapshot. */
 	applySnapshot(rows) {
 		const next = /* @__PURE__ */ new Map();
 		for (const row of rows) {
 			const projection = snapshotProjection(row);
 			if (projection === null) continue;
+			const rawExtra = ownValue(row, "extra");
+			if (isAnalysisSession(projection.session_id, rawExtra === INVALID_PROPERTY ? null : rawExtra)) continue;
 			const injectEligibility = deriveInjectEligibility(row);
 			next.set(sessionKey(projection.agent, projection.session_id), {
 				...projection,
@@ -4375,12 +4868,32 @@ var SessionStore = class {
 		if (row === void 0) return null;
 		return this.toView(key, row);
 	}
+	/**
+	* One session by id, with the detail-only fields attached. The board list
+	* deliberately omits the transcript path: every reconcile re-sends the whole
+	* board over SSE, and a per-row absolute path is payload the list never
+	* renders. The detail view asks for exactly one session, so that is where
+	* the path is worth its bytes.
+	*/
+	getSessionDetail(sessionId) {
+		for (const [key, row] of this.rows) {
+			if (row.session_id !== sessionId) continue;
+			const view = this.toView(key, row);
+			return row.transcript !== void 0 ? {
+				...view,
+				transcript: row.transcript
+			} : view;
+		}
+		return null;
+	}
 	getBoardState() {
 		const sessions = [];
 		for (const [key, row] of this.rows) sessions.push(this.toView(key, row));
 		sessions.sort((a, b) => b.updated_at - a.updated_at || a.session_id.localeCompare(b.session_id));
 		return {
 			sessions,
+			archived: this.archivedRows.map((row) => ({ ...row })),
+			archivePolicy: this.archivePolicy === null ? null : { ...this.archivePolicy },
 			streamHealth: this.streamHealth,
 			lastReconcileAt: this.lastReconcileAt
 		};
@@ -4401,6 +4914,9 @@ var SessionStore = class {
 			title: row.title,
 			project: row.project,
 			updated_at: row.updated_at,
+			...row.created_at !== void 0 ? { created_at: row.created_at } : {},
+			...row.model !== void 0 ? { model: row.model } : {},
+			...row.model_provider !== void 0 ? { model_provider: row.model_provider } : {},
 			last_event: state?.lastEvent ?? null,
 			gap: state?.gap ?? false,
 			inject_eligibility: row.inject_eligibility
@@ -4448,7 +4964,7 @@ the default; every mutation needs an explicit user request in the same turn.
 
 ## Inject (explicit request only)
 
-- For **Kimi Code 0.38.0**, the only supported mutation is protected ACP
+- For **Kimi Code 0.38.0 or 0.39.1**, the only supported mutation is protected ACP
   spawn-resume for a local, top-level \`waiting\` or \`idle\` session.
   \`working\`, \`dead\`, child/sidechain, and remote Kimi sessions are
   rejected. The plugin UI fixes the internal request mode to \`queue\`, but
@@ -4475,7 +4991,7 @@ the default; every mutation needs an explicit user request in the same turn.
   state fails closed. Direct \`agent-sidecar send\` still returns
   \`unsupported_dsh\`; only that CLI path is unsupported, not DSH injection
   through this plugin.
-- For **claude / codex / cursor-cli** sessions in \`waiting\`/\`idle\`, use
+- For **claude / codex / cursor-cli / copilot** sessions in \`waiting\`/\`idle\`, use
   the plugin panel, or run \`send\` only when the user explicitly requests
   the exact message or action in the same turn. Never infer consent from a
   request to observe, watch, report, or wait. That explicit same-turn
@@ -4489,8 +5005,9 @@ the default; every mutation needs an explicit user request in the same turn.
 - On the external \`agent-sidecar send\` path, preserve the returned
   \`request_id\` and \`replayed\` fields. It rejects remote, \`working\`,
   \`dead\`, child, and unsupported-agent sessions. \`cursor-ide\` and
-  \`copilot\` have no mutation path; the plugin's in-process DSH rules above
-  are separate.
+  \`cursor-ide\` has no mutation path; Copilot uses its authenticated
+  \`--resume --interactive\` path and requires a usable fine-grained GitHub
+  token or Copilot login on the pod.
 - Never retry \`failed\`, \`timed_out\`, \`request_pending\`,
   \`audit_error\`, \`cleanup_incomplete\`, or any result with
   \`delivery: "unknown"\` — the agent may already have received the
@@ -4910,6 +5427,12 @@ const DAEMON_GRACE_MS = 5e3;
 const DETECT_TIMEOUT_MS = 1e4;
 /** SIGTERM → grace → SIGKILL window when the send-cli hard timeout kills. */
 const SEND_CLI_GRACE_MS = 2e3;
+/**
+* Codex resume can spend over 30s rebuilding a large-context turn before it
+* emits its final JSONL event. Keep the plugin-side bound below the Sidecar
+* maximum while avoiding false unknown-delivery results on healthy resumes.
+*/
+const SEND_CLI_TIMEOUT_MS = 18e4;
 /** Output cap for the detection probe (one sanitized message line). */
 const DETECT_OUTPUT_BYTES = 4096;
 /** Per-line clamp when forwarding daemon output into ctx.logger (S8). */
@@ -4930,6 +5453,7 @@ const ANALYSIS_CROSS_SESSIONS = 5;
 const ANALYSIS_LINE_CLAMP = 200;
 /** Clamp on the user question (placed at the head, so it survives truncation). */
 const ANALYSIS_QUESTION_CLAMP = 2e3;
+const ANALYSIS_INPUT_LIMIT = 8e3;
 /**
 * `service status` messages that mean "a LaunchAgent owns daemon liveness"
 * (sidecar/launchd.py `_status`): exit 0 is `service is running (pid N)`;
@@ -4955,6 +5479,10 @@ function resolveRuntimeDir(configured, env) {
 function clampAnalysisText(text, max = ANALYSIS_LINE_CLAMP) {
 	const flat = text.replace(/\s+/g, " ").trim();
 	return flat.length <= max ? flat : `${flat.slice(0, max)}…`;
+}
+/** Redact semantic payloads before they reach a local or remote model. */
+function redactAnalysisText(text, max = ANALYSIS_INPUT_LIMIT) {
+	return clampAnalysisText(text, max).replace(/(?:sk-|gh[pousr]_)[A-Za-z0-9_-]{8,}/gu, "[secret]").replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu, "[email]").replace(/(?:\/Users\/|\/home\/|\/tmp\/|[A-Za-z]:\\)[^\s,)]+/gu, "[path]");
 }
 /** Same trailing-slash normalization fusion uses for project group keys. */
 function normalizeAnalysisProject(project) {
@@ -5036,13 +5564,29 @@ function apply(ctx, config) {
 			if (text.trim() !== "") ctx.logger[level](`agent-sidecar daemon: ${text}`);
 		});
 	};
+	/**
+	* Auto-archive flags for a daemon we are about to spawn. Read at spawn
+	* time from the live settings, so a saved policy applies to the next
+	* hosted daemon without a plugin reload — and never to a daemon we merely
+	* adopted, which owns whatever policy it was started with.
+	*/
+	const autoArchiveArgv = () => {
+		const policy = effective.archive;
+		if (!policy.auto) return [];
+		return [
+			"--auto-archive",
+			"--auto-archive-after",
+			`${policy.autoAfterHours}h`
+		];
+	};
 	/** Spawn `<command> daemon run` as a supervised foreground child. */
 	const spawnDaemon = () => {
 		const handle = ctx.subprocess.spawn({
 			argv: [
 				...command,
 				"daemon",
-				"run"
+				"run",
+				...autoArchiveArgv()
 			],
 			cwd: homedir(),
 			stdio: {
@@ -5118,6 +5662,30 @@ function apply(ctx, config) {
 		getSessionQuery,
 		replay: replayFace
 	});
+	/**
+	* Current `sessions` service, resolved per call. The injected property is
+	* the production face; reflect `get` is a late-binding fallback for hosts
+	* that expose the current generation only there. Any foreign-service
+	* exception degrades to null rather than escaping through an HTTP route.
+	*/
+	const currentSessionsService = (sctx) => {
+		try {
+			const direct = sctx.sessions;
+			if (direct !== void 0 && typeof direct.get === "function") return direct;
+			const getter = sctx.get;
+			if (typeof getter !== "function") return null;
+			const current = getter.call(sctx, "sessions");
+			return current !== void 0 && current !== null && typeof current.get === "function" ? current : null;
+		} catch {
+			return null;
+		}
+	};
+	/**
+	* Installed by the lazy `sessions` binding below; null whenever no
+	* generation is live, which is exactly when `capabilities.dispose` must
+	* read false.
+	*/
+	let sessionsResolver = null;
 	const fusionHolder = { current: buildFusion(null) };
 	const fusion = {
 		getUnifiedSessions: () => fusionHolder.current.getUnifiedSessions(),
@@ -5130,6 +5698,9 @@ function apply(ctx, config) {
 	const reconciler = new Reconciler(client, {
 		applySnapshot: (rows) => {
 			store.applySnapshot(rows);
+		},
+		setArchived: (rows, policy) => {
+			store.setArchived(rows, policy);
 		},
 		applyEvent: (ev) => {
 			store.applyEvent(ev);
@@ -5307,7 +5878,10 @@ function apply(ctx, config) {
 	const sendCliExecutor = createSendCliExecutor({
 		spawn: spawnSendCli,
 		log,
-		opts: { command }
+		opts: {
+			command,
+			timeoutMs: SEND_CLI_TIMEOUT_MS
+		}
 	});
 	/** Live target re-check against the reconciled store (§4.f.5 prepare). */
 	const verifyTarget = async (target) => {
@@ -5361,7 +5935,10 @@ function apply(ctx, config) {
 				provider: selection.provider,
 				model: selection.model
 			},
-			meta: { cwd: process.cwd() }
+			meta: {
+				cwd: process.cwd(),
+				agentSidecarAnalysis: true
+			}
 		});
 		const tracked = {
 			agent: handle.agent,
@@ -5390,7 +5967,7 @@ function apply(ctx, config) {
 	const buildAnalysisInput = async (req) => {
 		const questionLines = req.question !== void 0 && req.question.trim() !== "" ? [
 			"[用户问题 / question]",
-			clampAnalysisText(req.question, ANALYSIS_QUESTION_CLAMP),
+			redactAnalysisText(req.question, ANALYSIS_QUESTION_CLAMP),
 			""
 		] : [];
 		if (req.targetKind === "session") {
@@ -5399,7 +5976,7 @@ function apply(ctx, config) {
 			if (session === null) return null;
 			const page = await fusion.getSessionTimeline(targetId, { limit: ANALYSIS_TIMELINE_LIMIT });
 			const sources = page.sources;
-			const summaryText = [
+			const summaryText = redactAnalysisText([
 				...questionLines,
 				`[会话概览 / session] agent=${session.agent} status=${session.status} live=${session.live}`,
 				`title: ${session.title !== "" ? clampAnalysisText(session.title) : "(untitled)"}`,
@@ -5408,10 +5985,10 @@ function apply(ctx, config) {
 				"",
 				`[时间线 / timeline,最新在前 / newest first] ${page.entries.length} events (sources: dshLive=${sources.dshLive} dshCold=${sources.dshCold} replay=${sources.sidecarReplay} buffer=${sources.sidecarBuffer})`,
 				...[...page.entries].reverse().map((entry) => `- [${new Date(entry.ts).toISOString()}] ${entry.kind}${entry.seq !== null ? ` seq=${entry.seq}` : ""}${entry.text !== "" ? ` ${clampAnalysisText(entry.text)}` : ""}`)
-			].join("\n");
+			].join("\n"));
 			return {
 				kind: "session",
-				title: session.title !== "" ? session.title : `${session.agent} ${session.sessionId}`,
+				title: redactAnalysisText(session.title !== "" ? session.title : `${session.agent} ${session.sessionId}`),
 				summaryText,
 				meta: {
 					targetId,
@@ -5424,17 +6001,17 @@ function apply(ctx, config) {
 			const group = fusion.getProjectGroups().find((g) => normalizeAnalysisProject(g.project) === wanted) ?? null;
 			if (group === null) return null;
 			const omitted = group.sessions.length - ANALYSIS_MAX_SESSIONS;
-			const summaryText = [
+			const summaryText = redactAnalysisText([
 				...questionLines,
 				`[项目概览 / project] ${group.project}`,
 				`agents: ${group.agents.join(", ")} | sessions: ${group.sessions.length} | last activity: ${new Date(group.lastActivityAt).toISOString()}`,
 				"",
 				...group.sessions.slice(0, ANALYSIS_MAX_SESSIONS).map(describeUnifiedSession),
 				...omitted > 0 ? [`… ${omitted} more sessions omitted`] : []
-			].join("\n");
+			].join("\n"));
 			return {
 				kind: "project",
-				title: `project ${group.project}`,
+				title: `project ${redactAnalysisText(group.project)}`,
 				summaryText,
 				meta: { targetId: group.project }
 			};
@@ -5445,7 +6022,7 @@ function apply(ctx, config) {
 		return {
 			kind: "cross-agent",
 			title: "cross-agent overview",
-			summaryText: [
+			summaryText: redactAnalysisText([
 				...questionLines,
 				`[跨 agent 概览 / cross-agent overview] ${groups.length} projects, ${sessionsTotal} sessions in the correlation window`,
 				"",
@@ -5455,9 +6032,13 @@ function apply(ctx, config) {
 					""
 				]),
 				...omittedGroups > 0 ? [`… ${omittedGroups} more projects omitted`] : []
-			].join("\n")
+			].join("\n"))
 		};
 	};
+	const disposer = createDshDisposer({
+		resolve: () => sessionsResolver?.() ?? null,
+		log
+	});
 	const routes = createRoutes({
 		store,
 		supervisor,
@@ -5470,6 +6051,28 @@ function apply(ctx, config) {
 			buildInput: buildAnalysisInput,
 			available: () => liveAgents !== null,
 			modelConfigured: () => resolveAnalysisModel() !== null
+		},
+		dispose: {
+			available: () => disposer.available(),
+			dispose: async (sessionId) => {
+				const result = await disposer.dispose(sessionId);
+				if (result.outcome === "disposed" || result.outcome === "not_found") await reconciler.reconcileNow();
+				return result;
+			}
+		},
+		archive: {
+			preview: (idleSeconds, statuses) => client.archivePreview(idleSeconds, statuses),
+			apply: async (targets, token) => {
+				const result = await client.archiveApply(targets, token);
+				await reconciler.reconcileNow();
+				return result;
+			},
+			unarchive: async (targets) => {
+				const result = await client.unarchive(targets);
+				await reconciler.reconcileNow();
+				return result;
+			},
+			list: () => client.archiveList()
 		},
 		log
 	});
@@ -5501,21 +6104,13 @@ function apply(ctx, config) {
 		const sctx = injected;
 		const bindingGeneration = ++dshFeedGeneration;
 		let bindingActive = true;
+		sessionsResolver = () => bindingActive && bindingGeneration === dshFeedGeneration ? currentSessionsService(sctx) : null;
 		const bus = sctx;
 		const withFeed = buildFusion({
 			on: (event, handler) => bus.on(event, handler),
 			get: (sessionId) => {
 				if (!bindingActive || bindingGeneration !== dshFeedGeneration) return;
-				try {
-					const direct = sctx.sessions;
-					if (direct !== void 0 && typeof direct.get === "function") return direct.get(sessionId);
-					const getter = sctx.get;
-					if (typeof getter !== "function") return void 0;
-					const current = getter.call(sctx, "sessions");
-					return current !== void 0 && current !== null && typeof current.get === "function" ? current.get(sessionId) : void 0;
-				} catch {
-					return;
-				}
+				return currentSessionsService(sctx)?.get(sessionId);
 			}
 		});
 		withFeed.start();
@@ -5524,6 +6119,7 @@ function apply(ctx, config) {
 		previous.stop();
 		sctx.effect(() => () => {
 			bindingActive = false;
+			if (bindingGeneration === dshFeedGeneration) sessionsResolver = null;
 			if (bindingGeneration !== dshFeedGeneration || fusionHolder.current !== withFeed) {
 				withFeed.stop();
 				return;

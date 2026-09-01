@@ -5,6 +5,95 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.10.0] - 2026-09-01
+
+### Fixed
+
+- Remote cluster rows no longer carry the remote's own `local` label. Every
+  host groups its sessions under the reserved `local` alias, so the fleet view
+  used to claim each remote group also existed on the workstation — including
+  single-session groups. Remote rows are now attributed to their actual host.
+- `agent-sidecar daemon status` reports the running daemon's version and warns
+  when it differs from the CLI. A long-lived daemon keeps serving the code it
+  started with, so an upgrade would otherwise silently return stale sessions.
+- Sessions from non-DSH agents no longer open with an empty timeline. The
+  daemon now replays the on-disk transcript for every adapter, so a
+  claude/codex/copilot/cursor/kimi session shows its history immediately
+  instead of only the events that happen to arrive after the page is opened.
+  A transcript an adapter cannot replay reports `replay_unsupported` and is
+  presented as unavailable rather than as a failure.
+- The DSH plugin's session detail page keeps its header, and therefore its
+  Back button, when the timeline is unavailable. The degraded state used to
+  replace the whole page, leaving no way back to the board except browser
+  navigation.
+- The board's model column was always blank: the session projection dropped
+  `model` on the way to the view.
+
+### Added
+
+- `agent-sidecar service install|status|uninstall` now supports an explicit
+  Linux current-user systemd unit. The unit runs the foreground daemon with
+  bounded restart, process-group cleanup, least-privilege hardening, and
+  journald output; it never changes system-wide service state or user lingering.
+- Linux `send` now has process-group containment for bounded child execution,
+  allowing supported local injection paths to run on Linux while retaining
+  fail-closed cleanup and timeout behavior.
+- Kimi Code 0.39.1 is supported by the protected ACP spawn-resume path.
+- Copilot CLI injection is supported through `--resume --interactive` for
+  authenticated, eligible sessions, including the DSH plugin's send-cli route.
+- `scripts/deploy-to-pod.sh` provides an explicit operator path for rsyncing
+  the zipapp and plugin, restarting the daemon, and installing the DSH plugin.
+- `scripts/copilot_compat.py` provides a bounded, no-credential Copilot CLI
+  compatibility smoke for the authenticated `--resume --interactive` flag
+  contract.
+- The plugin adds a line-network Agent Center sidebar icon, a persisted
+  per-project idle-session fold, project/cross-agent analysis entry points,
+  and a multi-turn analysis conversation with an honest segmented progress
+  fallback.
+- `agent-sidecar archive`, `archive list`, `unarchive`, and `list --archived`
+  hide idle or dead sessions from every listing without touching them. Nothing
+  is edited and no process is signalled: the only state written is a private
+  `archive.json` registry, and a session that becomes active again is released
+  automatically. `daemon start --auto-archive [--auto-archive-after 24h]` runs
+  the same selection on a timer, off by default and archive-only. Archiving is
+  per host; `--remote`/`--host` are refused with the equivalent ssh
+  invocation.
+- The plugin board can archive in bulk: pick an inactivity threshold, review
+  and deselect the matched sessions, then confirm. Archived sessions move to a
+  collapsible "archived N" section that can release them again.
+- DSH sessions can be ended from the plugin. The detail page offers an
+  explicit, confirmed end-session action, and the batch archive dialog offers
+  it as an opt-in checkbox for the DSH sessions in the selection. It is the
+  one destructive action the plugin exposes, so it is DSH-only, manual, and
+  behind the same write gate as injection.
+- The session detail header reports last activity, session duration, event
+  counts, model, and copyable project and transcript paths.
+- An injection whose delivery is reported as unknown is now checked
+  automatically: the plugin reads the target's transcript a bounded number of
+  times and reports whether the message actually landed. It never re-sends,
+  and it distinguishes "not in the transcript" from "the transcript could not
+  be read".
+
+### Changed
+
+- Dedicated analysis sessions are explicitly marked and filtered out of
+  board and project correlation data.
+- The DSH plugin's send-cli execution timeout is now 180 seconds to cover
+  bounded real-agent resume operations.
+- Copilot documentation now distinguishes stdin isolation at the Sidecar
+  boundary from the upstream Copilot child process's argv message transport.
+- The plugin package uses its Trusted Publishing release workflow for npm
+  publication.
+- Added bounded deterministic session clustering with local and remote fleet
+  sources, model/provider metadata, and optional redacted DSH headless
+  enrichment.
+- Cursor observation now includes Remote-SSH `cursor-server` history manifests
+  and marks their provenance explicitly.
+- Every adapter now reports session creation time as `extra.created_at_epoch`
+  in seconds, so age and duration read the same key regardless of agent.
+
 ## [0.9.0] - 2026-08-29
 
 ### Fixed
@@ -420,6 +509,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI and terminal-dashboard workflows for session listing, status, watching,
   and process inspection.
 
+[Unreleased]: https://github.com/shendeguize/AgentSideCar/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/shendeguize/AgentSideCar/compare/v0.6.0...v0.7.0

@@ -16,9 +16,10 @@ import type { ReactElement, ReactNode } from 'react'
 import { SessionDetail } from './detail/SessionDetail.tsx'
 import { LineageTree } from './dsh-tools/LineageTree.tsx'
 import { SearchPanel } from './dsh-tools/SearchPanel.tsx'
-import { AnalysisPanel } from './analysis/AnalysisPanel.tsx'
 import { InjectPanel, injectErrorCopy } from './inject/InjectPanel.tsx'
 import { findCardHint, type DetailHeaderHint } from './detail-glue.ts'
+import type { AnalysisTarget } from './analysis-glue.ts'
+import type { DaemonStateToken } from './board/logic.ts'
 import type { SidecarController } from './controller.ts'
 import {
   fetchSession,
@@ -28,6 +29,7 @@ import {
 } from './api.ts'
 import type {
   AbortSignalLike,
+  DisposeOutcome,
   InjectBlockReason,
   InjectEligibility,
   SessionDetail as SessionDetailWire,
@@ -36,7 +38,6 @@ import type {
 import { isDeliveredResult } from './inject/logic.ts'
 import type { InjectActions } from './inject-glue.ts'
 import type {
-  AnalysisStorePort,
   DetailStorePort,
   DetailUiPort,
   SearchStorePort,
@@ -164,6 +165,132 @@ export function DetailInjectTrigger(props: DetailInjectTriggerProps): ReactEleme
   )
 }
 
+/** The one agent whose sessions the host can actually end. */
+const DISPOSABLE_AGENT = 'dsh'
+
+/**
+ * Copy for the outcomes worth reporting. `disposed` and `not_found` are
+ * absent by design: both mean the session is gone, and the page closes
+ * instead of narrating.
+ */
+const DISPOSE_FAILURE_COPY = {
+  unsupported: 'detail.dispose.outcome.unsupported',
+  timeout: 'detail.dispose.outcome.timeout',
+  failed: 'detail.dispose.outcome.failed',
+} as const
+
+/** The failure copy for an outcome, or null when the session is gone. */
+export function disposeFailureKey(
+  outcome: DisposeOutcome,
+): (typeof DISPOSE_FAILURE_COPY)[keyof typeof DISPOSE_FAILURE_COPY] | null {
+  return outcome === 'disposed' || outcome === 'not_found'
+    ? null
+    : DISPOSE_FAILURE_COPY[outcome]
+}
+
+export interface DetailDisposeButtonProps {
+  /** Observed agent of the open session; only `dsh` can be disposed. */
+  agent: string
+  /** Host `capabilities.dispose`: false hides the control entirely. */
+  capable: boolean
+  onDispose: () => Promise<DisposeOutcome>
+  /** Called after the session was actually ended. */
+  onDisposed: () => void
+}
+
+/**
+ * Detail-page dispose: a confirm dialog in front of the only irreversible
+ * action this plugin offers.
+ *
+ * It renders nothing at all unless both the agent and the host can support
+ * it — a disabled "end session" button invites the operator to hunt for a
+ * setting, while archiving (which is right for almost every idle session)
+ * is already one click away on the board.
+ */
+export function DetailDisposeButton(props: DetailDisposeButtonProps): ReactElement | null {
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [outcome, setOutcome] = useState<DisposeOutcome | null>(null)
+  if (props.agent !== DISPOSABLE_AGENT || !props.capable) return null
+  const failureKey = outcome === null ? null : disposeFailureKey(outcome)
+
+  const run = (): void => {
+    if (busy) return
+    setBusy(true)
+    setOutcome(null)
+    props.onDispose().then(
+      (result) => {
+        setBusy(false)
+        setOutcome(result)
+        // `not_found` means someone else already ended it: the board is
+        // stale either way, so both settled-gone outcomes close the dialog
+        // and hand control back to the owner.
+        if (result === 'disposed' || result === 'not_found') {
+          setConfirming(false)
+          props.onDisposed()
+        }
+      },
+      () => {
+        setBusy(false)
+        setOutcome('failed')
+      },
+    )
+  }
+
+  return (
+    <>
+      <Button
+        size="sm"
+        variant="outline"
+        title={t('detail.actions.disposeHint')}
+        onClick={() => {
+          setOutcome(null)
+          setConfirming(true)
+        }}
+        data-testid="agent-sidecar-detail-dispose"
+      >
+        {t('detail.actions.dispose')}
+      </Button>
+      {failureKey !== null && (
+        <span
+          className={css['analysisDisabledReason']}
+          role="alert"
+          data-testid="agent-sidecar-detail-dispose-outcome"
+        >
+          {t(failureKey)}
+        </span>
+      )}
+      <Modal
+        open={confirming}
+        onClose={() => { if (!busy) setConfirming(false) }}
+        title={t('detail.dispose.title')}
+        closeLabel={t('detail.dispose.cancel')}
+        description={t('detail.dispose.explain')}
+      >
+        <div data-testid="agent-sidecar-detail-dispose-confirm">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            onClick={() => { setConfirming(false) }}
+          >
+            {t('detail.dispose.cancel')}
+          </Button>
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={busy}
+            onClick={run}
+            data-testid="agent-sidecar-detail-dispose-confirm-run"
+          >
+            {busy ? t('detail.dispose.disposing') : t('detail.dispose.confirm')}
+          </Button>
+        </div>
+      </Modal>
+    </>
+  )
+}
+
 export interface SidecarDetailViewProps {
   sessionId: string
   /** Header seed from the opening surface (board card / project row). */
@@ -171,6 +298,8 @@ export interface SidecarDetailViewProps {
   controller: SidecarController
   integration: DetailUiPort
   onClose: () => void
+  /** Open the tab-scoped full-page analysis route for this session. */
+  onAnalyze: (target: AnalysisTarget) => void
   /** Provenance/search jump: navigate the detail view to another session. */
   onSelectSession: (sessionId: string) => void
 }
@@ -181,8 +310,17 @@ export interface TimelineAvailabilityBoundaryProps {
   refreshing: boolean
   onRefresh: () => void
   onClose?: () => void
+  /**
+   * Supervisor state, when the surface knows it. A dead daemon is the most
+   * common cause of a dead timeline and the only one the operator can act
+   * on, so it replaces the generic retry line with the actual fix.
+   */
+  daemonState?: DaemonStateToken
   children: ReactNode
 }
+
+/** Daemon states in which no history source can answer until it comes back. */
+const DAEMON_DOWN_STATES = new Set<DaemonStateToken>(['failed', 'backoff', 'defer'])
 
 /**
  * Content-free timeline degradation surface. A degraded empty page replaces
@@ -195,6 +333,8 @@ export function TimelineAvailabilityBoundary(
   const { health } = props
   const degraded = health.kind !== 'healthy'
   const blocksHealthyEmpty = degraded && props.entryCount === 0
+  const daemonDown =
+    props.daemonState !== undefined && DAEMON_DOWN_STATES.has(props.daemonState)
   const messageKey =
     health.kind === 'partial'
       ? 'detail.timeline.degradedPartial'
@@ -217,7 +357,15 @@ export function TimelineAvailabilityBoundary(
               {t('detail.sources.healthSummary', { ...health.summary })}
             </span>
           )}
-          <span>{t('detail.timeline.degradedRetry')}</span>
+          <span data-testid="agent-sidecar-timeline-degraded-hint">
+            {daemonDown
+              ? t(
+                  props.daemonState === 'defer'
+                    ? 'detail.timeline.daemonDeferHint'
+                    : 'detail.timeline.daemonDownHint',
+                )
+              : t('detail.timeline.degradedRetry')}
+          </span>
           {blocksHealthyEmpty && (
             <span>
               {props.onClose !== undefined && (
@@ -257,11 +405,9 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
     () => integration.createDetailStore(sessionId, props.hint),
   )
   const [searchStore] = useState<SearchStorePort>(() => integration.createSearchStore())
-  const [analysisStore] = useState<AnalysisStorePort>(() => integration.createAnalysisStore())
   const [injectOpen, setInjectOpen] = useState(false)
   const [injectEligibility, setInjectEligibility] =
     useState<InjectEligibility>(INVALID_INJECT_ELIGIBILITY)
-  const [analysisOpen, setAnalysisOpen] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
   const detailRootRef = useRef<HTMLDivElement | null>(null)
   const focusFrameRef = useRef<number | null>(null)
@@ -285,9 +431,8 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
       eligibilityRefresher.dispose()
       detailStore.dispose()
       searchStore.dispose()
-      analysisStore.dispose()
     }
-  }, [controller, detailStore, searchStore, analysisStore, sessionId])
+  }, [controller, detailStore, searchStore, sessionId])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -316,8 +461,6 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
     detailStore.subscribe, detailStore.getState, detailStore.getState)
   const search = useSyncExternalStore(
     searchStore.subscribe, searchStore.getState, searchStore.getState)
-  const analysis = useSyncExternalStore(
-    analysisStore.subscribe, analysisStore.getState, analysisStore.getState)
   const view = useSyncExternalStore(
     (cb) => controller.subscribe(cb),
     () => controller.getState(),
@@ -328,6 +471,7 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
   const analysisDisabledHint =
     analysisEnabled ? undefined : t('detail.actions.analyzeDisabledHint')
   const injectIntegration = props.integration.inject
+  const disposePort = props.integration.dispose
   const closeInject = (): void => { setInjectOpen(false) }
   const title = detail.header.title.trim()
 
@@ -347,6 +491,19 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
 
   const observeReaction = (): void => {
     if (!detailStore.getState().listening) detailStore.toggleListen()
+    closeInject()
+  }
+
+  // Unknown-delivery check: the panel asks the transport directly rather
+  // than reading this page's timeline, so a stale or filtered view cannot
+  // turn a delivered message into a false "not found".
+  const verifyProbe = integration.inject?.createVerifyProbe?.(sessionId)
+
+  // The injection target is always the session this page shows, so
+  // "show the target's timeline" means dismiss the panel over a refreshed
+  // newest window.
+  const inspectTarget = (): void => {
+    void detailStore.refreshNewest()
     closeInject()
   }
 
@@ -370,7 +527,9 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
           disabled={!analysisEnabled}
           title={analysisDisabledHint}
           aria-describedby={analysisEnabled ? undefined : ANALYSIS_DISABLED_REASON_ID}
-          onClick={() => { setAnalysisOpen(true) }}
+          onClick={() => {
+            props.onAnalyze({ targetKind: 'session', targetId: sessionId })
+          }}
           data-testid="agent-sidecar-detail-analyze"
         >
           {t('detail.actions.analyze')}
@@ -382,6 +541,20 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
           >
             {analysisDisabledHint}
           </span>
+        )}
+        {disposePort !== undefined && (
+          <DetailDisposeButton
+            agent={detail.header.agent}
+            capable={view.disposeCapability}
+            onDispose={() => disposePort.dispose(sessionId)}
+            // A disposed session is gone from the host but still in this
+            // board frame; leaving the detail page open would show a
+            // timeline that can never advance again.
+            onDisposed={() => {
+              void controller.refresh()
+              props.onClose()
+            }}
+          />
         )}
       </div>
 
@@ -431,41 +604,35 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
         )}
       </div>
 
-      <TimelineAvailabilityBoundary
-        health={detail.timelineHealth}
-        entryCount={detail.timeline.entries.length}
+      <SessionDetail
+        sessionId={sessionId}
+        header={detail.header}
+        timeline={detail.timeline}
+        loading={detail.loading}
+        error={detail.error}
+        hasMore={detail.hasMore}
+        listening={detail.listening}
         refreshing={detail.refreshing}
+        onLoadMore={() => { void detailStore.loadMore() }}
+        onToggleListen={() => { detailStore.toggleListen() }}
         onRefresh={() => { void detailStore.refreshNewest() }}
         onClose={props.onClose}
-      >
-        <SessionDetail
-          sessionId={sessionId}
-          header={detail.header}
-          timeline={detail.timeline}
-          loading={detail.loading}
-          error={detail.error}
-          hasMore={detail.hasMore}
-          listening={detail.listening}
-          refreshing={detail.refreshing}
-          onLoadMore={() => { void detailStore.loadMore() }}
-          onToggleListen={() => { detailStore.toggleListen() }}
-          onRefresh={() => { void detailStore.refreshNewest() }}
-          onClose={props.onClose}
-        />
-      </TimelineAvailabilityBoundary>
-
-      {analysisOpen && (
-        <AnalysisPanel
-          enabled={analysisEnabled}
-          state={analysis}
-          onStart={() => {
-            void analysisStore.start({ targetKind: 'session', targetId: sessionId })
-          }}
-          onFollowup={(question) => { void analysisStore.followup(question) }}
-          onStop={() => { void analysisStore.stop() }}
-          onClose={() => { setAnalysisOpen(false) }}
-        />
-      )}
+        // Degradation is scoped to the timeline body, so the header — back
+        // button, status, ids, transcript path — survives a dead timeline.
+        // Back therefore lives in the header only; the boundary keeps its own
+        // optional close for standalone use.
+        timelineBoundary={(body) => (
+          <TimelineAvailabilityBoundary
+            health={detail.timelineHealth}
+            entryCount={detail.timeline.entries.length}
+            refreshing={detail.refreshing}
+            onRefresh={() => { void detailStore.refreshNewest() }}
+            daemonState={view.daemonState}
+          >
+            {body}
+          </TimelineAvailabilityBoundary>
+        )}
+      />
 
       {injectIntegration !== undefined && injectActions !== undefined && (
         <Modal
@@ -489,6 +656,8 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
             onExecute={injectActions.onExecute}
             onClose={closeInject}
             onObserve={observeReaction}
+            verifyProbe={verifyProbe}
+            onOpenTarget={inspectTarget}
           />
         </Modal>
       )}

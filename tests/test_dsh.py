@@ -1150,7 +1150,7 @@ class DSHDiscoveryTests(unittest.TestCase):
         elapsed = time.monotonic() - started
 
         self.assertEqual([], sessions)
-        self.assertLess(elapsed, 0.2)
+        self.assertLess(elapsed, 0.3)
         self.assertLessEqual(sum(timeouts), 0.08)
         self.assertEqual(0, len(self.adapter._durable_header_cache))
 

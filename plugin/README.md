@@ -7,7 +7,7 @@
 - **一等 Agent Center overlay**:通过 dsh 官方 `shell.overlay` 注册 `agent-sidecar-center`(`order: 30`),由可观察导航状态驱动官方 Modal 内的大尺寸中心。dsh 主侧栏入口、footer 状态小件与 `/sidecar` 的 Agent Center 动作共享此入口,空白会话和窄屏下也可打开;会话区「Sidecar」Tab 保留为第二入口。嵌套 Modal 会把每个下层 dialog 同时标为 `inert` 与 `aria-hidden`,逐层关闭或卸载时精确恢复此前的宿主属性和焦点。
 - **跨 agent 会话看板**:Agent Center overlay 与会话区「Sidecar」Tab 展示本机受支持 agent(cursor IDE/CLI、claude、codex、copilot、dsh、kimi)的会话卡片与状态徽标(`working` / `waiting` / `idle` / `dead`;状态为从持久化数据推断的观察值,可能滞后),并可按 agent 类型过滤。首个快照前显示本地化 loading 且根节点为 `aria-busy`;首载失败结束 busy 并允许手动重试,后续刷新或流失败则保留最后成功快照并如实提示 stale/degraded 状态。
 - **会话详情视图**:统一时间线(融合 sidecar 规范化事件与 dsh 进程内实时事件,分页回溯历史,事件缺口如实标注,并公开不含正文的来源结果/降级状态);dsh 会话专属谱系树与全文检索(经 `sessionQuery`,该服务缺席时优雅降级——检索退化为标题/项目过滤,谱系显示不可用提示);项目分组视图(同一项目下跨 agent 会话并排呈现)。从看板/项目进入详情时焦点移入详情控件;返回时按 agent+session 组合身份恢复精确来源及各视图独立的有界滚动位置,来源消失或被过滤时回退到视图标题。详情内跳转到另一会话会清除原来源身份,返回时同样走标题 fallback。
-- **消息注入(默认关)**:`inject.enabled` 是独立全局门,会话是否可注入另由 host 按目标派生。普通外部 agent 仅允许本机顶层 `claude`/`codex`/`cursor-cli` 的 waiting/idle 会话;Kimi Code 仅允许经 0.38.0 ACP 受保护 spawn-resume 的本机顶层 waiting/idle 会话。两者都经 `agent-sidecar send <full-session-id> --agent <agent> --exact-session --message-stdin --allow-write --json` 执行,消息不进入 Sidecar argv,Kimi 提示词也只进入 ACP NDJSON 而不进入 Kimi argv。本机 DSH working 可走进程内 steer,waiting/idle 进入 live/cold 预检。unsupported/remote/dead/invalid 目标置灰并显示可访问原因。`delivery: unknown` 不提供重试按钮。
+- **消息注入(默认关)**:`inject.enabled` 是独立全局门,会话是否可注入另由 host 按目标派生。普通外部 agent 仅允许本机顶层 `claude`/`codex`/`cursor-cli` 的 waiting/idle 会话;Kimi Code 仅允许经 0.38.0/0.39.1 ACP 受保护 spawn-resume 的本机顶层 waiting/idle 会话。插件始终经 `agent-sidecar send <full-session-id> --agent <agent> --exact-session --message-stdin --allow-write --json` 执行；消息不进入 Sidecar 自身 argv，但 Copilot 的上游恢复合同会让消息进入其子进程 argv。Kimi 提示词只进入 ACP NDJSON 而不进入 Kimi argv。本机 DSH working 可走进程内 steer,waiting/idle 进入 live/cold 预检。unsupported/remote/dead/invalid 目标置灰并显示可访问原因。`delivery: unknown` 不提供重试按钮。
 - **AI 旁路分析(默认关)**:`analysis.enabled` 开启后,可对被观测会话/项目拉起专用 dsh 分析会话(有界摘要注入 + 增量追问 + 随时停止);模型路由见配置表 `analysis.provider` / `analysis.model`。分析正文绝不写入插件日志。
 - **footer 状态小件**:侧边栏底部常驻连接状态点(sidecar 连接态 + 速览),点击打开 Agent Center。
 - **`/sidecar` 斜杠命令**:会话输入框内的只读状态速览(daemon 状态、连接健康度、working/waiting 计数、按项目分组的活跃会话);选择末尾的「Agent Center」动作可打开 Agent Center。
@@ -71,23 +71,35 @@ dsh plugin --profile web add /path/to/agent_sidecar/plugin
 资格判定由 host 在仍持有完整只读会话行时派生,浏览器只接收 `{allowed, reason}`;原始 `extra`、远端标记、parent ID 与私有路径不跨该边界。
 
 - `inject.enabled=false`:全局门关闭,所有写动作服务端 403;这是独立于下列单会话资格的总开关。开启它不会把不合格会话变为合格。
-- `claude` / `codex` / `cursor-cli`:仅本机、顶层、`waiting` 或 `idle` 合格。`working`、child/sidechain、remote、dead 与结构无效行拒绝。
-- `kimi`:仅本机、顶层、`waiting` 或 `idle` 合格,执行器只接受精确验证的 Kimi Code 0.38.0 ACP。`working`、child/sidechain、remote、dead 与结构无效行拒绝。
+- `claude` / `codex` / `cursor-cli` / `copilot`:仅本机、顶层、`waiting` 或 `idle` 合格。`working`、child/sidechain、remote、dead 与结构无效行拒绝。
+- `kimi`:仅本机、顶层、`waiting` 或 `idle` 合格,执行器只接受精确验证的 Kimi Code 0.38.0 或 0.39.1 ACP。`working`、child/sidechain、remote、dead 与结构无效行拒绝。
 - `dsh`:本机 `working` 可走 live Agent 的进程内 steer;本机 `waiting` / `idle` 进入 DSH live/cold preflight,其中 live 复用现有 Agent,cold 才尝试持久化恢复。DSH child/sidechain 拓扑由该原生 preflight 判定,不套用外部 Agent 的静态 child 拒绝。
-- `cursor-ide` / `copilot` 及未知 Agent:没有注入执行器,入口置灰。
+- `cursor-ide` 及未知 Agent:没有注入执行器,入口置灰。
 
 禁用按钮和面板都会通过本地化文案与 `aria-describedby` 暴露原因;缺失、过期或身份不匹配的 verdict 按 `invalid_session` 关闭失败,client 不根据 agent/status 自行猜测放行。
 
-## Kimi 0.38.0 受保护恢复契约
+## Kimi 0.38.0 / 0.39.1 受保护恢复契约
 
 Kimi 通路是**受保护 spawn-resume**,不是对现有终端的 followup 或 steer:
 
-- 插件只支持精确版本 Kimi Code 0.38.0。每次执行启动独立的 `kimi acp` 进程,通过 ACP `session/resume` 恢复已持久化会话;不附着、不控制现有 Kimi 终端。旧版 Agent Sidecar 仍可能返回兼容错误 `unsupported_kimi`;这表示已安装的 Sidecar 过旧或版本验证未通过,不表示当前插件合同把 Kimi 整体列为不支持。
+- 插件只支持精确版本 Kimi Code 0.38.0 或 0.39.1。每次执行启动独立的 `kimi acp` 进程,通过 ACP `session/resume` 恢复已持久化会话;不附着、不控制现有 Kimi 终端。旧版 Agent Sidecar 仍可能返回兼容错误 `unsupported_kimi`;这表示已安装的 Sidecar 过旧或版本验证未通过,不表示当前插件合同把 Kimi 整体列为不支持。
 - UI 内部固定提交 `queue`,但用户界面只称「受保护恢复」并明确标注 non-steer;不会把它描述为下一轮排队或中途转向。
 - 插件调用 Sidecar 时使用 `--message-stdin`;Sidecar 再把消息写入 ACP JSON-RPC NDJSON 的 `session/prompt` 帧。消息不进入 `agent-sidecar` argv,也不进入 Kimi 子进程 argv。
 - ACP 恢复后固定进入 default/manual mode。所有 permission 或 question 请求一律回复 `cancelled`,绝不自动批准权限、回答问题或绕过交互门。
 - 只有本机、顶层、`waiting` / `idle` 会话可执行;`working`、child/sidechain、remote、dead 一律在提示词写入前拒绝。
 - 即使 Kimi turn 正常 completed,目前仍无法证明提示词已持久投递到恢复会话,所以结果保持 `delivery: "unknown"`。同一内容不得自动或手工盲目重试。使用同一 `request_id` 重放是安全的:Sidecar 返回已缓存回执且不再 spawn ACP 进程、不重复发送内容。
+
+## Copilot 注入契约
+
+Copilot 使用外部 Sidecar `send` 通路,通过
+`copilot --resume <session_id> --interactive <message> --silent --no-color
+--no-auto-update` 恢复会话。消息先通过 stdin 进入 Sidecar，以避免暴露在
+`agent-sidecar` 自身 argv；Sidecar 随后按 Copilot 上游合同把它放进 Copilot
+子进程 argv，因此确认对话框和安全边界不能声称 Copilot argv 隔离。会话必须
+是本机顶层的 `waiting` / `idle` 状态。pod 部署脚本会让该子进程加载远端受保护
+的 Copilot 认证环境,但不会复制或打印凭据;若认证不可用,返回失败回执而不自动
+重试。可用 `python3 scripts/copilot_compat.py` 在不读取凭据的情况下检查 CLI
+版本和恢复旗标；它只调用 `--version` 与 `--help`。
 
 ## DSH 注入的 live/cold 契约
 

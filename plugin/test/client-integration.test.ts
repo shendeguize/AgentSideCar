@@ -69,6 +69,8 @@ import {
   type SessionCardVM,
 } from '../src/client/board/logic.ts'
 import { ProjectView } from '../src/client/board/project-view.tsx'
+import { AnalysisPanel } from '../src/client/analysis/AnalysisPanel.tsx'
+import type { AnalysisGlueState } from '../src/client/analysis-glue.ts'
 import {
   createInjectEligibilityRefresher,
   DetailInjectTrigger,
@@ -130,6 +132,10 @@ const DETAIL_VIEW_SOURCE = readFileSync(
 )
 const PROJECT_VIEW_SOURCE = readFileSync(
   new URL('../src/client/board/project-view.tsx', import.meta.url),
+  'utf8',
+)
+const ANALYSIS_CSS_SOURCE = readFileSync(
+  new URL('../src/client/analysis/analysis.module.css', import.meta.url),
   'utf8',
 )
 
@@ -329,7 +335,7 @@ function detailWire(session: SessionView): SessionDetailWire {
 describe('client injection eligibility', () => {
   const allowed = { allowed: true, reason: 'eligible' } as const
 
-  it.each(['cursor-ide', 'copilot'])(
+  it.each(['cursor-ide'])(
     'consumes the host rejection for unsupported %s targets',
     (agent) => {
       const verdict = sessionInjectEligibility(eligibilitySession(agent, 'waiting', {
@@ -568,7 +574,7 @@ describe('client injection eligibility', () => {
     }
   })
 
-  it('never promotes a Kimi unknown receipt to delivered UI behavior', () => {
+  it('preserves a Kimi unknown receipt while accepting explicit delivery', () => {
     const response = { outcome: 'unknown' as const, errorCode: 'executor_error' }
     expect(classifyExecuteResponse(response)).toEqual({
       type: 'EXECUTE_RESULT',
@@ -579,8 +585,8 @@ describe('client injection eligibility', () => {
       canReprepare: false,
       showCheckSessionHint: true,
     })
-    expect(displayInjectOutcome('kimi', 'delivered')).toBe('unknown')
-    expect(resultCopyKey('kimi', 'delivered')).toBe('inject.kimiResultUnknown')
+    expect(displayInjectOutcome('kimi', 'delivered')).toBe('delivered')
+    expect(resultCopyKey('kimi', 'delivered')).toBe('inject.resultDelivered')
     expect(resultCopyKey('kimi', 'unknown')).toBe('inject.kimiResultUnknown')
     expect(resultCopyKey('kimi', 'failed')).toBe('inject.kimiResultFailed')
     expect(en['inject.kimiResultUnknown']).toContain('Kimi 0.38 completed')
@@ -884,6 +890,7 @@ describe('timeline source outcome integration', () => {
     health: TimelineHealth,
     entryCount: number,
     child = 'healthy-empty-content',
+    extra: Record<string, unknown> = {},
   ): string => renderToStaticMarkup(createElement(TimelineAvailabilityBoundary, {
     health,
     entryCount,
@@ -891,6 +898,7 @@ describe('timeline source outcome integration', () => {
     onRefresh: () => {},
     onClose: () => {},
     children: createElement('div', { 'data-testid': 'timeline-content' }, child),
+    ...extra,
   }))
 
   it('keeps healthy empty distinct from an all-source failure with retry', () => {
@@ -910,9 +918,11 @@ describe('timeline source outcome integration', () => {
       })
 
       expect(healthy).toMatchObject({ kind: 'healthy', legacy: false })
+      // `replay_unsupported` counts as unavailable, not failed: the source
+      // answered that this session has no replayable transcript.
       expect(failed).toMatchObject({
         kind: 'failed',
-        summary: { available: 0, unavailable: 2, failed: 2 },
+        summary: { available: 0, unavailable: 3, failed: 1 },
       })
 
       const healthyHtml = renderBoundary(healthy, 0)
@@ -921,7 +931,7 @@ describe('timeline source outcome integration', () => {
       expect(healthyHtml).not.toContain('agent-sidecar-timeline-degraded')
       expect(failedHtml).toContain('role="alert"')
       expect(failedHtml).toContain('All usable timeline sources failed')
-      expect(failedHtml).toContain('0 available · 2 unavailable · 2 failed')
+      expect(failedHtml).toContain('0 available · 3 unavailable · 1 failed')
       expect(failedHtml).toContain('agent-sidecar-timeline-retry')
       expect(failedHtml).toContain('Back to board')
       expect(failedHtml).not.toContain('healthy-empty-content')
@@ -963,6 +973,28 @@ describe('timeline source outcome integration', () => {
     } finally {
       setLocale('zh')
     }
+  })
+
+  it('names the daemon as the cause when the supervisor is down', () => {
+    const failed = normalizeTimelineHealth({
+      entries: [],
+      sourceOutcomes: failedOutcomes,
+      degraded: true,
+      reason: 'all_sources_failed',
+    })
+
+    // The generic "press refresh" line is useless while nothing is
+    // listening; the actionable fact is that the daemon is not running.
+    const down = renderBoundary(failed, 0, 'ignored', { daemonState: 'failed' })
+    expect(down).toContain('agent-sidecar daemon start')
+    expect(down).not.toContain('可点击「刷新」重试时间线来源')
+
+    const deferred = renderBoundary(failed, 0, 'ignored', { daemonState: 'defer' })
+    expect(deferred).toContain('服务拉起后')
+
+    const running = renderBoundary(failed, 0, 'ignored', { daemonState: 'hosted' })
+    expect(running).toContain('可点击「刷新」重试时间线来源')
+    expect(running).not.toContain('agent-sidecar daemon start')
   })
 
   it('fails closed on an unknown outcome and keeps field-less legacy pages healthy', () => {
@@ -1257,6 +1289,147 @@ describe('board agent filtering and initial snapshot state', () => {
     expect(MOUNT_SOURCE).toContain('initialLoadFailed={state.initialLoadFailed}')
     expect(MOUNT_SOURCE.match(/<Board\s/g)).toHaveLength(1)
   })
+
+  it('renders the idle-fold toggle and one expandable idle summary per project', () => {
+    try {
+      setLocale('en')
+      const html = renderBoard({
+        sessions: [
+          session('idle-1', 'claude', 'idle'),
+          session('idle-2', 'dsh', 'idle'),
+          session('working', 'dsh', 'working'),
+        ],
+        filters: { timeWindowHours: 24, showDead: false, collapseIdle: true },
+      })
+      expect(html).toContain('data-testid="agent-sidecar-collapse-idle"')
+      expect(html).toContain('Fold idle')
+      expect(html).toContain('data-testid="agent-sidecar-idle-summary"')
+      expect(html).toContain('2 idle sessions')
+      expect(html).not.toContain('idle-1')
+      expect(html).not.toContain('idle-2')
+    } finally {
+      setLocale('zh')
+    }
+  })
+
+  it('adds the cross-agent and project analysis entry points with target kinds', () => {
+    try {
+      setLocale('en')
+      const crossAgent = vi.fn()
+      const project = vi.fn()
+      const boardHtml = renderBoard({ onAnalyze: crossAgent })
+      const projectHtml = renderToStaticMarkup(createElement(ProjectView, {
+      groups: [{
+        project: '/tmp/project',
+        agents: ['claude'],
+        sessions: [{
+          agent: 'claude',
+          sessionId: 'session-claude',
+          status: 'idle',
+          title: 'session',
+          lastActivityAt: nowMs,
+        }],
+        lastActivityAt: nowMs,
+      }],
+      loading: false,
+      error: null,
+      onSelectSession: () => {},
+      onAnalyzeProject: project,
+      returnFocusTarget: null,
+      onReturnFocusConsumed: () => {},
+      rootRef: () => {},
+      onScrollTopChange: () => {},
+      nowMs,
+      }))
+      expect(boardHtml).toContain('Cross-agent analysis')
+      expect(projectHtml).toContain('Analyze this project')
+      // Static rendering cannot activate buttons; the callbacks remain typed
+      // target seams, pinned by the source contract below.
+      expect(PROJECT_VIEW_SOURCE).toContain("targetKind: 'project'")
+      expect(BOARD_SOURCE).toContain("targetKind: 'cross-agent'")
+      expect(crossAgent).not.toHaveBeenCalled()
+      expect(project).not.toHaveBeenCalled()
+    } finally {
+      setLocale('zh')
+    }
+  })
+})
+
+describe('AnalysisPanel conversation rendering', () => {
+  it('renders explicit user/assistant messages and a segmented pending assistant update', () => {
+    const state: AnalysisGlueState = {
+      phase: 'answering',
+      analysisSessionId: 'agent-sidecar-analysis-test',
+      exchanges: [{
+        question: null,
+        summary: 'first insight',
+        truncated: false,
+        tokensHint: null,
+      }],
+      messages: [
+        { role: 'assistant', content: 'first insight' },
+        { role: 'user', content: 'What should happen next?' },
+        { role: 'assistant', content: '', pending: true },
+      ],
+      disclaimer: 'AI analysis is for reference only',
+      errorCode: null,
+      noticeCode: null,
+      progressStep: 2,
+    }
+    try {
+      setLocale('en')
+      const html = renderToStaticMarkup(createElement(AnalysisPanel, {
+        enabled: true,
+        state,
+        onStart: () => {},
+        onFollowup: () => {},
+        onStop: () => {},
+        onClose: () => {},
+      }))
+      expect(html).toContain('data-role="user"')
+      expect(html).toContain('data-role="assistant"')
+      expect(html).toContain('segment 3')
+      expect(html).toContain('data-pending="true"')
+    } finally {
+      setLocale('zh')
+    }
+  })
+})
+
+describe('full-page analysis navigation', () => {
+  it('replaces every source route and returns to its exact source route', () => {
+    expect(MOUNT_SOURCE).toContain("type MainView = SourceView | 'analysis'")
+    expect(MOUNT_SOURCE).toContain(
+      'if (analysisRoute !== null && boardAnalysisStore !== null)',
+    )
+    expect(MOUNT_SOURCE).toContain('setMainView(analysisRoute.source.view)')
+    expect(MOUNT_SOURCE).toContain('setDetail(analysisRoute.source.detail)')
+    expect(MOUNT_SOURCE).toContain('data-testid="agent-sidecar-analysis-back"')
+    expect(MOUNT_SOURCE).toContain('onAnalyze={openAnalysis}')
+    expect(DETAIL_VIEW_SOURCE).toContain(
+      "props.onAnalyze({ targetKind: 'session', targetId: sessionId })",
+    )
+    expect(DETAIL_VIEW_SOURCE).not.toContain('<AnalysisPanel')
+  })
+
+  it('keeps one tab-scoped analysis store alive across route switches', () => {
+    expect(MOUNT_SOURCE).toContain(
+      '() => integration?.createAnalysisStore() ?? null',
+    )
+    expect(MOUNT_SOURCE).toContain('boardAnalysisStore?.dispose()')
+    expect(MOUNT_SOURCE).not.toContain('integration.detail.createAnalysisStore()')
+    expect(DETAIL_VIEW_SOURCE).not.toContain('createAnalysisStore')
+  })
+
+  it('gives the full-page panel an independent message scroller', () => {
+    expect(ANALYSIS_CSS_SOURCE).toMatch(
+      /\.panel\s*\{[\s\S]*?flex:\s*1;[\s\S]*?min-height:\s*0;[\s\S]*?overflow:\s*hidden;/,
+    )
+    expect(ANALYSIS_CSS_SOURCE).toMatch(
+      /\.messages\s*\{[\s\S]*?flex:\s*1;[\s\S]*?min-height:\s*0;[\s\S]*?overflow:\s*auto;/,
+    )
+    expect(ANALYSIS_CSS_SOURCE).not.toMatch(/\.summary\s*\{/)
+  })
 })
 
 describe('copy feedback timer lifecycle', () => {
@@ -1268,8 +1441,11 @@ describe('copy feedback timer lifecycle', () => {
       /useEffect\(\(\) => \{\s*copyAliveRef\.current = true\s*return \(\) => \{\s*copyAliveRef\.current = false\s*if \(copyTimerRef\.current !== null\) \{\s*clearTimeout\(copyTimerRef\.current\)\s*copyTimerRef\.current = null/,
     )
     expect(source).toContain('if (!copyAliveRef.current) return')
+    // The detail header copies several values (id / project / transcript) so
+    // its copied state names the field instead of a bare boolean; the timer
+    // lifecycle being pinned here is identical either way.
     expect(source).toMatch(
-      /if \(copyTimerRef\.current !== null\) clearTimeout\(copyTimerRef\.current\)\s*setCopied\(true\)\s*copyTimerRef\.current = setTimeout\(\(\) => \{\s*copyTimerRef\.current = null\s*setCopied\(false\)/,
+      /if \(copyTimerRef\.current !== null\) clearTimeout\(copyTimerRef\.current\)\s*setCopied\((?:true|field)\)\s*copyTimerRef\.current = setTimeout\(\(\) => \{\s*copyTimerRef\.current = null\s*setCopied\((?:false|null)\)/,
     )
   })
 })
@@ -1573,6 +1749,57 @@ describe('SettingsCard', () => {
     }
   })
 
+  it('reports the daemon-reported archive policy, not the staged config', () => {
+    const renderWithPolicy = (
+      archivePolicy: { auto: boolean; autoAfterSeconds: number } | null,
+      values = configToValues(DEFAULT_CONFIG_VIEW),
+    ): string => renderToStaticMarkup(createElement(SettingsCard, {
+      values,
+      onChange: () => {},
+      onSave: () => {},
+      onDiscard: () => {},
+      writable: true,
+      dirty: false,
+      saving: false,
+      defaultOpen: true,
+      archivePolicy,
+    }))
+
+    try {
+      setLocale('en')
+      // Staged "on" while the reached daemon still has it off: the readout
+      // must follow the daemon, or the card claims sessions are being
+      // archived when nothing is.
+      const staged = { ...configToValues(DEFAULT_CONFIG_VIEW), archiveAuto: true }
+      expect(renderWithPolicy({ auto: false, autoAfterSeconds: 86400 }, staged))
+        .toContain('off')
+
+      expect(renderWithPolicy({ auto: true, autoAfterSeconds: 86400 }))
+        .toContain('threshold 24h')
+      // A non-hour threshold is reported as it is, never rounded into a lie.
+      expect(renderWithPolicy({ auto: true, autoAfterSeconds: 5400 }))
+        .toContain('threshold 1.5h')
+      expect(renderWithPolicy(null)).toContain('no daemon reached yet')
+
+      // And the note must say whose daemon the toggle can actually reach.
+      expect(renderWithPolicy(null)).toContain('daemons this plugin spawns')
+    } finally {
+      setLocale('zh')
+    }
+  })
+
+  it('disables the threshold field until automatic archiving is on', () => {
+    // A distinct value so the assertion cannot match the board time window,
+    // whose default is also 24.
+    const base = { ...configToValues(DEFAULT_CONFIG_VIEW), archiveAutoAfterHours: 48 }
+    const thresholdField = (html: string): string =>
+      html.match(/<input[^>]*value="48"[^>]*>/)?.[0] ?? ''
+
+    expect(thresholdField(renderOpenSettings(base, true))).toContain('disabled')
+    expect(thresholdField(renderOpenSettings({ ...base, archiveAuto: true }, true)))
+      .not.toContain('disabled')
+  })
+
   it('marks a partial route invalid and disables misleading saves', () => {
     try {
       setLocale('en')
@@ -1632,15 +1859,15 @@ describe('createDefaultIntegration', () => {
         getAnalysisEnabled: () => true,
         createDetailStore: () => detailStore,
         createSearchStore: () => searchStore,
-        createAnalysisStore: () => analysisStore,
       },
       createProjectsStore: () => projectsStore,
+      createAnalysisStore: () => analysisStore,
     }
 
     expect(integration.createProjectsStore()).toBe(projectsStore)
     expect(integration.detail.createDetailStore('sess-structural', null)).toBe(detailStore)
     expect(integration.detail.createSearchStore()).toBe(searchStore)
-    expect(integration.detail.createAnalysisStore()).toBe(analysisStore)
+    expect(integration.createAnalysisStore()).toBe(analysisStore)
   })
 
   it('assembles narrow board and detail ports over the production stores', () => {
@@ -1651,7 +1878,7 @@ describe('createDefaultIntegration', () => {
     const projects = integration.createProjectsStore()
     const detail = integration.detail.createDetailStore('sess-alpha', null)
     const search = integration.detail.createSearchStore()
-    const analysis = integration.detail.createAnalysisStore()
+    const analysis = integration.createAnalysisStore()
 
     expect(projects.getState()).toMatchObject({ groups: [], loading: false })
     expect(detail.getState()).toMatchObject({ sessionId: 'sess-alpha', ready: false })
@@ -1799,6 +2026,24 @@ describe('readStoredFilters', () => {
     )
     // The record survives; only the illegal statusFilter token is dropped.
     expect(readStoredFilters(storage)).toEqual({ timeWindowHours: 6, showDead: false })
+  })
+
+  it('restores the persisted idle-fold toggle and drops malformed values', () => {
+    const storage = new FakeStorage()
+    storage.setItem(
+      FILTERS_STORAGE_KEY,
+      JSON.stringify({ timeWindowHours: 24, showDead: false, collapseIdle: true }),
+    )
+    expect(readStoredFilters(storage)).toEqual({
+      timeWindowHours: 24,
+      showDead: false,
+      collapseIdle: true,
+    })
+    storage.setItem(
+      FILTERS_STORAGE_KEY,
+      JSON.stringify({ timeWindowHours: 24, showDead: false, collapseIdle: 'yes' }),
+    )
+    expect(readStoredFilters(storage)).toEqual({ timeWindowHours: 24, showDead: false })
   })
 
   it.each([
@@ -2165,6 +2410,22 @@ describe('SidecarController', () => {
       statusFilter: 'working',
     })
     expect(controller.getFilters().statusFilter).toBe('working')
+  })
+
+  it('persists the idle-fold toggle through the existing safe storage seam', () => {
+    const storage = new FakeStorage()
+    const { controller } = build(storage)
+    controller.setFilters({ timeWindowHours: 24, showDead: false, collapseIdle: true })
+    expect(JSON.parse(storage.map.get(FILTERS_STORAGE_KEY) ?? '')).toEqual({
+      timeWindowHours: 24,
+      showDead: false,
+      collapseIdle: true,
+    })
+    controller.setFilters({ timeWindowHours: 24, showDead: false, collapseIdle: false })
+    expect(JSON.parse(storage.map.get(FILTERS_STORAGE_KEY) ?? '')).toEqual({
+      timeWindowHours: 24,
+      showDead: false,
+    })
   })
 
   it('start() is idempotent and pollNow()/stop() forward to the stream', () => {

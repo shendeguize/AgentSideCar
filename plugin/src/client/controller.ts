@@ -23,6 +23,8 @@
 
 import {
   fetchState,
+  type ArchivePolicy,
+  type ArchivedSessionView,
   type PingInfo,
   type SessionView,
   type StateSnapshot,
@@ -32,11 +34,14 @@ import { StateStream, STREAM_PATH, type StreamMode, type StreamStatus } from './
 import {
   DEFAULT_TIME_WINDOW_HOURS,
   normalizeAgentFilter,
+  type ArchivedCardVM,
   type BoardFilterState,
   type DaemonStateToken,
   type SessionCardVM,
   type StreamHealthToken,
 } from './board/logic.ts'
+
+export type { ArchivedCardVM }
 
 /**
  * Package name, used as the localStorage key prefix and the style-tag owner
@@ -65,8 +70,18 @@ export interface SidecarViewState {
   streamStatus: StreamStatus
   lastReconcileAtMs: number | null
   sessions: SessionCardVM[]
+  /** Sessions the daemon is hiding; empty on hosts without archiving. */
+  archived: ArchivedCardVM[]
+  /** Null until a daemon advertising the archive policy is reached. */
+  archivePolicy: ArchivePolicy | null
   /** Host capabilities.inject (M2 write surface; informational in M1). */
   injectCapability: boolean
+  /**
+   * Host capabilities.dispose: a bound dsh sessions service that can end a
+   * session, behind the inject write gate. False on every host without it,
+   * which hides the control rather than offering a doomed action.
+   */
+  disposeCapability: boolean
   /**
    * False only while the first load is pending. A first transport failure
    * settles this to true as well, with initialLoadFailed distinguishing it.
@@ -86,7 +101,10 @@ export function initialViewState(): SidecarViewState {
     streamStatus: 'connecting',
     lastReconcileAtMs: null,
     sessions: [],
+    archived: [],
+    archivePolicy: null,
     injectCapability: false,
+    disposeCapability: false,
     hasSnapshot: false,
     initialLoadFailed: false,
   }
@@ -105,12 +123,33 @@ export function mapSessions(sessions: readonly SessionView[]): SessionCardVM[] {
     title: session.title,
     project: session.project,
     updatedAtMs: session.updated_at * 1000,
+    ...session.created_at !== undefined ? { createdAtMs: session.created_at * 1000 } : {},
+    ...session.model !== undefined ? { model: session.model } : {},
+    ...session.model_provider !== undefined
+      ? { modelProvider: session.model_provider }
+      : {},
     lastEvent:
       session.last_event === null
         ? null
         : { kind: session.last_event.kind, text: session.last_event.text },
     gap: session.gap,
   }))
+}
+
+/** Archived wire rows → board cards (both clocks become epoch ms here). */
+export function mapArchived(
+  rows: readonly ArchivedSessionView[] | undefined,
+): ArchivedCardVM[] {
+  if (rows === undefined) return []
+  const cards = mapSessions(rows)
+  return cards.map((card, index) => {
+    const row = rows[index] as ArchivedSessionView
+    return {
+      ...card,
+      archivedAtMs: row.archived_at * 1000,
+      archiveReason: row.archive_reason,
+    }
+  })
 }
 
 /** Daemon badge hover detail from the last ping ("pid 123 · v0.6.0"). */
@@ -151,7 +190,10 @@ export function mapSnapshot(
     streamStatus: browserStatus,
     lastReconcileAtMs: snapshot.board.lastReconcileAt,
     sessions: mapSessions(snapshot.board.sessions),
+    archived: mapArchived(snapshot.board.archived),
+    archivePolicy: snapshot.board.archivePolicy ?? null,
     injectCapability: snapshot.capabilities.inject,
+    disposeCapability: snapshot.capabilities.dispose === true,
     hasSnapshot: true,
     initialLoadFailed: false,
   }
@@ -192,6 +234,7 @@ export function readStoredFilters(storage: StorageLike | null): BoardFilterState
     const candidate = parsed as {
       timeWindowHours?: unknown
       showDead?: unknown
+      collapseIdle?: unknown
       statusFilter?: unknown
       agentFilter?: unknown
     }
@@ -207,6 +250,7 @@ export function readStoredFilters(storage: StorageLike | null): BoardFilterState
       timeWindowHours: candidate.timeWindowHours,
       showDead: candidate.showDead,
     }
+    if (candidate.collapseIdle === true) filters.collapseIdle = true
     if (candidate.statusFilter === 'working' || candidate.statusFilter === 'waiting') {
       filters.statusFilter = candidate.statusFilter
     }
@@ -338,7 +382,12 @@ export class SidecarController {
 
   /** User filter change: persist (package-prefixed key) and notify. */
   setFilters(next: BoardFilterState): void {
-    this.filters = { ...next }
+    this.filters = {
+      timeWindowHours: next.timeWindowHours,
+      showDead: next.showDead,
+      ...(next.collapseIdle === true ? { collapseIdle: true } : {}),
+      ...(next.statusFilter !== undefined ? { statusFilter: next.statusFilter } : {}),
+    }
     const agentFilter = normalizeAgentFilter(next.agentFilter)
     if (agentFilter === null) delete this.filters.agentFilter
     else this.filters.agentFilter = agentFilter

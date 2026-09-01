@@ -7,6 +7,7 @@ import json
 import math
 import os
 import queue
+import secrets
 import socket
 import stat
 import sys
@@ -30,6 +31,18 @@ from typing import (
 
 from sidecar import __version__
 from sidecar import bus
+from sidecar.archive import (
+    DEFAULT_AUTO_THRESHOLD_SECONDS,
+    DEFAULT_IDLE_THRESHOLD_SECONDS,
+    ArchiveError,
+    ArchiveStore,
+    normalize_statuses,
+    normalize_targets,
+    parse_duration,
+    select_archivable,
+    session_target,
+)
+from sidecar.adapters.replay import ReplayUnsupported
 from sidecar.cursor_chat import default_snapshot_broker
 from sidecar.daemon_log import DaemonLog, DaemonLogError
 from sidecar.index import IncrementalIndex, SessionKey
@@ -63,6 +76,8 @@ MAX_LOG_ERROR_DEDUPE = 256
 MAX_SHUTDOWN_DIAGNOSTICS = 8
 REPLAY_DEFAULT_LIMIT = 256
 REPLAY_MAX_LIMIT = 1024
+ARCHIVE_TOKEN_TTL_SECONDS = 300.0
+MAX_ARCHIVE_TOKENS = 16
 
 
 class DaemonError(RuntimeError):
@@ -130,6 +145,9 @@ class SidecarDaemon:
         http_port: Optional[int] = None,
         http_server_factory: Optional[Callable[..., Any]] = None,
         daemon_log_factory: Optional[Callable[..., Any]] = None,
+        archive_store: Optional[ArchiveStore] = None,
+        auto_archive: bool = False,
+        auto_archive_after: float = DEFAULT_AUTO_THRESHOLD_SECONDS,
     ) -> None:
         if min(active_interval, idle_interval, max_idle_interval) <= 0:
             raise ValueError("scan intervals must be positive")
@@ -179,6 +197,11 @@ class SidecarDaemon:
             else Path(pidfile_path).expanduser()
         )
         self.lockfile_path = self.runtime_dir / LOCKFILE_NAME
+        self.archive_store = (
+            ArchiveStore(self.runtime_dir) if archive_store is None else archive_store
+        )
+        self.auto_archive = bool(auto_archive)
+        self.auto_archive_after = parse_duration(auto_archive_after)
         self.scanner = Scanner() if scanner is None else scanner
         self.index = IncrementalIndex()
         self.event_bus = bus.EventBus(subscriber_queue_size)
@@ -206,6 +229,10 @@ class SidecarDaemon:
         self._scan_lock = threading.Lock()
         self._snapshot_lock = threading.Lock()
         self._snapshot: Tuple[Dict[str, Any], ...] = ()
+        self._archived: Tuple[Dict[str, Any], ...] = ()
+        self._archive_error: Optional[str] = None
+        self._archive_lock = threading.Lock()
+        self._archive_tokens: Dict[str, Tuple[float, FrozenSet[Tuple[str, str]]]] = {}
         self._scan_errors: Tuple[Dict[str, Any], ...] = ()
         self._tail_errors: Tuple[Dict[str, Any], ...] = ()
         self._interval_lock = threading.Lock()
@@ -242,6 +269,11 @@ class SidecarDaemon:
     def sessions(self) -> List[Dict[str, Any]]:
         with self._snapshot_lock:
             return [dict(session) for session in self._snapshot]
+
+    @property
+    def archived_sessions(self) -> List[Dict[str, Any]]:
+        with self._snapshot_lock:
+            return [dict(row) for row in self._archived]
 
     @property
     def scan_errors(self) -> List[Dict[str, Any]]:
@@ -468,14 +500,20 @@ class SidecarDaemon:
             "session_id": getattr(error, "session_id", None),
         }
 
-    def _set_snapshot(self, sessions: Iterable[Session]) -> None:
+    def _set_snapshot(
+        self,
+        sessions: Iterable[Session],
+        archived: Iterable[Mapping[str, Any]] = (),
+    ) -> None:
         snapshot = tuple(session.to_dict() for session in sessions)
+        archived_rows = tuple(dict(row) for row in archived)
         errors = tuple(
             self._serialize_scan_error(error)
             for error in (getattr(self.scanner, "errors", ()) or ())
         )
         with self._snapshot_lock:
             self._snapshot = snapshot
+            self._archived = archived_rows
             self._scan_errors = errors
         self._log_scan_errors(errors)
 
@@ -515,6 +553,33 @@ class SidecarDaemon:
     def _publish_event(self, event: Any) -> None:
         self.event_bus.publish(event)
 
+    def _apply_archive(
+        self,
+        sessions: List[Session],
+    ) -> Tuple[List[Session], Tuple[Dict[str, Any], ...]]:
+        """Hide archived sessions, running the opt-in auto policy first.
+
+        A registry failure never hides a session: the snapshot degrades to
+        the unfiltered scan and the reason is reported as a diagnostic.
+        """
+
+        try:
+            if self.auto_archive:
+                stale = select_archivable(
+                    sessions,
+                    idle_seconds=self.auto_archive_after,
+                )
+                if stale:
+                    self.archive_store.archive(stale, reason="auto")
+            view = self.archive_store.partition(sessions)
+        except ArchiveError as error:
+            with self._snapshot_lock:
+                self._archive_error = error.code
+            return sessions, ()
+        with self._snapshot_lock:
+            self._archive_error = None
+        return list(view.visible), tuple(view.archived)
+
     def _scan_once(self, *, initial: bool = False) -> Tuple[bool, bool]:
         with self._scan_lock:
             with default_snapshot_broker().scan_generation():
@@ -533,17 +598,21 @@ class SidecarDaemon:
                     previous_keys,
                 )
                 delta = self.index.update(discovered)
+                # The index keeps archived sessions so their detail view and
+                # replay stay reachable; only the snapshot and the tailers
+                # observe the archive decision.
                 sessions = self.index.sessions()
-                self._set_snapshot(sessions)
+                visible, archived = self._apply_archive(sessions)
+                self._set_snapshot(visible, archived)
                 tailers_changed = self._tailer_pool.refresh(
-                    sessions,
+                    visible,
                     changed_keys=delta.changed,
                     initial=initial,
                     now=time.time(),
                 )
                 self._set_tail_errors()
                 working = any(
-                    session.status == Status.WORKING for session in sessions
+                    session.status == Status.WORKING for session in visible
                 )
                 return working, tailers_changed
 
@@ -860,8 +929,10 @@ class SidecarDaemon:
     def _status_response(self) -> Dict[str, Any]:
         with self._snapshot_lock:
             sessions = [dict(session) for session in self._snapshot]
+            archived = [dict(row) for row in self._archived]
             errors = [dict(error) for error in self._scan_errors]
             tail_errors = [dict(error) for error in self._tail_errors]
+            archive_error = self._archive_error
         with self._serving_lock:
             log_error = self._log_error
         diagnostics = []
@@ -873,10 +944,24 @@ class SidecarDaemon:
                     "code": log_error,
                 }
             )
+        if archive_error is not None:
+            diagnostics.append(
+                {
+                    "component": "archive",
+                    "event": "archive_error",
+                    "code": archive_error,
+                }
+            )
         return {
             "ok": True,
             "op": "status",
             "sessions": sessions,
+            "archived": archived,
+            "archive_policy": {
+                "auto": self.auto_archive,
+                "auto_after_seconds": self.auto_archive_after,
+                "default_idle_seconds": DEFAULT_IDLE_THRESHOLD_SECONDS,
+            },
             "scan_errors": errors,
             "tail_errors": tail_errors,
             "diagnostics": diagnostics,
@@ -913,9 +998,10 @@ class SidecarDaemon:
         """Return one bounded page of normalized historical events.
 
         The data source is the session adapter's own bounded transcript
-        replay (currently only ``dsh`` sessions provide one), so only events
-        still retained in the local transcript and carrying a ``seq`` cursor
-        can be returned.
+        replay: a compressed-stream decode for ``dsh``, an ordinal-cursor
+        scan of the append-only JSONL every other agent writes
+        (``adapters/replay.py``). Only events still retained in the local
+        transcript and carrying a ``seq`` cursor can be returned.
 
         ``truncated`` is true whenever more retained events may be fetched
         with the returned ``last_seq`` cursor: the page reached ``limit``,
@@ -1003,6 +1089,15 @@ class SidecarDaemon:
                         if isinstance(event, Event)
                         else dict(event)
                     )
+        except ReplayUnsupported:
+            # The adapter replays other sessions but not this transcript
+            # shape (a Cursor SQLite chat store, say). That is a capability
+            # answer, not a failure: the board stops asking instead of
+            # painting the timeline as broken.
+            return self._error(
+                "replay_unsupported",
+                "session {!r} has no replayable transcript".format(session_id),
+            )
         except Exception as error:
             return self._error(
                 "replay_failed",
@@ -1019,6 +1114,163 @@ class SidecarDaemon:
             "last_seq": last_seq,
             "truncated": record_count >= limit
             or (not exhausted and last_seq is not None),
+        }
+
+    def _issue_archive_token(
+        self,
+        targets: Iterable[Tuple[str, str]],
+    ) -> str:
+        token = secrets.token_urlsafe(18)
+        expiry = time.monotonic() + ARCHIVE_TOKEN_TTL_SECONDS
+        with self._archive_lock:
+            now = time.monotonic()
+            live = {
+                key: value
+                for key, value in self._archive_tokens.items()
+                if value[0] > now
+            }
+            if len(live) >= MAX_ARCHIVE_TOKENS:
+                oldest = min(live, key=lambda key: live[key][0])
+                live.pop(oldest, None)
+            live[token] = (expiry, frozenset(targets))
+            self._archive_tokens = live
+        return token
+
+    def _consume_archive_token(
+        self,
+        token: object,
+    ) -> Optional[FrozenSet[Tuple[str, str]]]:
+        """Return and retire a live preview token's candidate set."""
+
+        if not isinstance(token, str) or not token:
+            return None
+        with self._archive_lock:
+            entry = self._archive_tokens.pop(token, None)
+        if entry is None or entry[0] <= time.monotonic():
+            return None
+        return entry[1]
+
+    def _archive_preview_response(
+        self,
+        request: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Return the sessions a batch archive would hide, plus its token."""
+
+        try:
+            idle_seconds = parse_duration(
+                request.get("idle_seconds", DEFAULT_IDLE_THRESHOLD_SECONDS)
+            )
+            statuses = normalize_statuses(request.get("statuses"))
+        except ArchiveError as error:
+            return self._error("invalid_request", str(error))
+
+        with self._snapshot_lock:
+            sessions = [dict(session) for session in self._snapshot]
+        candidates = select_archivable(
+            sessions,
+            idle_seconds=idle_seconds,
+            statuses=statuses,
+        )
+        try:
+            targets = [session_target(row) for row in candidates]
+        except ArchiveError as error:
+            return self._error("invalid_request", str(error))
+        return {
+            "ok": True,
+            "op": "archive_preview",
+            "idle_seconds": idle_seconds,
+            "statuses": list(statuses),
+            "candidates": candidates,
+            "count": len(candidates),
+            "token": self._issue_archive_token(targets),
+        }
+
+    def _archive_apply_response(
+        self,
+        request: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Archive a subset of one preview's candidates."""
+
+        raw_targets = request.get("targets")
+        if not isinstance(raw_targets, list) or not raw_targets:
+            return self._error(
+                "invalid_request",
+                "targets must be a nonempty array of {agent, session_id}",
+            )
+        try:
+            targets = normalize_targets(raw_targets)
+        except ArchiveError as error:
+            return self._error("invalid_request", str(error))
+
+        allowed = self._consume_archive_token(request.get("token"))
+        if allowed is None:
+            return self._error(
+                "invalid_token",
+                "archive_apply requires a live archive_preview token",
+            )
+        unexpected = [target for target in targets if target not in allowed]
+        if unexpected:
+            return self._error(
+                "invalid_request",
+                "targets must be a subset of the previewed candidates",
+            )
+
+        try:
+            added = self.archive_store.archive(targets, reason="batch")
+        except ArchiveError as error:
+            return self._error(error.code, str(error))
+        self.scan_once()
+        return {
+            "ok": True,
+            "op": "archive_apply",
+            "archived": [entry.to_dict() for entry in added],
+            "count": len(added),
+            "requested": len(targets),
+        }
+
+    def _unarchive_response(
+        self,
+        request: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        raw_targets = request.get("targets")
+        try:
+            if request.get("all") is True:
+                removed = self.archive_store.unarchive_all()
+            elif isinstance(raw_targets, list) and raw_targets:
+                removed = self.archive_store.unarchive(
+                    normalize_targets(raw_targets)
+                )
+            else:
+                return self._error(
+                    "invalid_request",
+                    "provide targets or all=true",
+                )
+        except ArchiveError as error:
+            return self._error(error.code, str(error))
+        self.scan_once()
+        return {
+            "ok": True,
+            "op": "unarchive",
+            "released": [
+                {"agent": agent, "session_id": session_id}
+                for agent, session_id in removed
+            ],
+            "count": len(removed),
+        }
+
+    def _archive_list_response(self) -> Dict[str, Any]:
+        try:
+            entries = self.archive_store.entries()
+        except ArchiveError as error:
+            return self._error(error.code, str(error))
+        with self._snapshot_lock:
+            archived = [dict(row) for row in self._archived]
+        return {
+            "ok": True,
+            "op": "archive_list",
+            "entries": [entry.to_dict() for entry in entries],
+            "sessions": archived,
+            "count": len(entries),
         }
 
     def _serve_subscription(
@@ -1104,6 +1356,26 @@ class SidecarDaemon:
                             self._write_json(
                                 connection,
                                 self._replay_response(request),
+                            )
+                        elif operation == "archive_preview":
+                            self._write_json(
+                                connection,
+                                self._archive_preview_response(request),
+                            )
+                        elif operation == "archive_apply":
+                            self._write_json(
+                                connection,
+                                self._archive_apply_response(request),
+                            )
+                        elif operation == "unarchive":
+                            self._write_json(
+                                connection,
+                                self._unarchive_response(request),
+                            )
+                        elif operation == "archive_list":
+                            self._write_json(
+                                connection,
+                                self._archive_list_response(),
                             )
                         elif operation == "subscribe":
                             try:

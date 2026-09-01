@@ -6,7 +6,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from sidecar.json_limits import (
     JSONLimitError,
@@ -64,6 +64,19 @@ _SESSION_KEYS = frozenset(
         "status",
         "extra",
         "parent_id",
+    )
+)
+_CLUSTER_KEYS = frozenset(
+    (
+        "cluster_id",
+        "project",
+        "agent",
+        "model",
+        "model_provider",
+        "time_bucket",
+        "count",
+        "session_ids",
+        "hosts",
     )
 )
 _SESSION_STRING_LIMITS = {
@@ -243,13 +256,18 @@ def _command_arguments(
     command: object,
     recent_seconds: Optional[float] = None,
 ) -> Tuple[str, ...]:
-    if not isinstance(command, str) or command not in ("list", "status"):
-        raise ValueError("remote command must be list or status")
-    if command == "list":
+    if not isinstance(command, str) or command not in ("list", "status", "cluster"):
+        raise ValueError("remote command must be list, status, or cluster")
+    if command in ("list", "cluster"):
         if recent_seconds is None:
-            return ("list", "--json", "--all")
+            return (command, "--json", "--all")
         seconds = _validate_recent_seconds(recent_seconds)
-        return ("list", "--json", "--recent-seconds", format(seconds, ".17g"))
+        return (
+            command,
+            "--json",
+            "--recent-seconds",
+            format(seconds, ".17g"),
+        )
     if recent_seconds is not None:
         raise ValueError("recent_seconds is supported only for list")
     return _COMMAND_ARGS[command]
@@ -427,6 +445,66 @@ def _validate_protocol_rows(
     return tuple(rows)
 
 
+def _validate_protocol_cluster_rows(
+    value: object,
+    host: str,
+) -> Tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, list):
+        raise ValueError("invalid remote clusters")
+    if len(value) > MAX_ROWS:
+        raise ProtocolResourceLimitError("remote clusters exceed limit")
+    rows: List[Mapping[str, Any]] = []
+    for source in value:
+        if not isinstance(source, dict) or set(source) != _CLUSTER_KEYS:
+            raise ValueError("invalid remote cluster")
+        _validate_protocol_json(source, max_nodes=MAX_JSON_ITEMS)
+        for key in ("cluster_id", "project", "agent", "model", "model_provider"):
+            value_text = source[key]
+            if not isinstance(value_text, str):
+                raise ValueError("invalid remote cluster text")
+            try:
+                if len(value_text.encode("utf-8")) > 32768:
+                    raise ProtocolResourceLimitError(
+                        "remote cluster text exceeds limit"
+                    )
+            except UnicodeEncodeError as error:
+                raise ValueError("invalid remote cluster text") from error
+        _validate_updated_at(source["time_bucket"])
+        count = source["count"]
+        if type(count) is not int or count < 0 or count > MAX_ROWS:
+            raise ValueError("invalid remote cluster count")
+        for key in ("session_ids", "hosts"):
+            values = source[key]
+            if not isinstance(values, list) or len(values) > MAX_ROWS:
+                raise ValueError("invalid remote cluster list")
+            if not all(isinstance(item, str) for item in values):
+                raise ValueError("invalid remote cluster list")
+        encoded = _encoded_row(source)
+        if len(encoded) > MAX_ROW_BYTES:
+            raise ProtocolResourceLimitError("remote cluster exceeds limit")
+        row = dict(source)
+        row["hosts"] = _attributed_hosts(source["hosts"], host)
+        row["host"] = host
+        rows.append(row)
+    return tuple(rows)
+
+
+def _attributed_hosts(values: Sequence[str], host: str) -> List[str]:
+    """Rewrite a remote's self-reported ``local`` into its actual alias.
+
+    Every host clusters its own sessions under the reserved ``local`` label, so
+    without this the fleet view would claim each remote group also exists on
+    the workstation.
+    """
+
+    attributed: List[str] = []
+    for value in values:
+        alias = host if value.casefold() == "local" else value
+        if alias not in attributed:
+            attributed.append(alias)
+    return attributed
+
+
 class _RemoteResponseFailure(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -436,6 +514,7 @@ class _RemoteResponseFailure(Exception):
 def _parse_execution_response(
     payload: object,
     host: str,
+    command: str = "list",
 ) -> Tuple[Mapping[str, Any], ...]:
     value = _parse_one_line_json(payload, max_bytes=MAX_PROTOCOL_BYTES)
     if not isinstance(value, dict) or type(value.get("ok")) is not bool:
@@ -449,4 +528,6 @@ def _parse_execution_response(
         raise _RemoteResponseFailure(code)
     if set(value) != {"ok", "rows"}:
         raise ValueError("invalid remote response")
+    if command == "cluster":
+        return _validate_protocol_cluster_rows(value["rows"], host)
     return _validate_protocol_rows(value["rows"], host)

@@ -26,11 +26,13 @@ from sidecar.adapters.base import (
     as_mapping,
     compact_json,
     content_block_events,
+    created_at_extra,
     local_timestamp,
     read_json_object,
     snip,
     text_content,
 )
+from sidecar.adapters.replay import ReplayPage
 from sidecar.model import Event, Session, Status
 
 _ACTIVE_WINDOW_S = 120.0
@@ -52,6 +54,14 @@ _DISCOVERY_CANDIDATE_TIMEOUT_S = 3.5
 _DISCOVERY_TIMEOUT_S = 5.0
 _DISCOVERY_HEADER_CACHE_ENTRIES = 512
 _SESSION_FORMAT_VERSION = 0
+
+
+def _metadata_string(mapping: Mapping[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _utf16_units(value: str) -> Iterable[int]:
@@ -926,12 +936,31 @@ def _durable_session(
         extra={
             "source": "session_store",
             "created_at": created_at,
+            **created_at_extra(created_at),
             "transcript_exists": True,
             "replay_available": True,
             "durable_only": True,
             "open_evidence": False,
         },
     )
+    model = _metadata_string(
+        header,
+        "model",
+        "model_name",
+        "modelName",
+        "model_id",
+        "modelId",
+    )
+    model_provider = _metadata_string(
+        header,
+        "model_provider",
+        "modelProvider",
+        "provider",
+    )
+    if model:
+        session.extra["model"] = model
+    if model_provider:
+        session.extra["model_provider"] = model_provider
     session.status = Status.IDLE
     return session
 
@@ -1048,28 +1077,6 @@ def _stop_process(
         except subprocess.TimeoutExpired:
             returncode = process.poll()
     return returncode, stopped
-
-
-class ReplayPage(List[Dict[str, Any]]):
-    """One bounded replay page plus an explicit end-of-transcript signal.
-
-    ``exhausted`` is ``True`` only when the scan truly consumed the
-    retrievable transcript: it reached the end of the decoded stream, or a
-    degraded source (missing file, missing ``zstd``, failed decoder start)
-    had nothing retrievable at all. It is ``False`` when the page stopped
-    early on the record, retained-byte, scan-byte, or time budget, so
-    callers know more retained records may remain past this page.
-    """
-
-    __slots__ = ("exhausted",)
-
-    def __init__(
-        self,
-        records: Iterable[Dict[str, Any]] = (),
-        exhausted: bool = True,
-    ) -> None:
-        super().__init__(records)
-        self.exhausted = bool(exhausted)
 
 
 def replay_dsh_events(
@@ -1349,6 +1356,7 @@ class DSHAdapter(Adapter):
                 "source": "session_projcache",
                 "index": str(index_path),
                 "created_at": created_at,
+                **created_at_extra(created_at),
                 "seq": seq,
                 "seq_grew": seq_grew,
                 "stats": stats,
@@ -1357,6 +1365,36 @@ class DSHAdapter(Adapter):
                 "transcript_exists": transcript_mtime > 0,
                 "replay_available": transcript_mtime > 0 and shutil.which("zstd") is not None,
             }
+            model = _metadata_string(
+                identity,
+                "model",
+                "model_name",
+                "modelName",
+                "model_id",
+                "modelId",
+            ) or _metadata_string(
+                entry,
+                "model",
+                "model_name",
+                "modelName",
+                "model_id",
+                "modelId",
+            )
+            model_provider = _metadata_string(
+                identity,
+                "model_provider",
+                "modelProvider",
+                "provider",
+            ) or _metadata_string(
+                entry,
+                "model_provider",
+                "modelProvider",
+                "provider",
+            )
+            if model:
+                extra["model"] = model
+            if model_provider:
+                extra["model_provider"] = model_provider
             session = Session(
                 agent="dsh",
                 session_id=raw_session_id,

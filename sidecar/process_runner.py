@@ -17,7 +17,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from numbers import Real
-from typing import BinaryIO, Callable, Dict, Iterator, Mapping, Optional, Sequence, Set, Tuple, Union
+from pathlib import Path
+from typing import Any, BinaryIO, Callable, Dict, Iterator, Mapping, Optional, Sequence, Set, Tuple, Union
 
 
 MAX_TIMEOUT_SECONDS = 3600.0
@@ -123,13 +124,11 @@ class _ProcessGroupOwnership:
     def __init__(self, process_group_id: Optional[int]) -> None:
         self._lock = threading.Lock()
         self._process_group_id = process_group_id
-        self._descendant_tracker: Optional[
-            "_DarwinKqueueDescendantTracker"
-        ] = None
+        self._descendant_tracker: Optional[Any] = None
 
     def attach_descendant_tracker(
         self,
-        tracker: "_DarwinKqueueDescendantTracker",
+        tracker: Any,
     ) -> None:
         with self._lock:
             self._descendant_tracker = tracker
@@ -608,6 +607,112 @@ class _DarwinKqueueDescendantTracker:
             self._kqueue.close()
 
 
+class _LinuxProcessGroupTracker:
+    """Track the isolated Linux process group used for bounded execution.
+
+    Linux does not expose Darwin's ``NOTE_FORK`` event.  The supervisor and
+    native child are nevertheless started in a new session, so every normal
+    descendant inherits the root process group and is terminated by the
+    existing ``killpg`` ownership path.  This tracker proves that the group
+    has drained before the bounded operation is released and refuses to run
+    when the required isolated group cannot be established.
+    """
+
+    def __init__(self, root_pid: int) -> None:
+        if not self.supported():
+            raise DescendantContainmentUnsupportedError(
+                "Linux process-group containment is unsupported"
+            )
+        try:
+            if os.getpgid(root_pid) != root_pid:
+                raise DescendantContainmentUnsupportedError(
+                    "bounded process is not an isolated process-group leader"
+                )
+            os.killpg(root_pid, 0)
+        except DescendantContainmentUnsupportedError:
+            raise
+        except (OSError, ValueError) as error:
+            raise DescendantContainmentUnsupportedError(
+                "Linux process-group containment could not be established"
+            ) from error
+        self._root_pid = root_pid
+
+    @staticmethod
+    def supported() -> bool:
+        return (
+            sys.platform.startswith("linux")
+            and os.name == "posix"
+            and hasattr(os, "getpgid")
+            and hasattr(os, "killpg")
+        )
+
+    @property
+    def reliable(self) -> bool:
+        return True
+
+    @property
+    def cleanup_incomplete(self) -> bool:
+        return False
+
+    def _has_live_group_member(self) -> bool:
+        proc_root = Path("/proc")
+        try:
+            entries = tuple(proc_root.iterdir())
+        except OSError:
+            return True
+        for entry in entries:
+            if not entry.name.isdecimal():
+                continue
+            try:
+                stat_line = (entry / "stat").read_text(
+                    encoding="ascii",
+                    errors="strict",
+                )
+            except (OSError, UnicodeError):
+                continue
+            closing_paren = stat_line.rfind(")")
+            if closing_paren < 0:
+                continue
+            fields = stat_line[closing_paren + 2 :].split()
+            if len(fields) < 3:
+                continue
+            if fields[0] == "Z":
+                continue
+            try:
+                process_group = int(fields[2])
+            except ValueError:
+                continue
+            if process_group == self._root_pid:
+                return True
+        return False
+
+    def sample(self, *, force: bool = False) -> Tuple[int, ...]:
+        del force
+        return (self._root_pid,) if self._has_live_group_member() else ()
+
+    def terminate(self) -> bool:
+        if not self._has_live_group_member():
+            return True
+        try:
+            os.killpg(self._root_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        return not self._has_live_group_member()
+
+    def close(self) -> None:
+        return None
+
+
+def _containment_tracker_class() -> Optional[Any]:
+    if sys.platform == "darwin":
+        return _DarwinKqueueDescendantTracker
+    if sys.platform.startswith("linux"):
+        return _LinuxProcessGroupTracker
+    return None
+
+
 def _kill_process_group(
     process: subprocess.Popen,
     ownership: _ProcessGroupOwnership,
@@ -635,7 +740,7 @@ class _StartedProcess:
     process: subprocess.Popen
     ownership: _ProcessGroupOwnership
     lease: Optional[BinaryIO]
-    descendant_tracker: Optional[_DarwinKqueueDescendantTracker]
+    descendant_tracker: Optional[Any]
     containment_required: bool
     signal_scope: _SignalScope
     registry: Optional[_ProcessRegistry]
@@ -756,7 +861,7 @@ def _start_bounded_process(
     registry: Optional[_ProcessRegistry] = None
     process: Optional[subprocess.Popen] = None
     ownership: Optional[_ProcessGroupOwnership] = None
-    descendant_tracker: Optional[_DarwinKqueueDescendantTracker] = None
+    descendant_tracker: Optional[Any] = None
     lease_read_fd = -1
     lease_write_fd = -1
     config_read_fd = -1
@@ -766,9 +871,9 @@ def _start_bounded_process(
     lease: Optional[BinaryIO] = None
     spawn_pending = False
     process_registered = False
-    if (
-        require_descendant_containment
-        and not _DarwinKqueueDescendantTracker.supported()
+    containment_tracker = _containment_tracker_class()
+    if require_descendant_containment and (
+        containment_tracker is None or not containment_tracker.supported()
     ):
         raise DescendantContainmentUnsupportedError(
             "deterministic descendant containment is unsupported"
@@ -848,7 +953,8 @@ def _start_bounded_process(
             process.pid if os.name == "posix" else None
         )
         if require_descendant_containment:
-            descendant_tracker = _DarwinKqueueDescendantTracker(process.pid)
+            assert containment_tracker is not None
+            descendant_tracker = containment_tracker(process.pid)
             ownership.attach_descendant_tracker(descendant_tracker)
         if registry is not None:
             registry.complete_spawn(process, ownership)
@@ -1229,9 +1335,9 @@ def run_bounded(
         raise TypeError("require_descendant_containment must be bool")
     if pre_exec is not None and not require_descendant_containment:
         raise ValueError("pre_exec requires descendant containment")
-    if (
-        require_descendant_containment
-        and not _DarwinKqueueDescendantTracker.supported()
+    containment_tracker = _containment_tracker_class()
+    if require_descendant_containment and (
+        containment_tracker is None or not containment_tracker.supported()
     ):
         raise DescendantContainmentUnsupportedError(
             "deterministic descendant containment is unsupported"
@@ -1329,9 +1435,9 @@ class BoundedLineStream(Iterator[bytes]):
             raise TypeError("require_descendant_containment must be bool")
         if pre_exec is not None and not require_descendant_containment:
             raise ValueError("pre_exec requires descendant containment")
-        if (
-            require_descendant_containment
-            and not _DarwinKqueueDescendantTracker.supported()
+        containment_tracker = _containment_tracker_class()
+        if require_descendant_containment and (
+            containment_tracker is None or not containment_tracker.supported()
         ):
             raise DescendantContainmentUnsupportedError(
                 "deterministic descendant containment is unsupported"
@@ -1818,9 +1924,9 @@ class BoundedDuplexLineProcess:
             raise TypeError("require_descendant_containment must be bool")
         if pre_exec is not None and not require_descendant_containment:
             raise ValueError("pre_exec requires descendant containment")
-        if (
-            require_descendant_containment
-            and not _DarwinKqueueDescendantTracker.supported()
+        containment_tracker = _containment_tracker_class()
+        if require_descendant_containment and (
+            containment_tracker is None or not containment_tracker.supported()
         ):
             raise DescendantContainmentUnsupportedError(
                 "deterministic descendant containment is unsupported"

@@ -118,25 +118,39 @@ export interface AnalysisExchange {
   tokensHint: number | null
 }
 
+/** A UI-safe conversation message; pending assistant text is an honest
+ * segmented-update fallback when the host exposes no token stream. */
+export interface AnalysisMessage {
+  role: 'user' | 'assistant'
+  content: string
+  pending?: boolean
+  truncated?: boolean
+}
+
 export interface AnalysisGlueState {
   phase: AnalysisPhase
   analysisSessionId: string | null
   exchanges: AnalysisExchange[]
+  messages: AnalysisMessage[]
   /** Engine disclaimer verbatim; null before the first settle. */
   disclaimer: string | null
   /** Terminal failure code (phase 'failed'), else null. */
   errorCode: string | null
   /** Non-terminal notice code (kept session; retryable), else null. */
   noticeCode: string | null
+  /** Monotonic progress segment for the in-flight fallback indicator. */
+  progressStep: number
 }
 
 const INITIAL_STATE: AnalysisGlueState = {
   phase: 'idle',
   analysisSessionId: null,
   exchanges: [],
+  messages: [],
   disclaimer: null,
   errorCode: null,
   noticeCode: null,
+  progressStep: 0,
 }
 
 /**
@@ -177,6 +191,7 @@ export class AnalysisStore {
   private readonly postActionFn: typeof postAction
   private readonly timeoutMs: number
   private disposed = false
+  private progressTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: AnalysisStoreOptions = {}) {
     this.postActionFn = options.postActionFn ?? postAction
@@ -201,13 +216,48 @@ export class AnalysisStore {
     return this.postActionFn(body, opts)
   }
 
+  private beginProgress(): void {
+    this.progressTimer = setInterval(() => {
+      if (this.disposed) return
+      this.setState({ progressStep: this.state.progressStep + 1 })
+    }, 800)
+  }
+
+  private endProgress(): void {
+    if (this.progressTimer !== null) {
+      clearInterval(this.progressTimer)
+      this.progressTimer = null
+    }
+    if (!this.disposed) this.setState({ progressStep: 0 })
+  }
+
+  private withoutPendingMessages(): AnalysisMessage[] {
+    return this.state.messages.filter((message) => message.pending !== true)
+  }
+
+  private settledMessages(summary: string, truncated: boolean): AnalysisMessage[] {
+    return [
+      ...this.state.messages.filter((message) => message.pending !== true),
+      { role: 'assistant', content: summary, ...(truncated ? { truncated: true } : {}) },
+    ]
+  }
+
   /** Start one analysis (allowed from idle and from the terminal phases). */
   async start(target: AnalysisTarget): Promise<void> {
     const { phase } = this.state
     if (this.disposed || phase === 'requesting' || phase === 'ready' || phase === 'answering') {
       return
     }
-    this.setState({ ...INITIAL_STATE, phase: 'requesting' })
+    const question = target.question?.trim() ?? ''
+    this.setState({
+      ...INITIAL_STATE,
+      phase: 'requesting',
+      messages: [
+        ...(question === '' ? [] : [{ role: 'user' as const, content: question }]),
+        { role: 'assistant', content: '', pending: true },
+      ],
+    })
+    this.beginProgress()
     try {
       const result = (await this.post(analysisRequestEnvelope(target))) as AnalysisResultWire
       if (this.disposed) {
@@ -220,13 +270,32 @@ export class AnalysisStore {
         }
         return
       }
-      if (this.state.phase !== 'requesting') return
+      if (this.state.phase !== 'requesting') {
+        // A user can stop while creation/priming is in flight. The request
+        // transport cannot be aborted safely across all host versions, so
+        // release any late-created engine session exactly once.
+        const id = result?.analysisSessionId
+        if (
+          result?.outcome === 'completed' &&
+          typeof id === 'string' &&
+          id !== ''
+        ) {
+          this.fireCancel(id)
+        }
+        return
+      }
       this.adoptResult(null, result)
     } catch (err) {
       if (this.disposed || this.state.phase !== 'requesting') return
       // Request-path failures are all terminal: either the engine session
       // was never created, or (engine timeout) it was already disposed.
-      this.setState({ phase: 'failed', errorCode: failureCode(err) })
+      this.setState({
+        phase: 'failed',
+        errorCode: failureCode(err),
+        messages: this.withoutPendingMessages(),
+      })
+    } finally {
+      this.endProgress()
     }
   }
 
@@ -235,7 +304,16 @@ export class AnalysisStore {
     const id = this.state.analysisSessionId
     const q = question.trim()
     if (this.disposed || this.state.phase !== 'ready' || id === null || q === '') return
-    this.setState({ phase: 'answering', noticeCode: null })
+    this.setState({
+      phase: 'answering',
+      noticeCode: null,
+      messages: [
+        ...this.state.messages.filter((message) => message.pending !== true),
+        { role: 'user', content: q },
+        { role: 'assistant', content: '', pending: true },
+      ],
+    })
+    this.beginProgress()
     // Widened re-reads: setState/stop() move the phase between awaits, and
     // TS's property narrowing from the entry guard would misjudge that.
     const phaseNow = (): AnalysisPhase => this.state.phase
@@ -249,10 +327,20 @@ export class AnalysisStore {
       if (RETRYABLE_FOLLOWUP_CODES.has(code)) {
         // The engine keeps the session on a turn timeout; transport-level
         // failures are unknowable, so stay usable and let the user retry.
-        this.setState({ phase: 'ready', noticeCode: code })
+        this.setState({
+          phase: 'ready',
+          noticeCode: code,
+          messages: this.withoutPendingMessages(),
+        })
       } else {
-        this.setState({ phase: 'failed', errorCode: code })
+        this.setState({
+          phase: 'failed',
+          errorCode: code,
+          messages: this.withoutPendingMessages(),
+        })
       }
+    } finally {
+      this.endProgress()
     }
   }
 
@@ -260,13 +348,27 @@ export class AnalysisStore {
   async stop(): Promise<void> {
     const id = this.state.analysisSessionId
     const { phase } = this.state
-    if (this.disposed || id === null || (phase !== 'ready' && phase !== 'answering')) return
+    if (this.disposed) return
+    if (phase === 'requesting') {
+      this.setState({
+        phase: 'stopped',
+        noticeCode: null,
+        messages: this.withoutPendingMessages(),
+      })
+      this.endProgress()
+      return
+    }
+    if (id === null || (phase !== 'ready' && phase !== 'answering')) return
     try {
       await this.post(analysisCancelEnvelope(id))
       if (this.disposed) return
       // An in-flight followup now settles against a stopped phase and is
       // dropped by the phase recheck above.
-      this.setState({ phase: 'stopped', noticeCode: null })
+      this.setState({
+        phase: 'stopped',
+        noticeCode: null,
+        messages: this.withoutPendingMessages(),
+      })
     } catch {
       if (this.disposed) return
       this.setState({ noticeCode: 'cancel_failed' })
@@ -288,9 +390,11 @@ export class AnalysisStore {
             tokensHint: result.tokensHint ?? null,
           },
         ],
+        messages: this.settledMessages(result.summary ?? '', result.truncated),
         disclaimer: result.disclaimer,
         errorCode: null,
         noticeCode: null,
+        progressStep: 0,
       })
       return
     }
@@ -303,6 +407,8 @@ export class AnalysisStore {
         : 'failed',
       errorCode: result.errorCode ?? result.outcome,
       disclaimer: result.disclaimer,
+      messages: this.withoutPendingMessages(),
+      progressStep: 0,
     })
   }
 
@@ -318,6 +424,7 @@ export class AnalysisStore {
     if (this.disposed) return
     const { analysisSessionId, phase } = this.state
     this.disposed = true
+    this.endProgress()
     this.listeners.clear()
     if (analysisSessionId !== null && (phase === 'ready' || phase === 'answering')) {
       this.fireCancel(analysisSessionId)

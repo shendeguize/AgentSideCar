@@ -140,6 +140,43 @@
   color: var(--dsw-alias-label-caption);
 }
 
+.project:hover {
+  color: var(--dsw-alias-label-primary);
+  text-decoration: underline;
+}
+
+/* Header facts (UX-19): last activity / span / model / loaded events. */
+.fact {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.factLabel {
+  font-size: 11px;
+  color: var(--dsw-alias-label-caption);
+  flex: none;
+}
+
+.transcriptPath {
+  font-size: 11px;
+  font-family: var(--ds-font-family-code);
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  /* Truncate from the left: the tail (session file name) identifies the row,
+     the leading home-directory prefix is noise every path shares. */
+  direction: rtl;
+  text-align: left;
+}
+
+.transcriptPath:hover {
+  color: var(--dsw-alias-label-primary);
+  text-decoration: underline;
+}
+
 .sourceList {
   display: inline-flex;
   align-items: center;

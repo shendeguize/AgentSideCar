@@ -155,6 +155,20 @@ class SidecarClient:
         self.max_response_bytes = int(max_response_bytes)
         self._scan_errors: Tuple[Dict[str, Any], ...] = ()
         self._tail_errors: Tuple[Dict[str, Any], ...] = ()
+        self._archived: Tuple[Dict[str, Any], ...] = ()
+        self._archive_policy: Dict[str, Any] = {}
+
+    @property
+    def archived(self) -> List[Dict[str, Any]]:
+        """Return archived rows carried by the latest status response."""
+
+        return [dict(row) for row in self._archived]
+
+    @property
+    def archive_policy(self) -> Dict[str, Any]:
+        """Return the archive policy advertised by the latest status."""
+
+        return dict(self._archive_policy)
 
     @property
     def scan_errors(self) -> List[Dict[str, Any]]:
@@ -373,9 +387,75 @@ class SidecarClient:
                 "daemon status response has no valid tail_errors list",
                 code="invalid_response",
             )
+        archived = response.get("archived", [])
+        if not isinstance(archived, list) or not all(
+            isinstance(row, dict) for row in archived
+        ):
+            raise SidecarClientError(
+                "daemon status response has no valid archived list",
+                code="invalid_response",
+            )
+        policy = response.get("archive_policy", {})
+        if not isinstance(policy, Mapping):
+            raise SidecarClientError(
+                "daemon status response has an invalid archive policy",
+                code="invalid_response",
+            )
         self._scan_errors = tuple(dict(error) for error in scan_errors)
         self._tail_errors = tuple(dict(error) for error in tail_errors)
+        self._archived = tuple(dict(row) for row in archived)
+        self._archive_policy = dict(policy)
         return sessions
+
+    def archive_preview(
+        self,
+        *,
+        idle_seconds: Optional[float] = None,
+        statuses: Optional[Iterable[str]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Return the batch-archive candidate set and its confirmation token."""
+
+        fields: Dict[str, Any] = {}
+        if idle_seconds is not None:
+            fields["idle_seconds"] = idle_seconds
+        if statuses is not None:
+            fields["statuses"] = list(statuses)
+        return self._request("archive_preview", timeout=timeout, **fields)
+
+    def archive_apply(
+        self,
+        targets: Iterable[Mapping[str, str]],
+        *,
+        token: str,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Archive a subset of the candidates issued for ``token``."""
+
+        return self._request(
+            "archive_apply",
+            timeout=timeout,
+            targets=[dict(target) for target in targets],
+            token=token,
+        )
+
+    def unarchive(
+        self,
+        targets: Optional[Iterable[Mapping[str, str]]] = None,
+        *,
+        all_sessions: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        if all_sessions:
+            return self._request("unarchive", timeout=timeout, all=True)
+        return self._request(
+            "unarchive",
+            timeout=timeout,
+            targets=[dict(target) for target in (targets or ())],
+        )
+
+    def archive_list(self, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+        return self._request("archive_list", timeout=timeout)
 
     def replay(
         self,

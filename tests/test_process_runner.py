@@ -35,6 +35,7 @@ from sidecar.process_runner import (
     DescendantContainmentUnsupportedError,
     DuplexWriteBoundary,
     _DarwinKqueueDescendantTracker,
+    _LinuxProcessGroupTracker,
     _ProcessGroupOwnership,
     _ProcessRegistry,
     _kill_process_group,
@@ -90,6 +91,49 @@ def read_pid_when_ready(path, deadline):
 
 
 class ProcessRunnerTests(unittest.TestCase):
+    @staticmethod
+    def _proc_entry(pid, stat_line):
+        entry = mock.MagicMock()
+        entry.name = str(pid)
+        entry.__truediv__.return_value.read_text.return_value = stat_line
+        return entry
+
+    def test_linux_tracker_counts_live_group_members_and_ignores_zombies(self):
+        live = self._proc_entry(1235, "1235 (worker) S 1 1234\n")
+        zombie = self._proc_entry(1236, "1236 (worker) Z 1 1234\n")
+        other_group = self._proc_entry(1237, "1237 (worker) S 1 9999\n")
+        malformed = self._proc_entry(1238, "not a proc stat line")
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            os, "getpgid", return_value=1234
+        ), mock.patch.object(os, "killpg"), mock.patch.object(
+            Path, "iterdir", return_value=(live, zombie, other_group, malformed)
+        ):
+            tracker = _LinuxProcessGroupTracker(1234)
+            self.assertEqual((1234,), tracker.sample(force=True))
+            self.assertFalse(tracker.terminate())
+            self.assertTrue(tracker.reliable)
+            self.assertFalse(tracker.cleanup_incomplete)
+            tracker.close()
+
+    def test_linux_tracker_degrades_closed_proc_and_accepts_empty_group(self):
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            os, "getpgid", return_value=1234
+        ), mock.patch.object(os, "killpg"), mock.patch.object(
+            Path, "iterdir", side_effect=OSError("proc unavailable")
+        ):
+            tracker = _LinuxProcessGroupTracker(1234)
+            self.assertEqual((1234,), tracker.sample())
+            self.assertFalse(tracker.terminate())
+
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            os, "getpgid", return_value=1234
+        ), mock.patch.object(os, "killpg"), mock.patch.object(
+            Path, "iterdir", return_value=()
+        ):
+            tracker = _LinuxProcessGroupTracker(1234)
+            self.assertEqual((), tracker.sample())
+            self.assertTrue(tracker.terminate())
+
     def test_process_exists_distinguishes_linux_live_and_zombie_states(self):
         with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
             Path,
@@ -603,9 +647,9 @@ class ProcessRunnerTests(unittest.TestCase):
     @mock.patch("sidecar.process_runner.subprocess.Popen")
     def test_required_containment_unsupported_never_spawns_target(self, popen):
         with mock.patch.object(
-            _DarwinKqueueDescendantTracker,
-            "supported",
-            return_value=False,
+            process_runner_module,
+            "_containment_tracker_class",
+            return_value=None,
         ):
             with self.assertRaises(DescendantContainmentUnsupportedError):
                 run_bounded(

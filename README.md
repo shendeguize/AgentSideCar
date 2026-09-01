@@ -31,26 +31,28 @@ edit transcripts or agent configuration; a resumed native agent can do so as
 described above. The release installer writes only the selected executable and
 optional skill bundle; the checkout installer creates integration symlinks.
 
-Local installation and tooling for version 0.9.0 require Python 3.9+ and have
+Local installation and tooling for version 0.10.0 require Python 3.9+ and have
 no runtime Python dependencies. The remote observation payload accepts Python
 3.8+ on SSH targets. DSH event watching additionally requires an external
 `zstd` executable.
 
-## Version 0.9.0
+## Version 0.10.0
 
-Version 0.9.0 provides concurrent local/remote `watch --all --remote`, durable
+Version 0.10.0 provides concurrent local/remote `watch --all --remote`, durable
 private send auditing and request-ID idempotency, and the opt-in
 numeric-loopback HTTP panel. It also includes a deterministic executable
 zipapp, package metadata suitable for `pipx`, an explicit macOS user
-LaunchAgent, bounded private daemon diagnostics with log rotation, immutable
-private status snapshots, remote observation on Python 3.8+ SSH targets with an
-explicit fail-closed interpreter pin, and recoverable serialized release
-installation.
-New in 0.9.0, a moved audit namespace can be recovered explicitly through
-`audit rebind` without losing its epoch or request-ID idempotency history,
-`audit reset` archives the active state by default and `--purge` deletes it
-behind a separate confirmation, and the DSH Center remote inventory contract is
-pinned by a versioned fixture and documented as a read-only boundary.
+LaunchAgent, a current-user Linux systemd unit, bounded private daemon
+diagnostics with log rotation, immutable private status snapshots, remote
+observation on Python 3.8+ SSH targets with an explicit fail-closed interpreter
+pin, and recoverable serialized release installation.
+New in 0.10.0, an idle or dead session can be archived out of every listing
+without touching the transcript, the session directory, or any process, and
+releases itself as soon as it shows activity again; every adapter now replays
+its on-disk transcript, so a session no longer opens with an empty timeline;
+and the DSH plugin gained batch archiving, a detail page that reports activity,
+duration, event counts and paths, and an explicit end-session action for DSH
+sessions only.
 
 ![Agent Sidecar read-only panel showing synthetic sessions and events](site/assets/shots/panel.png)
 
@@ -61,7 +63,7 @@ pinned by a versioned fixture and documented as a read-only boundary.
 | Environment | Support boundary |
 | --- | --- |
 | macOS | Primary platform and full quality-gate target. Local observation, remote monitoring, the daemon and HTTP panel, deterministic zipapps, experimental local `send`, and the user LaunchAgent are supported. |
-| Linux | Portable observation, remote monitoring, daemon/HTTP, TUI, and packaging paths are exercised in CI. The macOS LaunchAgent is unavailable, and experimental `send` fails closed before execution because its required Darwin `kqueue` descendant containment is unavailable. Linux support is best-effort where agent-owned persistence formats or desktop integrations differ. |
+| Linux | Portable observation, remote monitoring, daemon/HTTP, TUI, packaging paths, and the current-user systemd service are exercised in CI. Experimental `send` fails closed before execution because its required Darwin `kqueue` descendant containment is unavailable. Linux support is best-effort where agent-owned persistence formats or desktop integrations differ. |
 | Windows | Unsupported. The current runtime and security contracts require POSIX permissions, file locking, process groups, Unix sockets, and related primitives. |
 | Python | Local installation and tooling require Python 3.9 or newer; the remote observation payload accepts Python 3.8 or newer on SSH targets. CI exercises the local product on Python 3.9 and 3.13; Agent Sidecar has zero runtime Python dependencies. |
 
@@ -87,8 +89,9 @@ The agent names below are also the exact values accepted by `list --agent`:
   and subagent relationships.
 - `codex`: Codex CLI rollout JSONL plus read-only native status SQLite when
   available.
-- `copilot`: GitHub Copilot CLI `workspace.yaml` metadata only. It has no event
-  source in v0.9.0 and is reported as `idle`.
+- `copilot`: GitHub Copilot CLI `workspace.yaml` metadata and authenticated
+  `--resume --interactive` send support. It has no event source in v0.10.0 and
+  is reported as `idle`.
 - `dsh`: DeepSeek DSH projection-cache metadata for listing and status, with
   bounded durable-session discovery as a fallback for cache-missing headless
   runs, plus compressed transcript events for watching. `DSH_HOME` selects an
@@ -129,11 +132,11 @@ installer="$(mktemp)"
 curl --fail --location --proto '=https' --tlsv1.2 --output "$installer" \
   https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh
 ${PAGER:-less} "$installer"
-sh "$installer" --version v0.9.0
+sh "$installer" --version v0.10.0
 rm "$installer"
 ```
 
-Omit `--version v0.9.0` to resolve the latest stable GitHub Release. The script
+Omit `--version v0.10.0` to resolve the latest stable GitHub Release. The script
 parses release metadata with Python, requires the exact versioned zipapp and
 `SHA256SUMS` assets, verifies the checksum with `shasum -a 256` on macOS or
 `sha256sum` on Linux, and only then atomically replaces
@@ -168,7 +171,7 @@ Or install directly from Git:
 pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'
 ```
 
-For a released, immutable revision, append its tag, for example `@v0.9.0`, to
+For a released, immutable revision, append its tag, for example `@v0.10.0`, to
 the Git URL after that tag is available. Both forms create an isolated
 environment and install `agent-sidecar`; the package has no runtime Python
 dependencies.
@@ -176,10 +179,10 @@ dependencies.
 ### Install a GitHub Release zipapp
 
 For manual installation, GitHub Releases publish the executable zipapp and its
-checksum file. For version 0.9.0:
+checksum file. For version 0.10.0:
 
 ```sh
-version=0.9.0
+version=0.10.0
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/agent-sidecar-${version}.pyz"
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -269,6 +272,32 @@ therefore starts independently of the shell's current working directory. Keep
 a checkout or zipapp at the resolved location while it is in use; follow the
 service update procedure below before moving or removing it.
 
+### Deploy the pod-local E2E topology
+
+For an explicitly operator-controlled E2E pod, run the deployment script from
+the AgentSideCar checkout:
+
+```sh
+cd /path/to/AgentSideCar
+scripts/deploy-to-pod.sh <ssh-alias>
+```
+
+The script requires `ssh`, `rsync`, and the configured pod-init-sync scan
+helpers. It performs a fresh SSH scan, builds the deterministic zipapp and DSH
+plugin bundles, copies them to `/home/caros/workspace/dsh_debug` by default,
+installs the plugin into the remote `web` profile, and restarts the remote
+Sidecar daemon until it is ready. Use `--remote-dir <absolute-path>` to choose
+another remote workspace, `--dry-run` to inspect the planned writes, or
+`--without-plugin` / `--without-daemon` to omit those respective steps.
+
+This is a development/operator workflow, not the release installer. It does
+not install `dsh`, configure agent credentials, or copy credential contents.
+When the remote user already has `copilot-byok.env`, the generated wrapper
+references that protected file only inside the remote child process. The
+optional DSH plugin then observes and, when explicitly enabled and confirmed,
+performs injection locally on the pod; the script itself never forwards a
+message through the local workstation.
+
 <a id="uninstall"></a>
 
 ## Uninstall
@@ -350,6 +379,51 @@ agent-sidecar status --remote --remote-python /usr/bin/python3.11 --json
 `ps` reports supported local agent executables; process presence is supporting
 evidence and is not reliably attributable to one session. `status` includes
 only `working` and `waiting` sessions.
+
+<a id="archive-idle-sessions"></a>
+
+### Archive idle sessions
+
+Archiving hides a session from every listing without touching it. Nothing is
+edited and nothing is stopped: the vendor transcript stays byte-for-byte as it
+was, no process is signalled, and the only state written is Agent Sidecar's own
+registry at `archive.json` in the runtime directory. A session that becomes
+active again is released automatically, so archiving cannot lose work.
+
+```sh
+agent-sidecar archive --idle-longer-than 2h
+agent-sidecar archive --idle-longer-than 2h --dry-run
+agent-sidecar archive --idle-longer-than 24h --yes
+agent-sidecar archive --idle-longer-than 2h --status dead --yes
+agent-sidecar archive list
+agent-sidecar list --archived
+agent-sidecar unarchive <session-prefix>
+agent-sidecar unarchive --all
+```
+
+`archive` selects sessions with no activity for at least `--idle-longer-than`
+(`30m`, `2h`, `24h`, `7d`, or bare seconds; default `2h`) in an archivable
+status (`--status`, default `idle,dead`; `working` and `waiting` are refused).
+Without `--yes` it only prints what it would do. The daemon can also archive on
+a timer: `daemon start --auto-archive [--auto-archive-after 24h]`, off by
+default, archive-only, and never a dispose.
+
+Archiving is per host, always. There is no fleet-wide archive: the registry
+lives beside the sessions it describes, so a pod's archive is managed on the
+pod. `archive` and `unarchive` therefore refuse `--remote`/`--host` and print
+the invocation that works instead:
+
+```sh
+ssh <host> agent-sidecar archive --idle-longer-than 24h --yes
+ssh <host> agent-sidecar archive list
+ssh <host> agent-sidecar unarchive --all
+```
+
+Because every host applies its own registry before answering, a merged
+`list --remote` view is the union of per-host *visible* sets — archived rows are
+absent from both halves. When this machine has archived sessions, remote
+snapshots print one stderr note with the local count and the ssh form above, so
+a hidden row is never mistaken for a lost session or an unreachable host.
 
 ### Remote list and status
 
@@ -634,12 +708,15 @@ resume or write concurrent history. Status is inferred and can lag, so do not
 send to a session that may still be open or active even when it is reported as
 `waiting`.
 
-Eligible targets are local, top-level `claude`, `codex`, `cursor-cli`, or
-`kimi` sessions in `waiting` or `idle`. `working`, `dead`, child, sidechain,
-and remote sessions are rejected, as are `cursor-ide`, `copilot`, and `dsh`.
+Eligible targets are local, top-level `claude`, `codex`, `cursor-cli`, `kimi`,
+or `copilot` sessions in `waiting` or `idle`. `working`, `dead`, child,
+sidechain, and remote sessions are rejected, as are `cursor-ide` and `dsh`.
 Claude and Codex receive the native prompt on stdin. Cursor CLI necessarily
 receives it in the child process argv. Kimi uses the protected ACP path below.
-Claude, Codex, and Cursor retain their existing resume and result semantics.
+Copilot uses its authenticated `--resume --interactive` path; the message is
+isolated from Sidecar's own argv by stdin, but the Copilot child receives it
+in argv as required by its upstream CLI contract. Claude, Codex, and Cursor
+retain their existing resume and result semantics.
 Direct CLI send still does not support DSH sessions; DSH injection exists only
 inside the DSH plugin.
 
@@ -649,10 +726,10 @@ command fails closed with exit `2` and JSON code `target_not_found`. The
 `remote_session` rejection applies when a locally scanned row carries remote
 provenance.
 
-**Kimi Code 0.38.0 protected resume.**
+**Kimi Code 0.38.0 / 0.39.1 protected resume.**
 
 Kimi support is deliberately exact-version and manual: only Kimi Code
-`0.38.0` is accepted, and one command starts one separate `kimi acp` process
+`0.38.0` or `0.39.1` is accepted, and one command starts one separate `kimi acp` process
 to resume the persisted root session. This is not a live inbox, does not
 attach to the existing terminal, and cannot queue or steer an in-progress
 turn. A Kimi session observed as `working` is therefore rejected.
@@ -778,9 +855,9 @@ ready. `start` and `daemon status` report the numeric-loopback URL and private
 token-file path, never the token. Starting with HTTP flags that do not match an
 already running daemon fails instead of silently changing its configuration.
 
-### Persistent macOS user service
+### Persistent user service
 
-On macOS, explicitly install the daemon as a current-user LaunchAgent:
+Explicitly install the daemon as a service owned by the current user:
 
 ```sh
 agent-sidecar service install [--http [--http-port PORT]] [--force]
@@ -791,12 +868,20 @@ agent-sidecar service status
 agent-sidecar service uninstall
 ```
 
-Service installation is never automatic. It writes the validated user plist
-at `~/Library/LaunchAgents/com.agent-sidecar.daemon.plist`, loads label
+Service installation is never automatic. On macOS it writes the validated user
+plist at `~/Library/LaunchAgents/com.agent-sidecar.daemon.plist`, loads label
 `com.agent-sidecar.daemon` in the `gui/<uid>` domain, and configures both
-`RunAtLoad` and `KeepAlive`. The stored runtime command is cwd-independent for
-pipx, executable zipapps, and the checkout shim. Service control is unsupported
-on non-Darwin systems and fails without changing service state.
+`RunAtLoad` and `KeepAlive`. On Linux it writes
+`~/.config/systemd/user/agent-sidecar.service` and uses only
+`systemctl --user`; it never writes `/etc`, invokes `sudo`, or changes user
+lingering. The Linux unit runs `daemon run` in the foreground with
+`Restart=on-failure`, `KillMode=control-group`, `NoNewPrivileges`, a read-only
+system/home policy with an explicit writable runtime directory, and journald
+output. The existing private `daemon.jsonl` size-bounded rotation remains the
+application log guarantee; journald retention follows host policy.
+The stored runtime command is cwd-independent for pipx, executable zipapps,
+and the checkout shim. Service control is unsupported on other systems and
+fails without changing service state.
 
 An identical install is idempotent. Changing a validated definition, including
 HTTP mode, port, or runtime directory, is refused unless `--force` is supplied:
@@ -807,12 +892,15 @@ agent-sidecar service install --http --http-port 43123 --force
 
 `--force` deliberately unloads and replaces the definition, causing an
 interruption; rollback is attempted on failure but can itself be incomplete.
-Use it only for an intentional configuration replacement. For a version
+Use it only for an intentional configuration replacement. Do not use it to
+replace a foreign unit or plist. Linux service installation requires a running
+user systemd manager; it does not enable lingering automatically. For a version
 update, use the old command to uninstall first, update or replace the pipx
 environment, zipapp, or checkout in place, and then reinstall with the desired
 HTTP flags. Uninstall before changing the runtime command's path. `service
-uninstall` removes the validated LaunchAgent and stops its daemon, but retains
-the private runtime directory and its diagnostic and HTTP-token data. Any
+uninstall` removes the validated LaunchAgent or systemd user unit and stops its
+daemon, but retains the private runtime directory and its diagnostic and
+HTTP-token data. Any
 send-audit files there are retained too, but are owned by the CLI `send`
 workflow rather than daemon observation.
 
@@ -1174,15 +1262,17 @@ runtime files, follow the sanitization requirements in the Security Policy.
 
 ## Current scope and deferred work
 
-Version 0.9.0 provides local observation for the supported sources, Cursor CLI
+Version 0.10.0 provides local observation for the supported sources, Cursor CLI
 event watching, remote `list`/`status` snapshots, concurrent local and remote
 `watch --all --remote`, and experimental local send for Claude, Codex, Cursor
-CLI, and the exact Kimi Code 0.38.0 protected ACP path. It packages the CLI for
-pipx and deterministic zipapp use, and adds explicit macOS LaunchAgent
-management plus private rotating daemon diagnostics. Remote prefix watch and
+CLI, Copilot, and exact Kimi Code 0.38.0/0.39.1 protected ACP paths. It packages the CLI for
+  pipx and deterministic zipapp use, and adds explicit macOS LaunchAgent and
+Linux systemd user-service management plus private rotating daemon diagnostics.
+`scripts/copilot_compat.py` provides a no-credential compatibility smoke for the
+Copilot resume flags. Remote prefix watch and
 remote send remain unsupported. `send` does not support dsh sessions, whose
-injection is available only through the dsh plugin; Cursor IDE and Copilot send
-are unsupported. The opt-in HTTP panel and read-only API remain
+injection is available only through the dsh plugin; Cursor IDE send remains
+unsupported. The opt-in HTTP panel and read-only API remain
 numeric-IPv4-loopback-only and do not extend remote monitoring or provide a
 control plane.
 
@@ -1214,12 +1304,15 @@ No. Remote `list`, `status`, and `watch --all --remote` are observation-only.
 Remote prefix watch and remote message delivery are unsupported. Experimental
 `send` is local-only, limited to eligible sources, explicitly gated by
 `--allow-write`, and available only where its containment contract is
-supported.
+supported. Archiving is per host as well: run
+[`archive`/`unarchive`](#archive-idle-sessions) over ssh on the host that owns
+the sessions.
 
 ### Where does Agent Sidecar store its own state?
 
 The default runtime directory is `~/.agent_sidecar`. It can contain the Unix
 socket, PID file, bounded diagnostics, HTTP token and transient port record,
+the `archive.json` registry of [archived sessions](#archive-idle-sessions),
 and, only after mutating send operations, private audit state. See
 [Uninstall](#uninstall) before removing anything; normal uninstall deliberately
 retains security-relevant history.

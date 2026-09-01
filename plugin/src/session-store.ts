@@ -18,7 +18,13 @@
  * @module
  */
 
-import type { SessionRow, SidecarEvent, StreamHealth } from './bridge.ts'
+import type {
+  ArchivedSessionRow,
+  ArchivePolicy,
+  SessionRow,
+  SidecarEvent,
+  StreamHealth,
+} from './bridge.ts'
 import {
   deriveInjectEligibility,
   type InjectEligibility,
@@ -39,6 +45,12 @@ export interface SessionView {
   title: string
   project: string
   updated_at: number
+  /** Epoch seconds the adapter reported as session birth; absent when unknown. */
+  created_at?: number
+  /** Absolute transcript path; absent for adapters with no file on disk. */
+  transcript?: string
+  model?: string
+  model_provider?: string
   last_event: SessionEventSummary | null
   /** True when a dsh seq discontinuity was observed since the last snapshot. */
   gap: boolean
@@ -46,9 +58,20 @@ export interface SessionView {
   inject_eligibility: InjectEligibility
 }
 
+/** One row the daemon is hiding, with the decision that hid it. */
+export interface ArchivedSessionView extends SessionView {
+  /** Epoch seconds of the archive decision. */
+  archived_at: number
+  archive_reason: string
+}
+
 /** Full board state handed to routes/UI. */
 export interface BoardState {
   sessions: SessionView[]
+  /** Archived rows, newest decision first; empty on pre-archive daemons. */
+  archived: ArchivedSessionView[]
+  /** Null until a daemon that advertises the archive policy is reached. */
+  archivePolicy: ArchivePolicy | null
   streamHealth: StreamHealth
   lastReconcileAt: number | null
 }
@@ -70,10 +93,15 @@ interface StoredSession {
   title: string
   project: string
   updated_at: number
+  created_at?: number
+  transcript?: string
+  model?: string
+  model_provider?: string
   inject_eligibility: InjectEligibility
 }
 
 const INVALID_PROPERTY = Symbol('invalid-property')
+const ANALYSIS_SESSION_PREFIX = 'agent-sidecar-analysis-'
 
 function ownValue(record: object, key: string): unknown | typeof INVALID_PROPERTY {
   try {
@@ -84,6 +112,13 @@ function ownValue(record: object, key: string): unknown | typeof INVALID_PROPERT
   } catch {
     return INVALID_PROPERTY
   }
+}
+
+/** Dedicated analysis agents are internal tooling, never board sessions. */
+function isAnalysisSession(sessionId: string, extra: unknown): boolean {
+  if (sessionId.startsWith(ANALYSIS_SESSION_PREFIX)) return true
+  return typeof extra === 'object' && extra !== null
+    && (extra as Record<string, unknown>)['agentSidecarAnalysis'] === true
 }
 
 /**
@@ -116,7 +151,7 @@ function snapshotProjection(row: SessionRow): Omit<StoredSession, 'inject_eligib
   ) {
     return null
   }
-  return {
+  const projected: Omit<StoredSession, 'inject_eligibility'> = {
     agent,
     session_id: sessionId,
     status,
@@ -124,6 +159,34 @@ function snapshotProjection(row: SessionRow): Omit<StoredSession, 'inject_eligib
     project,
     updated_at: updatedAt,
   }
+  // The transcript path is header metadata the detail view shows and copies
+  // (an operator needs it to grep the raw file), so unlike raw `extra` it is
+  // kept in cache — but it leaves the store only through
+  // `getSessionDetail`, never in a board frame.
+  const transcript = ownValue(row, 'transcript')
+  if (typeof transcript === 'string' && transcript !== '') projected.transcript = transcript
+  const extra = ownValue(row, 'extra')
+  if (typeof extra === 'object' && extra !== null) {
+    const model = (extra as Record<string, unknown>)['model']
+    const modelProvider = (extra as Record<string, unknown>)['model_provider']
+    const createdAt = (extra as Record<string, unknown>)['created_at_epoch']
+    if (typeof model === 'string' && model.trim() !== '') projected.model = model
+    if (typeof modelProvider === 'string' && modelProvider.trim() !== '') {
+      projected.model_provider = modelProvider
+    }
+    // Adapters normalize every native birth-time shape into one epoch-seconds
+    // key (`created_at_extra` in sidecar/adapters/base.py); anything else is
+    // a legacy or forged row and is dropped rather than half-trusted.
+    if (
+      typeof createdAt === 'number' &&
+      Number.isFinite(createdAt) &&
+      createdAt > 0 &&
+      createdAt <= updatedAt
+    ) {
+      projected.created_at = createdAt
+    }
+  }
+  return projected
 }
 
 function sessionKey(agent: string, sessionId: string): string {
@@ -148,10 +211,38 @@ function extractSeq(extra: Record<string, unknown>): number | null {
 /** In-memory session cache reconciled by snapshots, hinted by events. */
 export class SessionStore {
   private rows = new Map<string, StoredSession>()
+  private archivedRows: ArchivedSessionView[] = []
+  private archivePolicy: ArchivePolicy | null = null
   private eventState = new Map<string, EventSideState>()
   private streamHealth: StreamHealth = 'unknown'
   private lastReconcileAt: number | null = null
   private readonly listeners = new Set<() => void>()
+
+  /**
+   * Replace the archive projection. Archived rows go through the same
+   * sanitizing projection as board rows; a row the projection rejects is
+   * dropped rather than surfaced with partial fields.
+   */
+  setArchived(rows: readonly ArchivedSessionRow[], policy: ArchivePolicy | null): void {
+    const next: ArchivedSessionView[] = []
+    for (const row of rows) {
+      const projection = snapshotProjection(row)
+      if (projection === null) continue
+      next.push({
+        ...projection,
+        last_event: null,
+        gap: false,
+        inject_eligibility: deriveInjectEligibility(row),
+        archived_at: row.archived_at,
+        archive_reason: row.archive_reason,
+      })
+    }
+    next.sort((a, b) => b.archived_at - a.archived_at
+      || a.session_id.localeCompare(b.session_id))
+    this.archivedRows = next
+    this.archivePolicy = policy
+    this.notify()
+  }
 
   /** Replace the full session set with an authoritative snapshot. */
   applySnapshot(rows: SessionRow[]): void {
@@ -159,6 +250,11 @@ export class SessionStore {
     for (const row of rows) {
       const projection = snapshotProjection(row)
       if (projection === null) continue
+      const rawExtra = ownValue(row, 'extra')
+      if (isAnalysisSession(
+        projection.session_id,
+        rawExtra === INVALID_PROPERTY ? null : rawExtra,
+      )) continue
       // Derive while the full row is still present, then discard raw
       // `extra`, topology, host provenance, and transcript data from cache.
       const injectEligibility = deriveInjectEligibility(row)
@@ -230,6 +326,22 @@ export class SessionStore {
     return this.toView(key, row)
   }
 
+  /**
+   * One session by id, with the detail-only fields attached. The board list
+   * deliberately omits the transcript path: every reconcile re-sends the whole
+   * board over SSE, and a per-row absolute path is payload the list never
+   * renders. The detail view asks for exactly one session, so that is where
+   * the path is worth its bytes.
+   */
+  getSessionDetail(sessionId: string): SessionView | null {
+    for (const [key, row] of this.rows) {
+      if (row.session_id !== sessionId) continue
+      const view = this.toView(key, row)
+      return row.transcript !== undefined ? { ...view, transcript: row.transcript } : view
+    }
+    return null
+  }
+
   getBoardState(): BoardState {
     const sessions: SessionView[] = []
     for (const [key, row] of this.rows) {
@@ -240,6 +352,8 @@ export class SessionStore {
     )
     return {
       sessions,
+      archived: this.archivedRows.map((row) => ({ ...row })),
+      archivePolicy: this.archivePolicy === null ? null : { ...this.archivePolicy },
       streamHealth: this.streamHealth,
       lastReconcileAt: this.lastReconcileAt,
     }
@@ -262,6 +376,9 @@ export class SessionStore {
       title: row.title,
       project: row.project,
       updated_at: row.updated_at,
+      ...(row.created_at !== undefined ? { created_at: row.created_at } : {}),
+      ...(row.model !== undefined ? { model: row.model } : {}),
+      ...(row.model_provider !== undefined ? { model_provider: row.model_provider } : {}),
       last_event: state?.lastEvent ?? null,
       gap: state?.gap ?? false,
       inject_eligibility: row.inject_eligibility,

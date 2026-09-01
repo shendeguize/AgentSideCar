@@ -108,10 +108,172 @@
   border-color: var(--dsw-alias-state-error-secondary);
 }
 
+/* Pod-local clustering is a read-only metadata view. */
+.clusterPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--agsc-border);
+  border-radius: var(--agsc-radius-control);
+  background: var(--agsc-bg-raised);
+}
+
+.clusterHead,
+.clusterSummary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.clusterTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--agsc-fg);
+}
+
+.clusterList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.clusterCard {
+  padding: 7px 8px;
+  border: 1px solid var(--agsc-border);
+  border-radius: var(--agsc-radius-control);
+}
+
+.clusterSummary span {
+  font-size: 12px;
+  color: var(--agsc-fg-secondary);
+}
+
+.clusterMeta,
+.clusterEmpty {
+  font-size: 11px;
+  color: var(--agsc-fg-dimmed);
+  overflow-wrap: anywhere;
+}
+
 .bannerDismiss {
   margin-left: 10px;
   color: inherit;
   text-decoration: underline;
+}
+
+/* ------------------------------------------------ batch archive dialog */
+
+.archiveBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.archiveControls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.archiveNumber {
+  width: 76px;
+  height: 28px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--agsc-fg);
+  background: var(--agsc-bg-raised);
+  border: 1px solid var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-control);
+  padding: 0 8px;
+}
+
+.archiveSummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--agsc-fg-secondary);
+}
+
+.archiveEmpty {
+  font-size: 12px;
+  color: var(--agsc-fg-dimmed);
+  padding: 8px 0;
+}
+
+.archiveList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.archiveRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--agsc-border);
+  border-radius: var(--agsc-radius-control);
+}
+
+.archiveRowLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  cursor: pointer;
+}
+
+.archiveRowTitle {
+  font-size: 12px;
+  color: var(--agsc-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.archiveRowMeta {
+  flex: none;
+  font-size: 11px;
+  color: var(--agsc-fg-secondary);
+  white-space: nowrap;
+}
+
+.archiveActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* --------------------------------------------------- archived section */
+
+.archivedPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-control);
+}
+
+.archivedHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* -------------------------------------------------------- empty states */
@@ -174,6 +336,26 @@
   flex: none;
   font-size: 11px;
   color: var(--agsc-warn);
+}
+
+.idleSummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 4px 8px;
+  border: 1px solid var(--agsc-border-strong);
+  border-radius: var(--agsc-radius-control);
+  background: var(--agsc-bg-raised);
+  color: var(--agsc-fg-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.idleSummary:hover {
+  color: var(--agsc-fg);
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .showMore {

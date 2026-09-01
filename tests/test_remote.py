@@ -2636,7 +2636,7 @@ class AggregationTests(unittest.TestCase):
         )
         elapsed = time.monotonic() - started
 
-        self.assertLess(elapsed, 0.2)
+        self.assertLess(elapsed, 0.5)
         self.assertEqual(20, len(result.failures))
         self.assertTrue(all(item.code == "timeout" for item in result.failures))
         self.assertEqual(

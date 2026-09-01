@@ -25,12 +25,15 @@ import {
   agentDisplayName,
   agentFilterOptions,
   buildBoardViewModel,
+  clusterSessions,
   formatTemplate,
   normalizeAgentFilter,
+  partitionIdleCards,
   sliceCardsForDisplay,
   timeWindowLabel,
   withAgentFilter,
   GROUP_CARD_LIMIT,
+  type ArchivedCardVM,
   type BoardFilterState,
   type BoardStatusFilter,
   type DaemonStateToken,
@@ -39,6 +42,8 @@ import {
   type SessionCardVM,
   type StreamHealthToken,
 } from './logic.ts'
+import { ArchiveDialog, ArchivedSection, type BoardArchiveApi } from './ArchivePanel.tsx'
+import type { AnalysisTarget } from '../analysis-glue.ts'
 import { BOARD_STRINGS } from './strings.ts'
 import { t } from '../locales/index.ts'
 import { surfaceProps } from '../theme/parts.ts'
@@ -85,6 +90,17 @@ export interface BoardProps {
    */
   onRefresh: () => void | Promise<boolean>
   onSelectSession: (target: SessionFocusTarget) => void
+  onAnalyze?: (target: AnalysisTarget) => void
+  /**
+   * Batch-archive round-trips. Absent on hosts whose daemon predates the
+   * archive ops, in which case the entry point is not rendered at all
+   * (a disabled button that never explains itself is worse than no button).
+   */
+  archive?: BoardArchiveApi
+  /** Sessions the daemon is currently hiding; empty when nothing is archived. */
+  archived?: readonly ArchivedCardVM[]
+  /** True while at least one dsh session could accept a real dispose. */
+  disposeSupported?: boolean
   /** Composite in-memory identity awaiting return-focus restoration. */
   returnFocusTarget: SessionFocusTarget | null
   /** Called only after the matching card or fallback heading has been focused. */
@@ -217,6 +233,7 @@ function SessionCard(props: {
 function ProjectGroup(props: {
   group: ProjectGroupVM<DerivedSessionCardVM>
   onSelect: (target: SessionFocusTarget) => void
+  collapseIdle: boolean
   returnFocusTarget: SessionFocusTarget | null
   onReturnFocusConsumed: () => void
 }): ReactElement {
@@ -224,13 +241,25 @@ function ProjectGroup(props: {
   // UX-02: collapse + truncation are per-group ephemeral view state.
   const [collapsed, setCollapsed] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [idleExpanded, setIdleExpanded] = useState(false)
+  const idlePartition = partitionIdleCards(group.cards)
+  const displayCards = props.collapseIdle ? idlePartition.active : group.cards
   const returnTargetIndex = props.returnFocusTarget === null
     ? -1
     : group.cards.findIndex((card) => matchesSessionFocusTarget(card, props.returnFocusTarget))
   useEffect(() => {
     if (returnTargetIndex >= GROUP_CARD_LIMIT && !expanded) setExpanded(true)
   }, [expanded, returnTargetIndex])
-  const { shown, hiddenCount } = sliceCardsForDisplay(group.cards, GROUP_CARD_LIMIT, expanded)
+  useEffect(() => {
+    if (
+      props.collapseIdle &&
+      props.returnFocusTarget !== null &&
+      idlePartition.idle.some((card) => matchesSessionFocusTarget(card, props.returnFocusTarget))
+    ) {
+      setIdleExpanded(true)
+    }
+  }, [idlePartition.idle, props.collapseIdle, props.returnFocusTarget])
+  const { shown, hiddenCount } = sliceCardsForDisplay(displayCards, GROUP_CARD_LIMIT, expanded)
   // Honesty guard: a collapsed group must not silently hide waiting
   // sessions, so the header keeps a waiting counter while folded.
   const waitingInGroup = group.cards.filter((card) => card.badge.status === 'waiting').length
@@ -274,6 +303,40 @@ function ProjectGroup(props: {
               />
             ))}
           </div>
+          {props.collapseIdle && idlePartition.idle.length > 0 && (
+            <>
+              <button
+                type="button"
+                className={styles['idleSummary']}
+                aria-expanded={idleExpanded}
+                title={idleExpanded
+                  ? BOARD_STRINGS.group.collapseIdle
+                  : BOARD_STRINGS.group.expandIdle}
+                onClick={() => { setIdleExpanded((open) => !open) }}
+                data-testid="agent-sidecar-idle-summary"
+              >
+                <span className={styles['chevron']} aria-hidden>
+                  {idleExpanded ? '▾' : '▸'}
+                </span>
+                {formatTemplate(BOARD_STRINGS.group.idleSummary, {
+                  n: idlePartition.idle.length,
+                })}
+              </button>
+              {idleExpanded && (
+                <div className={styles['grid']}>
+                  {idlePartition.idle.map((card) => (
+                    <SessionCard
+                      key={`${card.agent}:${card.sessionId}`}
+                      card={card}
+                      onSelect={onSelect}
+                      returnFocusTarget={props.returnFocusTarget}
+                      onReturnFocusConsumed={props.onReturnFocusConsumed}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
+          )}
           {hiddenCount > 0 && (
             <Button
               size="sm"
@@ -318,6 +381,8 @@ export function Board(props: BoardProps): ReactElement {
     : [...TIME_WINDOW_OPTIONS, props.filters.timeWindowHours].sort((a, b) => a - b)
   const selectedAgent = normalizeAgentFilter(props.filters.agentFilter)
   const availableAgents = agentFilterOptions(props.sessions, props.filters.agentFilter)
+  const [showClusters, setShowClusters] = useState(false)
+  const clusters = clusterSessions(vm.groups.flatMap((group) => group.cards))
   const fallbackFocusRef = useRef<HTMLSpanElement>(null)
   const returnTargetVisible = props.returnFocusTarget !== null
     && vm.groups.some((group) =>
@@ -327,6 +392,8 @@ export function Board(props: BoardProps): ReactElement {
   // UX-07: manual-refresh feedback (in-flight + dismissible failure line).
   const [refreshing, setRefreshing] = useState(false)
   const [refreshFailed, setRefreshFailed] = useState(false)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  const archivedRows = props.archived ?? []
   const onRefreshClick = (): void => {
     if (refreshing) return
     setRefreshFailed(false)
@@ -430,6 +497,36 @@ export function Board(props: BoardProps): ReactElement {
           {formatTemplate(BOARD_STRINGS.topbar.countTotal, { n: vm.totalCount })}
         </span>
         <span className={styles['spacer']} />
+        {props.onAnalyze !== undefined && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => { props.onAnalyze?.({ targetKind: 'cross-agent' }) }}
+            data-testid="agent-sidecar-analyze-cross-agent"
+          >
+            {BOARD_STRINGS.topbar.analyzeCrossAgent}
+          </Button>
+        )}
+        {props.archive !== undefined && (
+          <Button
+            size="sm"
+            variant="outline"
+            title={BOARD_STRINGS.archive.openTitle}
+            onClick={() => { setArchiveOpen(true) }}
+            data-testid="agent-sidecar-archive-open"
+          >
+            {BOARD_STRINGS.archive.open}
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => { setShowClusters((visible) => !visible) }}
+          aria-pressed={showClusters}
+          data-testid="agent-sidecar-cluster-toggle"
+        >
+          {BOARD_STRINGS.topbar.cluster}
+        </Button>
         <label className={styles['control']}>
           {t('board.topbar.agentFilter')}
           <select
@@ -479,6 +576,19 @@ export function Board(props: BoardProps): ReactElement {
           />
           {BOARD_STRINGS.topbar.showDead}
         </label>
+        <label className={styles['control']}>
+          <input
+            type="checkbox"
+            className={styles['checkbox']}
+            checked={props.filters.collapseIdle === true}
+            title={BOARD_STRINGS.topbar.collapseIdleTitle}
+            onChange={(ev) =>
+              props.onFiltersChange({ ...props.filters, collapseIdle: ev.target.checked })
+            }
+            data-testid="agent-sidecar-collapse-idle"
+          />
+          {BOARD_STRINGS.topbar.collapseIdle}
+        </label>
         <Button
           size="sm"
           variant="toolbar"
@@ -510,6 +620,61 @@ export function Board(props: BoardProps): ReactElement {
         </div>
       )}
 
+      {showClusters && (
+        <section className={styles['clusterPanel']} data-testid="agent-sidecar-clusters">
+          <header className={styles['clusterHead']}>
+            <span className={styles['clusterTitle']}>{BOARD_STRINGS.cluster.title}</span>
+            <span className={styles['groupCount']}>
+              {formatTemplate(BOARD_STRINGS.cluster.count, { n: clusters.length })}
+            </span>
+          </header>
+          {clusters.length === 0
+            ? <div className={styles['clusterEmpty']}>{BOARD_STRINGS.cluster.empty}</div>
+            : (
+              <div className={styles['clusterList']}>
+                {clusters.map((cluster) => (
+                  <article className={styles['clusterCard']} key={cluster.key}>
+                    <div className={styles['clusterSummary']}>
+                      <strong>{cluster.project}</strong>
+                      <span>{cluster.agent}</span>
+                      <span>{cluster.model}</span>
+                      <span>
+                        {formatTemplate(BOARD_STRINGS.cluster.sessions, { n: cluster.count })}
+                      </span>
+                    </div>
+                    <div className={styles['clusterMeta']}>
+                      {cluster.modelProvider !== 'unknown'
+                        ? `${cluster.modelProvider} · `
+                        : ''}
+                      {cluster.sessionIds.join(', ')}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+        </section>
+      )}
+
+      {props.archive !== undefined && archiveOpen && (
+        <ArchiveDialog
+          open={archiveOpen}
+          onClose={() => { setArchiveOpen(false) }}
+          api={props.archive}
+          disposeSupported={props.disposeSupported === true}
+          onArchived={() => { void props.onRefresh() }}
+          nowMs={nowMs}
+        />
+      )}
+
+      {props.archive !== undefined && (
+        <ArchivedSection
+          rows={archivedRows}
+          onUnarchive={props.archive.unarchive}
+          onRestored={() => { void props.onRefresh() }}
+          nowMs={nowMs}
+        />
+      )}
+
       {!props.hasSnapshot ? (
         <div
           className={styles['empty']}
@@ -533,6 +698,7 @@ export function Board(props: BoardProps): ReactElement {
             key={group.key === '' ? '\u0000unknown' : group.key}
             group={group}
             onSelect={props.onSelectSession}
+            collapseIdle={props.filters.collapseIdle === true}
             returnFocusTarget={props.returnFocusTarget}
             onReturnFocusConsumed={props.onReturnFocusConsumed}
           />

@@ -26,20 +26,22 @@ HTTP 面板和 API 会在本机 IPv4 回环地址上公开只读的守护进程�
 Agent 配置；但恢复后的原生 Agent 可以按上述方式进行修改。Release 安装程序只
 写入所选可执行文件和可选 Skill Bundle；检出版本安装程序则创建集成用符号链接。
 
-0.9.0 版本的本地安装与工具要求 Python 3.9+，且没有 Python 运行时依赖。SSH
+0.10.0 版本的本地安装与工具要求 Python 3.9+，且没有 Python 运行时依赖。SSH
 目标接受使用 Python 3.8+ 的远程观察载荷。监视 DSH 事件还需要外部 `zstd`
 可执行文件。
 
-## 版本 0.9.0
+## 版本 0.10.0
 
-0.9.0 版本提供并发的本地/远程 `watch --all --remote`、持久化的私有发送审计、
+0.10.0 版本提供并发的本地/远程 `watch --all --remote`、持久化的私有发送审计、
 请求 ID 幂等性，以及可选启用、仅限数值回环地址的 HTTP 面板。它还包含确定性的
 可执行 zipapp、适用于 `pipx` 的包元数据、显式管理的 macOS 用户 LaunchAgent、
-具有日志轮转的有界私有守护进程诊断、不可变的私有状态快照、面向 Python 3.8+
-SSH 目标且可显式钉死解释器的远程观察，以及可恢复且串行化的 Release 安装。
-0.9.0 新增：命名空间迁移后可用 `audit rebind` 显式恢复，且保留原有 epoch 与
-请求 ID 幂等历史；`audit reset` 默认归档活动状态，`--purge` 需单独确认才会删除；
-DSH Center 远程清单契约由版本化夹具钉死，并以只读边界写入文档。
+当前用户的 Linux systemd 服务单元、具有日志轮转的有界私有守护进程诊断、不可变的
+私有状态快照、面向 Python 3.8+ SSH 目标且可显式钉死解释器的远程观察，以及可恢复
+且串行化的 Release 安装。
+0.10.0 新增：空闲或已结束的会话可以从所有列表中归档隐藏，既不改动 transcript、
+会话目录，也不触碰任何进程，一旦重新出现活动便自动解除归档；所有 adapter 现在都会
+回放磁盘上的 transcript，会话不再以空时间线打开；DSH 插件新增批量归档、会显示活动
+时间、持续时长、事件计数与路径的详情页，以及仅针对 DSH 会话的显式关停操作。
 
 ![使用合成会话和事件的 Agent Sidecar 只读面板](site/assets/shots/panel.png)
 
@@ -50,7 +52,7 @@ DSH Center 远程清单契约由版本化夹具钉死，并以只读边界写入
 | 环境 | 支持边界 |
 | --- | --- |
 | macOS | 主要平台和完整质量门禁的目标平台。支持本地观察、远程监控、守护进程和 HTTP 面板、确定性 zipapp、实验性本地 `send`，以及用户 LaunchAgent。 |
-| Linux | CI 会验证可移植的观察、远程监控、守护进程/HTTP、TUI 和打包路径。macOS LaunchAgent 不可用；实验性 `send` 所要求的 Darwin `kqueue` 后代进程遏制能力不可用，因此会在执行前关闭失败。在 Agent 自有持久化格式或桌面集成存在平台差异的地方，Linux 支持属于尽力支持。 |
+| Linux | CI 会验证可移植的观察、远程监控、守护进程/HTTP、TUI、打包路径和当前用户 systemd 服务。实验性 `send` 所要求的 Darwin `kqueue` 后代进程遏制能力不可用，因此会在执行前关闭失败。在 Agent 自有持久化格式或桌面集成存在平台差异的地方，Linux 支持属于尽力支持。 |
 | Windows | 不支持。当前运行时和安全契约依赖 POSIX 权限、文件锁、进程组、Unix 套接字及相关原语。 |
 | Python | 本地安装与工具要求 Python 3.9 或更高版本；SSH 目标上的远程观察载荷接受 Python 3.8 或更高版本。CI 使用 Python 3.9 和 3.13 验证本地产品；Agent Sidecar 没有 Python 运行时依赖。 |
 
@@ -71,8 +73,9 @@ DSH Center 远程清单契约由版本化夹具钉死，并以只读边界写入
 - `claude`：Claude Code 项目 JSONL 会话记录，包括已知的 sidechain 和子 Agent
   关系。
 - `codex`：Codex CLI rollout JSONL，以及可用时的只读原生状态 SQLite。
-- `copilot`：仅支持 GitHub Copilot CLI 的 `workspace.yaml` 元数据。0.9.0 版本
-  没有对应事件源，因此状态报告为 `idle`。
+- `copilot`：支持 GitHub Copilot CLI 的 `workspace.yaml` 元数据和认证后的
+  `--resume --interactive` 发送。0.10.0 版本没有对应事件源，因此状态报告为
+  `idle`。
 - `dsh`：优先通过 DeepSeek DSH 投影缓存元数据进行列表和状态查询，并以有界的
   持久会话扫描补充发现缓存缺失的 headless 运行，也支持从压缩会话记录中监视
   事件。`DSH_HOME` 可指定独立的绝对 DSH 存储根目录。基于缓存的列表和状态查询
@@ -105,11 +108,11 @@ installer="$(mktemp)"
 curl --fail --location --proto '=https' --tlsv1.2 --output "$installer" \
   https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh
 ${PAGER:-less} "$installer"
-sh "$installer" --version v0.9.0
+sh "$installer" --version v0.10.0
 rm "$installer"
 ```
 
-省略 `--version v0.9.0` 时会解析最新稳定 GitHub Release。脚本使用 Python 解析
+省略 `--version v0.10.0` 时会解析最新稳定 GitHub Release。脚本使用 Python 解析
 Release 元数据，要求精确匹配带版本号的 zipapp 和 `SHA256SUMS` 资产，在 macOS
 上使用 `shasum -a 256`、在 Linux 上使用 `sha256sum` 验证校验和，之后才会原子
 替换 `~/.local/bin/agent-sidecar`。可用 `--prefix <path>` 选择其他前缀，用
@@ -140,17 +143,17 @@ pipx install .
 pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'
 ```
 
-如需安装已发布且不可变的修订版，可在对应标签可用后，将标签（例如 `@v0.9.0`）
+如需安装已发布且不可变的修订版，可在对应标签可用后，将标签（例如 `@v0.10.0`）
 附加到 Git URL 后。两种方式都会创建隔离环境并安装 `agent-sidecar`；该包没有
 Python 运行时依赖。
 
 ### 安装 GitHub Release zipapp
 
-如需手动安装，GitHub Releases 会发布可执行 zipapp 及其校验和文件。以 0.9.0
+如需手动安装，GitHub Releases 会发布可执行 zipapp 及其校验和文件。以 0.10.0
 版本为例：
 
 ```sh
-version=0.9.0
+version=0.10.0
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/agent-sidecar-${version}.pyz"
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -233,6 +236,27 @@ sh scripts/install-skill.sh
 目录。检出版本或 zipapp 正在使用时，请将其保留在解析得到的位置；移动或删除前，
 请遵循下文的服务更新流程。
 
+### 部署 pod 本地 E2E 拓扑
+
+对于明确由操作员控制的 E2E pod，请在 AgentSideCar 检出目录运行部署脚本：
+
+```sh
+cd /path/to/AgentSideCar
+scripts/deploy-to-pod.sh <ssh-alias>
+```
+
+脚本要求本机有 `ssh`、`rsync` 以及已配置的 pod-init-sync 扫描辅助脚本。
+它会先重新扫描 SSH，构建确定性 zipapp 和 DSH 插件 bundle，默认复制到
+`/home/caros/workspace/dsh_debug`，把插件安装进远端 `web` profile，并重启远端
+Sidecar daemon 直到就绪。可用 `--remote-dir <absolute-path>` 选择其他远端工作区，
+用 `--dry-run` 检查计划写入，或用 `--without-plugin` / `--without-daemon` 分别跳过
+对应步骤。
+
+这是开发/操作员流程，不是 Release 安装程序。它不会安装 `dsh`、配置 agent 凭据，
+也不会复制凭据内容。若远端用户已有 `copilot-byok.env`，生成的 wrapper 只会在
+远端子进程内引用该受保护文件。随后可选的 DSH 插件在明确开启并确认后，才会在
+pod 本地观察和执行注入；脚本自身不会把消息经本机转发。
+
 <a id="uninstall"></a>
 
 ## 卸载
@@ -245,7 +269,7 @@ agent-sidecar service uninstall
 agent-sidecar daemon stop
 ```
 
-`service uninstall` 仅适用于 macOS LaunchAgent。它会保留私有运行时目录、诊断
+`service uninstall` 适用于 macOS LaunchAgent 或 Linux systemd user unit。它会保留私有运行时目录、诊断
 信息、HTTP 令牌和所有发送审计文件。对于根目录 Release 安装程序安装的 zipapp，
 请以相同前缀重新运行已检查的脚本：
 
@@ -310,6 +334,46 @@ agent-sidecar status --remote --remote-python /usr/bin/python3.11 --json
 
 `ps` 报告受支持的本地 Agent 可执行进程；进程存在只是辅助证据，无法可靠归属到
 某一个会话。`status` 只包含 `working` 和 `waiting` 会话。
+
+<a id="archive-idle-sessions"></a>
+
+### 归档空闲会话
+
+归档只把会话从各类列表中隐藏，不动会话本身：不修改厂商 transcript（保持逐字节
+不变）、不向任何进程发信号，唯一写入的是 Agent Sidecar 自己的注册表，即运行时
+目录下的 `archive.json`。已归档会话一旦重新活跃会自动解档，因此归档不会丢工作。
+
+```sh
+agent-sidecar archive --idle-longer-than 2h
+agent-sidecar archive --idle-longer-than 2h --dry-run
+agent-sidecar archive --idle-longer-than 24h --yes
+agent-sidecar archive --idle-longer-than 2h --status dead --yes
+agent-sidecar archive list
+agent-sidecar list --archived
+agent-sidecar unarchive <session-prefix>
+agent-sidecar unarchive --all
+```
+
+`archive` 选中至少 `--idle-longer-than` 时长没有活动（`30m`、`2h`、`24h`、`7d`
+或裸秒数，默认 `2h`）且处于可归档状态的会话（`--status`，默认 `idle,dead`；
+`working` 与 `waiting` 会被拒绝）。不带 `--yes` 时只打印将要发生的事。守护进程也
+可以按时间自动归档：`daemon start --auto-archive [--auto-archive-after 24h]`，
+默认关闭、只归档、永不 dispose。
+
+归档始终是按主机的：不存在机群级归档，注册表与它描述的会话放在同一台机器上，
+所以 pod 的归档要在该 pod 上管理。因此 `archive` 与 `unarchive` 会拒绝
+`--remote`/`--host`，并直接打印可用的调用方式：
+
+```sh
+ssh <host> agent-sidecar archive --idle-longer-than 24h --yes
+ssh <host> agent-sidecar archive list
+ssh <host> agent-sidecar unarchive --all
+```
+
+由于每台主机都会先应用自己的注册表再作答，合并后的 `list --remote` 视图是各主机
+**可见集**的并集——已归档的行在本地与远程两侧都不会出现。当本机存在已归档会话
+时，远程快照会在 stderr 打印一行提示，包含本地数量与上面的 ssh 用法，避免把被
+隐藏的行误读成会话丢失或主机不可达。
 
 ### 远程列表与状态
 
@@ -534,20 +598,21 @@ Sidecar 发送，以及已经改变或消失的目标，并持锁直到原生进
 不要发送。
 
 符合条件的目标是本地、顶层、处于 `waiting` 或 `idle` 的 `claude`、`codex`、
-`cursor-cli` 或 `kimi` 会话。`working`、`dead`、子会话、sidechain 和远程会话
-都会被拒绝；`cursor-ide`、`copilot` 和 `dsh` 也会被拒绝。Claude 和 Codex 通过
+`cursor-cli`、`kimi` 或 `copilot` 会话。`working`、`dead`、子会话、sidechain
+和远程会话都会被拒绝；`cursor-ide` 和 `dsh` 也会被拒绝。Claude 和 Codex 通过
 stdin 接收原生提示词；Cursor CLI 必然通过子进程 argv 接收；Kimi 使用下述受保护
-ACP 路径。Claude、Codex 与 Cursor 保持原有的恢复和结果语义。CLI 直接发送仍不
-支持 DSH；DSH 注入只存在于 DSH 插件内。
+ACP 路径；Copilot 使用认证后的 `--resume --interactive` 路径。Claude、Codex
+与 Cursor 保持原有的恢复和结果语义。CLI 直接发送仍不支持 DSH；DSH 注入只存在
+于 DSH 插件内。
 
 `send` 只根据直接本地扫描解析目标。从 `list --remote` 得到的行不能作为发送
 目标；如果其 ID 不在本地扫描中，`send` 会以退出码 `2` 关闭失败，并在 JSON
 中返回 `target_not_found`。如果本地扫描发现的行带有远程来源，则使用单独的
 `remote_session` 拒绝。
 
-**Kimi Code 0.38.0 受保护恢复。**
+**Kimi Code 0.38.0 / 0.39.1 受保护恢复。**
 
-Kimi 支持刻意限定为精确版本与手动操作：只接受 Kimi Code `0.38.0`，每条命令只
+Kimi 支持刻意限定为精确版本与手动操作：只接受 Kimi Code `0.38.0` 或 `0.39.1`，每条命令只
 启动一个独立的 `kimi acp` 进程来恢复持久化根会话。它不是 live inbox，不会附着
 既有终端，也不能向进行中的 turn queue 或 steer；因此观察为 `working` 的 Kimi
 会话会被拒绝。
@@ -652,9 +717,9 @@ agent-sidecar daemon run --http
 `daemon status` 会报告数值回环 URL 和私有令牌文件路径，但绝不报告令牌。若 HTTP
 参数与已运行守护进程不一致，启动会失败，而不会静默改变其配置。
 
-### 持久化 macOS 用户服务
+### 持久化用户服务
 
-在 macOS 上，需要显式把守护进程安装为当前用户 LaunchAgent：
+需要显式把守护进程安装为当前用户拥有的服务：
 
 ```sh
 agent-sidecar service install [--http [--http-port PORT]] [--force]
@@ -665,11 +730,17 @@ agent-sidecar service status
 agent-sidecar service uninstall
 ```
 
-服务绝不会自动安装。它会把经过验证的用户 plist 写入
+服务绝不会自动安装。在 macOS 上，它会把经过验证的用户 plist 写入
 `~/Library/LaunchAgents/com.agent-sidecar.daemon.plist`，在 `gui/<uid>` 域
 加载标签 `com.agent-sidecar.daemon`，并同时配置 `RunAtLoad` 和 `KeepAlive`。
-对于 pipx、可执行 zipapp 和检出版本 shim，存储的运行时命令都与 cwd 无关。
-非 Darwin 系统不支持服务控制，且失败时不会改变服务状态。
+在 Linux 上，它会写入 `~/.config/systemd/user/agent-sidecar.service`，只使用
+`systemctl --user`，绝不写入 `/etc`、调用 `sudo` 或自动修改 user lingering。
+Linux unit 以前台 `daemon run` 运行，包含 `Restart=on-failure`、
+`KillMode=control-group`、`NoNewPrivileges`、只读系统/主目录策略、明确的
+运行时可写目录以及 journald 输出。现有私有 `daemon.jsonl` 的有界轮转仍是
+应用日志容量保证，journald 的保留策略由主机决定。对于 pipx、可执行 zipapp
+和检出版本 shim，存储的运行时命令都与 cwd 无关。其他系统不支持服务控制，
+且失败时不会改变服务状态。
 
 相同安装是幂等的。若更改经过验证的定义，包括 HTTP 模式、端口或运行时目录，
 除非提供 `--force`，否则会被拒绝：
@@ -679,10 +750,13 @@ agent-sidecar service install --http --http-port 43123 --force
 ```
 
 `--force` 会有意卸载并替换定义，造成服务中断；失败时会尝试回滚，但回滚本身也
-可能不完整。只能在有意替换配置时使用。版本更新时，应先用旧命令卸载服务，就地
+可能不完整。只能在有意替换配置时使用，不得用来覆盖外部 unit/plist。Linux 服务
+安装要求当前用户的 systemd manager 正在运行，不会自动启用 lingering。版本更新时，
+应先用旧命令卸载服务，就地
 更新或替换 pipx 环境、zipapp 或检出版本，再以所需 HTTP 参数重新安装。改变运行时
-命令路径之前必须卸载。`service uninstall` 会删除经过验证的 LaunchAgent 并停止
-其守护进程，但会保留私有运行时目录及其中的诊断和 HTTP 令牌数据。所有发送审计
+命令路径之前必须卸载。`service uninstall` 会删除经过验证的 LaunchAgent 或
+systemd user unit 并停止其守护进程，但会保留私有运行时目录及其中的诊断和 HTTP
+令牌数据。所有发送审计
 文件也会保留，不过它们归 CLI `send` 工作流所有，而不是守护进程观察路径所有。
 
 ## 状态语义
@@ -966,12 +1040,13 @@ Changelog 和发布治理请参见[贡献指南](CONTRIBUTING.md)。
 
 ## 当前范围与后续工作
 
-0.9.0 版本为受支持数据源提供本地观察、Cursor CLI 事件监视、远程 `list`/`status`
-快照、并发本地和远程 `watch --all --remote`，并为 Claude、Codex、Cursor CLI
-以及精确 Kimi Code 0.38.0 受保护 ACP 路径提供实验性本地发送。它可以为 pipx 和
-确定性 zipapp 使用场景打包 CLI，并加入显式 macOS LaunchAgent 管理和私有轮转
-守护进程诊断。远程前缀监视和远程发送仍不受支持。`send` 不支持 dsh 会话，dsh
-会话注入仅能通过 dsh 插件完成；Cursor IDE 与 Copilot 发送不受支持。可选 HTTP
+0.10.0 版本为受支持数据源提供本地观察、Cursor CLI 事件监视、远程 `list`/`status`
+快照、并发本地和远程 `watch --all --remote`，并为 Claude、Codex、Cursor CLI、
+Copilot 以及精确 Kimi Code 0.38.0/0.39.1 受保护 ACP 路径提供实验性本地发送。它可以为 pipx 和
+确定性 zipapp 使用场景打包 CLI，并加入显式 macOS LaunchAgent 与 Linux systemd
+user service 管理和私有轮转守护进程诊断。`scripts/copilot_compat.py` 提供不读取
+凭据的 Copilot 恢复旗标兼容性冒烟。远程前缀监视和远程发送仍不受支持。`send` 不支持 dsh 会话，dsh
+会话注入仅能通过 dsh 插件完成；Cursor IDE 发送不受支持。可选 HTTP
 面板和只读 API 仍严格限制在数值 IPv4 回环地址，既不扩展远程监控，也不提供控制
 平面。
 
@@ -999,12 +1074,15 @@ macOS LaunchAgent 和实验性 `send` 明确排除在外。Windows 目前不受�
 
 不能。远程 `list`、`status` 和 `watch --all --remote` 仅用于观察。远程前缀
 监视和远程消息投递均不受支持。实验性 `send` 仅限本地、只支持符合条件的数据源、
-由 `--allow-write` 显式保护，并且只在其遏制契约受支持的平台可用。
+由 `--allow-write` 显式保护，并且只在其遏制契约受支持的平台可用。归档同样按
+主机进行：请在拥有这些会话的主机上通过 ssh
+执行[`archive`/`unarchive`](#archive-idle-sessions)。
 
 ### Agent Sidecar 在哪里存储自己的状态？
 
 默认运行时目录为 `~/.agent_sidecar`。其中可能包含 Unix 套接字、PID 文件、有界
-诊断、HTTP 令牌和临时端口记录，以及仅在可变更发送操作之后出现的私有审计状态。
+诊断、HTTP 令牌和临时端口记录、[已归档会话](#archive-idle-sessions)的
+`archive.json` 注册表，以及仅在可变更发送操作之后出现的私有审计状态。
 删除任何内容前请参见[卸载](#uninstall)；正常卸载会有意保留与安全有关的历史。
 
 ## 许可证

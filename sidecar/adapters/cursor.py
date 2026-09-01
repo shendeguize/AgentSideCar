@@ -27,11 +27,20 @@ from sidecar.adapters.base import (
     MetadataCache,
     compact_json,
     content_items,
+    created_at_extra,
     file_signature,
+    read_json_object,
     local_timestamp,
     read_jsonl_prefix,
     snip,
     text_content,
+)
+from sidecar.adapters.replay import (
+    JSONL_REPLAY_RECORDS,
+    ReplayPage,
+    ReplayUnsupported,
+    is_jsonl_transcript,
+    replay_jsonl_transcript,
 )
 from sidecar.cursor_chat import (
     CursorChatError,
@@ -214,6 +223,8 @@ def _read_cli_meta(path: Path) -> Tuple[str, str, Dict[str, Any]]:
 
     title = ""
     project = ""
+    model = ""
+    model_provider = ""
     decoded_keys: Dict[str, None] = {}
     for key, raw in rows:
         try:
@@ -230,12 +241,37 @@ def _read_cli_meta(path: Path) -> Tuple[str, str, Dict[str, Any]]:
             project = project or _direct_string(
                 value, ("cwd", "projectPath", "workspacePath", "rootPath")
             )
+            model = model or (
+                value_text
+                if key_text.lower()
+                in ("model", "model_name", "modelname", "model_id", "modelid")
+                else ""
+            )
+            model = model or _direct_string(
+                value,
+                ("model", "modelName", "model_id", "modelId"),
+            )
+            model_provider = model_provider or (
+                value_text
+                if key_text.lower()
+                in ("model_provider", "modelprovider", "provider")
+                else ""
+            )
+            model_provider = model_provider or _direct_string(
+                value,
+                ("model_provider", "modelProvider", "provider"),
+            )
         except (RecursionError, TypeError, ValueError, UnicodeError):
             # One malformed row must not hide metadata from valid siblings.
             continue
     title = _utf8_scalar_text(title)
     project = _utf8_scalar_text(project)
-    return snip(title, 160), project, {"meta_keys": sorted(decoded_keys)}
+    metadata: Dict[str, Any] = {"meta_keys": sorted(decoded_keys)}
+    if model:
+        metadata["model"] = snip(model, 160)
+    if model_provider:
+        metadata["model_provider"] = snip(model_provider, 160)
+    return snip(title, 160), project, metadata
 
 
 def _read_cli_snapshot_meta(
@@ -269,6 +305,24 @@ def _read_cli_snapshot_meta(
             "createdAt": state.metadata.created_at,
             "latestRoot": state.root_blob_id,
             "cursor_chat_snapshot": "production",
+            **created_at_extra(state.metadata.created_at),
+            **(
+                {"model": snip(getattr(state.metadata, "model"), 160)}
+                if isinstance(getattr(state.metadata, "model", None), str)
+                and getattr(state.metadata, "model").strip()
+                else {}
+            ),
+            **(
+                {
+                    "model_provider": snip(
+                        getattr(state.metadata, "model_provider"),
+                        160,
+                    )
+                }
+                if isinstance(getattr(state.metadata, "model_provider", None), str)
+                and getattr(state.metadata, "model_provider").strip()
+                else {}
+            ),
         },
     )
 
@@ -389,6 +443,75 @@ def _cursor_chat_tool_result_text(
     return ""
 
 
+def _cursor_ide_roots(home: Path) -> Tuple[Tuple[str, Path], ...]:
+    """Return bounded Cursor IDE roots, including Remote-SSH server storage."""
+
+    return (
+        ("ide", home / ".cursor" / "projects"),
+        ("cursor-server", home / ".cursor-server" / "projects"),
+        (
+            "cursor-server",
+            home / ".cursor-server" / "data" / "User" / "projects",
+        ),
+        (
+            "cursor-server",
+            home / ".cursor-server" / "data" / "User" / "workspaceStorage",
+        ),
+    )
+
+
+def _cursor_server_history_sessions(
+    home: Path,
+    active_signatures: List[Hashable],
+) -> List[Session]:
+    """Read Remote-SSH Cursor's durable User/History snapshots.
+
+    Remote Cursor versions store markdown turns under ``data/User/History``
+    instead of the desktop ``projects/*/agent-transcripts`` layout. The
+    entries manifest is metadata-only, so this path never needs to ingest the
+    transcript body to make a session observable.
+    """
+
+    sessions: List[Session] = []
+    root = home / ".cursor-server" / "data" / "User" / "History"
+    for manifest in root.glob("*/entries.json"):
+        signature = file_signature(manifest)
+        if signature is None:
+            continue
+        active_signatures.append(signature)
+        metadata = read_json_object(manifest, _META_LIMIT)
+        resource = metadata.get("resource")
+        project = resource.strip() if isinstance(resource, str) else ""
+        try:
+            updated_at = max(
+                [signature[1] / 1e9]
+                + [
+                    file_signature(path)[1] / 1e9
+                    for path in manifest.parent.iterdir()
+                    if file_signature(path) is not None
+                ]
+            )
+        except (OSError, TypeError, ValueError):
+            updated_at = signature[1] / 1e9
+        title = project.rsplit("/", 1)[-1] if project else "Cursor Remote-SSH history"
+        sessions.append(
+            Session(
+                agent="cursor-ide",
+                session_id="cursor-server:{}".format(manifest.parent.name),
+                project=project,
+                transcript=str(manifest.parent),
+                updated_at=updated_at,
+                title=snip(title, 160),
+                extra={
+                    "source": "cursor-server",
+                    "transcript_kind": "cursor-server-history",
+                    "history_manifest": str(manifest),
+                },
+            )
+        )
+    return sessions
+
+
 def _normalize_cursor_chat(
     record: Mapping[str, Any],
     session: Session,
@@ -497,57 +620,59 @@ class CursorAdapter(Adapter):
     def _discover(self, home: Path) -> Iterable[Session]:
         sessions: List[Session] = []
         active_signatures: List[Hashable] = []
-        projects_root = home / ".cursor" / "projects"
         patterns = (
             "*/agent-transcripts/*.jsonl",
             "*/agent-transcripts/*/*.jsonl",
             "*/agent-transcripts/*/subagents/*.jsonl",
         )
         seen = set()
-        for pattern in patterns:
-            for transcript in projects_root.glob(pattern):
-                if transcript in seen:
-                    continue
-                seen.add(transcript)
-                signature = file_signature(transcript)
-                if signature is None:
-                    continue
-                active_signatures.append(signature)
-                updated_at = signature[1] / 1e9
-                transcript_root = next(
-                    (
-                        parent
-                        for parent in transcript.parents
-                        if parent.name == "agent-transcripts"
-                    ),
-                    None,
-                )
-                if transcript_root is None:
-                    continue
-                project = decode_cursor_project_slug(transcript_root.parent.name)
-                parent_id = (
-                    transcript.parent.parent.name
-                    if transcript.parent.name == "subagents"
-                    else None
-                )
-                sessions.append(
-                    Session(
-                        agent="cursor-ide",
-                        session_id=transcript.stem,
-                        project=project,
-                        transcript=str(transcript),
-                        updated_at=updated_at,
-                        title=cast(
-                            str,
-                            self._metadata_cache.get_or_load(
-                                signature,
-                                lambda: _first_cursor_user_text(transcript),
-                            ),
+        for source, projects_root in _cursor_ide_roots(home):
+            for pattern in patterns:
+                for transcript in projects_root.glob(pattern):
+                    if transcript in seen:
+                        continue
+                    seen.add(transcript)
+                    signature = file_signature(transcript)
+                    if signature is None:
+                        continue
+                    active_signatures.append(signature)
+                    updated_at = signature[1] / 1e9
+                    transcript_root = next(
+                        (
+                            parent
+                            for parent in transcript.parents
+                            if parent.name == "agent-transcripts"
                         ),
-                        parent_id=parent_id,
-                        extra={"source": "ide"},
+                        None,
                     )
-                )
+                    if transcript_root is None:
+                        continue
+                    project = decode_cursor_project_slug(transcript_root.parent.name)
+                    parent_id = (
+                        transcript.parent.parent.name
+                        if transcript.parent.name == "subagents"
+                        else None
+                    )
+                    sessions.append(
+                        Session(
+                            agent="cursor-ide",
+                            session_id=transcript.stem,
+                            project=project,
+                            transcript=str(transcript),
+                            updated_at=updated_at,
+                            title=cast(
+                                str,
+                                self._metadata_cache.get_or_load(
+                                    signature,
+                                    lambda: _first_cursor_user_text(transcript),
+                                ),
+                            ),
+                            parent_id=parent_id,
+                            extra={"source": source},
+                        )
+                    )
+
+        sessions.extend(_cursor_server_history_sessions(home, active_signatures))
 
         for store in (home / ".cursor" / "chats").glob("*/*/store.db"):
             db_signature = file_signature(store)
@@ -606,6 +731,35 @@ class CursorAdapter(Adapter):
             )
         self._metadata_cache.prune(active_signatures)
         return sessions
+
+    def replay(
+        self,
+        session: Any,
+        after_seq: Optional[int] = None,
+        max_records: int = JSONL_REPLAY_RECORDS,
+    ) -> ReplayPage:
+        """Replay IDE transcripts; refuse the shapes that are not JSONL.
+
+        Cursor spans two storage designs: the IDE writes an append-only
+        JSONL transcript per agent session, while the CLI keeps chats in a
+        SQLite store and the server keeps a history directory. Only the
+        first can be paged by line ordinal, and answering an empty page for
+        the others would claim their history is gone rather than that this
+        route cannot read it.
+        """
+
+        transcript = getattr(session, "transcript", "")
+        if not is_jsonl_transcript(transcript):
+            raise ReplayUnsupported(
+                "cursor transcript kind {!r} has no ordinal replay".format(
+                    getattr(session, "extra", {}).get("transcript_kind")
+                )
+            )
+        return replay_jsonl_transcript(
+            transcript,
+            after_seq=after_seq,
+            max_records=max_records,
+        )
 
     def normalize(self, record: Mapping[str, Any], session: Session) -> Iterable[Event]:
         cursor_chat_value = record.get("_cursor_chat")

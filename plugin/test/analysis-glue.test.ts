@@ -83,6 +83,9 @@ describe('AnalysisStore.start', () => {
     expect(state.exchanges).toEqual([
       { question: null, summary: 'looks healthy', truncated: false, tokensHint: 128 },
     ])
+    expect(state.messages).toEqual([
+      { role: 'assistant', content: 'looks healthy' },
+    ])
     expect(state.disclaimer).toBe('AI 分析仅供参考')
   })
 
@@ -152,6 +155,11 @@ describe('AnalysisStore.followup', () => {
     expect(state.exchanges[1]).toEqual({
       question: 'and then?', summary: 'deeper', truncated: true, tokensHint: 42,
     })
+    expect(state.messages).toEqual([
+      { role: 'assistant', content: 'looks healthy' },
+      { role: 'user', content: 'and then?' },
+      { role: 'assistant', content: 'deeper', truncated: true },
+    ])
   })
 
   it('keeps the session usable on an engine turn timeout (notice, not terminal)', async () => {

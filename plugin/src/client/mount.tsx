@@ -16,11 +16,14 @@
  * write (it recovers by reloading host state instead).
  */
 
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactElement } from 'react'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { Board, type SessionFocusTarget } from './board/Board.tsx'
 import { ProjectView } from './board/project-view.tsx'
+import { AnalysisPanel } from './analysis/AnalysisPanel.tsx'
+import analysisCss from './analysis/analysis.module.css'
 import { SidecarWidget } from './widget.tsx'
 import { SettingsCard, type SettingsCardValues, type SidecarDaemonStatus } from './settings-card.tsx'
 import { countWorking, deriveWidgetConnection } from './board/logic.ts'
@@ -29,7 +32,9 @@ import type { SidecarController, SidecarViewState } from './controller.ts'
 import { SidecarDetailView } from './detail-view.tsx'
 import { findCardHint, type DetailHeaderHint } from './detail-glue.ts'
 import { findProjectSessionHint } from './project-glue.ts'
-import type { BoardUiPort, ProjectsStorePort } from './ui-integration.ts'
+import type { BoardArchiveApi } from './board/ArchivePanel.tsx'
+import type { AnalysisStorePort, BoardUiPort, ProjectsStorePort } from './ui-integration.ts'
+import type { AnalysisGlueState, AnalysisTarget } from './analysis-glue.ts'
 import { detailErrorText } from './detail/logic.ts'
 import { t } from './locales/index.ts'
 import { useActiveLocale } from './locales/react.ts'
@@ -44,8 +49,20 @@ import {
   type SidecarConfigView,
 } from './settings-glue.ts'
 
-/** Board-tab main views (detail is an overlay route on top of either). */
-type MainView = 'board' | 'projects'
+/** Board-tab source views (detail and analysis are full-page routes). */
+type SourceView = 'board' | 'projects'
+type MainView = SourceView | 'analysis'
+
+const EMPTY_ANALYSIS_STATE: AnalysisGlueState = {
+  phase: 'idle',
+  analysisSessionId: null,
+  exchanges: [],
+  messages: [],
+  disclaimer: null,
+  errorCode: null,
+  noticeCode: null,
+  progressStep: 0,
+}
 
 type DetailRoute = {
   id: string
@@ -54,8 +71,16 @@ type DetailRoute = {
 }
 
 type ReturnRequest = {
-  view: MainView
+  view: SourceView
   focusTarget: SessionFocusTarget | null
+}
+
+type AnalysisRoute = {
+  target: AnalysisTarget
+  source: {
+    view: SourceView
+    detail: DetailRoute | null
+  }
 }
 
 /**
@@ -115,6 +140,7 @@ function ProjectsContainer(props: {
   controller: SidecarController
   store: ProjectsStorePort
   onSelectSession: (target: SessionFocusTarget) => void
+  onAnalyzeProject?: (target: AnalysisTarget) => void
   rootRef: (element: HTMLDivElement | null) => void
   onScrollTopChange: (scrollTop: number) => void
   returnFocusTarget: SessionFocusTarget | null
@@ -132,11 +158,50 @@ function ProjectsContainer(props: {
       loading={state.loading}
       error={state.error === null ? null : detailErrorText(state.error)}
       onSelectSession={props.onSelectSession}
+      onAnalyzeProject={props.onAnalyzeProject}
       rootRef={props.rootRef}
       onScrollTopChange={props.onScrollTopChange}
       returnFocusTarget={props.returnFocusTarget}
       onReturnFocusConsumed={props.onReturnFocusConsumed}
     />
+  )
+}
+
+/** Full-page analysis route; the store stays owned by BoardContent. */
+function AnalysisMainView(props: {
+  enabled: boolean
+  state: AnalysisGlueState
+  store: AnalysisStorePort
+  target: AnalysisTarget
+  onBack: () => void
+}): ReactElement {
+  return (
+    <main
+      className={analysisCss['view']}
+      data-testid="agent-sidecar-analysis-view"
+    >
+      <header className={analysisCss['viewHead']}>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={props.onBack}
+          data-testid="agent-sidecar-analysis-back"
+        >
+          {t('analysis.back')}
+        </Button>
+        <span className={analysisCss['viewTitle']}>{t('analysis.title')}</span>
+      </header>
+      <div className={analysisCss['viewBody']}>
+        <AnalysisPanel
+          enabled={props.enabled}
+          state={props.state}
+          onStart={() => { void props.store.start(props.target) }}
+          onFollowup={(question) => { void props.store.followup(question) }}
+          onStop={() => { void props.store.stop() }}
+        />
+      </div>
+    </main>
   )
 }
 
@@ -168,12 +233,13 @@ function createBoardContent(
     const filters = useSyncExternalStore(subscribe, getFilters, getFilters)
     const [mainView, setMainView] = useState<MainView>('board')
     const [detail, setDetail] = useState<DetailRoute | null>(null)
+    const [analysisRoute, setAnalysisRoute] = useState<AnalysisRoute | null>(null)
     const [returnFocusRequest, setReturnFocusRequest] = useState<ReturnRequest | null>(null)
-    const viewRootsRef = useRef<Record<MainView, HTMLDivElement | null>>({
+    const viewRootsRef = useRef<Record<SourceView, HTMLDivElement | null>>({
       board: null,
       projects: null,
     })
-    const scrollTopsRef = useRef<Record<MainView, number>>({ board: 0, projects: 0 })
+    const scrollTopsRef = useRef<Record<SourceView, number>>({ board: 0, projects: 0 })
     const returnRequestRef = useRef<ReturnRequest | null>(null)
     const pendingFocusCancelRef = useRef<(() => void) | null>(null)
     // One project store per tab mount, created lazily with the integration
@@ -181,7 +247,39 @@ function createBoardContent(
     const [projectsStore] = useState<ProjectsStorePort | null>(
       () => integration?.createProjectsStore() ?? null,
     )
+    const [boardAnalysisStore] = useState<AnalysisStorePort | null>(
+      () => integration?.createAnalysisStore() ?? null,
+    )
+    // Gate on the daemon advertising a policy: an older daemon would answer
+    // the archive ops with unknown_op, and a button that can only fail is
+    // worse than no button.
+    const [archiveApi] = useState<BoardArchiveApi | null>(
+      () => integration?.createArchiveApi?.() ?? null,
+    )
+    const archiveEnabled = archiveApi !== null && state.archivePolicy !== null
     useEffect(() => () => { projectsStore?.dispose() }, [projectsStore])
+    useEffect(() => () => { boardAnalysisStore?.dispose() }, [boardAnalysisStore])
+    const analysisState = useSyncExternalStore(
+      boardAnalysisStore?.subscribe ?? (() => () => {}),
+      boardAnalysisStore?.getState ?? (() => EMPTY_ANALYSIS_STATE),
+      boardAnalysisStore?.getState ?? (() => EMPTY_ANALYSIS_STATE),
+    )
+    const openAnalysis = (target: AnalysisTarget): void => {
+      if (boardAnalysisStore === null) return
+      const sourceView: SourceView = mainView === 'analysis' ? 'board' : mainView
+      setAnalysisRoute({
+        target,
+        source: { view: sourceView, detail },
+      })
+      setMainView('analysis')
+    }
+
+    const closeAnalysis = (): void => {
+      if (analysisRoute === null) return
+      setAnalysisRoute(null)
+      setMainView(analysisRoute.source.view)
+      setDetail(analysisRoute.source.detail)
+    }
 
     const cancelPendingFocus = useCallback((): void => {
       pendingFocusCancelRef.current?.()
@@ -209,7 +307,7 @@ function createBoardContent(
       viewRootsRef.current.projects = element
     }, [])
 
-    const saveVisibleScroll = (view: MainView): void => {
+    const saveVisibleScroll = (view: SourceView): void => {
       const root = viewRootsRef.current[view]
       if (root !== null) scrollTopsRef.current[view] = root.scrollTop
     }
@@ -220,7 +318,7 @@ function createBoardContent(
         ? findProjectSessionHint(projectsStore.getState().groups, sessionId)
         : null)
 
-    const openDetail = (target: SessionFocusTarget, source: MainView): void => {
+    const openDetail = (target: SessionFocusTarget, source: SourceView): void => {
       if (integration === undefined) return
       cancelPendingFocus()
       clearReturnFocus()
@@ -253,19 +351,20 @@ function createBoardContent(
       setDetail(null)
     }
 
-    const switchMainView = (next: MainView): void => {
+    const switchMainView = (next: SourceView): void => {
       if (next === mainView) return
       cancelPendingFocus()
       clearReturnFocus()
-      saveVisibleScroll(mainView)
+      if (mainView !== 'analysis') saveVisibleScroll(mainView)
       setMainView(next)
     }
 
     useEffect(() => {
-      if (detail !== null || typeof window === 'undefined') return
+      if (detail !== null || analysisRoute !== null || typeof window === 'undefined') return
       cancelPendingFocus()
       const request = returnRequestRef.current
-      const view = request?.view ?? mainView
+      const view: SourceView = request?.view
+        ?? (mainView === 'analysis' ? 'board' : mainView)
       pendingFocusCancelRef.current = scheduleAfterLayout(window, () => {
         pendingFocusCancelRef.current = null
         if (request !== null && returnRequestRef.current !== request) return
@@ -280,12 +379,24 @@ function createBoardContent(
         setReturnFocusRequest(request)
       })
       return cancelPendingFocus
-    }, [cancelPendingFocus, detail, mainView])
+    }, [analysisRoute, cancelPendingFocus, detail, mainView])
 
     useEffect(() => () => {
       returnRequestRef.current = null
       cancelPendingFocus()
     }, [cancelPendingFocus])
+
+    if (analysisRoute !== null && boardAnalysisStore !== null) {
+      return (
+        <AnalysisMainView
+          enabled={integration?.detail.getAnalysisEnabled() === true}
+          state={analysisState}
+          store={boardAnalysisStore}
+          target={analysisRoute.target}
+          onBack={closeAnalysis}
+        />
+      )
+    }
 
     if (integration !== undefined && detail !== null) {
       return (
@@ -296,6 +407,7 @@ function createBoardContent(
           hint={detail.hint}
           controller={controller}
           integration={integration.detail}
+          onAnalyze={openAnalysis}
           onClose={closeDetail}
           onSelectSession={switchDetailSession}
         />
@@ -330,6 +442,7 @@ function createBoardContent(
               controller={controller}
               store={projectsStore}
               onSelectSession={(target) => { openDetail(target, 'projects') }}
+              onAnalyzeProject={openAnalysis}
               rootRef={setProjectsRoot}
               onScrollTopChange={(scrollTop) => {
                 scrollTopsRef.current.projects = scrollTop
@@ -359,6 +472,14 @@ function createBoardContent(
               // in-flight state and a failure notice (UX-07).
               onRefresh={() => controller.refresh()}
               onSelectSession={(target) => { openDetail(target, 'board') }}
+              onAnalyze={openAnalysis}
+              {...archiveEnabled && archiveApi !== null
+                ? {
+                    archive: archiveApi,
+                    archived: state.archived,
+                    disposeSupported: state.disposeCapability,
+                  }
+                : {}}
               rootRef={setBoardRoot}
               onScrollTopChange={(scrollTop) => {
                 scrollTopsRef.current.board = scrollTop
@@ -525,6 +646,16 @@ export function createSettingsCardEntry(
         saving={saving}
         saveFailed={saveFailed}
         daemon={daemon}
+        // The policy the reached daemon reports, not the staged config: an
+        // adopted daemon owns whatever it was started with.
+        archivePolicy={
+          state.archivePolicy === null
+            ? null
+            : {
+                auto: state.archivePolicy.auto,
+                autoAfterSeconds: state.archivePolicy.autoAfterSeconds,
+              }
+        }
       />
     )
   }

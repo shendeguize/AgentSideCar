@@ -89,6 +89,7 @@ import {
   type GuardVerdict,
 } from './guard.ts'
 import type { AnalysisEngine, AnalysisInput, AnalysisResult } from './analysis.ts'
+import type { DshDisposeApi } from './dsh-dispose.ts'
 import type { FusionQuery, TimelineCursor, TimelinePage } from './fusion.ts'
 import type { InjectGateway } from './inject-gateway.ts'
 import type { BoardState, SessionStore } from './session-store.ts'
@@ -128,6 +129,29 @@ export type FusionApi = Pick<
 
 /** The slice of {@link AnalysisEngine} the analysis actions drive. */
 export type AnalysisEngineApi = Pick<AnalysisEngine, 'request' | 'followup' | 'cancel'>
+
+/** One `(agent, sessionId)` archive target carried by an action envelope. */
+export interface ArchiveTarget {
+  agent: string
+  sessionId: string
+}
+
+/**
+ * The daemon archive ops the `archive.*` actions drive (host: bridge.ts
+ * {@link SidecarSocketClient}). Structural, like the other route deps.
+ *
+ * Archiving is observation-level and fully reversible — it hides a session
+ * from this board without touching the vendor transcript or any process —
+ * so, like `daemon.retry`, these actions pass guard layers 1-4 WITHOUT the
+ * inject write gate: `inject.enabled` gates agent-state mutation, which
+ * archiving is not (design §6).
+ */
+export interface ArchiveApi {
+  preview(idleSeconds: number, statuses?: readonly string[]): Promise<unknown>
+  apply(targets: readonly ArchiveTarget[], token: string): Promise<unknown>
+  unarchive(targets: readonly ArchiveTarget[] | 'all'): Promise<unknown>
+  list(): Promise<unknown>
+}
 
 /** Target selector carried by one `analysis.request` action envelope. */
 export interface AnalysisTargetRequest {
@@ -198,6 +222,17 @@ export interface RoutesDeps {
    * actions that pass the gate answer 501 `analysis_unavailable`.
    */
   analysis?: AnalysisApi
+  /**
+   * dsh session dispose. When absent — or bound to a host whose sessions
+   * service has no dispose member — `dsh.dispose` answers 501
+   * `dispose_unavailable` and `GET state` reports the capability as false.
+   */
+  dispose?: DshDisposeApi
+  /**
+   * Daemon archive ops. When absent, `archive.*` actions answer 501
+   * `archive_unavailable`.
+   */
+  archive?: ArchiveApi
   log(level: 'info' | 'warn' | 'error', msg: string, meta?: object): void
 }
 
@@ -218,7 +253,15 @@ export interface RoutesOptions {
 export interface StateSnapshot {
   daemon: { state: SupervisorState; lastPing: PingInfo | null }
   board: BoardState
-  capabilities: { inject: boolean }
+  capabilities: {
+    inject: boolean
+    /**
+     * Whether `dsh.dispose` can succeed right now: a bound sessions
+     * service that exposes dispose, behind the same write gate. False
+     * hides the control instead of offering a doomed action.
+     */
+    dispose: boolean
+  }
 }
 
 /** What `createRoutes` hands back to the plugin entry. */
@@ -304,6 +347,46 @@ const ANALYSIS_ACTION_TYPES = new Set([
   'analysis.followup',
   'analysis.cancel',
 ])
+
+const ARCHIVE_ACTION_TYPES = new Set([
+  'archive.preview',
+  'archive.apply',
+  'archive.unarchive',
+  'archive.list',
+])
+
+/**
+ * Daemon archive error code → HTTP status. Transport codes and unknown
+ * daemon vocabulary fall back to 502 (the daemon spoke, we could not).
+ */
+const ARCHIVE_ERROR_STATUS: Readonly<Record<string, number>> = {
+  invalid_request: 400,
+  invalid_token: 409,
+  archive_corrupt: 500,
+  archive_error: 500,
+  unknown_op: 501,
+  timeout: 504,
+  connection_failed: 503,
+  connection_closed: 503,
+}
+
+/** Upper bound on targets one `archive.apply`/`archive.unarchive` may carry. */
+const MAX_ARCHIVE_TARGETS = 500
+
+/** Parse `[{agent, sessionId}]`, or null when any entry is malformed. */
+function parseArchiveTargets(value: unknown): ArchiveTarget[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null
+  if (value.length > MAX_ARCHIVE_TARGETS) return null
+  const targets: ArchiveTarget[] = []
+  for (const raw of value) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+    const { agent, sessionId } = raw as Record<string, unknown>
+    if (typeof agent !== 'string' || agent === '') return null
+    if (typeof sessionId !== 'string' || sessionId === '') return null
+    targets.push({ agent, sessionId })
+  }
+  return targets
+}
 
 interface SseClient {
   res: ServerResponse
@@ -495,7 +578,13 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
   const buildSnapshot = (): StateSnapshot => ({
     daemon: { state: deps.supervisor.state, lastPing: deps.supervisor.lastPing },
     board: deps.store.getBoardState(),
-    capabilities: { inject: deps.guardOptions.allowWriteActions() },
+    capabilities: {
+      inject: deps.guardOptions.allowWriteActions(),
+      dispose:
+        deps.guardOptions.allowWriteActions() &&
+        deps.dispose !== undefined &&
+        deps.dispose.available(),
+    },
   })
 
   // ------------------------------------------------------------------ SSE
@@ -600,7 +689,7 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
   const handleSession = async (res: ServerResponse, rawId: string): Promise<void> => {
     const id = decodeId(res, rawId)
     if (id === null) return
-    const view = deps.store.getBoardState().sessions.find((s) => s.session_id === id)
+    const view = deps.store.getSessionDetail(id) ?? undefined
     const fusion = deps.fusion
     if (fusion === undefined) {
       // M1 contract preserved: detail == card data, timeline placeholder.
@@ -953,6 +1042,140 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
     writeJson(res, 200, { ok: true, analysisSessionId })
   }
 
+  // ------------------------------------------------------- archive actions
+
+  /**
+   * Run one daemon archive op and answer it. A coded daemon/transport
+   * failure becomes an honest status from {@link ARCHIVE_ERROR_STATUS};
+   * session titles and ids stay out of the route log (S8).
+   */
+  const runArchiveOp = async (
+    type: string,
+    res: ServerResponse,
+    op: () => Promise<unknown>,
+  ): Promise<void> => {
+    try {
+      const result = await op()
+      logAction(type, 200)
+      writeJson(res, 200, result)
+    } catch (err) {
+      const code = typeof (err as { code?: unknown })?.code === 'string'
+        ? (err as { code: string }).code
+        : 'archive_failed'
+      const status = ARCHIVE_ERROR_STATUS[code] ?? 502
+      logAction(type, status, { errorCode: code })
+      writeJson(res, status, { reason: code })
+    }
+  }
+
+  const handleDispose = async (
+    dispose: DshDisposeApi,
+    envelope: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> => {
+    const sessionId = envelope.sessionId
+    if (typeof sessionId !== 'string' || sessionId === '') {
+      logAction('dsh.dispose', 400, { reason: 'invalid_request' })
+      writeJson(res, 400, {
+        reason: 'invalid_request',
+        detail: 'dsh.dispose needs a nonempty sessionId',
+      })
+      return
+    }
+    let result
+    try {
+      result = await dispose.dispose(sessionId)
+    } catch {
+      // The executor already normalizes every host failure into an
+      // outcome; a throw past it is a bug on this side, not a host answer.
+      logAction('dsh.dispose', 500, { reason: 'executor_error' })
+      writeJson(res, 500, { reason: 'executor_error' })
+      return
+    }
+    // Every settled attempt answers 200 with its outcome, mirroring
+    // inject.execute: "the host refused" is a result the UI renders, not a
+    // transport error it should retry.
+    logAction('dsh.dispose', 200, { outcome: result.outcome })
+    writeJson(res, 200, { outcome: result.outcome })
+  }
+
+  const handleArchiveAction = async (
+    archive: ArchiveApi,
+    type: string,
+    envelope: Record<string, unknown>,
+    res: ServerResponse,
+  ): Promise<void> => {
+    if (type === 'archive.list') {
+      await runArchiveOp(type, res, () => archive.list())
+      return
+    }
+
+    if (type === 'archive.preview') {
+      const idleSeconds = envelope.idleSeconds
+      const rawStatuses = envelope.statuses
+      if (
+        typeof idleSeconds !== 'number' ||
+        !Number.isFinite(idleSeconds) ||
+        idleSeconds <= 0
+      ) {
+        logAction(type, 400, { reason: 'invalid_request' })
+        writeJson(res, 400, {
+          reason: 'invalid_request',
+          detail: 'archive.preview needs a positive idleSeconds',
+        })
+        return
+      }
+      let statuses: string[] | undefined
+      if (rawStatuses !== undefined) {
+        if (
+          !Array.isArray(rawStatuses) ||
+          rawStatuses.some((name) => typeof name !== 'string')
+        ) {
+          logAction(type, 400, { reason: 'invalid_request' })
+          writeJson(res, 400, {
+            reason: 'invalid_request',
+            detail: 'archive.preview statuses must be an array of strings',
+          })
+          return
+        }
+        statuses = rawStatuses as string[]
+      }
+      await runArchiveOp(type, res, () => archive.preview(idleSeconds, statuses))
+      return
+    }
+
+    if (type === 'archive.apply') {
+      const targets = parseArchiveTargets(envelope.targets)
+      const token = envelope.token
+      if (targets === null || typeof token !== 'string' || token === '') {
+        logAction(type, 400, { reason: 'invalid_request' })
+        writeJson(res, 400, {
+          reason: 'invalid_request',
+          detail: 'archive.apply needs a nonempty targets[{agent,sessionId}] and a preview token',
+        })
+        return
+      }
+      await runArchiveOp(type, res, () => archive.apply(targets, token))
+      return
+    }
+
+    // archive.unarchive
+    if (envelope.all === true) {
+      await runArchiveOp(type, res, () => archive.unarchive('all'))
+      return
+    }
+    const targets = parseArchiveTargets(envelope.targets)
+    if (targets === null) {
+      logAction(type, 400, { reason: 'invalid_request' })
+      writeJson(res, 400, {
+        reason: 'invalid_request',
+        detail: 'archive.unarchive needs targets[{agent,sessionId}] or all=true',
+      })
+      return
+    }
+    await runArchiveOp(type, res, () => archive.unarchive(targets))
+  }
+
   /** M2 dispatcher over the action envelope (gateway present, guard 1-4 passed). */
   const handleAction = async (
     gateway: InjectGatewayApi,
@@ -996,6 +1219,40 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
         const state = deps.supervisor.state
         logAction('daemon.retry', 200, { state })
         writeJson(res, 200, { state })
+        return
+      }
+
+      if (type !== null && ARCHIVE_ACTION_TYPES.has(type)) {
+        // No inject write gate: see the ArchiveApi doc — hiding a session
+        // from this board mutates sidecar-local state only.
+        const archive = deps.archive
+        if (archive === undefined) {
+          logAction(type, 501, { reason: 'archive_unavailable' })
+          writeJson(res, 501, { reason: 'archive_unavailable' })
+          return
+        }
+        await handleArchiveAction(archive, type, envelope, res)
+        return
+      }
+
+      if (type === 'dsh.dispose') {
+        // Dispose ends a live dsh session, so unlike archiving it passes
+        // through the same write gate as injection: `inject.enabled` is
+        // the deployment's "this plugin may mutate agent state" switch,
+        // and ending a session is the largest mutation on offer.
+        const writeVerdict = guardWriteAction(verdict, deps.guardOptions)
+        if (!writeVerdict.ok) {
+          logAction(type, writeVerdict.status, { reason: writeVerdict.reason })
+          writeJson(res, writeVerdict.status, { reason: writeVerdict.reason })
+          return
+        }
+        const dispose = deps.dispose
+        if (dispose === undefined || !dispose.available()) {
+          logAction(type, 501, { reason: 'dispose_unavailable' })
+          writeJson(res, 501, { reason: 'dispose_unavailable' })
+          return
+        }
+        await handleDispose(dispose, envelope, res)
         return
       }
 

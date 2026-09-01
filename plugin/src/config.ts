@@ -73,6 +73,22 @@ export interface UiConfig {
   showDead: boolean
 }
 
+/**
+ * Automatic archiving policy handed to daemons THIS plugin spawns.
+ *
+ * Deliberately conservative: off by default, a 24h threshold, and
+ * archive-only — the automatic path never disposes anything, and a session
+ * that speaks again is unarchived by the same scan that hid it. An adopted
+ * or service-managed daemon keeps the policy it was started with; the
+ * settings card reports what that daemon actually applies.
+ */
+export interface ArchivePolicyConfig {
+  /** Hide sessions idle past the threshold from the board. */
+  auto: boolean
+  /** Inactivity threshold in hours; only read when `auto` is true. */
+  autoAfterHours: number
+}
+
 /** Skill provider switch (design §6/§7 path two; wired in M4/T6.2). */
 export interface SkillConfig {
   /** Register the embedded agent-sidecar skill on ctx.skills (read at apply; restart semantics). */
@@ -87,6 +103,7 @@ export interface Config {
   inject: InjectConfig
   analysis: AnalysisConfig
   ui: UiConfig
+  archive: ArchivePolicyConfig
   skill: SkillConfig
 }
 
@@ -180,6 +197,22 @@ export const Config: z<Config> = z.object({
       showDead: z.boolean().default(false).description('是否显示 dead 会话'),
     })
     .description('看板界面'),
+  archive: z
+    .object({
+      auto: z
+        .boolean()
+        .default(false)
+        .description(
+          '自动归档:把空闲超过阈值的 idle/dead 会话从看板隐藏(只影响展示,不动会话文件与进程;会话一旦重新有活动自动解档)。仅对本插件拉起的 daemon 生效,且需 daemon 重启;默认关闭',
+        ),
+      autoAfterHours: z
+        .natural()
+        .min(1)
+        .max(720)
+        .default(24)
+        .description('自动归档的无活动阈值(小时,默认 24;仅在自动归档开启时生效)'),
+    })
+    .description('自动归档策略'),
   skill: z
     .object({
       provide: z

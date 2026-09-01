@@ -152,7 +152,8 @@ interface AnalysisCreateOptions {
    * `meta: { cwd: process.cwd() }` on its own create call).
    */
   readonly meta?: {
-    readonly cwd?: string;
+    readonly cwd?: string; /** Explicit marker for board/fusion filters; analysis is not user work. */
+    readonly agentSidecarAnalysis?: true;
   };
 }
 /** Minimal `ctx.agents` face: the one factory entry point this engine uses. */
@@ -213,6 +214,21 @@ interface UiConfig {
   /** Whether dead sessions are listed. */
   showDead: boolean;
 }
+/**
+ * Automatic archiving policy handed to daemons THIS plugin spawns.
+ *
+ * Deliberately conservative: off by default, a 24h threshold, and
+ * archive-only — the automatic path never disposes anything, and a session
+ * that speaks again is unarchived by the same scan that hid it. An adopted
+ * or service-managed daemon keeps the policy it was started with; the
+ * settings card reports what that daemon actually applies.
+ */
+interface ArchivePolicyConfig {
+  /** Hide sessions idle past the threshold from the board. */
+  auto: boolean;
+  /** Inactivity threshold in hours; only read when `auto` is true. */
+  autoAfterHours: number;
+}
 /** Skill provider switch (design §6/§7 path two; wired in M4/T6.2). */
 interface SkillConfig {
   /** Register the embedded agent-sidecar skill on ctx.skills (read at apply; restart semantics). */
@@ -226,6 +242,7 @@ interface Config {
   inject: InjectConfig;
   analysis: AnalysisConfig;
   ui: UiConfig;
+  archive: ArchivePolicyConfig;
   skill: SkillConfig;
 }
 declare const Config: z<Config>;
@@ -494,9 +511,16 @@ interface SessionPersistenceFace {
     readonly events: readonly unknown[];
   }>;
 }
-/** `ctx.sessions` direct live-session lookup used by fusion on demand. */
+/**
+ * `ctx.sessions` direct live-session lookup used by fusion on demand, plus
+ * the optional dispose the `dsh.dispose` action drives (the in-process form
+ * of the host's `session.dispose` RPC). `dispose` is optional because a
+ * host without it must degrade to "capability absent", never to a call
+ * that throws at the moment the operator confirms it.
+ */
 interface SessionsServiceFace {
   get(sessionId: string): DshSessionFace | undefined;
+  dispose?(sessionId: string): void | Promise<void>;
 }
 /** The plugin context with the two hard-injected services visible. */
 type HostContext = Context & {

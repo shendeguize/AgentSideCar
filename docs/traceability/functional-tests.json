@@ -47,11 +47,15 @@
         "tests.test_http_server",
         "tests.test_native_contracts",
         "tests.test_process",
-        "tests.test_process_runner"
+        "tests.test_process_runner",
+        "tests.test_systemd",
+        "tests.test_copilot_compat"
       ],
       "matrix_ids": [
         "FU-HTTP-001",
-        "FU-PROCESS-001"
+        "FU-PROCESS-001",
+        "FU-SERVICE-001",
+        "FU-COPILOT-001"
       ]
     },
     {

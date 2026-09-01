@@ -61,6 +61,8 @@ test ID is not a completed mapping.
 | FU-AUDIT-001 | Reserve, append, recover, rotate, reset, and rebind private audit state | `tests/test_functional_behavior.py` (`FU-AUDIT-001`), `tests/test_send_audit.py` | done |
 | FU-KIMI-001 | Bind Kimi identity, ACP protocol, protected resume, and durable outcome proof | `tests/test_kimi.py`, `test_kimi_acp.py`, `test_kimi_identity.py` | done |
 | FU-PROCESS-001 | Inspect processes and enforce bounded containment/cleanup | `tests/test_process.py`, `test_process_runner.py` | done |
+| FU-SERVICE-001 | Install, validate, restart, status, and remove the current-user service on macOS/Linux | `tests/test_launchd.py`, `tests/test_systemd.py` | done |
+| FU-COPILOT-001 | Keep Copilot authenticated resume flags and no-credential compatibility smoke aligned | `tests/test_copilot_compat.py`, `plugin/test/send-cli.test.ts` | done |
 | FU-PACK-001 | Build reproducible zipapps and preserve standard-library runtime boundary | `tests/test_release.py`, `test_install_script.py`, `test_governance.py` | done |
 | FU-QUALITY-001 | Run lint, tests, coverage, packaging, CLI, skill, and site quality stages | `tests/test_check_script.py`, `test_coverage_gate.py`, `test_site.py` | done |
 

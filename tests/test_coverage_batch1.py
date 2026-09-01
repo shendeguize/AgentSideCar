@@ -14,6 +14,7 @@ from unittest import mock
 import sidecar.daemon as daemon
 import sidecar.adapters.base as adapter_base
 import sidecar.bus as bus
+import sidecar.cluster as cluster
 import sidecar.index as index
 import sidecar.inject as inject
 import sidecar.kimi_acp as acp
@@ -7184,4 +7185,102 @@ class SendAuditExceptionalBranchTests(unittest.TestCase):
         session = remote_watch.RemoteWatchSession([], b"", cancel_event=cancelled)
         session._host_opener = mock.Mock(side_effect=RuntimeError("cancelled"))
         session._run_host(remote_types.RemoteHost("edge", "running"))
+
+    def test_remote_cluster_protocol_validation_boundaries(self):
+        valid = {
+            "cluster_id": "cluster",
+            "project": "/work",
+            "agent": "claude",
+            "model": "model",
+            "model_provider": "provider",
+            "time_bucket": 10,
+            "count": 1,
+            "session_ids": ["sid"],
+            "hosts": ["pod"],
+        }
+        rows = remote_types._validate_protocol_cluster_rows([valid], "pod")
+        self.assertEqual("pod", rows[0]["host"])
+        self.assertEqual(["pod"], rows[0]["hosts"])
+
+        for bad in (None, {}, [{"unexpected": True}]):
+            with self.subTest(bad=bad):
+                assert_rejected(
+                    self,
+                    remote_types._validate_protocol_cluster_rows,
+                    bad,
+                    "pod",
+                )
+        with mock.patch.object(remote_types, "MAX_ROWS", 0):
+            assert_rejected(
+                self,
+                remote_types._validate_protocol_cluster_rows,
+                [valid],
+                "pod",
+            )
+
+        for key, value in (
+            ("project", None),
+            ("count", -1),
+            ("count", True),
+            ("session_ids", "sid"),
+            ("hosts", [1]),
+        ):
+            bad = dict(valid, **{key: value})
+            with self.subTest(key=key, value=value):
+                assert_rejected(
+                    self,
+                    remote_types._validate_protocol_cluster_rows,
+                    [bad],
+                    "pod",
+                )
+        with self.subTest("surrogate text"):
+            assert_rejected(
+                self,
+                remote_types._validate_protocol_cluster_rows,
+                [dict(valid, model="\udcff")],
+                "pod",
+            )
+        with mock.patch.object(remote_types, "MAX_ROW_BYTES", 1):
+            assert_rejected(
+                self,
+                remote_types._validate_protocol_cluster_rows,
+                [valid],
+                "pod",
+            )
+
+    def test_remote_cluster_rows_attribute_a_remote_self_label_to_its_alias(self):
+        # Every host clusters its own sessions under "local"; if that label
+        # survived the trip, each remote group would claim to exist locally.
+        template = {
+            "cluster_id": "cluster",
+            "project": "/work",
+            "agent": "claude",
+            "model": "model",
+            "model_provider": "provider",
+            "time_bucket": 10,
+            "count": 1,
+            "session_ids": ["sid"],
+            "hosts": ["local"],
+        }
+
+        rows = remote_types._validate_protocol_cluster_rows([template], "pod-a")
+        self.assertEqual(["pod-a"], rows[0]["hosts"])
+
+        cased = remote_types._validate_protocol_cluster_rows(
+            [dict(template, hosts=["LOCAL"])],
+            "pod-a",
+        )
+        self.assertEqual(["pod-a"], cased[0]["hosts"])
+
+        # A remote that already names itself must not be duplicated.
+        deduped = remote_types._validate_protocol_cluster_rows(
+            [dict(template, hosts=["local", "pod-a", "pod-b"])],
+            "pod-a",
+        )
+        self.assertEqual(["pod-a", "pod-b"], deduped[0]["hosts"])
+
+        # Merging must keep local and remote groups distinct.
+        local_group = dict(template, hosts=["local"], host="local")
+        merged = cluster.merge_cluster_results([local_group, dict(rows[0])])
+        self.assertEqual(["local", "pod-a"], merged[0]["hosts"])
 

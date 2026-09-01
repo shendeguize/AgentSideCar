@@ -846,6 +846,18 @@ describe('Reconciler', () => {
 // ---------------------------------------------------------------------------
 
 describe('SessionStore', () => {
+  it('filters dedicated analysis sessions from the board projection', () => {
+    const store = new SessionStore()
+    store.applySnapshot([
+      row({ session_id: 'agent-sidecar-analysis-test' }),
+      row({ session_id: 'marked-analysis', extra: { agentSidecarAnalysis: true } }),
+      row({ session_id: 'real-session' }),
+    ])
+    expect(store.getBoardState().sessions.map((session) => session.session_id)).toEqual([
+      'real-session',
+    ])
+  })
+
   it('applySnapshot fully replaces the session set and sorts by recency', () => {
     const store = new SessionStore()
     store.applySnapshot([

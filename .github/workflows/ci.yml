@@ -82,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || (github.event_name == 'push' && fromJSON('["macos-latest"]') || fromJSON('["ubuntu-latest","macos-latest"]')) }}
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest","macos-latest"]') || (github.event_name == 'push' && fromJSON('["macos-latest"]') || fromJSON('["ubuntu-latest","macos-latest"]')) }}
         python-version: ["3.9", "3.13"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20

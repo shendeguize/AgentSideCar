@@ -497,11 +497,13 @@ describe('GET state', () => {
     expect(body.board.sessions.map((s: any) => s.session_id)).toEqual(['newer', 'older'])
     expect(body.board.streamHealth).toBe('unknown')
     expect(typeof body.board.lastReconcileAt).toBe('number')
-    expect(body.capabilities).toEqual({ inject: false })
+    // No dispose dep in this harness, so the capability is false regardless
+    // of the write gate (dsh-dispose.test.ts covers the matrix).
+    expect(body.capabilities).toEqual({ inject: false, dispose: false })
 
     harness.inject.enabled = true
     const flipped = JSON.parse((await request(harness.base, `${API_PREFIX}/state`)).body)
-    expect(flipped.capabilities).toEqual({ inject: true })
+    expect(flipped.capabilities).toEqual({ inject: true, dispose: false })
   })
 
   it('projects only the derived verdict and never raw extra or parent topology', async () => {
@@ -610,7 +612,7 @@ describe('GET stream (SSE)', () => {
     const initial = await sse.nextState()
     expect(initial.daemon).toEqual({ state: 'probe', lastPing: null })
     expect(initial.board.sessions.map((s: any) => s.session_id)).toEqual(['s1'])
-    expect(initial.capabilities).toEqual({ inject: false })
+    expect(initial.capabilities).toEqual({ inject: false, dispose: false })
 
     harness.store.applySnapshot([row('s1', { updated_at: 111 }), row('s2', { updated_at: 999 })])
     const afterStore = await sse.nextState()

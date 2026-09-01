@@ -14,12 +14,14 @@ from sidecar.adapters.base import (
     as_mapping,
     compact_json,
     content_block_events,
+    created_at_extra,
     epoch_seconds,
     local_timestamp,
     read_json_object,
     snip,
     text_content,
 )
+from sidecar.adapters.replay import JsonlReplayMixin
 from sidecar.kimi_identity import read_kimi_index_metadata
 from sidecar.model import Event, Session, Status
 
@@ -147,6 +149,14 @@ def _event_extra(record: Mapping[str, Any], **values: Any) -> Dict[str, Any]:
     }
     extra.update({key: value for key, value in values.items() if value is not None})
     return extra
+
+
+def _metadata_string(mapping: Mapping[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _render_content_block(
@@ -287,7 +297,7 @@ def _loop_events(record: Mapping[str, Any], session: Session) -> List[Event]:
     return []
 
 
-class KimiAdapter(Adapter):
+class KimiAdapter(JsonlReplayMixin, Adapter):
     name = "kimi"
     agent_names = ("kimi",)
 
@@ -392,6 +402,32 @@ class KimiAdapter(Adapter):
             )
             updated_at = state_updated or _mtime(state_path) or _mtime(transcript)
             reason_present = "lastTurnReason" in state
+            model = _metadata_string(
+                state,
+                "model",
+                "model_name",
+                "modelName",
+                "model_id",
+                "modelId",
+            ) or _metadata_string(
+                main_meta,
+                "model",
+                "model_name",
+                "modelName",
+                "model_id",
+                "modelId",
+            )
+            model_provider = _metadata_string(
+                state,
+                "model_provider",
+                "modelProvider",
+                "provider",
+            ) or _metadata_string(
+                main_meta,
+                "model_provider",
+                "modelProvider",
+                "provider",
+            )
             common_extra: Dict[str, Any] = {
                 "source": "session_index",
                 "session_dir": str(directory),
@@ -405,7 +441,12 @@ class KimiAdapter(Adapter):
                 "workspace": dict(workspace),
                 "agent_id": "main",
                 "subagents": subagents,
+                **created_at_extra(state.get("createdAt")),
             }
+            if model:
+                common_extra["model"] = model
+            if model_provider:
+                common_extra["model_provider"] = model_provider
             main = Session(
                 agent="kimi",
                 session_id=session_id,
@@ -436,6 +477,24 @@ class KimiAdapter(Adapter):
                         or "main",
                     }
                 )
+                child_model = _metadata_string(
+                    metadata,
+                    "model",
+                    "model_name",
+                    "modelName",
+                    "model_id",
+                    "modelId",
+                )
+                child_provider = _metadata_string(
+                    metadata,
+                    "model_provider",
+                    "modelProvider",
+                    "provider",
+                )
+                if child_model:
+                    child_extra["model"] = child_model
+                if child_provider:
+                    child_extra["model_provider"] = child_provider
                 child = Session(
                     agent="kimi",
                     session_id=_child_session_id(session_id, agent_id),

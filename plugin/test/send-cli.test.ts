@@ -16,6 +16,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 
 import type { InjectExecutionRequest } from '../src/inject-gateway.ts'
 import {
+  buildSendCliArgv,
   createSendCliExecutor,
   DEFAULT_SEND_CLI_COMMAND,
   DEFAULT_SEND_TIMEOUT_MS,
@@ -24,6 +25,35 @@ import {
   type SpawnLike,
   type SpawnedProcess,
 } from '../src/send-cli.ts'
+
+it('keeps the Copilot-compatible external send argv contract version-stable', () => {
+  const argv = buildSendCliArgv(
+    ['copilot-wrapper'],
+    {
+      target: { agent: 'copilot', sessionId: 'session-123' },
+      mode: 'queue',
+      message: 'message stays on stdin',
+      requestId: 'request-123',
+    },
+    30_999,
+  )
+  expect(argv).toEqual([
+    'copilot-wrapper',
+    'send',
+    'session-123',
+    '--agent',
+    'copilot',
+    '--exact-session',
+    '--message-stdin',
+    '--allow-write',
+    '--json',
+    '--request-id',
+    'request-123',
+    '--timeout',
+    '30',
+  ])
+  expect(argv).not.toContain('message stays on stdin')
+})
 
 // ---------------------------------------------------------------------------
 // Mock `agent-sidecar` CLI: a Node script driven by MOCK_SCENARIO.

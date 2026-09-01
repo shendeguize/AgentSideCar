@@ -176,7 +176,7 @@ the default; every mutation needs an explicit user request in the same turn.
 
 ## Inject (explicit request only)
 
-- For **Kimi Code 0.38.0**, the only supported mutation is protected ACP
+- For **Kimi Code 0.38.0 or 0.39.1**, the only supported mutation is protected ACP
   spawn-resume for a local, top-level \`waiting\` or \`idle\` session.
   \`working\`, \`dead\`, child/sidechain, and remote Kimi sessions are
   rejected. The plugin UI fixes the internal request mode to \`queue\`, but
@@ -203,7 +203,7 @@ the default; every mutation needs an explicit user request in the same turn.
   state fails closed. Direct \`agent-sidecar send\` still returns
   \`unsupported_dsh\`; only that CLI path is unsupported, not DSH injection
   through this plugin.
-- For **claude / codex / cursor-cli** sessions in \`waiting\`/\`idle\`, use
+- For **claude / codex / cursor-cli / copilot** sessions in \`waiting\`/\`idle\`, use
   the plugin panel, or run \`send\` only when the user explicitly requests
   the exact message or action in the same turn. Never infer consent from a
   request to observe, watch, report, or wait. That explicit same-turn
@@ -217,8 +217,9 @@ the default; every mutation needs an explicit user request in the same turn.
 - On the external \`agent-sidecar send\` path, preserve the returned
   \`request_id\` and \`replayed\` fields. It rejects remote, \`working\`,
   \`dead\`, child, and unsupported-agent sessions. \`cursor-ide\` and
-  \`copilot\` have no mutation path; the plugin's in-process DSH rules above
-  are separate.
+  \`cursor-ide\` has no mutation path; Copilot uses its authenticated
+  \`--resume --interactive\` path and requires a usable fine-grained GitHub
+  token or Copilot login on the pod.
 - Never retry \`failed\`, \`timed_out\`, \`request_pending\`,
   \`audit_error\`, \`cleanup_incomplete\`, or any result with
   \`delivery: "unknown"\` — the agent may already have received the

@@ -36,6 +36,7 @@ const EXTERNAL_AGENTS: ReadonlySet<string> = new Set([
   'codex',
   'cursor-cli',
   'kimi',
+  'copilot',
 ])
 const LIVE_STATUSES: ReadonlySet<string> = new Set(['working', 'waiting', 'idle'])
 const KNOWN_STATUSES: ReadonlySet<string> = new Set([...LIVE_STATUSES, 'dead'])

@@ -1,6 +1,6 @@
 {
   "name": "@shendeguize/dsh-agent-sidecar",
-  "version": "0.9.2",
+  "version": "0.10.0",
   "description": "Agent Sidecar as a native DSH plugin: cross-agent monitoring, injection and bypass analysis / 跨 agent 监控、注入与旁路分析",
   "type": "module",
   "main": "lib/index.js",

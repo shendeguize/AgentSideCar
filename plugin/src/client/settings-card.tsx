@@ -117,8 +117,23 @@ export interface SettingsCardValues {
   uiTimeWindowHours: number
   /** ui.showDead */
   uiShowDead: boolean
+  /** archive.auto */
+  archiveAuto: boolean
+  /** archive.autoAfterHours (integer 1…720) */
+  archiveAutoAfterHours: number
   /** skill.provide */
   skillProvide: boolean
+}
+
+/**
+ * The policy the REACHED daemon actually applies, as reported by its own
+ * status. Distinct from the staged config on purpose: an adopted or
+ * service-managed daemon owns the policy it was started with, so the card
+ * must show what is in force rather than what this plugin would ask for.
+ */
+export interface SidecarArchivePolicyStatus {
+  auto: boolean
+  autoAfterSeconds: number
 }
 
 /**
@@ -153,6 +168,12 @@ export interface SettingsCardProps {
   saveFailed?: boolean
   /** Daemon status block; omitted hides the row. */
   daemon?: SidecarDaemonStatus
+  /**
+   * Policy in force on the reached daemon. Null/omitted means no daemon has
+   * answered yet (or it predates the archive ops), in which case the card
+   * says so instead of echoing the staged config back as if it were live.
+   */
+  archivePolicy?: SidecarArchivePolicyStatus | null
   /** Retry hosting after the supervisor tripped `failed`. */
   onDaemonRetry?: () => void
   /** Documentation link target; omitted hides the link. */
@@ -179,6 +200,19 @@ function statusDotClass(state: SidecarDaemonState): string {
   if (state === 'adopted' || state === 'hosted') return `${css['statusDot']} ${css['statusOk']}`
   if (state === 'failed') return `${css['statusDot']} ${css['statusError']}`
   return css['statusDot'] ?? ''
+}
+
+/**
+ * Seconds → hours for the live-policy readout. One decimal, trailing zero
+ * dropped: the daemon accepts any duration, so a policy of 90 minutes must
+ * not be rounded into a lie about 2 hours.
+ */
+export function formatPolicyHours(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0'
+  const hours = seconds / 3600
+  return hours >= 10 || Number.isInteger(hours)
+    ? String(Math.round(hours))
+    : String(Math.round(hours * 10) / 10)
 }
 
 interface SectionProps {
@@ -285,6 +319,17 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
           model: analysisRoute.model,
         })
       : t('settings.analysisRoutePartial')
+
+  // What the reached daemon is really doing, in its own units. A policy
+  // this plugin staged but no daemon has picked up yet must not read as
+  // being in force.
+  const livePolicy = props.archivePolicy ?? null
+  const archiveLive =
+    livePolicy === null
+      ? t('settings.archiveLiveUnknown')
+      : livePolicy.auto
+        ? t('settings.archiveLiveOn', { hours: formatPolicyHours(livePolicy.autoAfterSeconds) })
+        : t('settings.archiveLiveOff')
 
   const daemonNote = props.daemon?.state === 'defer'
     ? t('settings.daemonDeferNote')
@@ -447,6 +492,33 @@ export function SettingsCard(props: SettingsCardProps): ReactNode {
                 disabled={disabled}
                 onCommit={(checked) => { props.onChange('uiShowDead', checked) }}
               />
+            </Section>
+
+            <Section title={t('settings.sectionArchive')}>
+              <p className={css['note']}>{t('settings.archiveExplain')}</p>
+              <div className={css['field']}>
+                <span className={css['label']}>{t('settings.archiveLiveLabel')}</span>
+                <span className={css['statusText']} data-testid="agent-sidecar-settings-archive-live">
+                  {archiveLive}
+                </span>
+              </div>
+              <ToggleField
+                label={t('settings.archiveAutoLabel')}
+                hint={t('settings.archiveAutoHint')}
+                checked={values.archiveAuto}
+                disabled={disabled}
+                onCommit={(checked) => { props.onChange('archiveAuto', checked) }}
+              />
+              <NumberField
+                label={t('settings.archiveAfterHoursLabel')}
+                hint={t('settings.archiveAfterHoursHint')}
+                invalidHint={t('settings.invalidNumber', { min: 1 })}
+                min={1}
+                value={values.archiveAutoAfterHours}
+                disabled={disabled || !values.archiveAuto}
+                onCommit={(value) => { props.onChange('archiveAutoAfterHours', value) }}
+              />
+              <p className={css['note']}>{t('settings.archiveHostedOnlyNote')}</p>
             </Section>
 
             <Section title={t('settings.sectionSkill')}>
