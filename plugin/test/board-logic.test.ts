@@ -11,6 +11,7 @@ import {
   badgeHoverTitle,
   buildBoardViewModel,
   compareCards,
+  clusterSessions,
   countByStatus,
   countWorking,
   deriveBadge,
@@ -515,5 +516,17 @@ describe('buildBoardViewModel (pipeline)', () => {
     expect(vm.banner?.tone).toBe('warn')
     expect(vm.groups[0]!.cards[0]!.badge.attention).toBeNull()
     expect(vm.streamTone).toBe('warn')
+  })
+})
+
+describe('clusterSessions', () => {
+  it('groups by project, agent, model/provider and time bucket', () => {
+    const groups = clusterSessions([
+      card({ sessionId: 'a', project: '/workspace/app', model: 'm1', modelProvider: 'p1' }),
+      card({ sessionId: 'b', project: '/workspace/app', model: 'm1', modelProvider: 'p1' }),
+      card({ sessionId: 'c', project: '/workspace/app', model: 'm2', modelProvider: 'p1' }),
+    ])
+    expect(groups).toHaveLength(2)
+    expect(groups.find((group) => group.model === 'm1')?.sessionIds).toEqual(['a', 'b'])
   })
 })

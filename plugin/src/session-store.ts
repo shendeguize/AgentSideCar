@@ -39,6 +39,8 @@ export interface SessionView {
   title: string
   project: string
   updated_at: number
+  model?: string
+  model_provider?: string
   last_event: SessionEventSummary | null
   /** True when a dsh seq discontinuity was observed since the last snapshot. */
   gap: boolean
@@ -70,6 +72,8 @@ interface StoredSession {
   title: string
   project: string
   updated_at: number
+  model?: string
+  model_provider?: string
   inject_eligibility: InjectEligibility
 }
 
@@ -124,7 +128,7 @@ function snapshotProjection(row: SessionRow): Omit<StoredSession, 'inject_eligib
   ) {
     return null
   }
-  return {
+  const projected: Omit<StoredSession, 'inject_eligibility'> = {
     agent,
     session_id: sessionId,
     status,
@@ -132,6 +136,16 @@ function snapshotProjection(row: SessionRow): Omit<StoredSession, 'inject_eligib
     project,
     updated_at: updatedAt,
   }
+  const extra = ownValue(row, 'extra')
+  if (typeof extra === 'object' && extra !== null) {
+    const model = (extra as Record<string, unknown>)['model']
+    const modelProvider = (extra as Record<string, unknown>)['model_provider']
+    if (typeof model === 'string' && model.trim() !== '') projected.model = model
+    if (typeof modelProvider === 'string' && modelProvider.trim() !== '') {
+      projected.model_provider = modelProvider
+    }
+  }
+  return projected
 }
 
 function sessionKey(agent: string, sessionId: string): string {

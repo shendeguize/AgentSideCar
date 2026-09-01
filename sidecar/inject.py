@@ -2824,7 +2824,7 @@ def _run_kimi_send(
                     agent=validated_plan.agent,
                     session_id=validated_plan.session_id,
                     outcome="completed",
-                    delivery="unknown",
+                    delivery="delivered" if acp_result.cleanup_complete else "unknown",
                     returncode=0,
                     response=response,
                     request_id=request_id,

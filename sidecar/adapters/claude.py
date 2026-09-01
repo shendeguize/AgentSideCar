@@ -48,7 +48,23 @@ def _session_identifier(value: Any) -> Optional[str]:
     return identifier
 
 
-def _claude_metadata(path: Path) -> Tuple[str, str, str, bool, Optional[str]]:
+def _record_string(record: Mapping[str, Any], *keys: str) -> str:
+    candidates = [record]
+    for nested_key in ("message", "metadata", "model"):
+        nested = record.get(nested_key)
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+    for candidate in candidates:
+        for key in keys:
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _claude_metadata(
+    path: Path,
+) -> Tuple[str, str, str, bool, Optional[str], str, str]:
     """Extract bounded discovery metadata; ai-title wins over prompt text."""
 
     cwd = ""
@@ -57,11 +73,27 @@ def _claude_metadata(path: Path) -> Tuple[str, str, str, bool, Optional[str]]:
     first_user = ""
     sidechain = False
     explicit_parent: Optional[str] = None
+    model = ""
+    model_provider = ""
     for record in read_jsonl_prefix(path):
         if not cwd and isinstance(record.get("cwd"), str):
             cwd = record["cwd"]
         if not session_id:
             session_id = _session_identifier(record.get("sessionId")) or ""
+        model = model or _record_string(
+            record,
+            "model",
+            "model_name",
+            "modelName",
+            "model_id",
+            "modelId",
+        )
+        model_provider = model_provider or _record_string(
+            record,
+            "model_provider",
+            "modelProvider",
+            "provider",
+        )
         if explicit_parent is None:
             for key in _PARENT_SESSION_KEYS:
                 explicit_parent = _session_identifier(record.get(key))
@@ -86,6 +118,8 @@ def _claude_metadata(path: Path) -> Tuple[str, str, str, bool, Optional[str]]:
         snip(ai_title or first_user, 160),
         sidechain,
         explicit_parent,
+        model,
+        model_provider,
     )
 
 
@@ -98,7 +132,7 @@ class ClaudeAdapter(Adapter):
         metadata_cache_size: int = DEFAULT_METADATA_CACHE_SIZE,
     ) -> None:
         self._metadata_cache: MetadataCache[
-            Tuple[str, str, str, bool, Optional[str]]
+            Tuple[str, str, str, bool, Optional[str], str, str]
         ] = MetadataCache(metadata_cache_size)
 
     def discover(self, home: Path) -> Iterable[Session]:
@@ -120,6 +154,8 @@ class ClaudeAdapter(Adapter):
                     title,
                     sidechain,
                     explicit_parent,
+                    model,
+                    model_provider,
                 ) = self._metadata_cache.get_or_load(
                     signature, lambda: _claude_metadata(transcript)
                 )
@@ -141,6 +177,11 @@ class ClaudeAdapter(Adapter):
                     parent_id = stored_id
                 if parent_id == child_id:
                     parent_id = None
+                extra = {"source": "transcript", "sidechain": sidechain}
+                if model:
+                    extra["model"] = model
+                if model_provider:
+                    extra["model_provider"] = model_provider
                 sessions.append(
                     Session(
                         agent="claude",
@@ -154,7 +195,7 @@ class ClaudeAdapter(Adapter):
                         updated_at=updated_at,
                         title=title,
                         parent_id=parent_id,
-                        extra={"source": "transcript", "sidechain": sidechain},
+                        extra=extra,
                     )
                 )
         self._metadata_cache.prune(active_signatures)

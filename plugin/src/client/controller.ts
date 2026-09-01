@@ -105,6 +105,10 @@ export function mapSessions(sessions: readonly SessionView[]): SessionCardVM[] {
     title: session.title,
     project: session.project,
     updatedAtMs: session.updated_at * 1000,
+    ...session.model !== undefined ? { model: session.model } : {},
+    ...session.model_provider !== undefined
+      ? { modelProvider: session.model_provider }
+      : {},
     lastEvent:
       session.last_event === null
         ? null

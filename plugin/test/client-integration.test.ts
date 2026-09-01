@@ -574,7 +574,7 @@ describe('client injection eligibility', () => {
     }
   })
 
-  it('never promotes a Kimi unknown receipt to delivered UI behavior', () => {
+  it('preserves a Kimi unknown receipt while accepting explicit delivery', () => {
     const response = { outcome: 'unknown' as const, errorCode: 'executor_error' }
     expect(classifyExecuteResponse(response)).toEqual({
       type: 'EXECUTE_RESULT',
@@ -585,8 +585,8 @@ describe('client injection eligibility', () => {
       canReprepare: false,
       showCheckSessionHint: true,
     })
-    expect(displayInjectOutcome('kimi', 'delivered')).toBe('unknown')
-    expect(resultCopyKey('kimi', 'delivered')).toBe('inject.kimiResultUnknown')
+    expect(displayInjectOutcome('kimi', 'delivered')).toBe('delivered')
+    expect(resultCopyKey('kimi', 'delivered')).toBe('inject.resultDelivered')
     expect(resultCopyKey('kimi', 'unknown')).toBe('inject.kimiResultUnknown')
     expect(resultCopyKey('kimi', 'failed')).toBe('inject.kimiResultFailed')
     expect(en['inject.kimiResultUnknown']).toContain('Kimi 0.38 completed')

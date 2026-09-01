@@ -54,6 +54,14 @@ _DISCOVERY_HEADER_CACHE_ENTRIES = 512
 _SESSION_FORMAT_VERSION = 0
 
 
+def _metadata_string(mapping: Mapping[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _utf16_units(value: str) -> Iterable[int]:
     encoded = value.encode("utf-16-be", "surrogatepass")
     for (unit,) in struct.iter_unpack(">H", encoded):
@@ -932,6 +940,24 @@ def _durable_session(
             "open_evidence": False,
         },
     )
+    model = _metadata_string(
+        header,
+        "model",
+        "model_name",
+        "modelName",
+        "model_id",
+        "modelId",
+    )
+    model_provider = _metadata_string(
+        header,
+        "model_provider",
+        "modelProvider",
+        "provider",
+    )
+    if model:
+        session.extra["model"] = model
+    if model_provider:
+        session.extra["model_provider"] = model_provider
     session.status = Status.IDLE
     return session
 
@@ -1357,6 +1383,36 @@ class DSHAdapter(Adapter):
                 "transcript_exists": transcript_mtime > 0,
                 "replay_available": transcript_mtime > 0 and shutil.which("zstd") is not None,
             }
+            model = _metadata_string(
+                identity,
+                "model",
+                "model_name",
+                "modelName",
+                "model_id",
+                "modelId",
+            ) or _metadata_string(
+                entry,
+                "model",
+                "model_name",
+                "modelName",
+                "model_id",
+                "modelId",
+            )
+            model_provider = _metadata_string(
+                identity,
+                "model_provider",
+                "modelProvider",
+                "provider",
+            ) or _metadata_string(
+                entry,
+                "model_provider",
+                "modelProvider",
+                "provider",
+            )
+            if model:
+                extra["model"] = model
+            if model_provider:
+                extra["model_provider"] = model_provider
             session = Session(
                 agent="dsh",
                 session_id=raw_session_id,

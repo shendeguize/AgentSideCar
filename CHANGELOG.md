@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boundary from the upstream Copilot child process's argv message transport.
 - The plugin package uses its Trusted Publishing release workflow for npm
   publication.
+- Added bounded deterministic session clustering with local and remote fleet
+  sources, model/provider metadata, and optional redacted DSH headless
+  enrichment.
+- Cursor observation now includes Remote-SSH `cursor-server` history manifests
+  and marks their provenance explicitly.
 
 ## [0.9.0] - 2026-08-29
 

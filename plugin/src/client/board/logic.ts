@@ -56,6 +56,9 @@ export interface SessionCardVM {
   lastEvent: { kind: string; text: string } | null
   /** True when a dsh seq discontinuity was observed since the last reconcile. */
   gap: boolean
+  /** Optional model metadata; absent means the adapter did not expose it. */
+  model?: string
+  modelProvider?: string
 }
 
 /** Statuses the top-bar count badges can filter down to (UX-01). */
@@ -408,6 +411,63 @@ export function groupSessions<T extends SessionCardVM>(
     return newest(b) - newest(a) || a.key.localeCompare(b.key)
   })
   return groups
+}
+
+export interface SessionClusterVM {
+  key: string
+  project: string
+  agent: string
+  model: string
+  modelProvider: string
+  count: number
+  sessionIds: string[]
+  updatedAtMs: number
+}
+
+/**
+ * Deterministic pod-local grouping for the analysis view. This deliberately
+ * stays metadata-only: semantic analysis is an explicit analysis action and
+ * never runs just because the board rendered.
+ */
+export function clusterSessions(
+  sessions: readonly SessionCardVM[],
+  windowMs = DAY_MS,
+): SessionClusterVM[] {
+  const bucketMs = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : DAY_MS
+  const groups = new Map<string, SessionClusterVM>()
+  for (const session of sessions) {
+    const project = session.project.trim() || BOARD_STRINGS.unknownProject
+    const agent = session.agent.trim() || 'unknown'
+    const model = session.model?.trim() || 'unknown'
+    const modelProvider = session.modelProvider?.trim() || 'unknown'
+    const bucket = Math.floor(session.updatedAtMs / bucketMs)
+    const key = [project, agent, modelProvider, model, bucket].join('\u0000')
+    const current = groups.get(key)
+    if (current === undefined) {
+      groups.set(key, {
+        key,
+        project,
+        agent,
+        model,
+        modelProvider,
+        count: 1,
+        sessionIds: [session.sessionId],
+        updatedAtMs: session.updatedAtMs,
+      })
+    } else {
+      current.count += 1
+      current.sessionIds.push(session.sessionId)
+      current.updatedAtMs = Math.max(current.updatedAtMs, session.updatedAtMs)
+    }
+  }
+  const result = [...groups.values()]
+  result.sort((a, b) =>
+    b.updatedAtMs - a.updatedAtMs
+    || a.project.localeCompare(b.project)
+    || a.agent.localeCompare(b.agent)
+    || a.model.localeCompare(b.model)
+    || a.key.localeCompare(b.key))
+  return result
 }
 
 // ---------------------------------------------------------------------------

@@ -95,6 +95,8 @@ export interface SessionView {
   title: string
   project: string
   updated_at: number
+  model?: string
+  model_provider?: string
   last_event: SessionEventSummary | null
   /** True when a dsh seq discontinuity was observed since the last snapshot. */
   gap: boolean

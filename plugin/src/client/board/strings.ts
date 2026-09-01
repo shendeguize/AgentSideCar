@@ -52,6 +52,7 @@ export const BOARD_STRINGS = createLocaleView({
     collapseIdle: 'board.topbar.collapseIdle',
     collapseIdleTitle: 'board.topbar.collapseIdleTitle',
     analyzeCrossAgent: 'board.topbar.analyzeCrossAgent',
+    cluster: 'board.topbar.cluster',
     timeWindow: 'board.topbar.timeWindow',
     countWorking: 'board.topbar.countWorking',
     countWaiting: 'board.topbar.countWaiting',
@@ -89,6 +90,12 @@ export const BOARD_STRINGS = createLocaleView({
   },
   groupCount: 'board.groupCount',
   unknownProject: 'board.unknownProject',
+  cluster: {
+    title: 'board.cluster.title',
+    count: 'board.cluster.count',
+    empty: 'board.cluster.empty',
+    sessions: 'board.cluster.sessions',
+  },
   widget: {
     label: 'board.widget.label',
     connection: {

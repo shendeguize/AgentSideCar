@@ -25,6 +25,7 @@ import {
   agentDisplayName,
   agentFilterOptions,
   buildBoardViewModel,
+  clusterSessions,
   formatTemplate,
   normalizeAgentFilter,
   partitionIdleCards,
@@ -368,6 +369,8 @@ export function Board(props: BoardProps): ReactElement {
     : [...TIME_WINDOW_OPTIONS, props.filters.timeWindowHours].sort((a, b) => a - b)
   const selectedAgent = normalizeAgentFilter(props.filters.agentFilter)
   const availableAgents = agentFilterOptions(props.sessions, props.filters.agentFilter)
+  const [showClusters, setShowClusters] = useState(false)
+  const clusters = clusterSessions(vm.groups.flatMap((group) => group.cards))
   const fallbackFocusRef = useRef<HTMLSpanElement>(null)
   const returnTargetVisible = props.returnFocusTarget !== null
     && vm.groups.some((group) =>
@@ -490,6 +493,15 @@ export function Board(props: BoardProps): ReactElement {
             {BOARD_STRINGS.topbar.analyzeCrossAgent}
           </Button>
         )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => { setShowClusters((visible) => !visible) }}
+          aria-pressed={showClusters}
+          data-testid="agent-sidecar-cluster-toggle"
+        >
+          {BOARD_STRINGS.topbar.cluster}
+        </Button>
         <label className={styles['control']}>
           {t('board.topbar.agentFilter')}
           <select
@@ -581,6 +593,41 @@ export function Board(props: BoardProps): ReactElement {
         <div className={styles['banner']} data-tone={vm.banner.tone} role="status">
           {vm.banner.text}
         </div>
+      )}
+
+      {showClusters && (
+        <section className={styles['clusterPanel']} data-testid="agent-sidecar-clusters">
+          <header className={styles['clusterHead']}>
+            <span className={styles['clusterTitle']}>{BOARD_STRINGS.cluster.title}</span>
+            <span className={styles['groupCount']}>
+              {formatTemplate(BOARD_STRINGS.cluster.count, { n: clusters.length })}
+            </span>
+          </header>
+          {clusters.length === 0
+            ? <div className={styles['clusterEmpty']}>{BOARD_STRINGS.cluster.empty}</div>
+            : (
+              <div className={styles['clusterList']}>
+                {clusters.map((cluster) => (
+                  <article className={styles['clusterCard']} key={cluster.key}>
+                    <div className={styles['clusterSummary']}>
+                      <strong>{cluster.project}</strong>
+                      <span>{cluster.agent}</span>
+                      <span>{cluster.model}</span>
+                      <span>
+                        {formatTemplate(BOARD_STRINGS.cluster.sessions, { n: cluster.count })}
+                      </span>
+                    </div>
+                    <div className={styles['clusterMeta']}>
+                      {cluster.modelProvider !== 'unknown'
+                        ? `${cluster.modelProvider} · `
+                        : ''}
+                      {cluster.sessionIds.join(', ')}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+        </section>
       )}
 
       {!props.hasSnapshot ? (
