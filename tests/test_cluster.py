@@ -110,6 +110,86 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(2, code)
         self.assertIn("remote: inventory", stderr.getvalue())
 
+    def test_cluster_cli_prints_rows_and_reports_semantic_fallback(self):
+        args = argparse.Namespace(
+            all=True,
+            recent_seconds=None,
+            window_seconds=60,
+            remote=False,
+            host=[],
+            remote_python_candidates=None,
+            semantic=True,
+            semantic_rules=("largest", "recent"),
+            semantic_max_groups=100,
+            json=False,
+        )
+        scanner = mock.Mock()
+        scanner.errors = []
+        scanner.scan.return_value = [{
+            "agent": "dsh",
+            "session_id": "local-session",
+            "project": "/work/local",
+            "updated_at": 100.0,
+        }]
+        client = mock.Mock()
+        client.status.side_effect = cli.SidecarClientError("offline")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            cli,
+            "run_headless_report",
+            return_value={"ok": False, "report": None},
+        ):
+            code = cli._run_cluster(
+                args,
+                scanner=scanner,
+                client=client,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        self.assertEqual(0, code)
+        self.assertIn("local", stdout.getvalue())
+        self.assertIn("semantic: unavailable", stderr.getvalue())
+
+    def test_cluster_cli_reports_remote_failures_before_local_fallback(self):
+        args = argparse.Namespace(
+            all=False,
+            recent_seconds=None,
+            window_seconds=60,
+            remote=True,
+            host=[],
+            remote_python_candidates=None,
+            semantic=False,
+            semantic_rules=("largest", "recent"),
+            semantic_max_groups=100,
+            json=True,
+        )
+        scanner = mock.Mock()
+        scanner.errors = []
+        scanner.scan.return_value = [{
+            "agent": "dsh",
+            "session_id": "local-session",
+            "project": "/work/local",
+            "updated_at": 100.0,
+        }]
+        client = mock.Mock()
+        client.status.side_effect = cli.SidecarClientError("offline")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        code = cli._run_cluster(
+            args,
+            scanner=scanner,
+            client=client,
+            stdout=stdout,
+            stderr=stderr,
+            remote_aggregator=lambda *_, **__: {
+                "rows": [],
+                "failures": [{"host": "pod-a", "code": "python_too_old"}],
+                "exit_code": 3,
+            },
+        )
+        self.assertEqual(0, code)
+        self.assertIn("remote pod-a: python_too_old", stderr.getvalue())
+        self.assertEqual(1, len(json.loads(stdout.getvalue())))
+
     def test_groups_by_project_agent_model_provider_and_time_bucket(self):
         rows = [
             {
