@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote cluster rows no longer carry the remote's own `local` label. Every
+  host groups its sessions under the reserved `local` alias, so the fleet view
+  used to claim each remote group also existed on the workstation — including
+  single-session groups. Remote rows are now attributed to their actual host.
+- `agent-sidecar daemon status` reports the running daemon's version and warns
+  when it differs from the CLI. A long-lived daemon keeps serving the code it
+  started with, so an upgrade would otherwise silently return stale sessions.
+
 ### Added
 
 - `agent-sidecar service install|status|uninstall` now supports an explicit

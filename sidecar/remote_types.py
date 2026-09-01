@@ -6,7 +6,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from sidecar.json_limits import (
     JSONLimitError,
@@ -483,9 +483,26 @@ def _validate_protocol_cluster_rows(
         if len(encoded) > MAX_ROW_BYTES:
             raise ProtocolResourceLimitError("remote cluster exceeds limit")
         row = dict(source)
+        row["hosts"] = _attributed_hosts(source["hosts"], host)
         row["host"] = host
         rows.append(row)
     return tuple(rows)
+
+
+def _attributed_hosts(values: Sequence[str], host: str) -> List[str]:
+    """Rewrite a remote's self-reported ``local`` into its actual alias.
+
+    Every host clusters its own sessions under the reserved ``local`` label, so
+    without this the fleet view would claim each remote group also exists on
+    the workstation.
+    """
+
+    attributed: List[str] = []
+    for value in values:
+        alias = host if value.casefold() == "local" else value
+        if alias not in attributed:
+            attributed.append(alias)
+    return attributed
 
 
 class _RemoteResponseFailure(Exception):

@@ -177,6 +177,16 @@ class FakeClient:
         return response
 
 
+class VersionedPingClient:
+    def __init__(self, *, pid=4321, version="", socket_path=None):
+        self.pid = pid
+        self.version = version
+        self.socket_path = socket_path
+
+    def ping(self):
+        return {"ok": True, "op": "ping", "pid": self.pid, "version": self.version}
+
+
 class SequencedPingClient:
     def __init__(self, responses, *, socket_path=None):
         self.responses = list(responses)
@@ -4656,6 +4666,44 @@ class CLITests(unittest.TestCase):
         self.assertEqual(1, stopped)
         self.assertIn("44", running_output.getvalue())
         self.assertIn("not running", stopped_output.getvalue())
+
+    def test_daemon_status_flags_a_version_older_than_the_cli(self):
+        matching = io.StringIO()
+        stale = io.StringIO()
+        silent = io.StringIO()
+
+        matching_code = main(
+            ["daemon", "status"],
+            client=VersionedPingClient(pid=44, version=sidecar.__version__),
+            stdout=matching,
+            stderr=io.StringIO(),
+        )
+        stale_code = main(
+            ["daemon", "status"],
+            client=VersionedPingClient(pid=45, version="0.0.1"),
+            stdout=stale,
+            stderr=io.StringIO(),
+        )
+        silent_code = main(
+            ["daemon", "status"],
+            client=FakeClient(pid=46),
+            stdout=silent,
+            stderr=io.StringIO(),
+        )
+
+        self.assertEqual(0, matching_code)
+        self.assertIn(sidecar.__version__, matching.getvalue())
+        self.assertNotIn("stale", matching.getvalue())
+
+        # A stale daemon is still live, so this stays an exit-0 warning.
+        self.assertEqual(0, stale_code)
+        self.assertIn("0.0.1", stale.getvalue())
+        self.assertIn("daemon is stale", stale.getvalue())
+        self.assertIn(sidecar.__version__, stale.getvalue())
+
+        self.assertEqual(0, silent_code)
+        self.assertIn("daemon is running (pid 46)", silent.getvalue())
+        self.assertNotIn("stale", silent.getvalue())
 
     def test_daemon_status_reports_http_url_and_token_path_not_token(self):
         with tempfile.TemporaryDirectory() as temporary:

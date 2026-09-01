@@ -1979,7 +1979,20 @@ def _daemon_status(client: SidecarClient, stdout: TextIO) -> int:
         stdout.write("daemon is not running\n")
         stdout.flush()
         return 1
-    stdout.write("daemon is running (pid {})\n".format(info.pid))
+    reported = sanitize_terminal_text(info.version)
+    if reported:
+        stdout.write(
+            "daemon is running (pid {}, version {})\n".format(info.pid, reported)
+        )
+    else:
+        stdout.write("daemon is running (pid {})\n".format(info.pid))
+    if reported and reported != sidecar.__version__:
+        # A long-lived daemon keeps serving the code it started with, so an
+        # upgraded CLI would otherwise read stale sessions without any signal.
+        stdout.write(
+            "daemon is stale: CLI is {}; restart the daemon or the service "
+            "to load it\n".format(sidecar.__version__)
+        )
     _report_http_info(info, client, stdout)
     stdout.flush()
     return 0
