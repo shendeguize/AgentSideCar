@@ -45,6 +45,10 @@ export type StreamHealth = 'ok' | 'degraded' | 'unknown'
 export interface PingInfo {
   pid: number
   version: string
+  /** Version in the daemon's own tree; absent when it cannot be read. */
+  sourceVersion?: string
+  /** The daemon's tree no longer matches the code it loaded. */
+  sourceChanged?: boolean
   http: { enabled: boolean; host?: string; port?: number }
 }
 
@@ -228,6 +232,18 @@ export interface TimelineSourceSummary {
 }
 
 /**
+ * How far back the rendered timeline can be trusted to reach.
+ *
+ * `volatile_only` says every durable source came up empty and the events on
+ * screen are whatever the in-memory ring still holds — a bounded tail, not a
+ * history. It is orthogonal to `TimelineHealth.kind`: no source has to break
+ * for it to happen (a session whose transcript shape has no replay reaches it
+ * with everything working), so it is reported beside the failure state rather
+ * than folded into it.
+ */
+export type TimelineHistoryScope = 'durable' | 'volatile_only' | 'unknown'
+
+/**
  * Browser-safe timeline availability. `unverified` is the fail-closed state
  * for malformed or newer unknown host vocabulary; raw wire values are never
  * retained, so paths, ids, and upstream errors cannot reach presentation.
@@ -237,16 +253,19 @@ export type TimelineHealth =
       kind: 'healthy'
       legacy: boolean
       summary: TimelineSourceSummary | null
+      historyScope: TimelineHistoryScope
     }>
   | Readonly<{
       kind: 'partial' | 'failed'
       legacy: false
       summary: TimelineSourceSummary
+      historyScope: TimelineHistoryScope
     }>
   | Readonly<{
       kind: 'unverified'
       legacy: false
       summary: null
+      historyScope: 'unknown'
     }>
 
 const TIMELINE_SOURCE_KEYS = [
@@ -281,16 +300,25 @@ const TIMELINE_INERT_OUTCOMES: ReadonlySet<TimelineSourceOutcome> = new Set([
   'replay_unsupported',
 ])
 
+/**
+ * Sources whose success means the page reaches as far back as the session
+ * itself. The buffer is excluded: it is a bounded ring the host fills from
+ * the live stream, so it can only ever vouch for a recent tail.
+ */
+const TIMELINE_DURABLE_SOURCE_KEYS = ['liveSession', 'sessionQuery', 'sidecarReplay'] as const
+
 export const LEGACY_TIMELINE_HEALTH: TimelineHealth = Object.freeze({
   kind: 'healthy',
   legacy: true,
   summary: null,
+  historyScope: 'unknown',
 })
 
 const UNVERIFIED_TIMELINE_HEALTH: TimelineHealth = Object.freeze({
   kind: 'unverified',
   legacy: false,
   summary: null,
+  historyScope: 'unknown',
 })
 
 function timelineSourceOutcomes(value: unknown): TimelineSourceOutcomes | null {
@@ -302,6 +330,17 @@ function timelineSourceOutcomes(value: unknown): TimelineSourceOutcomes | null {
     outcomes[key] = outcome as TimelineSourceOutcome
   }
   return outcomes
+}
+
+/**
+ * Whether the oldest event on the page is a real beginning or merely where
+ * the ring happens to start. Only a page carried exclusively by the buffer is
+ * `volatile_only`; an empty page has no history to misrepresent, so it needs
+ * no caveat and the failure and empty states own its messaging.
+ */
+function timelineHistoryScope(outcomes: TimelineSourceOutcomes): TimelineHistoryScope {
+  const durable = TIMELINE_DURABLE_SOURCE_KEYS.some((key) => outcomes[key] === 'succeeded')
+  return !durable && outcomes.buffer === 'succeeded' ? 'volatile_only' : 'durable'
 }
 
 function timelineSourceSummary(outcomes: TimelineSourceOutcomes): TimelineSourceSummary {
@@ -345,15 +384,16 @@ export function normalizeTimelineHealth(page: unknown): TimelineHealth {
     usable.length > 0 &&
     usable.every((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome))
   const summary = timelineSourceSummary(outcomes)
+  const historyScope = timelineHistoryScope(outcomes)
 
   if (!degraded && reason === null && failures.length === 0) {
-    return { kind: 'healthy', legacy: false, summary }
+    return { kind: 'healthy', legacy: false, summary, historyScope }
   }
   if (degraded && reason === 'all_sources_failed' && allSourcesFailed) {
-    return { kind: 'failed', legacy: false, summary }
+    return { kind: 'failed', legacy: false, summary, historyScope }
   }
   if (degraded && reason === 'partial_source_failure' && failures.length > 0 && !allSourcesFailed) {
-    return { kind: 'partial', legacy: false, summary }
+    return { kind: 'partial', legacy: false, summary, historyScope }
   }
   return UNVERIFIED_TIMELINE_HEALTH
 }

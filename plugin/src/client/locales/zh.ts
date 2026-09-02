@@ -276,6 +276,10 @@ export const zh = {
   'board.stream.degraded': '实时流重连中',
   'board.stream.unknown': '实时流未建立',
   'board.banner.daemonFailed': 'sidecar 离线:看板显示最后一次快照,数据不再更新',
+  'board.banner.daemonStale':
+    'daemon 仍在跑旧代码(运行 v{running},磁盘已是 v{installed});本页数据来自旧版本,重启 daemon 后才会生效',
+  'board.banner.daemonStaleCode':
+    'daemon 启动后代码已被改动(版本号仍是 v{running});本页数据来自启动时那份代码,重启 daemon 后才会生效',
   'board.banner.streamDegraded': '实时流重连中,数据可能滞后',
   'board.empty.daemonFailedTitle': 'sidecar 已离线',
   'board.empty.daemonFailedHint':
@@ -449,6 +453,10 @@ export const zh = {
   'detail.timeline.degradedUnverified':
     '无法确认时间线来源状态,当前事件可能不完整。',
   'detail.timeline.degradedRetry': '可点击「刷新」重试时间线来源。',
+  'detail.timeline.volatileOnly':
+    '当前事件仅来自实时缓冲,没有持久来源应答,更早的历史可能已不在其中。',
+  'detail.timeline.volatileOnlyHint':
+    '若该会话本应有可读取的历史,请确认 sidecar daemon 正在运行且版本为最新,然后点击「刷新」。',
   'detail.timeline.daemonDownHint':
     'sidecar daemon 未在运行,历史时间线无人应答。可在设置卡重试,或手动运行 agent-sidecar daemon start 后点击「刷新」。',
   'detail.timeline.daemonDeferHint':
@@ -575,7 +583,11 @@ export const zh = {
   'analysis.errUnavailable': '当前 host 未接入 AI 分析能力(agents 服务不可用)。',
   'analysis.errTargetNotFound': '分析目标不存在或已离开观测范围。',
   'analysis.errTooManyActive': '并发分析会话已达上限,请稍后再试。',
-  'analysis.errTimeout': '分析超时,分析会话已释放;可重新发起。',
+  'analysis.errTimeout': '分析超时,模型未在时限内开始作答;分析会话已释放,可重新发起。',
+  'analysis.errTimeoutPartial':
+    '分析超时,以上是模型在时限内已生成的部分内容;分析会话已释放,可重新发起以获取完整结论。',
+  'analysis.errTimeoutCreate':
+    '创建分析会话超时(尚未开始分析)。多为模型服务繁忙或未配置,可稍后重新发起。',
   'analysis.errCreateFailed': '分析会话创建失败。',
   'analysis.errCancelled': '分析已取消。',
   'analysis.errNetwork': '网络错误,分析请求未能完成。',

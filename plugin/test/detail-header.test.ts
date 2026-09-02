@@ -163,6 +163,19 @@ describe('header facts render only what the adapter reported', () => {
     expect(renderDetail(HEADER, timeline(['user']))).toContain('已加载 1 条事件<')
   })
 
+  it('never claims the start of history when only the volatile ring answered', () => {
+    // With no durable source, the ring's oldest event is wherever the buffer
+    // happens to begin — saying "start of the timeline" there invents a fact.
+    const vm = timeline(['user', 'assistant'])
+
+    const volatile = renderDetail(HEADER, vm, { historyScope: 'volatile_only' })
+    expect(volatile).not.toContain('已到时间线起点')
+    expect(volatile).toContain('已加载 2 条事件(还有更早的历史)')
+
+    // A durable source that paged to its end still gets the plain claim.
+    expect(renderDetail(HEADER, vm, { historyScope: 'durable' })).toContain('已到时间线起点')
+  })
+
   it('makes the project path copyable, and leaves the unknown placeholder inert', () => {
     const withProject = renderDetail(HEADER, timeline([]))
     expect(withProject).toContain('agent-sidecar-detail-copy-project')

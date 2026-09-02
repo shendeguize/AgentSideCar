@@ -184,6 +184,14 @@ export type AnalysisErrorCode =
 
 export type AnalysisOutcome = 'completed' | 'timeout' | 'failed'
 
+/**
+ * Which bounded step ran out of time. A bounded enum, never free text: it
+ * separates "the session never came up" from "the model never finished",
+ * which are different problems with different fixes, and the old single
+ * `timeout` code could not tell them apart in the result or the log.
+ */
+export type AnalysisTimeoutStage = 'create' | 'first_turn' | 'followup_turn'
+
 export interface AnalysisResult {
   outcome: AnalysisOutcome
   /**
@@ -192,8 +200,14 @@ export interface AnalysisResult {
    * (pre-create failures and request timeouts, where the session is disposed).
    */
   analysisSessionId?: string
-  /** Assistant text produced by this turn (only on `completed`). */
+  /**
+   * Assistant text produced by this turn. Present on `completed`, and on
+   * `timeout` when the model had already emitted text before the deadline —
+   * that text was paid for and is usually the useful part of a slow answer.
+   */
   summary?: string
+  /** Which step timed out; present exactly when `outcome` is `timeout`. */
+  timeoutStage?: AnalysisTimeoutStage
   /** Whether the input text of THIS call was truncated to `maxInputChars`. */
   truncated: boolean
   /** Sum of input+output tokens reported for this turn, when the adapter reported any. */
@@ -214,6 +228,10 @@ export interface AnalysisLogEntry {
   phase?: 'request' | 'followup'
   outcome?: AnalysisOutcome
   errorCode?: AnalysisErrorCode
+  /** Which bounded step ran out of time, on a timeout result. */
+  timeoutStage?: AnalysisTimeoutStage
+  /** Whether a timed-out turn still yielded usable text. */
+  partial?: boolean
   truncated?: boolean
   /** Size of the bounded input actually sent (chars), never its content. */
   inputChars?: number
@@ -230,8 +248,22 @@ export interface AnalysisLogEntry {
 
 /** Input bound: chars of summary/question text fed to one turn. */
 export const DEFAULT_MAX_INPUT_CHARS = 8000
-/** Bound on create + first response, and on each follow-up response. */
+/**
+ * Bound on one model turn: the first response, and each follow-up response.
+ * Measured from the moment the turn is handed to the agent, so a slow
+ * establishment cannot spend it — sharing one budget with `create` meant a
+ * model answering well inside its own bound still timed out.
+ */
 export const DEFAULT_ANALYSIS_TIMEOUT_MS = 60_000
+/** Separate bound on `ctx.agents.create` (session establishment only). */
+export const DEFAULT_ANALYSIS_CREATE_TIMEOUT_MS = 20_000
+/**
+ * Worst-case wall time of one `request`, which any transport in front of the
+ * engine must outlive to receive the engine's own verdict instead of racing
+ * it (see the client's `ANALYSIS_POST_TIMEOUT_MS`).
+ */
+export const ANALYSIS_REQUEST_BUDGET_MS =
+  DEFAULT_ANALYSIS_CREATE_TIMEOUT_MS + DEFAULT_ANALYSIS_TIMEOUT_MS
 /** Concurrent dedicated analysis sessions tracked by one engine. */
 export const DEFAULT_MAX_ACTIVE_ANALYSES = 4
 /** `source.plugin` attribution and analysis session id prefix. */
@@ -365,6 +397,8 @@ export interface AnalysisEngineDeps {
   maxInputChars?: number
   /** Per-turn wait bound; default {@link DEFAULT_ANALYSIS_TIMEOUT_MS}. */
   analysisTimeoutMs?: number
+  /** Session establishment bound; default {@link DEFAULT_ANALYSIS_CREATE_TIMEOUT_MS}. */
+  createTimeoutMs?: number
   /** Concurrent session cap; default {@link DEFAULT_MAX_ACTIVE_ANALYSES}. */
   maxActiveSessions?: number
   /** Attribution + session id prefix; default {@link DEFAULT_PLUGIN_NAME}. */
@@ -376,6 +410,7 @@ export class AnalysisEngine {
   private readonly now: () => number
   private readonly maxInputChars: number
   private readonly analysisTimeoutMs: number
+  private readonly createTimeoutMs: number
   private readonly maxActiveSessions: number
   private readonly pluginName: string
   private readonly active = new Map<string, ActiveAnalysis>()
@@ -386,6 +421,7 @@ export class AnalysisEngine {
     this.now = deps.now ?? Date.now
     this.maxInputChars = deps.maxInputChars ?? DEFAULT_MAX_INPUT_CHARS
     this.analysisTimeoutMs = deps.analysisTimeoutMs ?? DEFAULT_ANALYSIS_TIMEOUT_MS
+    this.createTimeoutMs = deps.createTimeoutMs ?? DEFAULT_ANALYSIS_CREATE_TIMEOUT_MS
     this.maxActiveSessions = deps.maxActiveSessions ?? DEFAULT_MAX_ACTIVE_ANALYSES
     this.pluginName = deps.pluginName ?? DEFAULT_PLUGIN_NAME
   }
@@ -397,9 +433,10 @@ export class AnalysisEngine {
 
   /**
    * Start a dedicated analysis session and return its first insight.
-   * Establishment (create + priming prompt + first response) shares one
-   * `analysisTimeoutMs` budget; on timeout the turn is cancelled and the
-   * session disposed, so a timed-out request leaves nothing running.
+   * Establishment is bounded by `createTimeoutMs` and the priming turn gets
+   * its own full `analysisTimeoutMs`; on timeout the turn is cancelled and
+   * the session disposed, so a timed-out request leaves nothing running —
+   * but any text the model already emitted is returned rather than dropped.
    */
   async request(input: AnalysisInput): Promise<AnalysisResult> {
     const startedAt = this.now()
@@ -434,7 +471,6 @@ export class AnalysisEngine {
     // overshoot the cap.
     this.active.set(analysisSessionId, entry)
 
-    const deadline = startedAt + this.analysisTimeoutMs
     const controller = new AbortController()
     let createTimedOut = false
     const createPromise = this.deps.createAgent({
@@ -451,12 +487,14 @@ export class AnalysisEngine {
     )
     let handle: AnalysisSession
     try {
-      const created = await withTimeout(createPromise, deadline - this.now())
+      const created = await withTimeout(createPromise, this.createTimeoutMs)
       if (created.timedOut) {
         createTimedOut = true
         this.active.delete(analysisSessionId)
         controller.abort()
-        return this.timeoutResult('request', entry, bounded.truncated, startedAt, undefined)
+        return this.timeoutResult('request', entry, bounded.truncated, startedAt, undefined, {
+          stage: 'create',
+        })
       }
       handle = created.value
     } catch (error) {
@@ -479,7 +517,7 @@ export class AnalysisEngine {
     })
 
     const prompt = this.buildInitialPrompt(input.kind, title, bounded)
-    const turn = await this.runTurn(entry, prompt, deadline)
+    const turn = await this.runTurn(entry, prompt, this.now() + this.analysisTimeoutMs)
     entry.busy = false
 
     if (turn.status === 'threw') {
@@ -495,11 +533,16 @@ export class AnalysisEngine {
     }
     if (turn.status === 'timeout') {
       // Bound token burn: cancel the in-flight turn AND dispose the session —
-      // a request that never answered holds no reusable context.
+      // a cancelled mid-turn holds no context worth a follow-up. Whatever the
+      // model did emit still ships: it was paid for, and on a slow answer it
+      // is usually the substance.
       this.cancelQuietly(entry)
       this.active.delete(analysisSessionId)
       await this.disposeQuietly(entry)
-      return this.timeoutResult('request', entry, bounded.truncated, startedAt, undefined)
+      return this.timeoutResult('request', entry, bounded.truncated, startedAt, undefined, {
+        stage: 'first_turn',
+        partial: turn.partial,
+      })
     }
 
     const result: AnalysisResult = {
@@ -569,7 +612,14 @@ export class AnalysisEngine {
       }
       if (turn.status === 'timeout') {
         this.cancelQuietly(entry)
-        return this.timeoutResult('followup', entry, bounded.truncated, startedAt, analysisSessionId)
+        return this.timeoutResult(
+          'followup',
+          entry,
+          bounded.truncated,
+          startedAt,
+          analysisSessionId,
+          { stage: 'followup_turn', partial: turn.partial },
+        )
       }
       const result: AnalysisResult = {
         outcome: 'completed',
@@ -618,7 +668,7 @@ export class AnalysisEngine {
     deadline: number,
   ): Promise<
     | { status: 'completed'; summary: string; tokensHint?: number }
-    | { status: 'timeout' }
+    | { status: 'timeout'; partial: string }
     | { status: 'threw'; detail: string }
   > {
     const handle = entry.handle!
@@ -647,7 +697,15 @@ export class AnalysisEngine {
     } catch (error) {
       return { status: 'threw', detail: describeError(error) }
     }
-    if (idle.timedOut) return { status: 'timeout' }
+    if (idle.timedOut) {
+      // Read the log before the caller cancels: a model that streamed text
+      // and then stalled has already appended assistant messages, and they
+      // are the only part of this turn worth anything.
+      return {
+        status: 'timeout',
+        partial: extractNewAssistantText(session.deriveMessages(), entry.messageBaseline),
+      }
+    }
 
     const summary = extractNewAssistantText(session.deriveMessages(), entry.messageBaseline)
     const tokensHint = extractTokensHint(session.events, entry.eventBaseline)
@@ -746,12 +804,16 @@ export class AnalysisEngine {
     truncated: boolean,
     startedAt: number,
     analysisSessionId: string | undefined,
+    opts: { stage: AnalysisTimeoutStage; partial?: string },
   ): AnalysisResult {
+    const partial = opts.partial ?? ''
     const result: AnalysisResult = {
       outcome: 'timeout',
       ...(analysisSessionId !== undefined ? { analysisSessionId } : {}),
+      ...(partial !== '' ? { summary: partial } : {}),
       truncated,
       errorCode: 'timeout',
+      timeoutStage: opts.stage,
       disclaimer: ANALYSIS_DISCLAIMER,
     }
     this.deps.log({
@@ -762,6 +824,8 @@ export class AnalysisEngine {
       title: entry.title,
       outcome: 'timeout',
       errorCode: 'timeout',
+      timeoutStage: opts.stage,
+      ...(partial !== '' ? { partial: true } : {}),
       elapsedMs: this.now() - startedAt,
     })
     return result

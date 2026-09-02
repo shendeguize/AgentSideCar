@@ -134,6 +134,18 @@ export interface ProjectGroupVM<T extends SessionCardVM = DerivedSessionCardVM> 
   cards: T[]
 }
 
+/**
+ * A daemon still serving code the disk has since replaced. Both numbers
+ * come from the daemon itself: what it is running, and what it would load
+ * on restart.
+ */
+export interface DaemonVersionDrift {
+  running: string
+  installed: string
+  /** Set when the two versions match but the code behind them changed. */
+  codeChanged?: boolean
+}
+
 export interface BoardBannerVM {
   tone: 'danger' | 'warn'
   text: string
@@ -161,6 +173,8 @@ export interface BoardComputeInput {
   filters: BoardFilterState
   daemonState: DaemonStateToken
   streamHealth: StreamHealthToken
+  /** Set only when the daemon is behind the code now on disk. */
+  daemonDrift?: DaemonVersionDrift | null
   /** Epoch ms of the last authoritative snapshot reconcile, or null. */
   lastReconcileAtMs: number | null
   /** Clock injection (epoch ms) for deterministic derivation. */
@@ -689,17 +703,32 @@ export function streamHealthTone(health: StreamHealthToken): BadgeTone {
 }
 
 /**
- * Top banner: daemon FAILED (red, last-snapshot notice) outranks a
- * degraded stream (yellow, may-lag notice). 'unknown' stream health alone
- * raises no banner — it is the pre-first-connect startup state and a
- * warning bar on every mount would be noise.
+ * Top banner: daemon FAILED (red, last-snapshot notice) outranks version
+ * drift, which in turn outranks a degraded stream — a lagging stream
+ * delivers the truth late, while a stale daemon delivers a different
+ * program's answer promptly, which is the harder thing to notice.
+ * 'unknown' stream health alone raises no banner — it is the
+ * pre-first-connect startup state and a warning bar on every mount would
+ * be noise.
  */
 export function deriveBanner(
   daemonState: DaemonStateToken,
   streamHealth: StreamHealthToken,
+  drift: DaemonVersionDrift | null = null,
 ): BoardBannerVM | null {
   if (daemonState === 'failed') {
     return { tone: 'danger', text: BOARD_STRINGS.banner.daemonFailed }
+  }
+  if (drift !== null) {
+    // Two matching version numbers would make the drift banner read as a
+    // contradiction, so that case names the change instead of the numbers.
+    const text = drift.running === drift.installed
+      ? formatTemplate(BOARD_STRINGS.banner.daemonStaleCode, { running: drift.running })
+      : formatTemplate(BOARD_STRINGS.banner.daemonStale, {
+          running: drift.running,
+          installed: drift.installed,
+        })
+    return { tone: 'warn', text }
   }
   if (streamHealth === 'degraded') {
     return { tone: 'warn', text: BOARD_STRINGS.banner.streamDegraded }
@@ -863,7 +892,15 @@ export function widgetTitle(connection: WidgetConnection, workingCount: number):
 
 /** filter → group → per-card derive; the one call Board.tsx renders from. */
 export function buildBoardViewModel(input: BoardComputeInput): BoardViewModel {
-  const { sessions, filters, daemonState, streamHealth, lastReconcileAtMs, nowMs } = input
+  const {
+    sessions,
+    filters,
+    daemonState,
+    streamHealth,
+    daemonDrift,
+    lastReconcileAtMs,
+    nowMs,
+  } = input
   const visible = filterSessions(sessions, filters, nowMs)
   const derived: DerivedSessionCardVM[] = visible.map((session) => ({
     ...session,
@@ -875,7 +912,7 @@ export function buildBoardViewModel(input: BoardComputeInput): BoardViewModel {
   }))
   return {
     groups: groupSessions(derived),
-    banner: deriveBanner(daemonState, streamHealth),
+    banner: deriveBanner(daemonState, streamHealth, daemonDrift ?? null),
     emptyState: deriveEmptyState(daemonState, visible.length, sessions.length),
     daemonBadge: deriveDaemonBadge(daemonState),
     streamLabel: BOARD_STRINGS.stream[streamHealth],

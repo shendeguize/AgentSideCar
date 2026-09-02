@@ -50,6 +50,7 @@ import {
   type TimelineVM,
 } from './logic.ts'
 import { DETAIL_STRINGS } from './strings.ts'
+import type { TimelineHistoryScope } from '../api.ts'
 import { StaticPill } from '../primitives/StaticPill.tsx'
 import { surfaceProps } from '../theme/parts.ts'
 import styles from './detail.module.css'
@@ -92,6 +93,12 @@ export interface SessionDetailProps {
   /** Manual newest-window refetch; the button renders only when given. */
   onRefresh?: () => void
   onClose?: () => void
+  /**
+   * How far back the loaded events reach. Under `volatile_only` the oldest
+   * event is only where the in-memory ring begins, so the pager must not
+   * claim the start of history and the count stays marked partial.
+   */
+  historyScope?: TimelineHistoryScope
   /** Clock injection for deterministic rendering; defaults to Date.now(). */
   nowMs?: number
   /** Render cap override (segmented rendering); mostly for tests/tuning. */
@@ -253,10 +260,11 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
       ? formatTemplate(DETAIL_STRINGS.header.model, { name: props.header.model })
       : null
   const kindCounts = countTimelineKinds(props.timeline.entries)
+  // Paging to the end of the volatile ring is not reaching the start of the
+  // session: the ring drops its oldest events and its floor moves.
+  const reachedStart = props.timeline.reachedStart && props.historyScope !== 'volatile_only'
   const loadedEvents = formatTemplate(
-    props.timeline.reachedStart
-      ? DETAIL_STRINGS.header.loadedEvents
-      : DETAIL_STRINGS.header.loadedEventsPartial,
+    reachedStart ? DETAIL_STRINGS.header.loadedEvents : DETAIL_STRINGS.header.loadedEventsPartial,
     { n: entryCount },
   )
   const kindBreakdown = kindCounts
@@ -517,7 +525,9 @@ export function SessionDetail(props: SessionDetailProps): ReactElement {
                   : DETAIL_STRINGS.timeline.loadMore}
               </Button>
             ) : (
-              <span className={styles['pagerNote']}>{DETAIL_STRINGS.timeline.noMore}</span>
+              reachedStart && (
+                <span className={styles['pagerNote']}>{DETAIL_STRINGS.timeline.noMore}</span>
+              )
             )}
           </div>
           {limited.notice !== null && (

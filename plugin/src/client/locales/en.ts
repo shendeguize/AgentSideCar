@@ -270,6 +270,10 @@ export const en = {
   'board.stream.unknown': 'Live stream not connected',
   'board.banner.daemonFailed':
     'sidecar is offline: the board shows the last snapshot and will not update',
+  'board.banner.daemonStale':
+    'The daemon is still running old code (running v{running}, installed v{installed}); this page reflects the old version until the daemon restarts',
+  'board.banner.daemonStaleCode':
+    'The installed code changed after the daemon started (still v{running}); this page reflects the code it loaded until the daemon restarts',
   'board.banner.streamDegraded': 'The live stream is reconnecting; data may be stale',
   'board.empty.daemonFailedTitle': 'sidecar is offline',
   'board.empty.daemonFailedHint':
@@ -448,6 +452,10 @@ export const en = {
   'detail.timeline.degradedUnverified':
     'Timeline source status could not be verified. Events may be incomplete.',
   'detail.timeline.degradedRetry': 'Use Refresh to try the timeline sources again.',
+  'detail.timeline.volatileOnly':
+    'These events come only from the live buffer. No durable source answered, so older history may not be among them.',
+  'detail.timeline.volatileOnlyHint':
+    'If this session should have readable history, check that the sidecar daemon is running and current, then press Refresh.',
   'detail.timeline.daemonDownHint':
     'The sidecar daemon is not running, so nothing can answer for history. Retry from the settings card, or run agent-sidecar daemon start and press Refresh.',
   'detail.timeline.daemonDeferHint':
@@ -586,7 +594,12 @@ export const en = {
     'This host has no AI analysis capability (agents service unavailable).',
   'analysis.errTargetNotFound': 'The analysis target does not exist or left the observation window.',
   'analysis.errTooManyActive': 'Too many concurrent analysis sessions; try again later.',
-  'analysis.errTimeout': 'The analysis timed out and its session was released; start again.',
+  'analysis.errTimeout':
+    'The analysis timed out before the model began answering; its session was released, so start again.',
+  'analysis.errTimeoutPartial':
+    'The analysis timed out. Above is what the model produced before the deadline; its session was released, so start again for a complete answer.',
+  'analysis.errTimeoutCreate':
+    'Creating the analysis session timed out, so no analysis ran. This usually means the model service is busy or unconfigured; try again shortly.',
   'analysis.errCreateFailed': 'Failed to create the analysis session.',
   'analysis.errCancelled': 'The analysis was cancelled.',
   'analysis.errNetwork': 'Network error; the analysis request could not complete.',

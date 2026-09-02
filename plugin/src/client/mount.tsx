@@ -60,6 +60,7 @@ const EMPTY_ANALYSIS_STATE: AnalysisGlueState = {
   messages: [],
   disclaimer: null,
   errorCode: null,
+  timeoutStage: null,
   noticeCode: null,
   progressStep: 0,
 }
@@ -459,6 +460,7 @@ function createBoardContent(
             <Board
               daemonState={state.daemonState}
               {...state.daemonDetail !== undefined ? { daemonDetail: state.daemonDetail } : {}}
+              daemonDrift={state.daemonDrift}
               streamHealth={state.streamHealth}
               lastReconcileAtMs={state.lastReconcileAtMs}
               hasSnapshot={state.hasSnapshot}

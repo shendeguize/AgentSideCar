@@ -178,13 +178,28 @@ class FakeClient:
 
 
 class VersionedPingClient:
-    def __init__(self, *, pid=4321, version="", socket_path=None):
+    def __init__(
+        self,
+        *,
+        pid=4321,
+        version="",
+        socket_path=None,
+        source_version=None,
+        source_changed=False,
+    ):
         self.pid = pid
         self.version = version
         self.socket_path = socket_path
+        self.source_version = source_version
+        self.source_changed = source_changed
 
     def ping(self):
-        return {"ok": True, "op": "ping", "pid": self.pid, "version": self.version}
+        response = {"ok": True, "op": "ping", "pid": self.pid, "version": self.version}
+        if self.source_version is not None:
+            response["source_version"] = self.source_version
+        if self.source_changed:
+            response["source_changed"] = True
+        return response
 
 
 class SequencedPingClient:
@@ -4794,6 +4809,63 @@ class CLITests(unittest.TestCase):
         self.assertEqual(0, silent_code)
         self.assertIn("daemon is running (pid 46)", silent.getvalue())
         self.assertNotIn("stale", silent.getvalue())
+
+    def test_daemon_status_trusts_the_daemons_own_tree_over_the_cli_version(self):
+        # The CLI and the daemon can come from different installs, so the
+        # CLI's own version is only a stand-in for what the daemon would load
+        # on restart. When the daemon reports the version sitting in its own
+        # tree, that is the number the drift check must use.
+        stale = io.StringIO()
+        current = io.StringIO()
+
+        stale_code = main(
+            ["daemon", "status"],
+            client=VersionedPingClient(
+                pid=51,
+                version=sidecar.__version__,
+                source_version="99.0.0",
+            ),
+            stdout=stale,
+            stderr=io.StringIO(),
+        )
+        current_code = main(
+            ["daemon", "status"],
+            client=VersionedPingClient(
+                pid=52,
+                version="0.0.1",
+                source_version="0.0.1",
+            ),
+            stdout=current,
+            stderr=io.StringIO(),
+        )
+
+        self.assertEqual(0, stale_code)
+        self.assertIn("daemon is stale", stale.getvalue())
+        self.assertIn("99.0.0", stale.getvalue())
+
+        # Matching its own tree is not drift, even if this CLI is newer.
+        self.assertEqual(0, current_code)
+        self.assertNotIn("stale", current.getvalue())
+
+    def test_daemon_status_warns_when_the_tree_changed_under_a_matching_version(self):
+        # Between releases the version never moves, so a same-version
+        # daemon can still be many edits behind the code on disk.
+        stdout = io.StringIO()
+
+        code = main(
+            ["daemon", "status"],
+            client=VersionedPingClient(
+                pid=53,
+                version=sidecar.__version__,
+                source_version=sidecar.__version__,
+                source_changed=True,
+            ),
+            stdout=stdout,
+            stderr=io.StringIO(),
+        )
+
+        self.assertEqual(0, code)
+        self.assertIn("daemon is stale", stdout.getvalue())
 
     def test_daemon_status_reports_http_url_and_token_path_not_token(self):
         with tempfile.TemporaryDirectory() as temporary:

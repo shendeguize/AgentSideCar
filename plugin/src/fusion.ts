@@ -456,47 +456,62 @@ const TIMELINE_INERT_OUTCOMES = new Set<TimelineSourceOutcome>([
 ])
 
 /**
- * Extract only a bounded, known machine code for internal classification.
- * The returned timeline contract never includes this value or the upstream
- * message, which may contain paths, ids, prompts, or other private content.
+ * Bounded classification of one source's rejection. The upstream code and
+ * message are matched into these tokens and never returned verbatim: either
+ * may carry paths, ids, or prompt text that the timeline contract must not
+ * expose.
  */
-function knownTimelineErrorCode(error: unknown): string | null {
-  const knownCodes = [
-    'unknown_session',
-    'not_found',
-    'SESSION_NOT_FOUND',
-    'replay_unsupported',
-  ] as const
+type TimelineErrorClass = 'session_absent' | 'replay_unsupported'
+
+/** Bare codes that answer "no such session here". */
+const SESSION_ABSENT_CODES: readonly string[] = ['unknown_session', 'not_found']
+
+/**
+ * Suffix of the namespaced form of the same answer. dsh services prefix their
+ * codes with the service name, so dsh-session-query raises
+ * `SESSION_QUERY_SESSION_NOT_FOUND` for every id it does not own — which is
+ * every session dsh never ran. Matching only the bare `SESSION_NOT_FOUND`
+ * classified all of them as broken sources, so every Cursor, Claude, and
+ * Codex session carried a permanent "sources failed" banner over a timeline
+ * that was in fact whole. The leading underscore is required so the rest of
+ * a service's vocabulary (`SESSION_QUERY_EVENT_NOT_FOUND`) stays a failure.
+ */
+const SESSION_ABSENT_SUFFIX = 'SESSION_NOT_FOUND'
+
+/** Leading `CODE`, `CODE:`, or `CODE ` of a message that lost its typed error. */
+const LEADING_CODE = /^([A-Za-z_]+)(?::|\s|$)/
+
+function classifyTimelineErrorCode(code: string): TimelineErrorClass | null {
+  if (code === 'replay_unsupported') return 'replay_unsupported'
+  if (SESSION_ABSENT_CODES.includes(code)) return 'session_absent'
+  return code === SESSION_ABSENT_SUFFIX || code.endsWith(`_${SESSION_ABSENT_SUFFIX}`)
+    ? 'session_absent'
+    : null
+}
+
+function classifyTimelineError(error: unknown): TimelineErrorClass | null {
   if (typeof error === 'object' && error !== null) {
     const record = error as Record<string, unknown>
     for (const key of ['code', 'errorCode'] as const) {
       const value = record[key]
-      if (typeof value === 'string' && knownCodes.some((code) => value === code)) return value
+      if (typeof value !== 'string') continue
+      const classified = classifyTimelineErrorCode(value)
+      if (classified !== null) return classified
     }
   }
   if (error instanceof Error) {
-    for (const code of knownCodes) {
-      if (
-        error.message === code ||
-        error.message.startsWith(`${code}:`) ||
-        error.message.startsWith(`${code} `)
-      ) {
-        return code
-      }
-    }
+    const leading = LEADING_CODE.exec(error.message)
+    if (leading !== null) return classifyTimelineErrorCode(leading[1] as string)
   }
   return null
 }
 
 function classifySourceFailure(error: unknown): TimelineSourceOutcome {
-  const code = knownTimelineErrorCode(error)
-  return code === 'unknown_session' || code === 'not_found' || code === 'SESSION_NOT_FOUND'
-    ? 'not_found'
-    : 'source_failed'
+  return classifyTimelineError(error) === 'session_absent' ? 'not_found' : 'source_failed'
 }
 
 function classifyReplayFailure(error: unknown): TimelineSourceOutcome {
-  return knownTimelineErrorCode(error) === 'replay_unsupported'
+  return classifyTimelineError(error) === 'replay_unsupported'
     ? 'replay_unsupported'
     : classifySourceFailure(error)
 }

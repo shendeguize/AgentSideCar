@@ -107,15 +107,27 @@ window.__ModuleLoader__.load({
 			"not_found",
 			"replay_unsupported"
 		]);
+		/**
+		* Sources whose success means the page reaches as far back as the session
+		* itself. The buffer is excluded: it is a bounded ring the host fills from
+		* the live stream, so it can only ever vouch for a recent tail.
+		*/
+		const TIMELINE_DURABLE_SOURCE_KEYS = [
+			"liveSession",
+			"sessionQuery",
+			"sidecarReplay"
+		];
 		const LEGACY_TIMELINE_HEALTH = Object.freeze({
 			kind: "healthy",
 			legacy: true,
-			summary: null
+			summary: null,
+			historyScope: "unknown"
 		});
 		const UNVERIFIED_TIMELINE_HEALTH = Object.freeze({
 			kind: "unverified",
 			legacy: false,
-			summary: null
+			summary: null,
+			historyScope: "unknown"
 		});
 		function timelineSourceOutcomes(value) {
 			if (!isRecord(value)) return null;
@@ -126,6 +138,15 @@ window.__ModuleLoader__.load({
 				outcomes[key] = outcome;
 			}
 			return outcomes;
+		}
+		/**
+		* Whether the oldest event on the page is a real beginning or merely where
+		* the ring happens to start. Only a page carried exclusively by the buffer is
+		* `volatile_only`; an empty page has no history to misrepresent, so it needs
+		* no caveat and the failure and empty states own its messaging.
+		*/
+		function timelineHistoryScope(outcomes) {
+			return !TIMELINE_DURABLE_SOURCE_KEYS.some((key) => outcomes[key] === "succeeded") && outcomes.buffer === "succeeded" ? "volatile_only" : "durable";
 		}
 		function timelineSourceSummary(outcomes) {
 			const summary = {
@@ -162,20 +183,24 @@ window.__ModuleLoader__.load({
 			const usable = values.filter((outcome) => !TIMELINE_INERT_OUTCOMES.has(outcome));
 			const allSourcesFailed = entries.length === 0 && usable.length > 0 && usable.every((outcome) => TIMELINE_FAILURE_OUTCOMES.has(outcome));
 			const summary = timelineSourceSummary(outcomes);
+			const historyScope = timelineHistoryScope(outcomes);
 			if (!degraded && reason === null && failures.length === 0) return {
 				kind: "healthy",
 				legacy: false,
-				summary
+				summary,
+				historyScope
 			};
 			if (degraded && reason === "all_sources_failed" && allSourcesFailed) return {
 				kind: "failed",
 				legacy: false,
-				summary
+				summary,
+				historyScope
 			};
 			if (degraded && reason === "partial_source_failure" && failures.length > 0 && !allSourcesFailed) return {
 				kind: "partial",
 				legacy: false,
-				summary
+				summary,
+				historyScope
 			};
 			return UNVERIFIED_TIMELINE_HEALTH;
 		}
@@ -524,6 +549,8 @@ window.__ModuleLoader__.load({
 			"board.stream.degraded": "实时流重连中",
 			"board.stream.unknown": "实时流未建立",
 			"board.banner.daemonFailed": "sidecar 离线:看板显示最后一次快照,数据不再更新",
+			"board.banner.daemonStale": "daemon 仍在跑旧代码(运行 v{running},磁盘已是 v{installed});本页数据来自旧版本,重启 daemon 后才会生效",
+			"board.banner.daemonStaleCode": "daemon 启动后代码已被改动(版本号仍是 v{running});本页数据来自启动时那份代码,重启 daemon 后才会生效",
 			"board.banner.streamDegraded": "实时流重连中,数据可能滞后",
 			"board.empty.daemonFailedTitle": "sidecar 已离线",
 			"board.empty.daemonFailedHint": "daemon 连续启动失败已熔断。可在设置卡重试,或手动运行 agent-sidecar daemon start 后等待自动领养。",
@@ -687,6 +714,8 @@ window.__ModuleLoader__.load({
 			"detail.timeline.degradedAll": "最近一次请求的可用时间线来源均读取失败,未能加载新事件。",
 			"detail.timeline.degradedUnverified": "无法确认时间线来源状态,当前事件可能不完整。",
 			"detail.timeline.degradedRetry": "可点击「刷新」重试时间线来源。",
+			"detail.timeline.volatileOnly": "当前事件仅来自实时缓冲,没有持久来源应答,更早的历史可能已不在其中。",
+			"detail.timeline.volatileOnlyHint": "若该会话本应有可读取的历史,请确认 sidecar daemon 正在运行且版本为最新,然后点击「刷新」。",
 			"detail.timeline.daemonDownHint": "sidecar daemon 未在运行,历史时间线无人应答。可在设置卡重试,或手动运行 agent-sidecar daemon start 后点击「刷新」。",
 			"detail.timeline.daemonDeferHint": "插件让位于系统服务托管的 daemon,服务拉起后点击「刷新」即可加载历史。",
 			"detail.states.loadingTitle": "正在加载时间线…",
@@ -799,7 +828,9 @@ window.__ModuleLoader__.load({
 			"analysis.errUnavailable": "当前 host 未接入 AI 分析能力(agents 服务不可用)。",
 			"analysis.errTargetNotFound": "分析目标不存在或已离开观测范围。",
 			"analysis.errTooManyActive": "并发分析会话已达上限,请稍后再试。",
-			"analysis.errTimeout": "分析超时,分析会话已释放;可重新发起。",
+			"analysis.errTimeout": "分析超时,模型未在时限内开始作答;分析会话已释放,可重新发起。",
+			"analysis.errTimeoutPartial": "分析超时,以上是模型在时限内已生成的部分内容;分析会话已释放,可重新发起以获取完整结论。",
+			"analysis.errTimeoutCreate": "创建分析会话超时(尚未开始分析)。多为模型服务繁忙或未配置,可稍后重新发起。",
 			"analysis.errCreateFailed": "分析会话创建失败。",
 			"analysis.errCancelled": "分析已取消。",
 			"analysis.errNetwork": "网络错误,分析请求未能完成。",
@@ -1041,6 +1072,8 @@ window.__ModuleLoader__.load({
 			"board.stream.degraded": "Live stream reconnecting",
 			"board.stream.unknown": "Live stream not connected",
 			"board.banner.daemonFailed": "sidecar is offline: the board shows the last snapshot and will not update",
+			"board.banner.daemonStale": "The daemon is still running old code (running v{running}, installed v{installed}); this page reflects the old version until the daemon restarts",
+			"board.banner.daemonStaleCode": "The installed code changed after the daemon started (still v{running}); this page reflects the code it loaded until the daemon restarts",
 			"board.banner.streamDegraded": "The live stream is reconnecting; data may be stale",
 			"board.empty.daemonFailedTitle": "sidecar is offline",
 			"board.empty.daemonFailedHint": "Repeated daemon start failures tripped the circuit breaker. Retry from Settings, or run agent-sidecar daemon start and wait for automatic adoption.",
@@ -1204,6 +1237,8 @@ window.__ModuleLoader__.load({
 			"detail.timeline.degradedAll": "All usable timeline sources failed for the latest request. No new events could be loaded.",
 			"detail.timeline.degradedUnverified": "Timeline source status could not be verified. Events may be incomplete.",
 			"detail.timeline.degradedRetry": "Use Refresh to try the timeline sources again.",
+			"detail.timeline.volatileOnly": "These events come only from the live buffer. No durable source answered, so older history may not be among them.",
+			"detail.timeline.volatileOnlyHint": "If this session should have readable history, check that the sidecar daemon is running and current, then press Refresh.",
 			"detail.timeline.daemonDownHint": "The sidecar daemon is not running, so nothing can answer for history. Retry from the settings card, or run agent-sidecar daemon start and press Refresh.",
 			"detail.timeline.daemonDeferHint": "The plugin defers to a service-managed daemon; once the service is up, press Refresh to load history.",
 			"detail.states.loadingTitle": "Loading the timeline…",
@@ -1316,7 +1351,9 @@ window.__ModuleLoader__.load({
 			"analysis.errUnavailable": "This host has no AI analysis capability (agents service unavailable).",
 			"analysis.errTargetNotFound": "The analysis target does not exist or left the observation window.",
 			"analysis.errTooManyActive": "Too many concurrent analysis sessions; try again later.",
-			"analysis.errTimeout": "The analysis timed out and its session was released; start again.",
+			"analysis.errTimeout": "The analysis timed out before the model began answering; its session was released, so start again.",
+			"analysis.errTimeoutPartial": "The analysis timed out. Above is what the model produced before the deadline; its session was released, so start again for a complete answer.",
+			"analysis.errTimeoutCreate": "Creating the analysis session timed out, so no analysis ran. This usually means the model service is busy or unconfigured; try again shortly.",
 			"analysis.errCreateFailed": "Failed to create the analysis session.",
 			"analysis.errCancelled": "The analysis was cancelled.",
 			"analysis.errNetwork": "Network error; the analysis request could not complete.",
@@ -1644,6 +1681,8 @@ window.__ModuleLoader__.load({
 			},
 			banner: {
 				daemonFailed: "board.banner.daemonFailed",
+				daemonStale: "board.banner.daemonStale",
+				daemonStaleCode: "board.banner.daemonStaleCode",
 				streamDegraded: "board.banner.streamDegraded"
 			},
 			empty: {
@@ -2140,15 +2179,25 @@ window.__ModuleLoader__.load({
 			return "neutral";
 		}
 		/**
-		* Top banner: daemon FAILED (red, last-snapshot notice) outranks a
-		* degraded stream (yellow, may-lag notice). 'unknown' stream health alone
-		* raises no banner — it is the pre-first-connect startup state and a
-		* warning bar on every mount would be noise.
+		* Top banner: daemon FAILED (red, last-snapshot notice) outranks version
+		* drift, which in turn outranks a degraded stream — a lagging stream
+		* delivers the truth late, while a stale daemon delivers a different
+		* program's answer promptly, which is the harder thing to notice.
+		* 'unknown' stream health alone raises no banner — it is the
+		* pre-first-connect startup state and a warning bar on every mount would
+		* be noise.
 		*/
-		function deriveBanner(daemonState, streamHealth) {
+		function deriveBanner(daemonState, streamHealth, drift = null) {
 			if (daemonState === "failed") return {
 				tone: "danger",
 				text: BOARD_STRINGS.banner.daemonFailed
+			};
+			if (drift !== null) return {
+				tone: "warn",
+				text: drift.running === drift.installed ? formatTemplate$2(BOARD_STRINGS.banner.daemonStaleCode, { running: drift.running }) : formatTemplate$2(BOARD_STRINGS.banner.daemonStale, {
+					running: drift.running,
+					installed: drift.installed
+				})
 			};
 			if (streamHealth === "degraded") return {
 				tone: "warn",
@@ -2255,7 +2304,7 @@ window.__ModuleLoader__.load({
 		}
 		/** filter → group → per-card derive; the one call Board.tsx renders from. */
 		function buildBoardViewModel(input) {
-			const { sessions, filters, daemonState, streamHealth, lastReconcileAtMs, nowMs } = input;
+			const { sessions, filters, daemonState, streamHealth, daemonDrift, lastReconcileAtMs, nowMs } = input;
 			const visible = filterSessions(sessions, filters, nowMs);
 			return {
 				groups: groupSessions(visible.map((session) => ({
@@ -2266,7 +2315,7 @@ window.__ModuleLoader__.load({
 					relativeTime: formatRelativeTime$1(session.updatedAtMs, nowMs),
 					hoverTitle: badgeHoverTitle(session.status, lastReconcileAtMs, nowMs)
 				}))),
-				banner: deriveBanner(daemonState, streamHealth),
+				banner: deriveBanner(daemonState, streamHealth, daemonDrift ?? null),
 				emptyState: deriveEmptyState(daemonState, visible.length, sessions.length),
 				daemonBadge: deriveDaemonBadge(daemonState),
 				streamLabel: BOARD_STRINGS.stream[streamHealth],
@@ -2970,6 +3019,7 @@ window.__ModuleLoader__.load({
 				daemonState: "probe",
 				lastPing: null,
 				daemonDetail: void 0,
+				daemonDrift: null,
 				streamHealth: "unknown",
 				streamStatus: "connecting",
 				lastReconcileAtMs: null,
@@ -3023,6 +3073,30 @@ window.__ModuleLoader__.load({
 			return `pid ${ping.pid} · v${ping.version}`;
 		}
 		/**
+		* Version drift from the last ping, or null when there is none to report.
+		*
+		* A daemon that outlived an upgrade keeps answering pings normally, so
+		* nothing else on the page contradicts a board built from replaced code.
+		* Only the daemon knows both numbers; a missing source version means it
+		* could not read its own tree, and inventing drift from that would be
+		* worse than staying quiet.
+		*/
+		function daemonVersionDriftOf(ping) {
+			if (ping === null) return null;
+			const installed = ping.sourceVersion;
+			if (installed === void 0 || installed === "" || ping.version === "") return null;
+			if (installed !== ping.version) return {
+				running: ping.version,
+				installed
+			};
+			if (ping.sourceChanged === true) return {
+				running: ping.version,
+				installed,
+				codeChanged: true
+			};
+			return null;
+		}
+		/**
 		* Composite stream health for the UI:
 		* - before the first snapshot nothing is known → 'unknown';
 		* - a degraded BROWSER stream overrides (the host may still be healthy,
@@ -3042,6 +3116,7 @@ window.__ModuleLoader__.load({
 				daemonState: snapshot.daemon.state,
 				lastPing: snapshot.daemon.lastPing,
 				daemonDetail: daemonDetailOf(snapshot.daemon.lastPing),
+				daemonDrift: daemonVersionDriftOf(snapshot.daemon.lastPing),
 				streamHealth: combineStreamHealth(snapshot.board.streamHealth, browserStatus, true),
 				streamStatus: browserStatus,
 				lastReconcileAtMs: snapshot.board.lastReconcileAt,
@@ -4269,6 +4344,7 @@ window.__ModuleLoader__.load({
 				filters: props.filters,
 				daemonState: props.daemonState,
 				streamHealth: props.streamHealth,
+				daemonDrift: props.daemonDrift ?? null,
 				lastReconcileAtMs: props.lastReconcileAtMs,
 				nowMs
 			});
@@ -5189,7 +5265,18 @@ window.__ModuleLoader__.load({
 			network_error: "analysis.errNetwork",
 			request_timeout: "analysis.errNetwork"
 		};
-		function errorText(code) {
+		/**
+		* Terminal error copy. A timeout says which step ran out and whether any of
+		* the answer survived, because "creating the analysis session timed out" and
+		* "the model stopped mid-answer" are different problems, and the text above
+		* this line is worth reading in the second case.
+		*/
+		function errorText(state) {
+			const code = state.errorCode ?? "";
+			if (code === "timeout") {
+				if (state.timeoutStage === "create") return t("analysis.errTimeoutCreate");
+				return state.messages.some((message) => message.role === "assistant" && message.content !== "") ? t("analysis.errTimeoutPartial") : t("analysis.errTimeout");
+			}
 			const key = ERROR_KEYS[code];
 			return key !== void 0 ? t(key) : t("analysis.errGeneric", { code });
 		}
@@ -5293,7 +5380,7 @@ window.__ModuleLoader__.load({
 							state.phase === "failed" && state.errorCode !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 								className: analysis_module_css_default["errorCard"],
 								"data-testid": "agent-sidecar-analysis-error",
-								children: errorText(state.errorCode)
+								children: errorText(state)
 							}),
 							state.phase === "stopped" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 								className: analysis_module_css_default["noteCard"],
@@ -7045,7 +7132,8 @@ window.__ModuleLoader__.load({
 			const duration = durationSpan !== null ? formatTemplate$1(DETAIL_STRINGS.header.duration, { span: durationSpan }) : null;
 			const modelLabel = props.header.model !== void 0 && props.header.model !== "" ? formatTemplate$1(DETAIL_STRINGS.header.model, { name: props.header.model }) : null;
 			const kindCounts = countTimelineKinds(props.timeline.entries);
-			const loadedEvents = formatTemplate$1(props.timeline.reachedStart ? DETAIL_STRINGS.header.loadedEvents : DETAIL_STRINGS.header.loadedEventsPartial, { n: entryCount });
+			const reachedStart = props.timeline.reachedStart && props.historyScope !== "volatile_only";
+			const loadedEvents = formatTemplate$1(reachedStart ? DETAIL_STRINGS.header.loadedEvents : DETAIL_STRINGS.header.loadedEventsPartial, { n: entryCount });
 			const kindBreakdown = kindCounts.map((row) => formatTemplate$1(DETAIL_STRINGS.header.kindCount, {
 				label: row.label,
 				n: row.count
@@ -7297,7 +7385,7 @@ window.__ModuleLoader__.load({
 							disabled: props.loading,
 							onClick: props.onLoadMore,
 							children: props.loading ? DETAIL_STRINGS.timeline.loadingMore : DETAIL_STRINGS.timeline.loadMore
-						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						}) : reachedStart && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							className: detail_module_css_default["pagerNote"],
 							children: DETAIL_STRINGS.timeline.noMore
 						})
@@ -10031,39 +10119,49 @@ window.__ModuleLoader__.load({
 			const blocksHealthyEmpty = degraded && props.entryCount === 0;
 			const daemonDown = props.daemonState !== void 0 && DAEMON_DOWN_STATES.has(props.daemonState);
 			const messageKey = health.kind === "partial" ? "detail.timeline.degradedPartial" : health.kind === "failed" ? "detail.timeline.degradedAll" : "detail.timeline.degradedUnverified";
-			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [degraded && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: detail_view_module_css_default["toolsSection"],
-				role: health.kind === "partial" ? "status" : "alert",
-				"data-kind": health.kind,
-				"data-testid": "agent-sidecar-timeline-degraded",
-				children: [
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t(messageKey) }),
-					health.summary !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-						"data-testid": "agent-sidecar-timeline-source-summary",
-						children: t("detail.sources.healthSummary", { ...health.summary })
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-						"data-testid": "agent-sidecar-timeline-degraded-hint",
-						children: daemonDown ? t(props.daemonState === "defer" ? "detail.timeline.daemonDeferHint" : "detail.timeline.daemonDownHint") : t("detail.timeline.degradedRetry")
-					}),
-					blocksHealthyEmpty && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: [props.onClose !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-						type: "button",
-						size: "sm",
-						variant: "outline",
-						onClick: props.onClose,
-						children: t("detail.header.close")
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
-						type: "button",
-						size: "sm",
-						variant: "outline",
-						disabled: props.refreshing,
-						title: t("detail.header.refreshHint"),
-						onClick: props.onRefresh,
-						"data-testid": "agent-sidecar-timeline-retry",
-						children: props.refreshing ? t("detail.header.refreshing") : t("detail.header.refresh")
-					})] })
-				]
-			}), !blocksHealthyEmpty && props.children] });
+			const volatileOnly = health.historyScope === "volatile_only" && props.entryCount > 0;
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+				degraded && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: detail_view_module_css_default["toolsSection"],
+					role: health.kind === "partial" ? "status" : "alert",
+					"data-kind": health.kind,
+					"data-testid": "agent-sidecar-timeline-degraded",
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t(messageKey) }),
+						health.summary !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							"data-testid": "agent-sidecar-timeline-source-summary",
+							children: t("detail.sources.healthSummary", { ...health.summary })
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							"data-testid": "agent-sidecar-timeline-degraded-hint",
+							children: daemonDown ? t(props.daemonState === "defer" ? "detail.timeline.daemonDeferHint" : "detail.timeline.daemonDownHint") : t("detail.timeline.degradedRetry")
+						}),
+						blocksHealthyEmpty && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: [props.onClose !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							type: "button",
+							size: "sm",
+							variant: "outline",
+							onClick: props.onClose,
+							children: t("detail.header.close")
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(_deepseek_ai_dsh_client_ui_primitives.Button, {
+							type: "button",
+							size: "sm",
+							variant: "outline",
+							disabled: props.refreshing,
+							title: t("detail.header.refreshHint"),
+							onClick: props.onRefresh,
+							"data-testid": "agent-sidecar-timeline-retry",
+							children: props.refreshing ? t("detail.header.refreshing") : t("detail.header.refresh")
+						})] })
+					]
+				}),
+				volatileOnly && !blocksHealthyEmpty && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					className: detail_view_module_css_default["toolsSection"],
+					role: "status",
+					"data-testid": "agent-sidecar-timeline-volatile",
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("detail.timeline.volatileOnly") }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children: t("detail.timeline.volatileOnlyHint") })]
+				}),
+				!blocksHealthyEmpty && props.children
+			] });
 		}
 		/**
 		* The detail view. Owner remounts it per session id (`key={sessionId}`),
@@ -10246,6 +10344,7 @@ window.__ModuleLoader__.load({
 						hasMore: detail.hasMore,
 						listening: detail.listening,
 						refreshing: detail.refreshing,
+						historyScope: detail.timelineHealth.historyScope,
 						onLoadMore: () => {
 							detailStore.loadMore();
 						},
@@ -10983,6 +11082,7 @@ window.__ModuleLoader__.load({
 			messages: [],
 			disclaimer: null,
 			errorCode: null,
+			timeoutStage: null,
 			noticeCode: null,
 			progressStep: 0
 		};
@@ -11285,6 +11385,7 @@ window.__ModuleLoader__.load({
 				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Board, {
 					daemonState: state.daemonState,
 					...state.daemonDetail !== void 0 ? { daemonDetail: state.daemonDetail } : {},
+					daemonDrift: state.daemonDrift,
 					streamHealth: state.streamHealth,
 					lastReconcileAtMs: state.lastReconcileAtMs,
 					hasSnapshot: state.hasSnapshot,
@@ -12123,6 +12224,7 @@ window.__ModuleLoader__.load({
 			messages: [],
 			disclaimer: null,
 			errorCode: null,
+			timeoutStage: null,
 			noticeCode: null,
 			progressStep: 0
 		};
@@ -12145,7 +12247,7 @@ window.__ModuleLoader__.load({
 			progressTimer = null;
 			constructor(options = {}) {
 				this.postActionFn = options.postActionFn ?? postAction;
-				this.timeoutMs = options.timeoutMs ?? 75e3;
+				this.timeoutMs = options.timeoutMs ?? 95e3;
 			}
 			subscribe = (fn) => {
 				this.listeners.add(fn);
@@ -12225,6 +12327,7 @@ window.__ModuleLoader__.load({
 					this.setState({
 						phase: "failed",
 						errorCode: failureCode(err),
+						timeoutStage: null,
 						messages: this.withoutPendingMessages()
 					});
 				} finally {
@@ -12305,6 +12408,20 @@ window.__ModuleLoader__.load({
 			}
 			/** Fold one settled 200 result into the conversation. */
 			adoptResult(question, result) {
+				if (result.outcome === "timeout") {
+					const summary = result.summary ?? "";
+					const kept = typeof result.analysisSessionId === "string" && result.analysisSessionId !== "";
+					this.setState({
+						phase: kept ? "ready" : "failed",
+						...kept ? { analysisSessionId: result.analysisSessionId } : {},
+						...kept ? { noticeCode: "timeout" } : { errorCode: "timeout" },
+						timeoutStage: result.timeoutStage ?? null,
+						disclaimer: result.disclaimer,
+						messages: summary === "" ? this.withoutPendingMessages() : this.settledMessages(summary, false),
+						progressStep: 0
+					});
+					return;
+				}
 				if (result.outcome === "completed") {
 					this.setState({
 						phase: "ready",

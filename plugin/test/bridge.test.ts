@@ -68,6 +68,10 @@ function ev(overrides: Partial<SidecarEvent> = {}): SidecarEvent {
 
 interface MockDaemonOptions {
   pingBehavior?: 'reply' | 'silent'
+  /** The version the daemon reports as sitting in its own source tree. */
+  pingSourceVersion?: string
+  /** The daemon reports its tree no longer matches the code it loaded. */
+  pingSourceChanged?: boolean
   statusBehavior?: 'reply' | 'error'
   statusSessions?: unknown[]
   /**
@@ -130,6 +134,10 @@ async function startMockDaemon(opts: MockDaemonOptions = {}): Promise<MockDaemon
                 op: 'ping',
                 pid: 4242,
                 version: '9.9.9',
+                ...opts.pingSourceVersion === undefined
+                  ? {}
+                  : { source_version: opts.pingSourceVersion },
+                ...opts.pingSourceChanged === true ? { source_changed: true } : {},
                 http: { enabled: false },
               }) + '\n',
             )
@@ -261,6 +269,31 @@ describe('SidecarSocketClient', () => {
     expect(await client.ping()).toEqual({
       pid: 4242,
       version: '9.9.9',
+      http: { enabled: false },
+    })
+  })
+
+  it('ping carries the version sitting in the daemon own tree', async () => {
+    // Without this the page cannot tell a live daemon from one still
+    // serving code that was replaced on disk hours ago.
+    daemon = await startMockDaemon({ pingSourceVersion: '10.0.0' })
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    expect(await client.ping()).toEqual({
+      pid: 4242,
+      version: '9.9.9',
+      sourceVersion: '10.0.0',
+      http: { enabled: false },
+    })
+  })
+
+  it('ping carries a tree that changed under an unchanged version', async () => {
+    daemon = await startMockDaemon({ pingSourceVersion: '9.9.9', pingSourceChanged: true })
+    const client = new SidecarSocketClient({ socketPath: daemon.socketPath })
+    expect(await client.ping()).toEqual({
+      pid: 4242,
+      version: '9.9.9',
+      sourceVersion: '9.9.9',
+      sourceChanged: true,
       http: { enabled: false },
     })
   })

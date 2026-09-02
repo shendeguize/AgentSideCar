@@ -37,11 +37,12 @@ import {
   type ArchivedCardVM,
   type BoardFilterState,
   type DaemonStateToken,
+  type DaemonVersionDrift,
   type SessionCardVM,
   type StreamHealthToken,
 } from './board/logic.ts'
 
-export type { ArchivedCardVM }
+export type { ArchivedCardVM, DaemonVersionDrift }
 
 /**
  * Package name, used as the localStorage key prefix and the style-tag owner
@@ -64,6 +65,8 @@ export interface SidecarViewState {
   lastPing: PingInfo | null
   /** Hover detail for the daemon badge, e.g. "pid 123 · v0.6.0". */
   daemonDetail: string | undefined
+  /** Set only when the daemon is behind the code now on disk. */
+  daemonDrift: DaemonVersionDrift | null
   /** Composite health: browser stream status folded over host-reported health. */
   streamHealth: StreamHealthToken
   /** Raw browser-side stream status. */
@@ -97,6 +100,7 @@ export function initialViewState(): SidecarViewState {
     daemonState: 'probe',
     lastPing: null,
     daemonDetail: undefined,
+    daemonDrift: null,
     streamHealth: 'unknown',
     streamStatus: 'connecting',
     lastReconcileAtMs: null,
@@ -159,6 +163,28 @@ export function daemonDetailOf(ping: PingInfo | null): string | undefined {
 }
 
 /**
+ * Version drift from the last ping, or null when there is none to report.
+ *
+ * A daemon that outlived an upgrade keeps answering pings normally, so
+ * nothing else on the page contradicts a board built from replaced code.
+ * Only the daemon knows both numbers; a missing source version means it
+ * could not read its own tree, and inventing drift from that would be
+ * worse than staying quiet.
+ */
+export function daemonVersionDriftOf(ping: PingInfo | null): DaemonVersionDrift | null {
+  if (ping === null) return null
+  const installed = ping.sourceVersion
+  if (installed === undefined || installed === '' || ping.version === '') return null
+  if (installed !== ping.version) return { running: ping.version, installed }
+  // Same version, different code: between releases the version cannot
+  // move, so the daemon's own content check is the only signal left.
+  if (ping.sourceChanged === true) {
+    return { running: ping.version, installed, codeChanged: true }
+  }
+  return null
+}
+
+/**
  * Composite stream health for the UI:
  * - before the first snapshot nothing is known → 'unknown';
  * - a degraded BROWSER stream overrides (the host may still be healthy,
@@ -186,6 +212,7 @@ export function mapSnapshot(
     daemonState: snapshot.daemon.state,
     lastPing: snapshot.daemon.lastPing,
     daemonDetail: daemonDetailOf(snapshot.daemon.lastPing),
+    daemonDrift: daemonVersionDriftOf(snapshot.daemon.lastPing),
     streamHealth: combineStreamHealth(snapshot.board.streamHealth, browserStatus, true),
     streamStatus: browserStatus,
     lastReconcileAtMs: snapshot.board.lastReconcileAt,

@@ -13,6 +13,7 @@ import {
   ANALYSIS_DISCLAIMER,
   ANALYSIS_GUIDANCE,
   AnalysisEngine,
+  DEFAULT_ANALYSIS_CREATE_TIMEOUT_MS,
   DEFAULT_ANALYSIS_TIMEOUT_MS,
   DEFAULT_MAX_ACTIVE_ANALYSES,
   DEFAULT_MAX_INPUT_CHARS,
@@ -37,6 +38,13 @@ class FakeDriver {
   readonly cancelCauses: AnalysisCancelCauseFace[] = []
   respond: Responder
   followupThrows?: Error
+  /** Milliseconds the scripted model takes before its reply lands. */
+  respondDelayMs = 0
+  /**
+   * Assistant text appended immediately while the turn never reaches
+   * quiescence — a model that started answering and then stalled.
+   */
+  respondPartial?: (promptText: string) => string
   /** Token usage attached to each scripted reply's assistant/message event. */
   usage: { inputTokens: number; outputTokens: number } | undefined = {
     inputTokens: 100,
@@ -48,6 +56,7 @@ class FakeDriver {
     content: Array<{ type: string; text?: string }>
   }> = []
   private readonly eventLog: Array<{ type: string; data?: unknown }> = []
+  private readonly idleWaiters: Array<() => void> = []
   private turnPending = false
 
   readonly session: {
@@ -74,12 +83,30 @@ class FakeDriver {
       .join('')
     this.derived.push({ role: 'user', content: [{ type: 'text', text }] })
     this.eventLog.push({ type: 'user/message', data: {} })
+    if (this.respondPartial !== undefined) {
+      this.settle(this.respondPartial(text))
+      this.turnPending = true
+      return
+    }
     const reply = this.respond(text)
     if (reply === null) {
       this.turnPending = true
       return
     }
-    this.derived.push({ role: 'assistant', content: [{ type: 'text', text: reply }] })
+    if (this.respondDelayMs > 0) {
+      this.turnPending = true
+      setTimeout(() => {
+        this.settle(reply)
+        this.turnPending = false
+        for (const wake of this.idleWaiters.splice(0)) wake()
+      }, this.respondDelayMs)
+      return
+    }
+    this.settle(reply)
+  }
+
+  private settle(text: string): void {
+    this.derived.push({ role: 'assistant', content: [{ type: 'text', text }] })
     this.eventLog.push({
       type: 'assistant/message',
       data: this.usage !== undefined ? { usage: this.usage } : {},
@@ -93,7 +120,10 @@ class FakeDriver {
 
   whenIdle(): Promise<void> {
     // A pending (never-answered) turn never reaches quiescence.
-    return this.turnPending ? new Promise<void>(() => {}) : Promise.resolve()
+    if (!this.turnPending) return Promise.resolve()
+    return new Promise<void>((resolve) => {
+      this.idleWaiters.push(resolve)
+    })
   }
 }
 
@@ -106,8 +136,11 @@ interface FakeCreated {
 
 function fakeWorld(opts?: {
   respond?: Responder
+  respondDelayMs?: number
+  respondPartial?: (promptText: string) => string
   createRejects?: Error
   createNever?: boolean
+  createDelayMs?: number
 }): {
   create: AnalysisAgentFace['create']
   created: FakeCreated[]
@@ -126,6 +159,8 @@ function fakeWorld(opts?: {
       return new Promise<AnalysisSession>(() => {})
     }
     const driver = new FakeDriver(respond)
+    driver.respondDelayMs = opts?.respondDelayMs ?? 0
+    if (opts?.respondPartial !== undefined) driver.respondPartial = opts.respondPartial
     const record: FakeCreated = {
       sessionId: options.sessionId,
       signal: options.signal,
@@ -139,7 +174,11 @@ function fakeWorld(opts?: {
         record.disposeCalls += 1
       },
     }
-    return Promise.resolve(handle)
+    const delay = opts?.createDelayMs ?? 0
+    if (delay === 0) return Promise.resolve(handle)
+    return new Promise<AnalysisSession>((resolve) => {
+      setTimeout(() => resolve(handle), delay)
+    })
   }
   return { create, created }
 }
@@ -149,6 +188,7 @@ function makeEngine(opts?: {
   allow?: () => boolean
   maxInputChars?: number
   analysisTimeoutMs?: number
+  createTimeoutMs?: number
   maxActiveSessions?: number
 }): {
   engine: AnalysisEngine
@@ -165,6 +205,7 @@ function makeEngine(opts?: {
     ...(opts?.analysisTimeoutMs !== undefined
       ? { analysisTimeoutMs: opts.analysisTimeoutMs }
       : {}),
+    ...(opts?.createTimeoutMs !== undefined ? { createTimeoutMs: opts.createTimeoutMs } : {}),
     ...(opts?.maxActiveSessions !== undefined
       ? { maxActiveSessions: opts.maxActiveSessions }
       : {}),
@@ -375,10 +416,65 @@ describe('timeout', () => {
     expect(logEntries.some((e) => e.op === 'result' && e.outcome === 'timeout')).toBe(true)
   })
 
+  it('gives create its own budget instead of charging it to the first turn', async () => {
+    vi.useFakeTimers()
+    // A slow-but-successful create used to eat most of the turn's deadline,
+    // so a model that answered well within its own budget still timed out.
+    const world = fakeWorld({
+      createDelayMs: 15_000,
+      respondDelayMs: DEFAULT_ANALYSIS_TIMEOUT_MS - 10_000,
+      respond: () => 'insight after a slow start',
+    })
+    const { engine } = makeEngine({ world })
+
+    const pending = engine.request(input())
+    await vi.advanceTimersByTimeAsync(DEFAULT_ANALYSIS_TIMEOUT_MS + 15_000)
+    const result = await pending
+
+    expect(result.outcome).toBe('completed')
+    expect(result.summary).toBe('insight after a slow start')
+  })
+
+  it('keeps the text produced before the deadline and names the stage', async () => {
+    vi.useFakeTimers()
+    const world = fakeWorld({ respondPartial: () => 'first half of the verdict' })
+    const { engine, logEntries } = makeEngine({ world })
+
+    const pending = engine.request(input())
+    await vi.advanceTimersByTimeAsync(DEFAULT_ANALYSIS_TIMEOUT_MS)
+    const result = await pending
+
+    // Discarding a stalled turn's output made the user pay for it twice.
+    expect(result.outcome).toBe('timeout')
+    expect(result.summary).toBe('first half of the verdict')
+    expect(result.timeoutStage).toBe('first_turn')
+    // The session is still released: a cancelled mid-turn holds no context
+    // worth a follow-up, so nothing keeps burning a slot.
+    expect(world.created[0]!.disposeCalls).toBe(1)
+    expect(result.analysisSessionId).toBeUndefined()
+    expect(
+      logEntries.some((e) => e.op === 'result' && e.timeoutStage === 'first_turn'),
+    ).toBe(true)
+  })
+
+  it('attributes a create timeout to the create stage', async () => {
+    vi.useFakeTimers()
+    const world = fakeWorld({ createNever: true })
+    const { engine, logEntries } = makeEngine({ world })
+
+    const pending = engine.request(input())
+    await vi.advanceTimersByTimeAsync(DEFAULT_ANALYSIS_CREATE_TIMEOUT_MS)
+    const result = await pending
+
+    expect(result.outcome).toBe('timeout')
+    expect(result.timeoutStage).toBe('create')
+    expect(logEntries.some((e) => e.op === 'result' && e.timeoutStage === 'create')).toBe(true)
+  })
+
   it('a hanging create times out, aborts the creation signal, frees the slot', async () => {
     vi.useFakeTimers()
     const world = fakeWorld({ createNever: true })
-    const { engine } = makeEngine({ world, analysisTimeoutMs: 5000 })
+    const { engine } = makeEngine({ world, createTimeoutMs: 5000 })
 
     const pending = engine.request(input())
     await vi.advanceTimersByTimeAsync(5000)
@@ -403,6 +499,7 @@ describe('timeout', () => {
     const result = await pending
 
     expect(result.outcome).toBe('timeout')
+    expect(result.timeoutStage).toBe('followup_turn')
     expect(result.analysisSessionId).toBe(first.analysisSessionId)
     const record = world.created[0]!
     expect(record.driver.cancelCauses).toEqual([{ kind: 'user' }])
@@ -528,7 +625,7 @@ describe('concurrency cap', () => {
   it('counts a pending create against the cap (no overshoot race)', async () => {
     vi.useFakeTimers()
     const world = fakeWorld({ createNever: true })
-    const { engine } = makeEngine({ world, maxActiveSessions: 1, analysisTimeoutMs: 1000 })
+    const { engine } = makeEngine({ world, maxActiveSessions: 1, createTimeoutMs: 1000 })
 
     const pending = engine.request(input({ title: 'slow create' }))
     const second = await engine.request(input({ title: 'racer' }))

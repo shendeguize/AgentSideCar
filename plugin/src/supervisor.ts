@@ -31,6 +31,10 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 export interface PingInfo {
   pid: number
   version: string
+  /** Version in the daemon's own tree; absent when it cannot be read. */
+  sourceVersion?: string
+  /** The daemon's tree no longer matches the code it loaded. */
+  sourceChanged?: boolean
   http: {
     enabled: boolean
     host?: string

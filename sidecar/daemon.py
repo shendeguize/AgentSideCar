@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import errno
+import hashlib
 import json
 import math
 import os
@@ -77,6 +79,7 @@ MAX_SHUTDOWN_DIAGNOSTICS = 8
 REPLAY_DEFAULT_LIMIT = 256
 REPLAY_MAX_LIMIT = 1024
 ARCHIVE_TOKEN_TTL_SECONDS = 300.0
+SOURCE_DRIFT_TTL_SECONDS = 5.0
 MAX_ARCHIVE_TOKENS = 16
 
 
@@ -90,6 +93,68 @@ class DaemonAlreadyRunning(DaemonError):
 
 class RuntimePathError(DaemonError):
     """Raised when a runtime path is unsafe to replace."""
+
+
+def installed_source_version(init_path: Optional[Path] = None) -> Optional[str]:
+    """Read the ``__version__`` literal from the installed source on disk.
+
+    A daemon serves whatever it imported when it started, so upgrading in
+    place leaves it answering with code the operator believes they replaced —
+    silently, for as long as it stays up. Parsing the literal (never
+    importing: the tree on disk is a newer program that must not run inside
+    this process) gives every reader the two numbers needed to see that.
+
+    Returns ``None`` when there is no readable source tree, as in a packaged
+    zipapp: no version is knowable there, and guessing one would manufacture
+    a drift report out of nothing.
+    """
+
+    path = init_path if init_path is not None else Path(__file__).resolve().parent / "__init__.py"
+    try:
+        module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, ValueError):
+        return None
+    for statement in module.body:
+        if not isinstance(statement, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "__version__"
+            for target in statement.targets
+        ):
+            continue
+        value = statement.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value.value
+        return None
+    return None
+
+
+def source_digest(package_dir: Optional[Path] = None) -> Optional[str]:
+    """Content fingerprint of the installed package's Python modules.
+
+    Version numbers only move on release, so between releases a daemon can
+    be many edits behind its own tree while both sides report the same
+    version. Fingerprinting content (not mtimes: a rewrite with identical
+    bytes is not a change, and a false stale warning teaches operators to
+    ignore the real one) is what makes that case visible.
+
+    Returns ``None`` when the tree cannot be read, as in a packaged form.
+    """
+
+    root = package_dir if package_dir is not None else Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    try:
+        modules = sorted(root.rglob("*.py"))
+        for module in modules:
+            digest.update(str(module.relative_to(root)).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(module.read_bytes())
+            digest.update(b"\0")
+    except OSError:
+        return None
+    if not modules:
+        return None
+    return digest.hexdigest()
 
 
 def default_runtime_dir() -> Path:
@@ -251,6 +316,11 @@ class SidecarDaemon:
         self._serve_thread: Optional[threading.Thread] = None
         self._shutdown_timed_out = False
         self._shutdown_diagnostics: Tuple[str, ...] = ()
+        # Fingerprint of the code this process is actually serving, taken
+        # before anything can edit the tree underneath it.
+        self._loaded_digest = source_digest()
+        self._drift_checked_at = 0.0
+        self._drift_report: Dict[str, Any] = {}
         self._http_server: Optional[Any] = None
         self._http_bound_port = 0
         self._daemon_log: Optional[Any] = None
@@ -870,6 +940,36 @@ class SidecarDaemon:
             )
             raise DaemonError("HTTP startup failed: {}".format(error)) from error
 
+    def _source_drift_payload(self) -> Dict[str, Any]:
+        """What the installed tree says, re-read on a short interval.
+
+        Read per ping rather than once at start — the whole point is to
+        notice the tree changing underneath a daemon that is still up — but
+        behind a TTL, since a ping should not walk the package on every
+        supervisor poll.
+        """
+
+        now = time.time()
+        with self._serving_lock:
+            fresh = now - self._drift_checked_at < SOURCE_DRIFT_TTL_SECONDS
+            if fresh:
+                return dict(self._drift_report)
+        report: Dict[str, Any] = {}
+        on_disk = installed_source_version()
+        if on_disk is not None:
+            report["source_version"] = on_disk
+        digest = source_digest()
+        if (
+            digest is not None
+            and self._loaded_digest is not None
+            and digest != self._loaded_digest
+        ):
+            report["source_changed"] = True
+        with self._serving_lock:
+            self._drift_checked_at = now
+            self._drift_report = dict(report)
+        return report
+
     def _record_shutdown_diagnostic(self, message: str) -> None:
         with self._serving_lock:
             self._shutdown_timed_out = True
@@ -1347,6 +1447,7 @@ class SidecarDaemon:
                                     "op": "ping",
                                     "pid": os.getpid(),
                                     "version": __version__,
+                                    **self._source_drift_payload(),
                                     "http": self._http_ping_payload(),
                                 },
                             )

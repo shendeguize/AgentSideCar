@@ -48,6 +48,8 @@ export interface AnalysisResultWire {
   truncated: boolean
   tokensHint?: number
   errorCode?: string
+  /** Which bounded step ran out of time (host: AnalysisTimeoutStage). */
+  timeoutStage?: string
   detail?: string
   disclaimer: string
 }
@@ -136,6 +138,12 @@ export interface AnalysisGlueState {
   disclaimer: string | null
   /** Terminal failure code (phase 'failed'), else null. */
   errorCode: string | null
+  /**
+   * Which step ran out of time on a timeout, else null. "The session never
+   * came up" and "the model never finished" need different words and
+   * different fixes; one `timeout` code could say neither.
+   */
+  timeoutStage: string | null
   /** Non-terminal notice code (kept session; retryable), else null. */
   noticeCode: string | null
   /** Monotonic progress segment for the in-flight fallback indicator. */
@@ -149,16 +157,20 @@ const INITIAL_STATE: AnalysisGlueState = {
   messages: [],
   disclaimer: null,
   errorCode: null,
+  timeoutStage: null,
   noticeCode: null,
   progressStep: 0,
 }
 
 /**
- * The action deadline: the engine bounds one turn at ~60s (analysis.ts
- * `turnTimeoutMs`), so the transport must outlive it to receive the
- * engine's own timeout verdict instead of racing it.
+ * The action deadline. It must outlive the engine's own worst case — create
+ * (~20s) plus one turn (~60s), i.e. `ANALYSIS_REQUEST_BUDGET_MS` in
+ * analysis.ts — or the transport aborts first and the client loses both the
+ * engine's verdict and any text the engine salvaged from a slow turn. The
+ * relationship is pinned by a test, since a client program cannot import the
+ * host constant to derive it.
  */
-export const ANALYSIS_POST_TIMEOUT_MS = 75_000
+export const ANALYSIS_POST_TIMEOUT_MS = 95_000
 
 /** ApiError reason codes that keep a live followup session usable. */
 const RETRYABLE_FOLLOWUP_CODES = new Set([
@@ -292,6 +304,7 @@ export class AnalysisStore {
       this.setState({
         phase: 'failed',
         errorCode: failureCode(err),
+        timeoutStage: null,
         messages: this.withoutPendingMessages(),
       })
     } finally {
@@ -377,6 +390,25 @@ export class AnalysisStore {
 
   /** Fold one settled 200 result into the conversation. */
   private adoptResult(question: string | null, result: AnalysisResultWire): void {
+    if (result.outcome === 'timeout') {
+      // The engine answers 200 for a timeout that salvaged text. Keep that
+      // text, then land where the engine's session lifecycle points: a kept
+      // session (follow-up) stays answerable with a notice, a disposed one
+      // (request) is terminal.
+      const summary = result.summary ?? ''
+      const kept = typeof result.analysisSessionId === 'string' && result.analysisSessionId !== ''
+      this.setState({
+        phase: kept ? 'ready' : 'failed',
+        ...(kept ? { analysisSessionId: result.analysisSessionId as string } : {}),
+        ...(kept ? { noticeCode: 'timeout' } : { errorCode: 'timeout' }),
+        timeoutStage: result.timeoutStage ?? null,
+        disclaimer: result.disclaimer,
+        messages:
+          summary === '' ? this.withoutPendingMessages() : this.settledMessages(summary, false),
+        progressStep: 0,
+      })
+      return
+    }
     if (result.outcome === 'completed') {
       this.setState({
         phase: 'ready',
