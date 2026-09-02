@@ -1282,11 +1282,20 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
                 process.stdin.close()
                 assert process.stdout is not None
                 self.assertEqual(READY_FRAME + b"\n", process.stdout.readline())
+                # The child creates this file and then writes to it, so mere
+                # existence can still mean an empty read on a loaded runner.
                 deadline = time.monotonic() + 1
-                while time.monotonic() < deadline and not pid_path.exists():
+                recorded = ""
+                while time.monotonic() < deadline:
+                    try:
+                        recorded = pid_path.read_text(encoding="ascii").strip()
+                    except OSError:
+                        recorded = ""
+                    if recorded:
+                        break
                     time.sleep(0.01)
-                self.assertTrue(pid_path.exists())
-                child_pid = int(pid_path.read_text(encoding="ascii"))
+                self.assertTrue(recorded, "child never recorded its pid")
+                child_pid = int(recorded)
 
                 disconnected_at = time.monotonic()
                 process.stdout.close()
