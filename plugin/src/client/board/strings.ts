@@ -29,6 +29,8 @@ export const BOARD_STRINGS = createLocaleView({
   },
   banner: {
     daemonFailed: 'board.banner.daemonFailed',
+    daemonStale: 'board.banner.daemonStale',
+    daemonStaleCode: 'board.banner.daemonStaleCode',
     streamDegraded: 'board.banner.streamDegraded',
   },
   empty: {

@@ -2223,12 +2223,22 @@ def _daemon_status(client: SidecarClient, stdout: TextIO) -> int:
         )
     else:
         stdout.write("daemon is running (pid {})\n".format(info.pid))
-    if reported and reported != sidecar.__version__:
+    # The daemon's own tree is what it would load on restart; this CLI's
+    # version is only a stand-in for it, and a wrong one when the two come
+    # from different installs. Between releases the version cannot move at
+    # all, so the daemon's own content check is the only signal left.
+    on_disk = sanitize_terminal_text(info.source_version) or sidecar.__version__
+    if reported and reported != on_disk:
         # A long-lived daemon keeps serving the code it started with, so an
-        # upgraded CLI would otherwise read stale sessions without any signal.
+        # upgraded install would otherwise be read as live without a signal.
         stdout.write(
-            "daemon is stale: CLI is {}; restart the daemon or the service "
-            "to load it\n".format(sidecar.__version__)
+            "daemon is stale: installed code is {}; restart the daemon or the "
+            "service to load it\n".format(on_disk)
+        )
+    elif info.source_changed:
+        stdout.write(
+            "daemon is stale: the installed code changed since it started "
+            "(still {}); restart the daemon or the service to load it\n".format(on_disk)
         )
     _report_http_info(info, client, stdout)
     stdout.flush()

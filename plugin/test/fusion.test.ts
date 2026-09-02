@@ -567,6 +567,42 @@ describe('getSessionTimeline', () => {
     expect(page.entries.map((e) => e.text)).toEqual(['survivor'])
   })
 
+  it('reads a namespaced session-not-found as an absent session, not a broken source', async () => {
+    // dsh-session-query raises SESSION_QUERY_SESSION_NOT_FOUND for every id it
+    // does not own — which is every Cursor, Claude, and Codex session on the
+    // board. Matching only the bare token pinned those timelines as degraded.
+    const absent = Object.assign(new Error('session "sess-x" not found'), {
+      code: 'SESSION_QUERY_SESSION_NOT_FOUND',
+    })
+    const engine = fakeEngine()
+    engine.setLog(absent)
+    const { fusion } = makeFusion({ getSessionQuery: () => engine.engine })
+    fusion.ingestSidecarEvent(sidecarEvent('sess-x', { text: 'survivor' }))
+
+    const page = await fusion.getSessionTimeline('sess-x')
+
+    expect(page.sourceOutcomes.sessionQuery).toBe('not_found')
+    expect(page.degraded).toBe(false)
+    expect(page.reason).toBeNull()
+    expect(page.entries.map((entry) => entry.text)).toEqual(['survivor'])
+  })
+
+  it('keeps a namespaced non-session failure a failure', async () => {
+    // The prefix tolerance must not swallow the rest of a service's code
+    // vocabulary: only the session-absent suffix is an absence.
+    const broken = Object.assign(new Error('event 7 not found'), {
+      code: 'SESSION_QUERY_EVENT_NOT_FOUND',
+    })
+    const engine = fakeEngine()
+    engine.setLog(broken)
+    const { fusion } = makeFusion({ getSessionQuery: () => engine.engine })
+
+    const page = await fusion.getSessionTimeline('sess-x')
+
+    expect(page.sourceOutcomes.sessionQuery).toBe('source_failed')
+    expect(page.degraded).toBe(true)
+  })
+
   it('reports a redacted partial failure while preserving successful entries', async () => {
     const secret = 'PROMPT-SECRET /Users/private/session-id-77'
     const engine = fakeEngine()

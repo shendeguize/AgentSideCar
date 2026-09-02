@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A session that simply does not exist in a timeline source no longer counts
+  as a broken source. `dsh-session-query` answers `SESSION_NOT_FOUND` for
+  every non-DSH session, and that namespaced code was unrecognized, so any
+  claude/codex/copilot/cursor/kimi detail page opened with a "sources failed"
+  warning over a complete timeline.
+- The AI analysis budget no longer charges session creation to the first model
+  turn. Creation and the turn each get their own deadline, a timeout records
+  which stage ran out, and text the model had already produced is kept and
+  shown instead of being discarded with the turn.
+
+### Added
+
+- A detail page whose history came only from the in-memory ring buffer now
+  says so, and stops claiming the visible events reach the start of the
+  timeline. Correctly recognizing an absent session (above) would otherwise
+  have silenced the one warning that hinted at genuinely truncated history.
+- The daemon now reports drift against its own installed code, and both
+  `daemon status` and the board say so. A daemon that outlives an upgrade
+  keeps answering pings normally, so nothing used to contradict a board built
+  from code that was replaced hours ago. It reports the version sitting in its
+  source tree — the number `daemon status` now compares against, rather than
+  the CLI's own version, which is only a stand-in and wrong when the two come
+  from different installs — plus a content fingerprint of that tree, because
+  between releases the version cannot move at all and a same-version daemon
+  can still be many edits behind. Content, not timestamps: a rewrite with
+  identical bytes is not drift, and a false stale warning would teach
+  operators to ignore the real one.
+
 ## [0.10.0] - 2026-09-01
 
 ### Fixed

@@ -37,6 +37,7 @@ import {
   type BoardFilterState,
   type BoardStatusFilter,
   type DaemonStateToken,
+  type DaemonVersionDrift,
   type DerivedSessionCardVM,
   type ProjectGroupVM,
   type SessionCardVM,
@@ -72,6 +73,8 @@ export interface BoardProps {
   daemonState: DaemonStateToken
   /** Optional raw detail for the daemon badge hover (e.g. "pid 123 · v0.6.0"). */
   daemonDetail?: string
+  /** Set only when the daemon is behind the code now on disk. */
+  daemonDrift?: DaemonVersionDrift | null
   streamHealth: StreamHealthToken
   /** Epoch ms of the last authoritative snapshot reconcile, or null. */
   lastReconcileAtMs: number | null
@@ -371,6 +374,7 @@ export function Board(props: BoardProps): ReactElement {
     filters: props.filters,
     daemonState: props.daemonState,
     streamHealth: props.streamHealth,
+    daemonDrift: props.daemonDrift ?? null,
     lastReconcileAtMs: props.lastReconcileAtMs,
     nowMs,
   })

@@ -931,19 +931,28 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
    * body is the result verbatim (it already carries outcome /
    * analysisSessionId / summary / truncated / disclaimer). The log line
    * keeps only outcome/codes/ids — never summaries or questions (S8).
+   *
+   * One exception to the error-status table: a timeout that salvaged text is
+   * answered 200. A 504 body is an error body, and every client throws it
+   * away — which would discard the very output the engine went out of its
+   * way to keep. The outcome and `timeoutStage` in the body still say it
+   * timed out, so nothing reads it as a clean completion.
    */
   const respondAnalysisResult = (
     type: string,
     res: ServerResponse,
     result: AnalysisResult,
   ): void => {
+    const salvaged =
+      result.outcome === 'timeout' && result.summary !== undefined && result.summary !== ''
     const status =
-      result.errorCode !== undefined
+      result.errorCode !== undefined && !salvaged
         ? (ANALYSIS_ERROR_STATUS[result.errorCode] ?? 502)
         : 200
     logAction(type, status, {
       outcome: result.outcome,
       ...(result.errorCode !== undefined ? { errorCode: result.errorCode } : {}),
+      ...(result.timeoutStage !== undefined ? { timeoutStage: result.timeoutStage } : {}),
       ...(result.analysisSessionId !== undefined
         ? { analysisSessionId: result.analysisSessionId }
         : {}),

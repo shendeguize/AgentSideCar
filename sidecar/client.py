@@ -81,6 +81,12 @@ class PingInfo:
     pid: int
     version: str
     http: HttpPingInfo
+    # The version the daemon's own tree would load on restart. Empty when the
+    # daemon cannot read its source, which is not the same as "no drift".
+    source_version: str = ""
+    # The daemon's tree no longer matches the code it loaded — the only
+    # signal available between releases, when the version cannot move.
+    source_changed: bool = False
 
     @classmethod
     def from_response(cls, response: object) -> "PingInfo":
@@ -121,10 +127,22 @@ class PingInfo:
                 "daemon returned an invalid version",
                 code="invalid_response",
             )
+        source_version = response.get("source_version")
+        if source_version is None:
+            rendered_source = ""
+        elif isinstance(source_version, str):
+            rendered_source = source_version
+        else:
+            raise SidecarClientError(
+                "daemon returned an invalid source version",
+                code="invalid_response",
+            )
         return cls(
             pid=parsed_pid,
             version=rendered_version,
             http=HttpPingInfo.from_value(response.get("http")),
+            source_version=rendered_source,
+            source_changed=response.get("source_changed") is True,
         )
 
 

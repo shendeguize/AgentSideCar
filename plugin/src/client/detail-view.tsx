@@ -341,6 +341,9 @@ export function TimelineAvailabilityBoundary(
       : health.kind === 'failed'
         ? 'detail.timeline.degradedAll'
         : 'detail.timeline.degradedUnverified'
+  // Reported separately from degradation, and only when there is something to
+  // qualify: nothing broke, so this is a note about reach, not a warning.
+  const volatileOnly = health.historyScope === 'volatile_only' && props.entryCount > 0
 
   return (
     <>
@@ -388,6 +391,16 @@ export function TimelineAvailabilityBoundary(
               </Button>
             </span>
           )}
+        </div>
+      )}
+      {volatileOnly && !blocksHealthyEmpty && (
+        <div
+          className={css['toolsSection']}
+          role="status"
+          data-testid="agent-sidecar-timeline-volatile"
+        >
+          <span>{t('detail.timeline.volatileOnly')}</span>
+          <span>{t('detail.timeline.volatileOnlyHint')}</span>
         </div>
       )}
       {!blocksHealthyEmpty && props.children}
@@ -613,6 +626,7 @@ export function SidecarDetailView(props: SidecarDetailViewProps): ReactElement {
         hasMore={detail.hasMore}
         listening={detail.listening}
         refreshing={detail.refreshing}
+        historyScope={detail.timelineHealth.historyScope}
         onLoadMore={() => { void detailStore.loadMore() }}
         onToggleListen={() => { detailStore.toggleListen() }}
         onRefresh={() => { void detailStore.refreshNewest() }}

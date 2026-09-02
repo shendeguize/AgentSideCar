@@ -57,6 +57,17 @@ export interface HttpPingInfo {
 export interface PingInfo {
   pid: number
   version: string
+  /**
+   * The `__version__` in the daemon's own source tree — what it would load
+   * if restarted. Absent when the daemon cannot read its source (a packaged
+   * form), which is not the same as "matches".
+   */
+  sourceVersion?: string
+  /**
+   * The daemon's tree no longer matches the code it loaded. Between
+   * releases the version cannot move, so this is the only drift signal.
+   */
+  sourceChanged?: boolean
   http: HttpPingInfo
 }
 
@@ -277,7 +288,16 @@ function parsePingInfo(value: unknown): PingInfo | null {
   else return null
   const http = parseHttpPingInfo(value['http'])
   if (http === null) return null
-  return { pid, version, http }
+  const rawSource = value['source_version']
+  if (rawSource !== null && rawSource !== undefined && typeof rawSource !== 'string') return null
+  const sourceVersion = typeof rawSource === 'string' && rawSource !== '' ? rawSource : undefined
+  return {
+    pid,
+    version,
+    ...sourceVersion === undefined ? {} : { sourceVersion },
+    ...value['source_changed'] === true ? { sourceChanged: true } : {},
+    http,
+  }
 }
 
 /**

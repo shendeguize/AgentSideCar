@@ -82,6 +82,7 @@ var AnalysisEngine = class {
 	now;
 	maxInputChars;
 	analysisTimeoutMs;
+	createTimeoutMs;
 	maxActiveSessions;
 	pluginName;
 	active = /* @__PURE__ */ new Map();
@@ -91,6 +92,7 @@ var AnalysisEngine = class {
 		this.now = deps.now ?? Date.now;
 		this.maxInputChars = deps.maxInputChars ?? 8e3;
 		this.analysisTimeoutMs = deps.analysisTimeoutMs ?? 6e4;
+		this.createTimeoutMs = deps.createTimeoutMs ?? 2e4;
 		this.maxActiveSessions = deps.maxActiveSessions ?? 4;
 		this.pluginName = deps.pluginName ?? "agent-sidecar";
 	}
@@ -100,9 +102,10 @@ var AnalysisEngine = class {
 	}
 	/**
 	* Start a dedicated analysis session and return its first insight.
-	* Establishment (create + priming prompt + first response) shares one
-	* `analysisTimeoutMs` budget; on timeout the turn is cancelled and the
-	* session disposed, so a timed-out request leaves nothing running.
+	* Establishment is bounded by `createTimeoutMs` and the priming turn gets
+	* its own full `analysisTimeoutMs`; on timeout the turn is cancelled and
+	* the session disposed, so a timed-out request leaves nothing running —
+	* but any text the model already emitted is returned rather than dropped.
 	*/
 	async request(input) {
 		const startedAt = this.now();
@@ -134,7 +137,6 @@ var AnalysisEngine = class {
 			messageSeq: 0
 		};
 		this.active.set(analysisSessionId, entry);
-		const deadline = startedAt + this.analysisTimeoutMs;
 		const controller = new AbortController();
 		let createTimedOut = false;
 		const createPromise = this.deps.createAgent({
@@ -146,12 +148,12 @@ var AnalysisEngine = class {
 		}, () => {});
 		let handle;
 		try {
-			const created = await withTimeout(createPromise, deadline - this.now());
+			const created = await withTimeout(createPromise, this.createTimeoutMs);
 			if (created.timedOut) {
 				createTimedOut = true;
 				this.active.delete(analysisSessionId);
 				controller.abort();
-				return this.timeoutResult("request", entry, bounded.truncated, startedAt, void 0);
+				return this.timeoutResult("request", entry, bounded.truncated, startedAt, void 0, { stage: "create" });
 			}
 			handle = created.value;
 		} catch (error) {
@@ -172,7 +174,7 @@ var AnalysisEngine = class {
 			inputChars: bounded.text.length
 		});
 		const prompt = this.buildInitialPrompt(input.kind, title, bounded);
-		const turn = await this.runTurn(entry, prompt, deadline);
+		const turn = await this.runTurn(entry, prompt, this.now() + this.analysisTimeoutMs);
 		entry.busy = false;
 		if (turn.status === "threw") {
 			this.active.delete(analysisSessionId);
@@ -187,7 +189,10 @@ var AnalysisEngine = class {
 			this.cancelQuietly(entry);
 			this.active.delete(analysisSessionId);
 			await this.disposeQuietly(entry);
-			return this.timeoutResult("request", entry, bounded.truncated, startedAt, void 0);
+			return this.timeoutResult("request", entry, bounded.truncated, startedAt, void 0, {
+				stage: "first_turn",
+				partial: turn.partial
+			});
 		}
 		const result = {
 			outcome: "completed",
@@ -245,7 +250,10 @@ var AnalysisEngine = class {
 			}
 			if (turn.status === "timeout") {
 				this.cancelQuietly(entry);
-				return this.timeoutResult("followup", entry, bounded.truncated, startedAt, analysisSessionId);
+				return this.timeoutResult("followup", entry, bounded.truncated, startedAt, analysisSessionId, {
+					stage: "followup_turn",
+					partial: turn.partial
+				});
 			}
 			const result = {
 				outcome: "completed",
@@ -320,7 +328,10 @@ var AnalysisEngine = class {
 				detail: describeError$3(error)
 			};
 		}
-		if (idle.timedOut) return { status: "timeout" };
+		if (idle.timedOut) return {
+			status: "timeout",
+			partial: extractNewAssistantText(session.deriveMessages(), entry.messageBaseline)
+		};
 		const summary = extractNewAssistantText(session.deriveMessages(), entry.messageBaseline);
 		const tokensHint = extractTokensHint(session.events, entry.eventBaseline);
 		entry.messageBaseline = session.deriveMessages().length;
@@ -391,12 +402,15 @@ var AnalysisEngine = class {
 		});
 		return result;
 	}
-	timeoutResult(phase, entry, truncated, startedAt, analysisSessionId) {
+	timeoutResult(phase, entry, truncated, startedAt, analysisSessionId, opts) {
+		const partial = opts.partial ?? "";
 		const result = {
 			outcome: "timeout",
 			...analysisSessionId !== void 0 ? { analysisSessionId } : {},
+			...partial !== "" ? { summary: partial } : {},
 			truncated,
 			errorCode: "timeout",
+			timeoutStage: opts.stage,
 			disclaimer: ANALYSIS_DISCLAIMER
 		};
 		this.deps.log({
@@ -407,6 +421,8 @@ var AnalysisEngine = class {
 			title: entry.title,
 			outcome: "timeout",
 			errorCode: "timeout",
+			timeoutStage: opts.stage,
+			...partial !== "" ? { partial: true } : {},
 			elapsedMs: this.now() - startedAt
 		});
 		return result;
@@ -783,9 +799,14 @@ function parsePingInfo(value) {
 	else return null;
 	const http = parseHttpPingInfo(value["http"]);
 	if (http === null) return null;
+	const rawSource = value["source_version"];
+	if (rawSource !== null && rawSource !== void 0 && typeof rawSource !== "string") return null;
+	const sourceVersion = typeof rawSource === "string" && rawSource !== "" ? rawSource : void 0;
 	return {
 		pid,
 		version,
+		...sourceVersion === void 0 ? {} : { sourceVersion },
+		...value["source_changed"] === true ? { sourceChanged: true } : {},
 		http
 	};
 }
@@ -2336,36 +2357,47 @@ const TIMELINE_INERT_OUTCOMES = /* @__PURE__ */ new Set([
 	"not_found",
 	"replay_unsupported"
 ]);
+/** Bare codes that answer "no such session here". */
+const SESSION_ABSENT_CODES = ["unknown_session", "not_found"];
 /**
-* Extract only a bounded, known machine code for internal classification.
-* The returned timeline contract never includes this value or the upstream
-* message, which may contain paths, ids, prompts, or other private content.
+* Suffix of the namespaced form of the same answer. dsh services prefix their
+* codes with the service name, so dsh-session-query raises
+* `SESSION_QUERY_SESSION_NOT_FOUND` for every id it does not own — which is
+* every session dsh never ran. Matching only the bare `SESSION_NOT_FOUND`
+* classified all of them as broken sources, so every Cursor, Claude, and
+* Codex session carried a permanent "sources failed" banner over a timeline
+* that was in fact whole. The leading underscore is required so the rest of
+* a service's vocabulary (`SESSION_QUERY_EVENT_NOT_FOUND`) stays a failure.
 */
-function knownTimelineErrorCode(error) {
-	const knownCodes = [
-		"unknown_session",
-		"not_found",
-		"SESSION_NOT_FOUND",
-		"replay_unsupported"
-	];
+const SESSION_ABSENT_SUFFIX = "SESSION_NOT_FOUND";
+/** Leading `CODE`, `CODE:`, or `CODE ` of a message that lost its typed error. */
+const LEADING_CODE = /^([A-Za-z_]+)(?::|\s|$)/;
+function classifyTimelineErrorCode(code) {
+	if (code === "replay_unsupported") return "replay_unsupported";
+	if (SESSION_ABSENT_CODES.includes(code)) return "session_absent";
+	return code === SESSION_ABSENT_SUFFIX || code.endsWith(`_${SESSION_ABSENT_SUFFIX}`) ? "session_absent" : null;
+}
+function classifyTimelineError(error) {
 	if (typeof error === "object" && error !== null) {
 		const record = error;
 		for (const key of ["code", "errorCode"]) {
 			const value = record[key];
-			if (typeof value === "string" && knownCodes.some((code) => value === code)) return value;
+			if (typeof value !== "string") continue;
+			const classified = classifyTimelineErrorCode(value);
+			if (classified !== null) return classified;
 		}
 	}
 	if (error instanceof Error) {
-		for (const code of knownCodes) if (error.message === code || error.message.startsWith(`${code}:`) || error.message.startsWith(`${code} `)) return code;
+		const leading = LEADING_CODE.exec(error.message);
+		if (leading !== null) return classifyTimelineErrorCode(leading[1]);
 	}
 	return null;
 }
 function classifySourceFailure(error) {
-	const code = knownTimelineErrorCode(error);
-	return code === "unknown_session" || code === "not_found" || code === "SESSION_NOT_FOUND" ? "not_found" : "source_failed";
+	return classifyTimelineError(error) === "session_absent" ? "not_found" : "source_failed";
 }
 function classifyReplayFailure(error) {
-	return knownTimelineErrorCode(error) === "replay_unsupported" ? "replay_unsupported" : classifySourceFailure(error);
+	return classifyTimelineError(error) === "replay_unsupported" ? "replay_unsupported" : classifySourceFailure(error);
 }
 function degradationOf(sourceOutcomes, entriesEmpty) {
 	const outcomes = Object.values(sourceOutcomes);
@@ -4102,12 +4134,20 @@ function createRoutes(deps, opts = {}) {
 	* body is the result verbatim (it already carries outcome /
 	* analysisSessionId / summary / truncated / disclaimer). The log line
 	* keeps only outcome/codes/ids — never summaries or questions (S8).
+	*
+	* One exception to the error-status table: a timeout that salvaged text is
+	* answered 200. A 504 body is an error body, and every client throws it
+	* away — which would discard the very output the engine went out of its
+	* way to keep. The outcome and `timeoutStage` in the body still say it
+	* timed out, so nothing reads it as a clean completion.
 	*/
 	const respondAnalysisResult = (type, res, result) => {
-		const status = result.errorCode !== void 0 ? ANALYSIS_ERROR_STATUS[result.errorCode] ?? 502 : 200;
+		const salvaged = result.outcome === "timeout" && result.summary !== void 0 && result.summary !== "";
+		const status = result.errorCode !== void 0 && !salvaged ? ANALYSIS_ERROR_STATUS[result.errorCode] ?? 502 : 200;
 		logAction(type, status, {
 			outcome: result.outcome,
 			...result.errorCode !== void 0 ? { errorCode: result.errorCode } : {},
+			...result.timeoutStage !== void 0 ? { timeoutStage: result.timeoutStage } : {},
 			...result.analysisSessionId !== void 0 ? { analysisSessionId: result.analysisSessionId } : {},
 			...result.truncated ? { truncated: true } : {}
 		});

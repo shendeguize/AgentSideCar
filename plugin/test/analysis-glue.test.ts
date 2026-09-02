@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { ANALYSIS_REQUEST_BUDGET_MS } from '../src/analysis.ts'
 import { ApiError, type ActionEnvelope } from '../src/client/api.ts'
 import {
   ANALYSIS_POST_TIMEOUT_MS,
@@ -119,6 +120,38 @@ describe('AnalysisStore.start', () => {
     expect(state.errorCode).toBeNull()
   })
 
+  it('keeps a timed-out turn\'s salvaged text and its stage', async () => {
+    // The engine answers 200 when a timeout produced text, precisely so the
+    // client stops throwing away output the user already paid for.
+    const { store } = makeStore([
+      {
+        outcome: 'timeout',
+        summary: 'ran out of time, but here is the read so far',
+        truncated: false,
+        errorCode: 'timeout',
+        timeoutStage: 'first_turn',
+        disclaimer: 'AI 分析仅供参考',
+      } satisfies AnalysisResultWire,
+    ])
+
+    await store.start({ targetKind: 'session', targetId: 's1' })
+
+    const state = store.getState()
+    // Terminal: the engine disposed the session, so no follow-ups.
+    expect(state.phase).toBe('failed')
+    expect(state.errorCode).toBe('timeout')
+    expect(state.timeoutStage).toBe('first_turn')
+    expect(state.analysisSessionId).toBeNull()
+    expect(state.messages).toEqual([
+      { role: 'assistant', content: 'ran out of time, but here is the read so far' },
+    ])
+  })
+
+  it('transport deadline outlives the engine\'s own worst case', async () => {
+    // Racing the engine loses its verdict — and now also the salvaged text.
+    expect(ANALYSIS_POST_TIMEOUT_MS).toBeGreaterThan(ANALYSIS_REQUEST_BUDGET_MS)
+  })
+
   it('guards against double starts while live', async () => {
     const { store, posted } = makeStore([completed()])
     await store.start({ targetKind: 'session', targetId: 's1' })
@@ -169,6 +202,34 @@ describe('AnalysisStore.followup', () => {
     expect(state.phase).toBe('ready')
     expect(state.noticeCode).toBe('timeout')
     expect(state.errorCode).toBeNull()
+  })
+
+  it('shows a timed-out follow-up\'s salvaged text and stays answerable', async () => {
+    const { store } = await readyStore([
+      {
+        outcome: 'timeout',
+        analysisSessionId: 'ana-1',
+        summary: 'partial answer',
+        truncated: false,
+        errorCode: 'timeout',
+        timeoutStage: 'followup_turn',
+        disclaimer: 'AI 分析仅供参考',
+      } satisfies AnalysisResultWire,
+    ])
+
+    await store.followup('and then?')
+
+    const state = store.getState()
+    // The engine keeps a follow-up's session, so this is a notice, not a
+    // terminal — and the text it did produce stays on screen.
+    expect(state.phase).toBe('ready')
+    expect(state.noticeCode).toBe('timeout')
+    expect(state.errorCode).toBeNull()
+    expect(state.messages).toEqual([
+      { role: 'assistant', content: 'looks healthy' },
+      { role: 'user', content: 'and then?' },
+      { role: 'assistant', content: 'partial answer' },
+    ])
   })
 
   it('treats a 200 cancelled result as the stopped terminal', async () => {

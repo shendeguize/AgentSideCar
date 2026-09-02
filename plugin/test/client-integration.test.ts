@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   injectBlockReason,
   INVALID_INJECT_ELIGIBILITY,
+  LEGACY_TIMELINE_HEALTH,
   normalizeInjectEligibility,
   normalizeTimelineHealth,
   sessionInjectEligibility,
@@ -31,6 +32,7 @@ import {
   SidecarController,
   combineStreamHealth,
   daemonDetailOf,
+  daemonVersionDriftOf,
   initialViewState,
   mapSessions,
   mapSnapshot,
@@ -940,6 +942,54 @@ describe('timeline source outcome integration', () => {
     }
   })
 
+  it('separates a volatile-only history from a broken source', () => {
+    // The stale-daemon shape: no durable source answered, so the in-memory
+    // ring is the entire timeline. Nothing broke, so the failure banner must
+    // stay off — but the page cannot claim it reached the start of history.
+    const volatileOnly = normalizeTimelineHealth({
+      entries: [{ seq: 3 }],
+      sourceOutcomes: {
+        liveSession: 'not_found',
+        sessionQuery: 'not_found',
+        sidecarReplay: 'replay_unsupported',
+        buffer: 'succeeded',
+      },
+      degraded: false,
+      reason: null,
+    })
+    const durable = normalizeTimelineHealth({
+      entries: [{ seq: 3 }],
+      sourceOutcomes: {
+        liveSession: 'not_found',
+        sessionQuery: 'not_found',
+        sidecarReplay: 'succeeded',
+        buffer: 'succeeded',
+      },
+      degraded: false,
+      reason: null,
+    })
+
+    expect(volatileOnly).toMatchObject({ kind: 'healthy', historyScope: 'volatile_only' })
+    expect(durable).toMatchObject({ kind: 'healthy', historyScope: 'durable' })
+    // A legacy host sends no outcomes, so the scope is unknowable there.
+    expect(LEGACY_TIMELINE_HEALTH).toMatchObject({ historyScope: 'unknown' })
+
+    try {
+      setLocale('zh')
+      const html = renderBoundary(volatileOnly, 1, 'timeline-body')
+      expect(html).toContain('agent-sidecar-timeline-volatile')
+      // Entries stay visible and the failure banner stays away.
+      expect(html).toContain('timeline-body')
+      expect(html).not.toContain('agent-sidecar-timeline-degraded')
+
+      expect(renderBoundary(durable, 1, 'timeline-body')).not.toContain(
+        'agent-sidecar-timeline-volatile',
+      )
+    } finally {
+      setLocale('zh')
+    }
+  })
+
   it('shows partial degradation in both locales without hiding entries or leaking details', () => {
     const health = normalizeTimelineHealth({
       entries: [{ seq: 9 }],
@@ -1011,8 +1061,20 @@ describe('timeline source outcome integration', () => {
       sources: {},
     })
 
-    expect(unknown).toEqual({ kind: 'unverified', legacy: false, summary: null })
-    expect(legacy).toEqual({ kind: 'healthy', legacy: true, summary: null })
+    // Neither page can be trusted to state its own reach: the unknown one
+    // failed validation and the legacy one never reported outcomes.
+    expect(unknown).toEqual({
+      kind: 'unverified',
+      legacy: false,
+      summary: null,
+      historyScope: 'unknown',
+    })
+    expect(legacy).toEqual({
+      kind: 'healthy',
+      legacy: true,
+      summary: null,
+      historyScope: 'unknown',
+    })
     const unknownHtml = renderBoundary(unknown, 0)
     expect(unknownHtml).toContain('role="alert"')
     expect(unknownHtml).not.toContain('healthy-empty-content')
@@ -1931,6 +1993,46 @@ describe('daemonDetailOf', () => {
 
   it('is undefined without a ping', () => {
     expect(daemonDetailOf(null)).toBeUndefined()
+  })
+})
+
+describe('daemonVersionDriftOf', () => {
+  it('reports the two versions when the daemon is behind its own tree', () => {
+    expect(
+      daemonVersionDriftOf({
+        pid: 1,
+        version: '0.9.0',
+        sourceVersion: '0.10.0',
+        http: { enabled: false },
+      }),
+    ).toEqual({ running: '0.9.0', installed: '0.10.0' })
+  })
+
+  it('reports drift when the tree changed under an unchanged version', () => {
+    expect(
+      daemonVersionDriftOf({
+        pid: 1,
+        version: '0.10.0',
+        sourceVersion: '0.10.0',
+        sourceChanged: true,
+        http: { enabled: false },
+      }),
+    ).toEqual({ running: '0.10.0', installed: '0.10.0', codeChanged: true })
+  })
+
+  it('claims no drift when the daemon matches its tree or cannot read it', () => {
+    expect(
+      daemonVersionDriftOf({
+        pid: 1,
+        version: '0.10.0',
+        sourceVersion: '0.10.0',
+        http: { enabled: false },
+      }),
+    ).toBeNull()
+    // A packaged daemon knows no source version; silence beats a guess.
+    expect(daemonVersionDriftOf({ pid: 1, version: '0.9.0', http: { enabled: false } }))
+      .toBeNull()
+    expect(daemonVersionDriftOf(null)).toBeNull()
   })
 })
 

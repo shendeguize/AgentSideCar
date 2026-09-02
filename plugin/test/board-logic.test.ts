@@ -391,6 +391,41 @@ describe('top bar / banner / empty state', () => {
     expect(deriveBanner('probe', 'unknown')).toBeNull()
   })
 
+  it('banner: names a daemon still serving code the disk has replaced', () => {
+    // The badge stays green while a stale daemon answers pings normally, so
+    // nothing on the page would otherwise contradict a board built from
+    // code the operator already replaced.
+    expect(deriveBanner('hosted', 'ok', { running: '0.9.0', installed: '0.10.0' })).toEqual({
+      tone: 'warn',
+      text: formatTemplate(BOARD_STRINGS.banner.daemonStale, {
+        running: '0.9.0',
+        installed: '0.10.0',
+      }),
+    })
+  })
+
+  it('banner: says the code changed when the version alone cannot show it', () => {
+    const banner = deriveBanner('hosted', 'ok', {
+      running: '0.10.0',
+      installed: '0.10.0',
+      codeChanged: true,
+    })
+    expect(banner).toEqual({
+      tone: 'warn',
+      text: formatTemplate(BOARD_STRINGS.banner.daemonStaleCode, { running: '0.10.0' }),
+    })
+  })
+
+  it('banner: a dead daemon outranks drift, and drift outranks a lagging stream', () => {
+    const drift = { running: '0.9.0', installed: '0.10.0' }
+    expect(deriveBanner('failed', 'degraded', drift)?.text)
+      .toBe(BOARD_STRINGS.banner.daemonFailed)
+    expect(deriveBanner('hosted', 'degraded', drift)?.tone).toBe('warn')
+    expect(deriveBanner('hosted', 'degraded', drift)?.text)
+      .not.toBe(BOARD_STRINGS.banner.streamDegraded)
+    expect(deriveBanner('hosted', 'ok', null)).toBeNull()
+  })
+
   it('empty state: null when anything is visible', () => {
     expect(deriveEmptyState('failed', 3, 5)).toBeNull()
   })

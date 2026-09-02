@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import sidecar
 import sidecar.daemon as daemon_module
 from sidecar import bus
 from sidecar.adapters.base import Adapter
@@ -528,6 +529,121 @@ class DaemonIntegrationTests(unittest.TestCase):
         self.assertEqual("malformed_json", malformed["error"]["code"])
         self.assertEqual("unknown_op", unknown["error"]["code"])
         self.assertTrue(healthy["ok"])
+
+    def test_ping_reports_the_source_version_now_on_disk(self):
+        # A long-lived daemon keeps serving whatever it imported at start, so
+        # an upgrade in place leaves it answering with code the operator
+        # believes they replaced. Reporting the version currently on disk
+        # beside the loaded one is what lets any reader see that drift.
+        client = SidecarClient(runtime_dir=self.runtime, timeout=0.5)
+
+        ping = client.ping()
+
+        self.assertEqual(sidecar.__version__, ping["version"])
+        self.assertEqual(sidecar.__version__, ping["source_version"])
+
+    def test_ping_omits_the_source_version_when_it_cannot_be_read(self):
+        # Packaged forms (zipapp) have no readable source tree. Claiming a
+        # version there would be a guess, and claiming drift would be a lie.
+        client = SidecarClient(runtime_dir=self.runtime, timeout=0.5)
+
+        with mock.patch.object(daemon_module, "installed_source_version", return_value=None):
+            ping = client.ping()
+
+        self.assertNotIn("source_version", ping)
+
+    def test_ping_reports_source_changed_when_the_tree_no_longer_matches(self):
+        # Version numbers only move on release, so between releases a daemon
+        # can be several edits behind its own tree while both sides report
+        # the same version — the exact case that reads as "no drift".
+        client = SidecarClient(runtime_dir=self.runtime, timeout=0.5)
+
+        with mock.patch.object(daemon_module, "SOURCE_DRIFT_TTL_SECONDS", 0.0):
+            self.assertNotIn("source_changed", client.ping())
+            with mock.patch.object(daemon_module, "source_digest", return_value="different"):
+                changed = client.ping()
+
+        self.assertTrue(changed["source_changed"])
+
+    def test_ping_rereads_the_tree_on_an_interval_not_on_every_request(self):
+        # A ping is the supervisor's health poll, so walking the package on
+        # each one would make a diagnostic into a cost.
+        client = SidecarClient(runtime_dir=self.runtime, timeout=0.5)
+        real = daemon_module.source_digest
+
+        with mock.patch.object(
+            daemon_module,
+            "source_digest",
+            side_effect=lambda *args, **kwargs: real(*args, **kwargs),
+        ) as digest:
+            for _ in range(3):
+                self.assertTrue(client.ping()["ok"])
+
+        self.assertEqual(1, digest.call_count)
+
+    def test_source_digest_follows_content_not_timestamps(self):
+        package = self.root / "tree"
+        package.mkdir()
+        (package / "a.py").write_text("value = 1\n", encoding="utf-8")
+        (package / "notes.txt").write_text("not code\n", encoding="utf-8")
+
+        original = daemon_module.source_digest(package)
+
+        # A rewrite with identical content must not read as a change: a
+        # false stale warning teaches operators to ignore the real one.
+        (package / "a.py").write_text("value = 1\n", encoding="utf-8")
+        os.utime(package / "a.py", (0, 0))
+        self.assertEqual(original, daemon_module.source_digest(package))
+
+        (package / "a.py").write_text("value = 2\n", encoding="utf-8")
+        self.assertNotEqual(original, daemon_module.source_digest(package))
+
+        # A new module is a change; an unrelated file is not.
+        (package / "a.py").write_text("value = 1\n", encoding="utf-8")
+        (package / "notes.txt").write_text("still not code\n", encoding="utf-8")
+        self.assertEqual(original, daemon_module.source_digest(package))
+        (package / "b.py").write_text("value = 1\n", encoding="utf-8")
+        self.assertNotEqual(original, daemon_module.source_digest(package))
+
+        self.assertIsNone(daemon_module.source_digest(self.root / "absent"))
+
+    def test_installed_source_version_parses_the_literal_without_importing(self):
+        package = self.root / "pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            'raise RuntimeError("import me and the daemon dies")\n'
+            '__version__ = "9.9.9"\n',
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            "9.9.9",
+            daemon_module.installed_source_version(package / "__init__.py"),
+        )
+        self.assertIsNone(
+            daemon_module.installed_source_version(package / "missing.py")
+        )
+
+    def test_installed_source_version_declines_to_guess_a_non_literal(self):
+        package = self.root / "odd"
+        package.mkdir()
+        (package / "computed.py").write_text(
+            "other = 1\n__version__ = str(other)\n",
+            encoding="utf-8",
+        )
+        (package / "silent.py").write_text("other = 1\n", encoding="utf-8")
+
+        # A computed version cannot be read without running the file, and a
+        # tree that declares none has nothing to report; both stay unknown
+        # rather than becoming a fabricated drift signal.
+        self.assertIsNone(daemon_module.installed_source_version(package / "computed.py"))
+        self.assertIsNone(daemon_module.installed_source_version(package / "silent.py"))
+
+    def test_source_digest_stays_unknown_when_a_module_cannot_be_read(self):
+        package = self.root / "unreadable"
+        (package / "shadow.py").mkdir(parents=True)
+
+        self.assertIsNone(daemon_module.source_digest(package))
 
     def test_status_response_larger_than_2mib_roundtrips_as_jsonl(self):
         updated_at = time.time()

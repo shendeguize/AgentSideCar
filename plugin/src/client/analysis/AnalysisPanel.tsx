@@ -29,7 +29,21 @@ const ERROR_KEYS: Record<string, Parameters<typeof t>[0]> = {
   request_timeout: 'analysis.errNetwork',
 }
 
-function errorText(code: string): string {
+/**
+ * Terminal error copy. A timeout says which step ran out and whether any of
+ * the answer survived, because "creating the analysis session timed out" and
+ * "the model stopped mid-answer" are different problems, and the text above
+ * this line is worth reading in the second case.
+ */
+function errorText(state: AnalysisGlueState): string {
+  const code = state.errorCode ?? ''
+  if (code === 'timeout') {
+    if (state.timeoutStage === 'create') return t('analysis.errTimeoutCreate')
+    const hasPartial = state.messages.some(
+      (message) => message.role === 'assistant' && message.content !== '',
+    )
+    return hasPartial ? t('analysis.errTimeoutPartial') : t('analysis.errTimeout')
+  }
   const key = ERROR_KEYS[code]
   return key !== undefined ? t(key) : t('analysis.errGeneric', { code })
 }
@@ -136,7 +150,7 @@ export function AnalysisPanel(props: AnalysisPanelProps): ReactElement {
 
         {state.phase === 'failed' && state.errorCode !== null && (
           <div className={css['errorCard']} data-testid="agent-sidecar-analysis-error">
-            {errorText(state.errorCode)}
+            {errorText(state)}
           </div>
         )}
         {state.phase === 'stopped' && (
