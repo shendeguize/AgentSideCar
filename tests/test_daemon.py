@@ -624,6 +624,27 @@ class DaemonIntegrationTests(unittest.TestCase):
             daemon_module.installed_source_version(package / "missing.py")
         )
 
+    def test_installed_source_version_declines_to_guess_a_non_literal(self):
+        package = self.root / "odd"
+        package.mkdir()
+        (package / "computed.py").write_text(
+            "other = 1\n__version__ = str(other)\n",
+            encoding="utf-8",
+        )
+        (package / "silent.py").write_text("other = 1\n", encoding="utf-8")
+
+        # A computed version cannot be read without running the file, and a
+        # tree that declares none has nothing to report; both stay unknown
+        # rather than becoming a fabricated drift signal.
+        self.assertIsNone(daemon_module.installed_source_version(package / "computed.py"))
+        self.assertIsNone(daemon_module.installed_source_version(package / "silent.py"))
+
+    def test_source_digest_stays_unknown_when_a_module_cannot_be_read(self):
+        package = self.root / "unreadable"
+        (package / "shadow.py").mkdir(parents=True)
+
+        self.assertIsNone(daemon_module.source_digest(package))
+
     def test_status_response_larger_than_2mib_roundtrips_as_jsonl(self):
         updated_at = time.time()
         sessions = [
