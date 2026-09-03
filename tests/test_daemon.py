@@ -1110,10 +1110,17 @@ class DaemonHttpIntegrationTests(unittest.TestCase):
         self.assertTrue(daemon.wait_until_ready(2.0))
         return daemon, thread
 
-    @staticmethod
-    def _stop(daemon, thread):
-        daemon.stop(timeout=2.0)
-        thread.join(2.0)
+    def _stop(self, daemon, thread):
+        # Asking to stop is not stopping: the daemon removes its HTTP port
+        # record and joins its workers on the way out of this thread, so tests
+        # that assert no residue have to know the thread is gone. A 2s join
+        # that quietly expired on a loaded runner is what made
+        # test_active_http_stream_stops_without_thread_or_port_residue fail on
+        # a macOS runner while the daemon was still unwinding.
+        stopped = daemon.stop(timeout=10.0)
+        thread.join(10.0)
+        self.assertTrue(stopped, "daemon did not report a clean stop")
+        self.assertFalse(thread.is_alive(), "daemon thread outlived its stop")
 
     @staticmethod
     def _token(runtime):
