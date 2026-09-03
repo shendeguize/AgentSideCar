@@ -139,6 +139,24 @@ def process_exists(pid):
     return True
 
 
+def read_pid_when_ready(path, deadline):
+    """Return the pid a child recorded, waiting for content and not the file.
+
+    A child creates its pid file and then writes to it, so a reader that waits
+    only for existence can still read an empty file on a loaded host.
+    """
+
+    while time.monotonic() < deadline:
+        try:
+            payload = path.read_text(encoding="ascii").strip()
+        except OSError:
+            payload = ""
+        if payload.isdecimal():
+            return int(payload)
+        time.sleep(0.01)
+    raise AssertionError("child never recorded its pid")
+
+
 class ProcessLivenessTests(unittest.TestCase):
     def test_process_exists_distinguishes_linux_live_and_zombie_states(self):
         with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
@@ -2249,16 +2267,8 @@ class AggregationTests(unittest.TestCase):
             descendant_pid = None
             try:
                 deadline = time.monotonic() + 3
-                while time.monotonic() < deadline and (
-                    not child_pid_path.exists() or not descendant_pid_path.exists()
-                ):
-                    if parent.poll() is not None:
-                        break
-                    time.sleep(0.01)
-                self.assertTrue(child_pid_path.exists())
-                self.assertTrue(descendant_pid_path.exists())
-                child_pid = int(child_pid_path.read_text(encoding="ascii"))
-                descendant_pid = int(descendant_pid_path.read_text(encoding="ascii"))
+                child_pid = read_pid_when_ready(child_pid_path, deadline)
+                descendant_pid = read_pid_when_ready(descendant_pid_path, deadline)
 
                 started = time.monotonic()
                 os.kill(parent.pid, exit_signal)
