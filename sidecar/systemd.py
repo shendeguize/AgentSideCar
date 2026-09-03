@@ -889,6 +889,15 @@ def service_status(
             return ServiceResult(0, "service is running (pid {})".format(info.pid))
         if state.loaded and info is not None:
             return ServiceResult(1, "service is degraded; daemon pid does not match")
+        if state.loaded and state.active and state.main_pid:
+            # systemd reports a live MainPID for the whole first scan, during
+            # which the socket answers nothing. The pid is the stronger
+            # evidence.
+            return ServiceResult(
+                1,
+                "service is running (pid {}) but the daemon is not answering "
+                "yet".format(state.main_pid),
+            )
         if state.loaded:
             return ServiceResult(1, "service is loaded but daemon is not running")
         if info is not None:
