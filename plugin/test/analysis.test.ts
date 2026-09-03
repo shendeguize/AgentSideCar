@@ -385,7 +385,7 @@ describe('input bounding', () => {
   })
 
   it('exports the specified defaults', () => {
-    expect(DEFAULT_MAX_INPUT_CHARS).toBe(8000)
+    expect(DEFAULT_MAX_INPUT_CHARS).toBe(6000)
     expect(DEFAULT_ANALYSIS_TIMEOUT_MS).toBe(60_000)
     expect(DEFAULT_MAX_ACTIVE_ANALYSES).toBe(4)
   })

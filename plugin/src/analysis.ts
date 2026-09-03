@@ -246,8 +246,13 @@ export interface AnalysisLogEntry {
 // Tunables and fixed strings.
 // ---------------------------------------------------------------------------
 
-/** Input bound: chars of summary/question text fed to one turn. */
-export const DEFAULT_MAX_INPUT_CHARS = 8000
+/**
+ * Input bound: chars of summary/question text fed to one turn. Matches the
+ * assembly's own cap so the two layers agree on how much reaches a model:
+ * an engine bound above the assembly's would never be the one that bit,
+ * and a bound below it would re-cut a digest already trimmed to fit.
+ */
+export const DEFAULT_MAX_INPUT_CHARS = 6000
 /**
  * Bound on one model turn: the first response, and each follow-up response.
  * Measured from the moment the turn is handed to the agent, so a slow
