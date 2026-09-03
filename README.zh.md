@@ -26,24 +26,26 @@ HTTP 面板和 API 会在本机 IPv4 回环地址上公开只读的守护进程�
 Agent 配置；但恢复后的原生 Agent 可以按上述方式进行修改。Release 安装程序只
 写入所选可执行文件和可选 Skill Bundle；检出版本安装程序则创建集成用符号链接。
 
-0.11.0 版本的本地安装与工具要求 Python 3.9+，且没有 Python 运行时依赖。SSH
+0.11.1 版本的本地安装与工具要求 Python 3.9+，且没有 Python 运行时依赖。SSH
 目标接受使用 Python 3.8+ 的远程观察载荷。监视 DSH 事件还需要外部 `zstd`
 可执行文件。
 
-## 版本 0.11.0
+## 版本 0.11.1
 
-0.11.0 版本提供并发的本地/远程 `watch --all --remote`、持久化的私有发送审计、
+0.11.1 版本提供并发的本地/远程 `watch --all --remote`、持久化的私有发送审计、
 请求 ID 幂等性，以及可选启用、仅限数值回环地址的 HTTP 面板。它还包含确定性的
 可执行 zipapp、适用于 `pipx` 的包元数据、显式管理的 macOS 用户 LaunchAgent、
 当前用户的 Linux systemd 服务单元、具有日志轮转的有界私有守护进程诊断、不可变的
 私有状态快照、面向 Python 3.8+ SSH 目标且可显式钉死解释器的远程观察，以及可恢复
 且串行化的 Release 安装。
-0.11.0 新增：daemon 会针对自己已安装的代码报告漂移——既包括源码树里的版本号，
-也包括该树的内容指纹（因为两次发布之间版本号根本不会变），因此 `daemon status`
-和 DSH 插件都能说出「长时间运行的 daemon 仍在跑磁盘上已被替换的代码」。插件也
-不再夸大自己知道的事：某个时间线来源里不存在的会话不再被当成来源故障；仅来自
-内存环形缓冲的历史会如实说明，而不是声称已到时间线起点；分析超时也会保留模型
-此前已经生成的文本。
+0.11.1 新增：分析摘要在 6000 字上限内携带最新 24 条时间线条目，而不再是取回
+120 条、任由字数上限悄悄决定哪些能留下；窗口之外还有更早的日志时，摘要会如实
+说明。自 0.11.0 起，daemon 会针对自己已安装的代码报告漂移——既包括源码树里的
+版本号，也包括该树的内容指纹（因为两次发布之间版本号根本不会变），因此
+`daemon status` 和 DSH 插件都能说出「长时间运行的 daemon 仍在跑磁盘上已被替换
+的代码」。插件也不再夸大自己知道的事：某个时间线来源里不存在的会话不再被当成
+来源故障；仅来自内存环形缓冲的历史会如实说明，而不是声称已到时间线起点；分析
+超时也会保留模型此前已经生成的文本。
 
 ![使用合成会话和事件的 Agent Sidecar 只读面板](site/assets/shots/panel.png)
 
@@ -76,7 +78,7 @@ Agent 配置；但恢复后的原生 Agent 可以按上述方式进行修改。R
   关系。
 - `codex`：Codex CLI rollout JSONL，以及可用时的只读原生状态 SQLite。
 - `copilot`：支持 GitHub Copilot CLI 的 `workspace.yaml` 元数据和认证后的
-  `--resume --interactive` 发送。0.11.0 版本没有对应事件源，因此状态报告为
+  `--resume --interactive` 发送。0.11.1 版本没有对应事件源，因此状态报告为
   `idle`。
 - `dsh`：优先通过 DeepSeek DSH 投影缓存元数据进行列表和状态查询，并以有界的
   持久会话扫描补充发现缓存缺失的 headless 运行，也支持从压缩会话记录中监视
@@ -110,11 +112,11 @@ installer="$(mktemp)"
 curl --fail --location --proto '=https' --tlsv1.2 --output "$installer" \
   https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh
 ${PAGER:-less} "$installer"
-sh "$installer" --version v0.11.0
+sh "$installer" --version v0.11.1
 rm "$installer"
 ```
 
-省略 `--version v0.11.0` 时会解析最新稳定 GitHub Release。脚本使用 Python 解析
+省略 `--version v0.11.1` 时会解析最新稳定 GitHub Release。脚本使用 Python 解析
 Release 元数据，要求精确匹配带版本号的 zipapp 和 `SHA256SUMS` 资产，在 macOS
 上使用 `shasum -a 256`、在 Linux 上使用 `sha256sum` 验证校验和，之后才会原子
 替换 `~/.local/bin/agent-sidecar`。可用 `--prefix <path>` 选择其他前缀，用
@@ -145,17 +147,17 @@ pipx install .
 pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'
 ```
 
-如需安装已发布且不可变的修订版，可在对应标签可用后，将标签（例如 `@v0.11.0`）
+如需安装已发布且不可变的修订版，可在对应标签可用后，将标签（例如 `@v0.11.1`）
 附加到 Git URL 后。两种方式都会创建隔离环境并安装 `agent-sidecar`；该包没有
 Python 运行时依赖。
 
 ### 安装 GitHub Release zipapp
 
-如需手动安装，GitHub Releases 会发布可执行 zipapp 及其校验和文件。以 0.11.0
+如需手动安装，GitHub Releases 会发布可执行 zipapp 及其校验和文件。以 0.11.1
 版本为例：
 
 ```sh
-version=0.11.0
+version=0.11.1
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/agent-sidecar-${version}.pyz"
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -1042,7 +1044,7 @@ Changelog 和发布治理请参见[贡献指南](CONTRIBUTING.md)。
 
 ## 当前范围与后续工作
 
-0.11.0 版本为受支持数据源提供本地观察、Cursor CLI 事件监视、远程 `list`/`status`
+0.11.1 版本为受支持数据源提供本地观察、Cursor CLI 事件监视、远程 `list`/`status`
 快照、并发本地和远程 `watch --all --remote`，并为 Claude、Codex、Cursor CLI、
 Copilot 以及精确 Kimi Code 0.38.0/0.39.1 受保护 ACP 路径提供实验性本地发送。它可以为 pipx 和
 确定性 zipapp 使用场景打包 CLI，并加入显式 macOS LaunchAgent 与 Linux systemd
