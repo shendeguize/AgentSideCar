@@ -60,6 +60,24 @@ def process_exists(pid):
             fields = suffix[1].split() if len(suffix) == 2 else ()
             if fields:
                 return fields[0] != "Z"
+    if sys.platform == "darwin":
+        # A killed process whose parent has not reaped it keeps its pid, and a
+        # signal probe cannot tell that entry from a living process. Darwin
+        # has no /proc, so the state comes from ps; an unusable ps falls
+        # through to the probe below rather than guessing.
+        try:
+            state = subprocess.run(
+                ["/bin/ps", "-o", "state=", "-p", str(pid)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            state = None
+        if state is not None:
+            if state.returncode != 0:
+                return False
+            flags = state.stdout.decode("ascii", "replace").strip()
+            return bool(flags) and not flags.startswith("Z")
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -91,6 +109,44 @@ def read_pid_when_ready(path, deadline):
 
 
 class ProcessRunnerTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "zombie states are POSIX")
+    def test_an_unreaped_child_does_not_count_as_a_live_process(self):
+        # A parent that never waits leaves its dead child as a zombie, and a
+        # zombie still answers a signal probe. Tests that assert a tree was
+        # killed compare against this helper, so it has to mean "alive" and
+        # not "has a process table entry" — the Linux branch already skips
+        # state Z, and Darwin has to agree or those assertions race the
+        # reparenting reaper.
+        code = (
+            "import os,sys,time;"
+            "pid=os.fork();"
+            "\nif pid == 0:\n"
+            " os._exit(0)\n"
+            "sys.stdout.write('{}\\n'.format(pid));sys.stdout.flush();"
+            "time.sleep(60)"
+        )
+        parent = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE,
+        )
+        try:
+            zombie_pid = int(parent.stdout.readline().decode("ascii").strip())
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(zombie_pid, 0)
+                except ProcessLookupError:
+                    self.fail("the child was reaped by someone else")
+                    break
+                if not process_exists(zombie_pid):
+                    break
+                time.sleep(0.01)
+
+            self.assertFalse(process_exists(zombie_pid))
+        finally:
+            parent.kill()
+            parent.wait()
+
     @staticmethod
     def _proc_entry(pid, stat_line):
         entry = mock.MagicMock()
@@ -147,12 +203,37 @@ class ProcessRunnerTests(unittest.TestCase):
             self.assertFalse(process_exists(124))
         kill.assert_not_called()
 
+        def ps_result(state, code=0):
+            return subprocess.CompletedProcess([], code, stdout=state)
+
+        for state, expected in (
+            (b"S+\n", True),
+            (b"Z\n", False),
+            (b"\n", False),
+        ):
+            with self.subTest(state=state):
+                with mock.patch.object(
+                    sys, "platform", "darwin"
+                ), mock.patch.object(
+                    subprocess, "run", return_value=ps_result(state)
+                ), mock.patch.object(
+                    os, "kill"
+                ) as kill:
+                    self.assertEqual(expected, process_exists(125))
+                kill.assert_not_called()
+
         with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
-            os,
-            "kill",
-        ) as kill:
-            self.assertTrue(process_exists(125))
-        kill.assert_called_once_with(125, 0)
+            subprocess, "run", return_value=ps_result(b"", code=1)
+        ):
+            self.assertFalse(process_exists(126))
+
+        # No usable ps leaves only the signal probe, which is still better
+        # than reporting a live process as gone.
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            subprocess, "run", side_effect=OSError
+        ), mock.patch.object(os, "kill") as kill:
+            self.assertTrue(process_exists(127))
+        kill.assert_called_once_with(127, 0)
 
     def test_read_pid_when_ready_retries_missing_empty_and_partial_files(self):
         path = mock.Mock(spec=Path)
