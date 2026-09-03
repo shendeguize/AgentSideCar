@@ -21,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daemon status` and `daemon stop` name the live owner instead of declaring
   `daemon is not running`, and `service status` reports the pid launchd or
   systemd just handed back rather than contradicting it.
+- The plugin's supervisor no longer executes the daemon it just spawned for
+  taking too long to index. Its readiness window was 5 seconds against a
+  first scan that runs 22 seconds on a 1,950-session machine, so hosting
+  killed each healthy daemon mid-scan, backed off, and respawned into the
+  same fate until the failure budget tripped. Installs without a service
+  therefore never got a daemon at all on a large index. The window is now 45
+  seconds and still ends the moment the daemon answers.
 - A remote `watch` child that took longer than a second to reap turned an
   orderly shutdown into a crash. The bootstrap's cleanup ran two one-second
   waits and the second one was unguarded, so on a loaded host the payload

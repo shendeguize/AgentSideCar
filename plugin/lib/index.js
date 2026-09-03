@@ -5164,7 +5164,7 @@ var DaemonSupervisor = class {
 			probeIntervalMs: options.probeIntervalMs ?? 5e3,
 			adoptedRepingMs: options.adoptedRepingMs ?? 5e3,
 			adoptedFailureLimit: options.adoptedFailureLimit ?? 3,
-			hostReadyTimeoutMs: options.hostReadyTimeoutMs ?? 5e3,
+			hostReadyTimeoutMs: options.hostReadyTimeoutMs ?? 45e3,
 			hostReadyPingIntervalMs: options.hostReadyPingIntervalMs ?? 500
 		};
 	}

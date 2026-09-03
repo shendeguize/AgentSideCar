@@ -80,7 +80,12 @@ export interface SupervisorOptions {
   adoptedRepingMs?: number
   /** Consecutive ADOPTED ping misses before REPROBE. Default 3. */
   adoptedFailureLimit?: number
-  /** HOSTING readiness window before the spawn counts as failed. Default 5000. */
+  /**
+   * HOSTING readiness window before the spawn counts as failed. Default
+   * 45000: a daemon answers nothing until its first index scan ends, and that
+   * scan grows with the index — 22s on a 1,950-session machine. A window
+   * shorter than the scan executes healthy daemons in a loop.
+   */
   hostReadyTimeoutMs?: number
   /** Ping cadence while waiting for a hosted daemon to become ready. Default 500. */
   hostReadyPingIntervalMs?: number
@@ -131,7 +136,7 @@ export class DaemonSupervisor {
       probeIntervalMs: options.probeIntervalMs ?? 5000,
       adoptedRepingMs: options.adoptedRepingMs ?? 5000,
       adoptedFailureLimit: options.adoptedFailureLimit ?? 3,
-      hostReadyTimeoutMs: options.hostReadyTimeoutMs ?? 5000,
+      hostReadyTimeoutMs: options.hostReadyTimeoutMs ?? 45_000,
       hostReadyPingIntervalMs: options.hostReadyPingIntervalMs ?? 500,
     }
   }
