@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `service install` no longer tears down the service it just installed
+  because the daemon was still indexing. It waited 5 seconds for the first
+  ping, and a first scan takes 22 seconds on a 1,950-session machine, so
+  install booted the job out, deleted the plist or unit, and reported
+  `daemon did not become ready` about a daemon that was healthy — leaving the
+  machine with no service at all. Both backends now wait up to 45 seconds,
+  matching `daemon start`, and still return the moment the daemon answers.
+  `service uninstall` shares that window when waiting for a daemon to exit,
+  so a busy daemon gets the same room before it is called stuck.
+
 ## [0.11.2] - 2026-09-03
 
 ### Fixed

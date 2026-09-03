@@ -39,7 +39,9 @@ UNIT_NAME = "agent-sidecar.service"
 SYSTEMCTL_PATH = Path("/usr/bin/systemctl")
 PATH_VALUE = "/usr/local/bin:/usr/bin:/bin"
 CONTROL_TIMEOUT = 10.0
-READY_TIMEOUT = 5.0
+# Sized like the launchd backend: long enough for a first index scan, so a unit
+# is not torn down over a daemon that has not finished scanning.
+READY_TIMEOUT = 45.0
 STOP_TIMEOUT = 10.0
 POLL_INTERVAL = 0.1
 MAX_CONTROL_OUTPUT = 64 * 1024

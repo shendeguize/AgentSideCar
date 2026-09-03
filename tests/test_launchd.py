@@ -343,6 +343,39 @@ class LaunchdTests(unittest.TestCase):
             [call[0][1] for call in runner.calls],
         )
 
+    def test_default_readiness_window_outlasts_a_first_index_scan(self):
+        # A daemon answers nothing until its first index scan ends, and that
+        # scan grows with the index: 22s on a 1,952-session machine. A window
+        # shorter than the scan boots out a healthy service and reports it as
+        # a daemon that never became ready.
+        runner = FakeLaunchctl()
+        clock = [0.0]
+
+        def advance(value):
+            clock[0] += value
+
+        client = FakeClient(runner, pid=4321)
+        answers_at = 22.0
+        original_ping = client.ping
+
+        def ping():
+            if clock[0] < answers_at:
+                raise SidecarClientError("scanning", code="connection_failed")
+            return original_ping()
+
+        client.ping = ping
+
+        result, _ = self.install(
+            runner=runner,
+            client=client,
+            monotonic=lambda: clock[0],
+            sleep=advance,
+        )
+
+        self.assertEqual(0, result.exit_code)
+        self.assertTrue(self.plist_path.exists())
+        self.assertTrue(runner.loaded)
+
     def test_atomic_write_failure_leaves_no_service_or_plist(self):
         runner = FakeLaunchctl()
         with mock.patch(
