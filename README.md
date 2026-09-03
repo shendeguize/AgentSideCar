@@ -31,14 +31,14 @@ edit transcripts or agent configuration; a resumed native agent can do so as
 described above. The release installer writes only the selected executable and
 optional skill bundle; the checkout installer creates integration symlinks.
 
-Local installation and tooling for version 0.11.2 require Python 3.9+ and have
+Local installation and tooling for version 0.11.3 require Python 3.9+ and have
 no runtime Python dependencies. The remote observation payload accepts Python
 3.8+ on SSH targets. DSH event watching additionally requires an external
 `zstd` executable.
 
-## Version 0.11.2
+## Version 0.11.3
 
-Version 0.11.2 provides concurrent local/remote `watch --all --remote`, durable
+Version 0.11.3 provides concurrent local/remote `watch --all --remote`, durable
 private send auditing and request-ID idempotency, and the opt-in
 numeric-loopback HTTP panel. It also includes a deterministic executable
 zipapp, package metadata suitable for `pipx`, an explicit macOS user
@@ -46,13 +46,16 @@ LaunchAgent, a current-user Linux systemd unit, bounded private daemon
 diagnostics with log rotation, immutable private status snapshots, remote
 observation on Python 3.8+ SSH targets with an explicit fail-closed interpreter
 pin, and recoverable serialized release installation.
-New in 0.11.2, a daemon that is still building its first index is no longer
-read as a dead one. It answers nothing until that scan ends — up to 22 seconds
-on a 1,950-session machine — so `daemon start` now waits out a live owner and
-adopts it instead of blaming a child that lost the ownership lock, `daemon
-status`, `daemon stop`, and `service status` name that owner rather than
-declaring absence, and the plugin stops killing the daemon it just spawned for
-taking too long to index. Since 0.11.1 an analysis digest carries the newest 24
+New in 0.11.3, `service install` no longer removes the service it just
+installed when the daemon is still indexing: it waits up to 45 seconds for the
+first ping, like `daemon start`, instead of booting the job out after five and
+leaving the machine with no service. Since 0.11.2 a daemon that is still
+building its first index is no longer read as a dead one. It answers nothing
+until that scan ends — up to 22 seconds on a 1,950-session machine — so
+`daemon start` waits out a live owner and adopts it instead of blaming a child
+that lost the ownership lock, `daemon status`, `daemon stop`, and `service
+status` name that owner rather than declaring absence, and the plugin stops
+killing the daemon it just spawned for taking too long to index. Since 0.11.1 an analysis digest carries the newest 24
 timeline entries within a 6000-char bound instead of fetching 120 and letting a
 character cap silently decide which survived, and it states when the log
 continues past the window it shows. Since 0.11.0 the daemon reports drift against its own
@@ -101,7 +104,7 @@ The agent names below are also the exact values accepted by `list --agent`:
 - `codex`: Codex CLI rollout JSONL plus read-only native status SQLite when
   available.
 - `copilot`: GitHub Copilot CLI `workspace.yaml` metadata and authenticated
-  `--resume --interactive` send support. It has no event source in v0.11.2 and
+  `--resume --interactive` send support. It has no event source in v0.11.3 and
   is reported as `idle`.
 - `dsh`: DeepSeek DSH projection-cache metadata for listing and status, with
   bounded durable-session discovery as a fallback for cache-missing headless
@@ -143,11 +146,11 @@ installer="$(mktemp)"
 curl --fail --location --proto '=https' --tlsv1.2 --output "$installer" \
   https://raw.githubusercontent.com/shendeguize/AgentSideCar/main/install.sh
 ${PAGER:-less} "$installer"
-sh "$installer" --version v0.11.2
+sh "$installer" --version v0.11.3
 rm "$installer"
 ```
 
-Omit `--version v0.11.2` to resolve the latest stable GitHub Release. The script
+Omit `--version v0.11.3` to resolve the latest stable GitHub Release. The script
 parses release metadata with Python, requires the exact versioned zipapp and
 `SHA256SUMS` assets, verifies the checksum with `shasum -a 256` on macOS or
 `sha256sum` on Linux, and only then atomically replaces
@@ -182,7 +185,7 @@ Or install directly from Git:
 pipx install 'git+https://github.com/shendeguize/AgentSideCar.git'
 ```
 
-For a released, immutable revision, append its tag, for example `@v0.11.2`, to
+For a released, immutable revision, append its tag, for example `@v0.11.3`, to
 the Git URL after that tag is available. Both forms create an isolated
 environment and install `agent-sidecar`; the package has no runtime Python
 dependencies.
@@ -190,10 +193,10 @@ dependencies.
 ### Install a GitHub Release zipapp
 
 For manual installation, GitHub Releases publish the executable zipapp and its
-checksum file. For version 0.11.2:
+checksum file. For version 0.11.3:
 
 ```sh
-version=0.11.2
+version=0.11.3
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/agent-sidecar-${version}.pyz"
 curl -fLO "https://github.com/shendeguize/AgentSideCar/releases/download/v${version}/SHA256SUMS"
 shasum -a 256 -c SHA256SUMS
@@ -1273,7 +1276,7 @@ runtime files, follow the sanitization requirements in the Security Policy.
 
 ## Current scope and deferred work
 
-Version 0.11.2 provides local observation for the supported sources, Cursor CLI
+Version 0.11.3 provides local observation for the supported sources, Cursor CLI
 event watching, remote `list`/`status` snapshots, concurrent local and remote
 `watch --all --remote`, and experimental local send for Claude, Codex, Cursor
 CLI, Copilot, and exact Kimi Code 0.38.0/0.39.1 protected ACP paths. It packages the CLI for
