@@ -130,6 +130,23 @@ def process_exists(pid):
                 # A killed non-child can remain a zombie under non-reaping PID 1.
                 # It is terminated even though kill(pid, 0) still reports existence.
                 return fields[0] != "Z"
+    if sys.platform == "darwin":
+        # Same zombie, no /proc to read it from: ask ps for the state so a
+        # killed process does not read as a live one. An unusable ps falls
+        # through to the signal probe.
+        try:
+            state = subprocess.run(
+                ["/bin/ps", "-o", "state=", "-p", str(pid)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            state = None
+        if state is not None:
+            if state.returncode != 0:
+                return False
+            flags = state.stdout.decode("ascii", "replace").strip()
+            return bool(flags) and not flags.startswith("Z")
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -171,12 +188,33 @@ class ProcessLivenessTests(unittest.TestCase):
             self.assertFalse(process_exists(124))
         kill.assert_not_called()
 
+        def ps_result(state, code=0):
+            return subprocess.CompletedProcess([], code, stdout=state)
+
+        for state, expected in ((b"S+\n", True), (b"Z\n", False), (b"\n", False)):
+            with self.subTest(state=state):
+                with mock.patch.object(
+                    sys, "platform", "darwin"
+                ), mock.patch.object(
+                    subprocess, "run", return_value=ps_result(state)
+                ), mock.patch.object(
+                    os, "kill"
+                ) as kill:
+                    self.assertEqual(expected, process_exists(125))
+                kill.assert_not_called()
+
         with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
-            os,
-            "kill",
-        ) as kill:
-            self.assertTrue(process_exists(125))
-        kill.assert_called_once_with(125, 0)
+            subprocess, "run", return_value=ps_result(b"", code=1)
+        ):
+            self.assertFalse(process_exists(126))
+
+        # No usable ps leaves only the signal probe, which is still better
+        # than reporting a live process as gone.
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.object(
+            subprocess, "run", side_effect=OSError
+        ), mock.patch.object(os, "kill") as kill:
+            self.assertTrue(process_exists(127))
+        kill.assert_called_once_with(127, 0)
 
 
 class TrackingFuture(concurrent.futures.Future):
