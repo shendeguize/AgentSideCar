@@ -4418,7 +4418,11 @@ class CLITests(unittest.TestCase):
                             str(pid_path),
                         ),
                     ),
-                    mock.patch("sidecar.cli.DAEMON_START_TIMEOUT", 0.2),
+                    # Long enough for two interpreters to start and record
+                    # their pids on a loaded runner: the subject here is the
+                    # cleanup of a real descendant group, and a budget that
+                    # expires first leaves nothing to assert about.
+                    mock.patch("sidecar.cli.DAEMON_START_TIMEOUT", 5.0),
                     mock.patch("sidecar.cli.DAEMON_POLL_INTERVAL", 0.01),
                     mock.patch("sidecar.cli.DAEMON_CHILD_TERM_TIMEOUT", 0.1),
                     mock.patch("sidecar.cli.DAEMON_CHILD_KILL_TIMEOUT", 1.0),
