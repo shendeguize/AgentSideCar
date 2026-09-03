@@ -192,6 +192,13 @@ def kill_group():
             except OSError:
                 pass
 
+def reap(timeout):
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
 def close_stream(stream):
     if selector is not None:
         try:
@@ -327,11 +334,9 @@ def run_child(child_args):
 
     if process.poll() is None:
         kill_group()
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
+    if not reap(1):
         kill_group()
-        process.wait(timeout=1)
+        reap(1)
     return failure
 
 terminal = None
@@ -365,12 +370,9 @@ finally:
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
                 close_stream(stream)
-        if process.poll() is None:
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                kill_group()
-                process.wait(timeout=1)
+        if process.poll() is None and not reap(1):
+            kill_group()
+            reap(1)
     if selector is not None:
         selector.close()
     if fd is not None:

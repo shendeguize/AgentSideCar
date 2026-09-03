@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A remote `watch` child that took longer than a second to reap turned an
+  orderly shutdown into a crash. The bootstrap's cleanup ran two one-second
+  waits and the second one was unguarded, so on a loaded host the payload
+  exited 1 with a `TimeoutExpired` traceback instead of reporting the status
+  it had determined. Both waits now tolerate a slow child; the group kill has
+  already gone out either way.
+
 ## [0.11.1] - 2026-09-03
 
 ### Changed
