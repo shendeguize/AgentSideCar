@@ -60,6 +60,44 @@ def honoring_runner(runner):
     return wrapped
 
 
+def _closure_outside_snapshot_bounds(node):
+    """Name the first file in a Node dylib closure the snapshot would reject.
+
+    Mirrors the per-asset bounds in _snapshot_runtime_asset_for_analysis so a
+    machine whose runtime cannot be snapshotted is reported as such instead of
+    reading as a defect in the code under test. Returns None when the whole
+    closure fits.
+    """
+
+    if sys.platform != "darwin":
+        return None
+    pending = [str(node)]
+    visited = set()
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        try:
+            details = Path(current).stat()
+        except OSError as error:
+            return "{} is unreadable ({})".format(current, error)
+        if not stat.S_ISREG(details.st_mode):
+            return "{} is not a regular file".format(current)
+        if stat.S_IMODE(details.st_mode) & 0o022:
+            return "{} is group- or world-writable".format(current)
+        if details.st_size > inject_module.KIMI_RUNTIME_FILE_BYTES:
+            return "{} exceeds the per-file bound".format(current)
+        for raw in inject_module._otool_dependencies(current):
+            if inject_module._system_library(raw):
+                continue
+            resolved = inject_module._resolve_macho_dependency(Path(current), raw)
+            if inject_module._system_library(resolved):
+                continue
+            pending.append(str(resolved))
+    return None
+
+
 def copy_private_executable(source, destination):
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     if not nofollow:
@@ -2663,6 +2701,14 @@ class KimiSendIntegrationTests(unittest.TestCase):
                 break
         if real_node is None:
             self.skipTest("No bounded executable Node candidate is available")
+        # The snapshot bounds apply to the whole dylib closure, not just the
+        # interpreter, and the closure belongs to whatever Node this machine
+        # installed. A runner whose Homebrew dylibs are group-writable or
+        # oversized has nothing to say about this code, so name the offending
+        # file and skip rather than failing with a bare unsupported_kimi.
+        unbounded = _closure_outside_snapshot_bounds(real_node)
+        if unbounded is not None:
+            self.skipTest("Node runtime is outside the snapshot bounds: {}".format(unbounded))
         private_node_directory = tempfile.TemporaryDirectory(
             prefix="private-node-",
             dir=str(self.root),
