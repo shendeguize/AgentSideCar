@@ -1,3 +1,4 @@
+import ast
 import dataclasses
 import io
 import json
@@ -260,6 +261,49 @@ class RemoteWatchTransportTests(unittest.TestCase):
             remote.remote_shell_command("watch")
         with self.assertRaises(ValueError):
             remote.remote_watch_ssh_argv("edge;touch")
+
+    def test_bootstrap_never_waits_on_the_child_outside_the_tolerant_reaper(self):
+        # Cleanup runs in a `finally`, so a `wait` that raises there replaces
+        # the bootstrap's own exit status with a traceback and exit 1 — which
+        # is what a loaded runner produced when a killed child took longer
+        # than a second to reap.
+        tree = ast.parse(remote.REMOTE_WATCH_BOOTSTRAP)
+        reaper = next(
+            (
+                node
+                for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name == "reap"
+            ),
+            None,
+        )
+        self.assertIsNotNone(reaper, "the bootstrap has no reap() helper")
+        absorbed = [
+            handler
+            for node in ast.walk(reaper)
+            if isinstance(node, ast.Try)
+            for handler in node.handlers
+            if isinstance(handler.type, ast.Attribute)
+            and handler.type.attr == "TimeoutExpired"
+        ]
+        self.assertTrue(absorbed, "reap() must absorb TimeoutExpired")
+
+        tolerated = {id(node) for node in ast.walk(reaper)}
+        waits = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "wait"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "process"
+        ]
+        self.assertTrue(waits, "the bootstrap never waits for its child")
+        for wait in waits:
+            self.assertIn(
+                id(wait),
+                tolerated,
+                "process.wait() outside reap() can raise during cleanup",
+            )
 
     def test_watch_builders_default_to_python3_and_shell_quote_custom_executable(self):
         default_command = remote.remote_watch_shell_command()
