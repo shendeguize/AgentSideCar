@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The analysis digest is smaller and its bounds now agree with each other.
+  A session summary carries the newest 24 timeline entries (was 120), lines
+  clamp at 120 chars to match the event text the daemon already snips, the
+  question clamps at 800, and both the assembly and the engine cap the whole
+  input at 6000 chars (was 8000 each). The item caps are sized so their worst
+  case fits the char cap, which makes that cap a backstop rather than the
+  thing that routinely decides what the model sees.
+
+### Fixed
+
+- A session digest that could not fit its whole timeline said nothing about
+  it. The char cap silently cut the oldest entries — for a long session most
+  of them — while the header still announced the full event count and the
+  prompt still called itself un-truncated. The digest now states that older
+  events exist beyond the window it shows.
+
 ## [0.11.0] - 2026-09-03
 
 ### Fixed

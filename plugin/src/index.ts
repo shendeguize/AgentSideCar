@@ -281,19 +281,32 @@ const REPLAY_MAX_PAGES = 4
 // Bounds of the fusion→AnalysisInput adapter (§7-B: the engine re-bounds
 // the whole text to maxInputChars anyway; these keep the assembly cheap
 // and the head of the text — which survives engine truncation — useful).
-/** Timeline entries pulled into one session-analysis summary. */
-const ANALYSIS_TIMELINE_LIMIT = 120
+//
+// The item caps below are sized so their worst case fits under
+// ANALYSIS_INPUT_LIMIT: the char cap is a backstop, not the routine
+// amputator. A cap that routinely bites would drop events the digest still
+// claimed to list, and the prompt would call itself un-truncated while
+// missing most of the timeline.
+/**
+ * Timeline entries pulled into one session-analysis summary. The daemon
+ * snips event text at 120 chars (`sidecar/text_utils.snip`), so 24 entries
+ * cost at most ~24 × 170 chars.
+ */
+const ANALYSIS_TIMELINE_LIMIT = 24
 /** Sessions listed per project-analysis overview. */
-const ANALYSIS_MAX_SESSIONS = 30
+const ANALYSIS_MAX_SESSIONS = 20
 /** Project groups listed in a cross-agent analysis overview. */
-const ANALYSIS_MAX_GROUPS = 12
+const ANALYSIS_MAX_GROUPS = 8
 /** Sessions listed per group in a cross-agent analysis overview. */
-const ANALYSIS_CROSS_SESSIONS = 5
-/** Clamp on one line of untrusted text (titles, event text). */
-const ANALYSIS_LINE_CLAMP = 200
+const ANALYSIS_CROSS_SESSIONS = 4
+/**
+ * Clamp on one line of untrusted text (titles, event text). Matches the
+ * daemon's own event-text snip, so this binds titles and paths only.
+ */
+const ANALYSIS_LINE_CLAMP = 120
 /** Clamp on the user question (placed at the head, so it survives truncation). */
-const ANALYSIS_QUESTION_CLAMP = 2000
-const ANALYSIS_INPUT_LIMIT = 8000
+const ANALYSIS_QUESTION_CLAMP = 800
+const ANALYSIS_INPUT_LIMIT = 6000
 
 /**
  * `service status` messages that mean "a LaunchAgent owns daemon liveness"
@@ -998,6 +1011,12 @@ export function apply(ctx: HostContext, config: Config): void {
             `${entry.seq !== null ? ` seq=${entry.seq}` : ''}` +
             `${entry.text !== '' ? ` ${clampAnalysisText(entry.text)}` : ''}`,
         ),
+        // A cursor means the log continues past this window. Fusion does not
+        // know how many events are back there, so the digest claims a
+        // direction and not a count.
+        ...(page.cursor !== null
+          ? ['… 更早事件已省略 / older events omitted beyond this window']
+          : []),
       ].join('\n'))
       return {
         kind: 'session',

@@ -1923,6 +1923,55 @@ describe('M3 analysis wiring (T5.10a)', () => {
     expect(newerAt).toBeLessThan(olderAt)
   })
 
+  it('keeps the newest events, says how many it dropped, and stays under the char cap', async () => {
+    const { agents, followups } = makeAnalysisAgents()
+    const fake = createFakeCtx({ sessions: {}, agents, agentDefaultModel: fakeDefaultModel })
+    const runtimeDir = await tempRuntimeDir()
+    apply(
+      fake.ctx,
+      Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir }, analysis: { enabled: true } }),
+    )
+    cleanups.push(() => fake.disposeAll())
+
+    // The daemon already snips event text at 120 chars, so this is the
+    // worst line a real timeline can produce.
+    const base = Date.now() - 600_000
+    const events = Array.from({ length: 90 }, (_, i) => ({
+      type: 'evt/tool',
+      seq: i,
+      time: base + i * 1_000,
+      data: { text: `e${i} `.padEnd(120, 'x') },
+    }))
+    const live = {
+      id: 'live-bounds',
+      header: { createdAt: base, cwd: '/tmp/bounds' },
+      events,
+    }
+    fake.emit('session/created', live)
+    for (const event of events) fake.emit('session/event', live, event)
+
+    const requested = await postAction(fake.routes[0]!, {
+      type: 'analysis.request',
+      targetKind: 'session',
+      targetId: 'live-bounds',
+      question: 'q'.repeat(4000),
+    })
+    expect(requested.status).toBe(200)
+    const primedText = followups[0]!.content[0]!.text ?? ''
+
+    // A digest the char cap had to amputate would drop events without
+    // saying so, and the prompt would still call itself un-truncated.
+    const listed = primedText.match(/- \[\d{4}-/gu) ?? []
+    expect(listed).toHaveLength(24)
+    // Fusion knows older events exist but not how many, so the digest says
+    // that much and no more.
+    expect(primedText).toContain('older events omitted')
+    expect(primedText).not.toContain('已截断 / truncated')
+    // Newest kept, oldest shed.
+    expect(primedText).toContain('seq=89')
+    expect(primedText).not.toContain('seq=0 ')
+  })
+
   it('assembles agentOptions from the host default model selection (A-1 fallback)', async () => {
     const { agents, createOptions } = makeAnalysisAgents()
     const fake = createFakeCtx({ agents, agentDefaultModel: fakeDefaultModel })

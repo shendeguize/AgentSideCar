@@ -90,7 +90,7 @@ var AnalysisEngine = class {
 	constructor(deps) {
 		this.deps = deps;
 		this.now = deps.now ?? Date.now;
-		this.maxInputChars = deps.maxInputChars ?? 8e3;
+		this.maxInputChars = deps.maxInputChars ?? 6e3;
 		this.analysisTimeoutMs = deps.analysisTimeoutMs ?? 6e4;
 		this.createTimeoutMs = deps.createTimeoutMs ?? 2e4;
 		this.maxActiveSessions = deps.maxActiveSessions ?? 4;
@@ -5481,19 +5481,26 @@ const LOG_LINE_LIMIT = 400;
 const REPLAY_PAGE_LIMIT = 512;
 /** Page cap per fusion replay pull: bounds one timeline fan-out to ≤2048 events. */
 const REPLAY_MAX_PAGES = 4;
-/** Timeline entries pulled into one session-analysis summary. */
-const ANALYSIS_TIMELINE_LIMIT = 120;
+/**
+* Timeline entries pulled into one session-analysis summary. The daemon
+* snips event text at 120 chars (`sidecar/text_utils.snip`), so 24 entries
+* cost at most ~24 × 170 chars.
+*/
+const ANALYSIS_TIMELINE_LIMIT = 24;
 /** Sessions listed per project-analysis overview. */
-const ANALYSIS_MAX_SESSIONS = 30;
+const ANALYSIS_MAX_SESSIONS = 20;
 /** Project groups listed in a cross-agent analysis overview. */
-const ANALYSIS_MAX_GROUPS = 12;
+const ANALYSIS_MAX_GROUPS = 8;
 /** Sessions listed per group in a cross-agent analysis overview. */
-const ANALYSIS_CROSS_SESSIONS = 5;
-/** Clamp on one line of untrusted text (titles, event text). */
-const ANALYSIS_LINE_CLAMP = 200;
+const ANALYSIS_CROSS_SESSIONS = 4;
+/**
+* Clamp on one line of untrusted text (titles, event text). Matches the
+* daemon's own event-text snip, so this binds titles and paths only.
+*/
+const ANALYSIS_LINE_CLAMP = 120;
 /** Clamp on the user question (placed at the head, so it survives truncation). */
-const ANALYSIS_QUESTION_CLAMP = 2e3;
-const ANALYSIS_INPUT_LIMIT = 8e3;
+const ANALYSIS_QUESTION_CLAMP = 800;
+const ANALYSIS_INPUT_LIMIT = 6e3;
 /**
 * `service status` messages that mean "a LaunchAgent owns daemon liveness"
 * (sidecar/launchd.py `_status`): exit 0 is `service is running (pid N)`;
@@ -6024,7 +6031,8 @@ function apply(ctx, config) {
 				`last activity: ${new Date(session.lastActivityAt).toISOString()}`,
 				"",
 				`[时间线 / timeline,最新在前 / newest first] ${page.entries.length} events (sources: dshLive=${sources.dshLive} dshCold=${sources.dshCold} replay=${sources.sidecarReplay} buffer=${sources.sidecarBuffer})`,
-				...[...page.entries].reverse().map((entry) => `- [${new Date(entry.ts).toISOString()}] ${entry.kind}${entry.seq !== null ? ` seq=${entry.seq}` : ""}${entry.text !== "" ? ` ${clampAnalysisText(entry.text)}` : ""}`)
+				...[...page.entries].reverse().map((entry) => `- [${new Date(entry.ts).toISOString()}] ${entry.kind}${entry.seq !== null ? ` seq=${entry.seq}` : ""}${entry.text !== "" ? ` ${clampAnalysisText(entry.text)}` : ""}`),
+				...page.cursor !== null ? ["… 更早事件已省略 / older events omitted beyond this window"] : []
 			].join("\n"));
 			return {
 				kind: "session",
