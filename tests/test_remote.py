@@ -2097,16 +2097,21 @@ class EmbeddedBootstrapTests(unittest.TestCase):
             )
             started = time.monotonic()
 
-            result = self._run_bootstrap(root, source, child_timeout=0.5)
+            # The child starts an interpreter, spawns a second one, and only
+            # then records the pids this test kills by. A budget under an
+            # interpreter start cuts it off before that and leaves nothing to
+            # assert; the timeout path is still what ends the run.
+            result = self._run_bootstrap(root, source, child_timeout=1.5)
 
-            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertLess(time.monotonic() - started, 5.0)
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(
                 {"ok": False, "code": "timeout"},
                 json.loads(result.stdout),
             )
-            pid = int((root / "child.pid").read_text(encoding="ascii"))
-            grandchild_pid = int((root / "grandchild.pid").read_text(encoding="ascii"))
+            deadline = time.monotonic() + 5
+            pid = read_pid_when_ready(root / "child.pid", deadline)
+            grandchild_pid = read_pid_when_ready(root / "grandchild.pid", deadline)
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline and (
                 process_exists(pid) or process_exists(grandchild_pid)
@@ -2171,7 +2176,10 @@ class BoundedTransportTests(unittest.TestCase):
         return Path(root) / "{}.pid".format(name)
 
     def _read_pid(self, path):
-        return int(path.read_text(encoding="ascii"))
+        # The child may still be starting when the bounded call returns, so
+        # wait for the pid it promised rather than reading an absent file and
+        # failing on a precondition instead of on the reaping under test.
+        return read_pid_when_ready(path, time.monotonic() + 5)
 
     @mock.patch.object(remote_transport, "_run_bounded")
     def test_remote_wrapper_keeps_thirty_second_timeout_ceiling(self, run_bounded):
@@ -2226,9 +2234,11 @@ class BoundedTransportTests(unittest.TestCase):
                 remote_transport._bounded_popen(
                     [sys.executable, "-c", code, str(pid_path)],
                     stdout_limit=1024,
-                    timeout=0.2,
+                    # Above an interpreter start, so the child reaches its
+                    # sleep and the timeout is what ends the call.
+                    timeout=1.5,
                 )
-            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertLess(time.monotonic() - started, 3.0)
             self.assertFalse(process_exists(self._read_pid(pid_path)))
 
     def test_real_child_that_never_reads_stdin_cannot_deadlock(self):
@@ -2245,9 +2255,9 @@ class BoundedTransportTests(unittest.TestCase):
                     [sys.executable, "-c", code, str(pid_path)],
                     input_data=b"x" * remote.MAX_ARTIFACT_BYTES,
                     stdout_limit=1024,
-                    timeout=0.2,
+                    timeout=1.5,
                 )
-            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertLess(time.monotonic() - started, 3.0)
             self.assertFalse(process_exists(self._read_pid(pid_path)))
 
 

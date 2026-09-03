@@ -1137,8 +1137,14 @@ class RemoteWatchFleetTests(unittest.TestCase):
                 )
                 self.assertTrue(child_path.exists(), diagnostic)
                 self.assertTrue(descendant_path.exists(), diagnostic)
-                child_pid = int(child_path.read_text(encoding="ascii"))
-                descendant_pid = int(descendant_path.read_text(encoding="ascii"))
+                # Existence is not content: both files are created and then
+                # written, so read them as records rather than as files.
+                read_deadline = time.monotonic() + 5
+                child_pid = read_pid_when_ready(child_path, read_deadline)
+                descendant_pid = read_pid_when_ready(
+                    descendant_path,
+                    read_deadline,
+                )
 
                 os.kill(parent.pid, signal.SIGTERM)
                 self.assertEqual(130, parent.wait(timeout=4))

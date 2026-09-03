@@ -262,6 +262,24 @@ def controlled_process_group(process, *, survive_term=False):
     return signals, killpg
 
 
+def _two_pids_when_ready(path, deadline):
+    """Return the two ids a spawned script records, waiting for both.
+
+    A child creates its file and then writes to it, so a reader that waits
+    only for existence can still read a partial record on a loaded host.
+    """
+
+    while time.monotonic() < deadline:
+        try:
+            fields = path.read_text(encoding="ascii").split()
+        except OSError:
+            fields = []
+        if len(fields) == 2 and all(field.isdecimal() for field in fields):
+            return int(fields[0]), int(fields[1])
+        time.sleep(0.01)
+    raise AssertionError("child never recorded both pids")
+
+
 class FakeRemoteWatchSession:
     def __init__(self, items=(), hosts=("edge",), all_failed=False):
         self.items = list(items)
@@ -4435,11 +4453,13 @@ class CLITests(unittest.TestCase):
                     )
 
                 self.assertEqual(1, code)
-                self.assertTrue(pid_path.exists())
-                process_group, descendant = [
-                    int(value)
-                    for value in pid_path.read_text(encoding="ascii").split()
-                ]
+                # The script writes both ids in one line, so waiting for two
+                # decimal fields waits for the whole record rather than for a
+                # file that exists but is still empty.
+                process_group, descendant = _two_pids_when_ready(
+                    pid_path,
+                    time.monotonic() + 5,
+                )
                 self.assertGreater(descendant, 0)
                 with self.assertRaises(ProcessLookupError):
                     os.killpg(process_group, 0)
