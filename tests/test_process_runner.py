@@ -821,11 +821,17 @@ class ProcessRunnerTests(unittest.TestCase):
                     input_limit=1,
                     stdout_limit=1,
                     stderr_limit=1,
-                    timeout=0.2,
+                    # Same reason as the startup-timeout stream test: this
+                    # budget covers an interpreter start so the child gets to
+                    # record its pid. What matters is that the call returns
+                    # near its timeout instead of hanging on closed pipes.
+                    timeout=1.5,
                 )
 
-            self.assertLess(time.monotonic() - started, 1)
-            self.assertFalse(process_exists(int(pid_path.read_text(encoding="ascii"))))
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertFalse(
+                process_exists(read_pid_when_ready(pid_path, time.monotonic() + 2))
+            )
 
     def test_cancel_raises_timeout_expired_with_bounded_output(self):
         cancel_event = threading.Event()
@@ -1324,12 +1330,17 @@ class ProcessRunnerTests(unittest.TestCase):
             stream = BoundedLineStream(
                 [sys.executable, "-c", code, str(pid_path)],
                 line_limit=64,
-                startup_timeout=0.15,
+                # The budget has to outlast an interpreter start, or the child
+                # is killed before it records the pid this test asks about and
+                # the failure is a missing file rather than a surviving
+                # process. The child never writes a line, so the timeout still
+                # fires either way.
+                startup_timeout=2,
             )
             with self.assertRaises(BoundedLineStreamTimeoutError) as raised:
                 next(stream)
 
-            pid = int(pid_path.read_text(encoding="ascii"))
+            pid = read_pid_when_ready(pid_path, time.monotonic() + 2)
             self.assertEqual(
                 BoundedLineStreamEndReason.STARTUP_TIMEOUT,
                 raised.exception.result.end_reason,
