@@ -122,6 +122,36 @@ class SystemdTests(unittest.TestCase):
         )
         return result, active_runner
 
+    def test_default_readiness_window_outlasts_a_first_index_scan(self):
+        # Same claim as the launchd backend: the default window has to cover a
+        # first index scan, or `service install` tears down a service whose
+        # daemon was only still scanning.
+        runner = FakeSystemctl()
+        clock = [0.0]
+        client = FakeClient(runner)
+        original_ping = client.ping
+        answers_at = 22.0
+
+        def ping():
+            if clock[0] < answers_at:
+                raise SidecarClientError("scanning", code="connection_failed")
+            return original_ping()
+
+        def advance(value):
+            clock[0] += value
+
+        client.ping = ping
+
+        result, _ = self.install(
+            runner=runner,
+            client=client,
+            monotonic=lambda: clock[0],
+            sleep=advance,
+        )
+
+        self.assertEqual(ServiceResult(0, "service installed and running"), result)
+        self.assertTrue(self.unit.exists())
+
     def test_install_writes_hardened_user_unit_and_exact_argv(self):
         result, runner = self.install()
 

@@ -45,7 +45,11 @@ LAUNCHCTL_PATH = Path("/bin/launchctl")
 PATH_VALUE = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 THROTTLE_INTERVAL = 10
 CONTROL_TIMEOUT = 10.0
-READY_TIMEOUT = 5.0
+# A daemon answers nothing until its first index scan ends, and that scan grows
+# with the index — 22s on a 1,952-session machine. A shorter window boots out a
+# healthy service and blames a daemon that was only still scanning, so this
+# matches the CLI's own start window.
+READY_TIMEOUT = 45.0
 POLL_INTERVAL = 0.1
 MAX_PLIST_BYTES = 1024 * 1024
 MAX_CONTROL_OUTPUT = 64 * 1024
