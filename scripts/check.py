@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,6 +54,23 @@ def _run_command(
     return result.returncode
 
 
+@contextlib.contextmanager
+def _scratch_directory(prefix: str):
+    """Yield a temporary directory whose removal tolerates a late writer.
+
+    The coverage stage runs a suite that spawns interpreters, and a straggler
+    can drop a `.coverage.*` file into this directory while it is being
+    removed. The measurement is already reported by then, so a raced removal
+    must not turn a passing gate into an error.
+    """
+
+    path = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        yield str(path)
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def _run_stage(stage: str, full_tests_ran: bool) -> int:
     python = sys.executable
     if stage == "matrix":
@@ -63,9 +82,7 @@ def _run_stage(stage: str, full_tests_ran: bool) -> int:
             (python, "-m", "unittest", "discover", "-s", "tests", "-v")
         )
     if stage == "coverage":
-        with tempfile.TemporaryDirectory(
-            prefix="agent-sidecar-coverage-"
-        ) as temporary:
+        with _scratch_directory("agent-sidecar-coverage-") as temporary:
             data_file = Path(temporary) / ".coverage"
             report_file = Path(temporary) / "coverage.json"
             environment = dict(os.environ)

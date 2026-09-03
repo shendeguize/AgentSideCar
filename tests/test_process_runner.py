@@ -834,26 +834,44 @@ class ProcessRunnerTests(unittest.TestCase):
             )
 
     def test_cancel_raises_timeout_expired_with_bounded_output(self):
+        # The cancel has to arrive after the child has spoken, or the test
+        # asserts against output the child never got to write. A wall-clock
+        # delay cannot promise that on a loaded machine, so the child announces
+        # itself with a file it touches only after writing to stdout.
         cancel_event = threading.Event()
-        timer = threading.Timer(0.15, cancel_event.set)
-        timer.start()
-        code = "import os,time;os.write(1,b'ready');time.sleep(60)"
-        started = time.monotonic()
-        try:
-            with self.assertRaises(subprocess.TimeoutExpired) as raised:
-                run_bounded(
-                    [sys.executable, "-c", code],
-                    input_limit=1,
-                    stdout_limit=1024,
-                    stderr_limit=1024,
-                    timeout=2,
-                    cancel_event=cancel_event,
-                )
-        finally:
-            timer.cancel()
-            timer.join()
+        code = (
+            "import os,sys,time;os.write(1,b'ready');"
+            "open(sys.argv[1],'w').close();time.sleep(60)"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            spoke = Path(temporary) / "spoke"
 
-        self.assertLess(time.monotonic() - started, 1)
+            def cancel_once_the_child_has_spoken():
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline and not spoke.exists():
+                    time.sleep(0.01)
+                cancel_event.set()
+
+            watcher = threading.Thread(target=cancel_once_the_child_has_spoken)
+            watcher.start()
+            started = time.monotonic()
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                    run_bounded(
+                        [sys.executable, "-c", code, str(spoke)],
+                        input_limit=1,
+                        stdout_limit=1024,
+                        stderr_limit=1024,
+                        # Long enough that reaching it would be a different
+                        # failure: this call must end on the cancel.
+                        timeout=60,
+                        cancel_event=cancel_event,
+                    )
+            finally:
+                cancel_event.set()
+                watcher.join()
+
+        self.assertLess(time.monotonic() - started, 30)
         self.assertEqual(b"ready", raised.exception.output)
 
     @mock.patch("sidecar.process_runner.subprocess.Popen")
