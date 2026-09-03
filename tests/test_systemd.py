@@ -228,6 +228,31 @@ class SystemdTests(unittest.TestCase):
         self.assertEqual(1, missing.exit_code)
         self.assertIn("unloaded", missing.message)
 
+    def test_status_names_a_supervised_pid_that_has_not_answered_yet(self):
+        # systemd keeps reporting a live MainPID throughout the daemon's first
+        # scan, and the socket answers nothing until that scan ends. Calling
+        # that window "not running" contradicts the pid systemd just gave.
+        runner = FakeSystemctl(loaded=True, active=True, pid=100)
+        self.unit.parent.mkdir(mode=0o700, parents=True)
+        self.unit.write_bytes(build_unit(self.prefix, runtime_dir=self.runtime))
+        self.unit.chmod(0o644)
+
+        warming = service_status(
+            runner=runner,
+            client=FakeClient(runner, offline=True),
+            runtime_dir=self.runtime,
+            home=self.home,
+            config_home=self.config,
+            platform="linux",
+            systemctl_path=self.systemctl,
+            euid=os.geteuid(),
+        )
+
+        self.assertEqual(1, warming.exit_code)
+        self.assertIn("100", warming.message)
+        self.assertIn("not answering", warming.message)
+        self.assertNotIn("not running", warming.message)
+
     def test_foreign_unit_and_unsupported_platform_fail_closed(self):
         self.unit.parent.mkdir(mode=0o700, parents=True)
         self.unit.write_text("[Unit]\nDescription=foreign\n", encoding="utf-8")

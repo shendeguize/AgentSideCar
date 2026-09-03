@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A daemon that was still building its first index no longer reads as a dead
+  or absent one. It binds its socket and records its pid before that scan and
+  answers nothing until the scan ends, which on a 1,950-session machine took
+  up to 22 seconds; every command that met that silence called it absence.
+  `daemon start` waited 5 seconds and, when a service claimed the runtime in
+  the gap after a `stop`, reported `daemon child exited before readiness`
+  while the winner was seconds from serving. It now waits out a live owner —
+  up to 45 seconds, ending the moment a ping lands — and adopts it, while a
+  child that died with nothing holding the runtime still fails immediately.
+  `daemon status` and `daemon stop` name the live owner instead of declaring
+  `daemon is not running`, and `service status` reports the pid launchd or
+  systemd just handed back rather than contradicting it.
 - A remote `watch` child that took longer than a second to reap turned an
   orderly shutdown into a crash. The bootstrap's cleanup ran two one-second
   waits and the second one was unguarded, so on a loaded host the payload

@@ -1676,6 +1676,14 @@ def _status(
         return ServiceResult(0, "service is running (pid {})".format(info.pid))
     if job.loaded and info is not None:
         return ServiceResult(1, "service is degraded; daemon pid does not match")
+    if job.loaded and job.running and job.pid is not None:
+        # launchd hands back a live pid for the whole first scan, during which
+        # the socket answers nothing. The pid is the stronger evidence.
+        return ServiceResult(
+            1,
+            "service is running (pid {}) but the daemon is not answering "
+            "yet".format(job.pid),
+        )
     if job.loaded:
         return ServiceResult(1, "service is loaded but daemon is not running")
     if info is not None:

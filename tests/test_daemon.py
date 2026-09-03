@@ -2238,6 +2238,47 @@ class DaemonLifecycleTests(unittest.TestCase):
                 subscription.get(timeout=0.01)
 
 
+class RuntimeOwnerTests(unittest.TestCase):
+    def test_ownership_needs_a_recorded_pid_that_is_still_alive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+
+            self.assertIsNone(daemon_module.runtime_owner(runtime))
+
+            (runtime / "daemon.pid").write_text("999999\n", encoding="ascii")
+            self.assertIsNone(daemon_module.runtime_owner(runtime))
+
+            (runtime / "daemon.pid").write_text(
+                "{}\n".format(os.getpid()),
+                encoding="ascii",
+            )
+            self.assertEqual(os.getpid(), daemon_module.runtime_owner(runtime))
+
+    def test_a_pid_we_may_not_signal_still_counts_as_alive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            (runtime / "daemon.pid").write_text("4242\n", encoding="ascii")
+
+            with mock.patch.object(
+                daemon_module.os,
+                "kill",
+                side_effect=PermissionError,
+            ):
+                self.assertEqual(4242, daemon_module.runtime_owner(runtime))
+
+    def test_an_unanswerable_liveness_check_claims_no_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            (runtime / "daemon.pid").write_text("4242\n", encoding="ascii")
+
+            with mock.patch.object(
+                daemon_module.os,
+                "kill",
+                side_effect=OSError(errno.EINVAL, "invalid"),
+            ):
+                self.assertIsNone(daemon_module.runtime_owner(runtime))
+
+
 class StaleRuntimeTests(unittest.TestCase):
     def test_concurrent_stale_startup_keeps_one_reachable_owner(self):
         context = multiprocessing.get_context("spawn")

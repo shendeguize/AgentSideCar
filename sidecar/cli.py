@@ -58,6 +58,7 @@ from sidecar.daemon import (
     default_runtime_dir,
     read_pid,
     run_foreground,
+    runtime_owner,
 )
 from sidecar.inject import (
     DEFAULT_SEND_TIMEOUT_SECONDS,
@@ -117,7 +118,11 @@ from sidecar.text_utils import normalize_scalar_text, redact_message
 from sidecar.tui import arrange_session_tree, run_tui
 
 RECENT_SECONDS = 48.0 * 60.0 * 60.0
-DAEMON_START_TIMEOUT = 5.0
+# A daemon answers nothing until its first scan finishes, and that scan grows
+# with the index: a 1,950-session machine took 22s. Five seconds bought a
+# verdict before the evidence existed, so this budget outlasts a real scan and
+# ends the moment a ping lands.
+DAEMON_START_TIMEOUT = 45.0
 DAEMON_STOP_TIMEOUT = 5.0
 DAEMON_POLL_INTERVAL = 0.1
 DAEMON_CHILD_TERM_TIMEOUT = 2.0
@@ -1727,6 +1732,24 @@ def _runtime_dir_for(client: object) -> Path:
     return default_runtime_dir()
 
 
+def _silent_daemon_line(client: object) -> str:
+    """Describe a runtime whose socket said nothing.
+
+    Silence has two causes with opposite meanings: no daemon at all, or one
+    that is still doing the first scan it must finish before it answers. Only
+    the second leaves a live owner behind, so when there is one the pid is
+    reported instead of an absence the ping never established.
+    """
+
+    owner = runtime_owner(_runtime_dir_for(client))
+    if owner is None:
+        return "daemon is not running\n"
+    return (
+        "daemon is not answering: pid {} owns the runtime and a starting "
+        "daemon stays silent until its first scan finishes\n".format(owner)
+    )
+
+
 def _report_http_info(
     info: PingInfo,
     client: object,
@@ -2059,8 +2082,18 @@ def _daemon_start(
                     )
                     break
                 if return_code is not None:
-                    failure = "daemon child exited before readiness"
-                    break
+                    # The child loses the ownership lock when a service or a
+                    # racing start already holds it, and the winner is then
+                    # mid-scan and silent. Waiting it out ends in the adoption
+                    # path below; calling it a dead daemon ends in a lie.
+                    owner = runtime_owner(_runtime_dir_for(client))
+                    if owner is None or owner == process.pid:
+                        failure = "daemon child exited before readiness"
+                        break
+                    failure = (
+                        "daemon child lost the runtime to pid {}, which has "
+                        "not answered yet".format(owner)
+                    )
                 time.sleep(DAEMON_POLL_INTERVAL)
                 continue
             if not _ping_belongs_to_child(process, info):
@@ -2142,7 +2175,7 @@ def _daemon_stop(client: SidecarClient, stdout: TextIO, stderr: TextIO) -> int:
     try:
         socket_pid = _ping_pid(client)
     except (SidecarClientError, OSError):
-        stdout.write("daemon is not running\n")
+        stdout.write(_silent_daemon_line(client))
         stdout.flush()
         return 1
 
@@ -2213,7 +2246,7 @@ def _daemon_status(client: SidecarClient, stdout: TextIO) -> int:
     try:
         info = _client_ping_info(client)
     except (SidecarClientError, OSError):
-        stdout.write("daemon is not running\n")
+        stdout.write(_silent_daemon_line(client))
         stdout.flush()
         return 1
     reported = sanitize_terminal_text(info.version)

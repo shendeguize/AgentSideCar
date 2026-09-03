@@ -1019,7 +1019,9 @@ class LaunchdTests(unittest.TestCase):
             euid=os.geteuid(),
         )
         loaded = service_status(
-            runner=FakeLaunchctl(loaded=True),
+            # Loaded with nothing behind it: launchd holds the job but no
+            # process, which is the only silence that means "not running".
+            runner=FakeLaunchctl(loaded=True, pid=None, state="waiting"),
             client=FakeClient(offline=True),
             prefix=self.prefix,
             runtime_dir=self.runtime,
@@ -1058,6 +1060,29 @@ class LaunchdTests(unittest.TestCase):
         self.assertEqual(2, control.exit_code)
         self.assertNotIn("private", control.message)
         self.assertNotIn(str(self.plist_path), control.message)
+
+    def test_status_names_a_supervised_pid_that_has_not_answered_yet(self):
+        # launchd keeps reporting a live pid throughout the daemon's first
+        # scan, and the socket answers nothing until that scan ends. Calling
+        # that window "not running" contradicts the pid launchd just gave.
+        self.write_plist()
+        warming_runner = FakeLaunchctl(loaded=True)
+
+        warming = service_status(
+            runner=warming_runner,
+            client=FakeClient(offline=True),
+            prefix=self.prefix,
+            runtime_dir=self.runtime,
+            home=self.home,
+            platform="darwin",
+            launchctl_path=self.launchctl,
+            euid=os.geteuid(),
+        )
+
+        self.assertEqual(1, warming.exit_code)
+        self.assertIn(str(warming_runner.pid), warming.message)
+        self.assertIn("not answering", warming.message)
+        self.assertNotIn("not running", warming.message)
 
     def test_status_requires_parsed_running_state_and_exact_ping_pid(self):
         self.write_plist()

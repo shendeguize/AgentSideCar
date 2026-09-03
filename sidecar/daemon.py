@@ -186,6 +186,34 @@ def read_pid(runtime_dir: Optional[Path] = None) -> Optional[int]:
     return pid if pid > 0 else None
 
 
+def runtime_owner(runtime_dir: Optional[Path] = None) -> Optional[int]:
+    """Return the runtime's recorded owner pid while that process is alive.
+
+    A daemon binds its socket and writes this pid before its first scan, and
+    only starts answering once that scan is done. Between the two it is
+    invisible to a ping, so callers that would otherwise read the silence as
+    absence can ask here whether anyone still holds the runtime.
+
+    The ownership lock is deliberately not consulted: probing it means taking
+    it, and a probe that briefly holds the lock would make the very daemon it
+    asks about fail to claim its own runtime.
+    """
+
+    pid = read_pid(runtime_dir)
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        # Signalling is denied, which is itself proof the pid is taken.
+        return pid
+    except OSError:
+        return None
+    return pid
+
+
 class SidecarDaemon:
     """Orchestrate scanning, snapshots, tailer pooling, and the socket API."""
 
@@ -1727,4 +1755,5 @@ __all__ = [
     "default_runtime_dir",
     "read_pid",
     "run_foreground",
+    "runtime_owner",
 ]

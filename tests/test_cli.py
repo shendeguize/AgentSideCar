@@ -3914,15 +3914,22 @@ class CLITests(unittest.TestCase):
 
     def test_daemon_stop_reports_each_terminal_process_state(self):
         stdout = io.StringIO()
-        self.assertEqual(
-            1,
-            main(
-                ["daemon", "stop"],
-                client=OfflineClient(),
-                stdout=stdout,
-                stderr=io.StringIO(),
-            ),
-        )
+        # An unowned runtime of its own: silence only means "no daemon" when
+        # nothing holds the runtime, and the developer's own daemon holds the
+        # default one.
+        with tempfile.TemporaryDirectory() as unowned:
+            self.assertEqual(
+                1,
+                main(
+                    ["daemon", "stop"],
+                    client=SequencedPingClient(
+                        [SidecarClientError("offline", code="connection_failed")],
+                        socket_path=Path(unowned) / "daemon.sock",
+                    ),
+                    stdout=stdout,
+                    stderr=io.StringIO(),
+                ),
+            )
         self.assertIn("not running", stdout.getvalue())
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -4525,6 +4532,77 @@ class CLITests(unittest.TestCase):
         self.assertIn("already running", stdout.getvalue())
         self.assertIn(signal.SIGTERM, signals)
 
+    def test_daemon_start_waits_out_the_owner_that_displaced_its_child(self):
+        # A service can claim the runtime in the gap between a stop and this
+        # start; our child then exits on the ownership lock while the winner is
+        # still doing its first scan. Silence from a live owner is not a dead
+        # daemon, and the owner's runtime files are not ours to clean up.
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            pidfile = runtime / "daemon.pid"
+            owner_pid = os.getpid()
+            pidfile.write_text("{}\n".format(owner_pid), encoding="ascii")
+            process = FakeDaemonProcess()
+            process.returncode = 1
+            client = SequencedPingClient(
+                [
+                    SidecarClientError("offline", code="connection_failed"),
+                    SidecarClientError("offline", code="connection_failed"),
+                    {"ok": True, "op": "ping", "pid": owner_pid},
+                ],
+                socket_path=runtime / "daemon.sock",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with (
+                mock.patch("sidecar.cli.subprocess.Popen", return_value=process),
+                mock.patch("sidecar.cli.os.getpgid", side_effect=lambda pid: pid),
+                mock.patch("sidecar.cli.os.killpg"),
+            ):
+                code = main(
+                    ["daemon", "start"],
+                    client=client,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+            self.assertEqual(0, code)
+            self.assertIn("already running", stdout.getvalue())
+            self.assertNotIn("child exited", stderr.getvalue())
+            self.assertTrue(pidfile.exists())
+
+    def test_daemon_start_reports_a_dead_child_that_owned_nothing(self):
+        # The mirror case: nothing owns the runtime, so the child's exit is the
+        # whole story and start says so without waiting out its budget.
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            process = FakeDaemonProcess()
+            process.returncode = 1
+            client = SequencedPingClient(
+                [SidecarClientError("offline", code="connection_failed")],
+                socket_path=runtime / "daemon.sock",
+            )
+            stderr = io.StringIO()
+
+            with (
+                mock.patch("sidecar.cli.subprocess.Popen", return_value=process),
+                mock.patch("sidecar.cli.DAEMON_START_TIMEOUT", 60.0),
+                mock.patch("sidecar.cli.os.killpg"),
+            ):
+                started = time.monotonic()
+                code = main(
+                    ["daemon", "start"],
+                    client=client,
+                    stdout=io.StringIO(),
+                    stderr=stderr,
+                )
+                elapsed = time.monotonic() - started
+
+            self.assertEqual(1, code)
+            self.assertIn("child exited before readiness", stderr.getvalue())
+            self.assertLess(elapsed, 5.0)
+
     def test_daemon_http_parser_defaults_and_port_validation(self):
         default = build_parser().parse_args(["daemon", "start", "--http"])
         selected = build_parser().parse_args(
@@ -4760,17 +4838,57 @@ class CLITests(unittest.TestCase):
             stdout=running_output,
             stderr=io.StringIO(),
         )
-        stopped = main(
-            ["daemon", "status"],
-            client=OfflineClient(),
-            stdout=stopped_output,
-            stderr=io.StringIO(),
-        )
+        with tempfile.TemporaryDirectory() as unowned:
+            stopped = main(
+                ["daemon", "status"],
+                client=SequencedPingClient(
+                    [SidecarClientError("offline", code="connection_failed")],
+                    socket_path=Path(unowned) / "daemon.sock",
+                ),
+                stdout=stopped_output,
+                stderr=io.StringIO(),
+            )
 
         self.assertEqual(0, running)
         self.assertEqual(1, stopped)
         self.assertIn("44", running_output.getvalue())
         self.assertIn("not running", stopped_output.getvalue())
+
+    def test_daemon_status_separates_a_silent_owner_from_no_daemon(self):
+        # The socket answers nothing until the first scan finishes, which on a
+        # large index takes tens of seconds. Reporting that window as "not
+        # running" reads as a crash, so a live recorded owner is named instead.
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary)
+            client = SequencedPingClient(
+                [SidecarClientError("offline", code="connection_failed")],
+                socket_path=runtime / "daemon.sock",
+            )
+            absent = io.StringIO()
+            absent_code = main(
+                ["daemon", "status"],
+                client=client,
+                stdout=absent,
+                stderr=io.StringIO(),
+            )
+            (runtime / "daemon.pid").write_text(
+                "{}\n".format(os.getpid()),
+                encoding="ascii",
+            )
+            silent = io.StringIO()
+            silent_code = main(
+                ["daemon", "status"],
+                client=client,
+                stdout=silent,
+                stderr=io.StringIO(),
+            )
+
+        self.assertEqual(1, absent_code)
+        self.assertIn("not running", absent.getvalue())
+        self.assertEqual(1, silent_code)
+        self.assertIn(str(os.getpid()), silent.getvalue())
+        self.assertIn("first scan", silent.getvalue())
+        self.assertNotIn("not running", silent.getvalue())
 
     def test_daemon_status_flags_a_version_older_than_the_cli(self):
         matching = io.StringIO()
