@@ -1,7 +1,9 @@
 /**
  * Fake-timer coverage of the probe-adopt-else-host supervisor state machine
  * (src/supervisor.ts, design §4.a). All timing uses the module defaults:
- * hostReadyTimeoutMs 5000, hostReadyPingIntervalMs 500, probeIntervalMs 5000,
+ * hostReadyTimeoutMs 45000 (overridden to 5000 where a test covers backoff
+ * mechanics rather than the readiness budget), hostReadyPingIntervalMs 500,
+ * probeIntervalMs 5000,
  * adoptedRepingMs 5000, adoptedFailureLimit 3, backoff 1s→2s→4s→8s, limit 5.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -130,8 +132,30 @@ describe('DaemonSupervisor', () => {
     expect(h.states).toEqual(['hosting', 'hosted'])
   })
 
-  it('readiness timeout → exponential backoff sequence (1s→2s→4s→8s) → failed', async () => {
+  it('lets a first scan finish instead of executing the daemon doing it', async () => {
+    // A daemon answers nothing until its first index scan ends, and that scan
+    // grows with the index: a 1,950-session machine took 22s. A readiness
+    // window shorter than the scan kills healthy daemons in a loop and never
+    // hosts one, so the default has to outlast a real scan.
     const h = createHarness()
+    h.sup.start()
+    await flush()
+    expect(h.sup.state).toBe('hosting')
+
+    await vi.advanceTimersByTimeAsync(22_000)
+    expect(h.sup.state).toBe('hosting')
+    expect(h.procs[0]!.terminate).not.toHaveBeenCalled()
+
+    h.setPing(PING)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(h.sup.state).toBe('hosted')
+    expect(h.deps.spawnDaemon).toHaveBeenCalledTimes(1)
+  })
+
+  it('readiness timeout → exponential backoff sequence (1s→2s→4s→8s) → failed', async () => {
+    // Short window on purpose: this covers the backoff sequence, not the
+    // default readiness budget, which is deliberately long enough for a scan.
+    const h = createHarness({ hostReadyTimeoutMs: 5000 })
     h.sup.start()
     await flush()
     expect(h.sup.state).toBe('hosting')
@@ -302,7 +326,7 @@ describe('DaemonSupervisor', () => {
   })
 
   it('retry() from FAILED resets the failure budget and re-probes', async () => {
-    const h = createHarness({ backoffLimit: 2 })
+    const h = createHarness({ backoffLimit: 2, hostReadyTimeoutMs: 5000 })
     h.sup.start()
     await flush()
     await vi.advanceTimersByTimeAsync(5000) // failure 1 → backoff
