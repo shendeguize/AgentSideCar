@@ -836,16 +836,8 @@ class ProcessRunnerTests(unittest.TestCase):
             descendant_pid = None
             try:
                 deadline = time.monotonic() + 3
-                while time.monotonic() < deadline and (
-                    not child_pid_path.exists() or not descendant_pid_path.exists()
-                ):
-                    if parent.poll() is not None:
-                        break
-                    time.sleep(0.01)
-                self.assertTrue(child_pid_path.exists())
-                self.assertTrue(descendant_pid_path.exists())
-                child_pid = int(child_pid_path.read_text(encoding="ascii"))
-                descendant_pid = int(descendant_pid_path.read_text(encoding="ascii"))
+                child_pid = read_pid_when_ready(child_pid_path, deadline)
+                descendant_pid = read_pid_when_ready(descendant_pid_path, deadline)
 
                 started = time.monotonic()
                 os.kill(parent.pid, exit_signal)
@@ -1149,11 +1141,9 @@ class ProcessRunnerTests(unittest.TestCase):
                     worker = threading.Thread(target=run_in_worker)
                     worker.start()
                     self.assertTrue(spawned.wait(timeout=2))
-                    deadline = time.monotonic() + 2
-                    while time.monotonic() < deadline and not pid_path.exists():
-                        time.sleep(0.01)
-                    self.assertTrue(pid_path.exists())
-                    child_pid = int(pid_path.read_text(encoding="ascii"))
+                    child_pid = read_pid_when_ready(
+                        pid_path, time.monotonic() + 2
+                    )
 
                     cleanup = threading.Thread(target=registry.kill_all)
                     cleanup.start()
@@ -1991,10 +1981,9 @@ class ProcessRunnerTests(unittest.TestCase):
                     b"ready",
                     process.read_line(deadline=time.monotonic() + 2),
                 )
-                deadline = time.monotonic() + 2
-                while not pid_path.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                escaped_pid = int(pid_path.read_text(encoding="ascii"))
+                escaped_pid = read_pid_when_ready(
+                    pid_path, time.monotonic() + 2
+                )
                 observed = process.wait_clean(
                     deadline=time.monotonic() + 1
                 )

@@ -102,6 +102,24 @@ def process_exists(pid):
     return True
 
 
+def read_pid_when_ready(path, deadline):
+    """Return the pid a child recorded, waiting for content and not the file.
+
+    A child creates its pid file and then writes to it, so a reader that waits
+    only for existence can still read an empty file on a loaded host.
+    """
+
+    while time.monotonic() < deadline:
+        try:
+            payload = path.read_text(encoding="ascii").strip()
+        except OSError:
+            payload = ""
+        if payload.isdecimal():
+            return int(payload)
+        time.sleep(0.01)
+    raise AssertionError("child never recorded its pid")
+
+
 class ProcessLivenessTests(unittest.TestCase):
     def test_process_exists_distinguishes_linux_live_and_zombie_states(self):
         with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
@@ -1326,20 +1344,7 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
                 process.stdin.close()
                 assert process.stdout is not None
                 self.assertEqual(READY_FRAME + b"\n", process.stdout.readline())
-                # The child creates this file and then writes to it, so mere
-                # existence can still mean an empty read on a loaded runner.
-                deadline = time.monotonic() + 1
-                recorded = ""
-                while time.monotonic() < deadline:
-                    try:
-                        recorded = pid_path.read_text(encoding="ascii").strip()
-                    except OSError:
-                        recorded = ""
-                    if recorded:
-                        break
-                    time.sleep(0.01)
-                self.assertTrue(recorded, "child never recorded its pid")
-                child_pid = int(recorded)
+                child_pid = read_pid_when_ready(pid_path, time.monotonic() + 1)
 
                 disconnected_at = time.monotonic()
                 process.stdout.close()
@@ -1393,11 +1398,7 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
                 assert process.stdin is not None
                 process.stdin.write(self._zipapp(source))
                 process.stdin.close()
-                deadline = time.monotonic() + 2
-                while time.monotonic() < deadline and not pid_path.exists():
-                    time.sleep(0.01)
-                self.assertTrue(pid_path.exists())
-                child_pid = int(pid_path.read_text(encoding="ascii"))
+                child_pid = read_pid_when_ready(pid_path, time.monotonic() + 2)
                 self.assertTrue(list(root.glob("agent-sidecar-watch-*.pyz")))
 
                 os.kill(process.pid, signal.SIGTERM)
@@ -1454,11 +1455,7 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
                 process.stdin.close()
                 assert process.stdout is not None
                 self.assertEqual(READY_FRAME + b"\n", process.stdout.readline())
-                deadline = time.monotonic() + 2
-                while time.monotonic() < deadline and not pid_path.exists():
-                    time.sleep(0.01)
-                self.assertTrue(pid_path.exists())
-                child_pid = int(pid_path.read_text(encoding="ascii"))
+                child_pid = read_pid_when_ready(pid_path, time.monotonic() + 2)
                 for index in range(60):
                     signum = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)[index % 3]
                     try:
