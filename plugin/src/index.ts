@@ -63,7 +63,7 @@ import {
   type AnalysisInput,
   type AnalysisSession,
 } from './analysis.ts'
-import { Config } from './config.ts'
+import { bakedConfigDrift, Config } from './config.ts'
 import { Reconciler, SidecarSocketClient } from './bridge.ts'
 import {
   createDshInjectExecutor,
@@ -1338,8 +1338,20 @@ export function apply(ctx: HostContext, config: Config): void {
         applies: 'live',
       })
       effective = scope.get()
+      const reportBakedDrift = (next: Config) => {
+        const drifted = bakedConfigDrift(config, next)
+        if (drifted.length === 0) return
+        log(
+          'warn',
+          `settings values read at apply time were not applied: ${drifted.join(', ')}; ` +
+            "set these in the profile's cordis patch for the 'agent-sidecar' row, " +
+            'since a plugin reload reads the entry config rather than the settings document',
+        )
+      }
+      reportBakedDrift(effective)
       const unwatch = scope.watch((next) => {
         effective = next
+        reportBakedDrift(next)
       })
       sctx.effect(() => () => {
         unwatch()
