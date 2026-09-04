@@ -119,13 +119,23 @@ def process_exists(pid):
     return True
 
 
-def read_pid_when_ready(path, deadline):
+# A child that has to start an interpreter before recording its own pid can
+# lose seconds to a loaded host, and no test here is about how fast that
+# record appears: every caller's subject is what happens once it exists. A
+# generous budget therefore costs nothing on the happy path and only bounds
+# how long a genuinely broken case takes to fail.
+PID_WAIT_SECONDS = 30
+
+
+def read_pid_when_ready(path, deadline=None):
     """Return the pid a child recorded, waiting for content and not the file.
 
     A child creates its pid file and then writes to it, so a reader that waits
     only for existence can still read an empty file on a loaded host.
     """
 
+    if deadline is None:
+        deadline = time.monotonic() + PID_WAIT_SECONDS
     while time.monotonic() < deadline:
         try:
             payload = path.read_text(encoding="ascii").strip()
@@ -1139,12 +1149,8 @@ class RemoteWatchFleetTests(unittest.TestCase):
                 self.assertTrue(descendant_path.exists(), diagnostic)
                 # Existence is not content: both files are created and then
                 # written, so read them as records rather than as files.
-                read_deadline = time.monotonic() + 5
-                child_pid = read_pid_when_ready(child_path, read_deadline)
-                descendant_pid = read_pid_when_ready(
-                    descendant_path,
-                    read_deadline,
-                )
+                child_pid = read_pid_when_ready(child_path)
+                descendant_pid = read_pid_when_ready(descendant_path)
 
                 os.kill(parent.pid, signal.SIGTERM)
                 self.assertEqual(130, parent.wait(timeout=4))
@@ -1388,7 +1394,7 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
                 process.stdin.close()
                 assert process.stdout is not None
                 self.assertEqual(READY_FRAME + b"\n", process.stdout.readline())
-                child_pid = read_pid_when_ready(pid_path, time.monotonic() + 1)
+                child_pid = read_pid_when_ready(pid_path)
 
                 disconnected_at = time.monotonic()
                 process.stdout.close()
@@ -1442,7 +1448,7 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
                 assert process.stdin is not None
                 process.stdin.write(self._zipapp(source))
                 process.stdin.close()
-                child_pid = read_pid_when_ready(pid_path, time.monotonic() + 2)
+                child_pid = read_pid_when_ready(pid_path)
                 self.assertTrue(list(root.glob("agent-sidecar-watch-*.pyz")))
 
                 os.kill(process.pid, signal.SIGTERM)
@@ -1499,7 +1505,7 @@ class RemoteWatchBootstrapTests(unittest.TestCase):
                 process.stdin.close()
                 assert process.stdout is not None
                 self.assertEqual(READY_FRAME + b"\n", process.stdout.readline())
-                child_pid = read_pid_when_ready(pid_path, time.monotonic() + 2)
+                child_pid = read_pid_when_ready(pid_path)
                 for index in range(60):
                     signum = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)[index % 3]
                     try:

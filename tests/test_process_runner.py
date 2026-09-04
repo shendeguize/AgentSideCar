@@ -87,7 +87,17 @@ def process_exists(pid):
     return True
 
 
-def read_pid_when_ready(path, deadline):
+# A child that has to start an interpreter before recording its own pid can
+# lose seconds to a loaded host, and no test here is about how fast that
+# record appears: every caller's subject is what happens once it exists. A
+# generous budget therefore costs nothing on the happy path and only bounds
+# how long a genuinely broken case takes to fail.
+PID_WAIT_SECONDS = 30
+
+
+def read_pid_when_ready(path, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic() + PID_WAIT_SECONDS
     candidate = None
     while time.monotonic() < deadline:
         try:
@@ -830,7 +840,7 @@ class ProcessRunnerTests(unittest.TestCase):
 
             self.assertLess(time.monotonic() - started, 3)
             self.assertFalse(
-                process_exists(read_pid_when_ready(pid_path, time.monotonic() + 2))
+                process_exists(read_pid_when_ready(pid_path))
             )
 
     def test_cancel_raises_timeout_expired_with_bounded_output(self):
@@ -940,9 +950,8 @@ class ProcessRunnerTests(unittest.TestCase):
             child_pid = None
             descendant_pid = None
             try:
-                deadline = time.monotonic() + 3
-                child_pid = read_pid_when_ready(child_pid_path, deadline)
-                descendant_pid = read_pid_when_ready(descendant_pid_path, deadline)
+                child_pid = read_pid_when_ready(child_pid_path)
+                descendant_pid = read_pid_when_ready(descendant_pid_path)
 
                 started = time.monotonic()
                 os.kill(parent.pid, exit_signal)
@@ -1246,9 +1255,7 @@ class ProcessRunnerTests(unittest.TestCase):
                     worker = threading.Thread(target=run_in_worker)
                     worker.start()
                     self.assertTrue(spawned.wait(timeout=2))
-                    child_pid = read_pid_when_ready(
-                        pid_path, time.monotonic() + 2
-                    )
+                    child_pid = read_pid_when_ready(pid_path)
 
                     cleanup = threading.Thread(target=registry.kill_all)
                     cleanup.start()
@@ -1358,7 +1365,7 @@ class ProcessRunnerTests(unittest.TestCase):
             with self.assertRaises(BoundedLineStreamTimeoutError) as raised:
                 next(stream)
 
-            pid = read_pid_when_ready(pid_path, time.monotonic() + 2)
+            pid = read_pid_when_ready(pid_path)
             self.assertEqual(
                 BoundedLineStreamEndReason.STARTUP_TIMEOUT,
                 raised.exception.result.end_reason,
@@ -1952,10 +1959,7 @@ class ProcessRunnerTests(unittest.TestCase):
                     b"ready",
                     process.read_line(deadline=time.monotonic() + 2),
                 )
-                child_pid = read_pid_when_ready(
-                    child_pid_path,
-                    time.monotonic() + 2,
-                )
+                child_pid = read_pid_when_ready(child_pid_path)
                 observed = process.wait_clean(deadline=time.monotonic() + 0.05)
                 self.assertFalse(observed.cleanup_complete)
                 result = process.terminate_tree(
@@ -2016,10 +2020,7 @@ class ProcessRunnerTests(unittest.TestCase):
                     b"ready",
                     process.read_line(deadline=time.monotonic() + 2),
                 )
-                fork_pid = read_pid_when_ready(
-                    pid_path,
-                    time.monotonic() + 2,
-                )
+                fork_pid = read_pid_when_ready(pid_path)
                 result = process.terminate_tree(
                     deadline=time.monotonic() + 2
                 )
@@ -2091,9 +2092,7 @@ class ProcessRunnerTests(unittest.TestCase):
                     b"ready",
                     process.read_line(deadline=time.monotonic() + 2),
                 )
-                escaped_pid = read_pid_when_ready(
-                    pid_path, time.monotonic() + 2
-                )
+                escaped_pid = read_pid_when_ready(pid_path)
                 observed = process.wait_clean(
                     deadline=time.monotonic() + 1
                 )

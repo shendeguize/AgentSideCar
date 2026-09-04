@@ -262,13 +262,23 @@ def controlled_process_group(process, *, survive_term=False):
     return signals, killpg
 
 
-def _two_pids_when_ready(path, deadline):
+# A child that has to start an interpreter before recording its own pid can
+# lose seconds to a loaded host, and no test here is about how fast that
+# record appears: every caller's subject is what happens once it exists. A
+# generous budget therefore costs nothing on the happy path and only bounds
+# how long a genuinely broken case takes to fail.
+PID_WAIT_SECONDS = 30
+
+
+def _two_pids_when_ready(path, deadline=None):
     """Return the two ids a spawned script records, waiting for both.
 
     A child creates its file and then writes to it, so a reader that waits
     only for existence can still read a partial record on a loaded host.
     """
 
+    if deadline is None:
+        deadline = time.monotonic() + PID_WAIT_SECONDS
     while time.monotonic() < deadline:
         try:
             fields = path.read_text(encoding="ascii").split()
@@ -4456,10 +4466,7 @@ class CLITests(unittest.TestCase):
                 # The script writes both ids in one line, so waiting for two
                 # decimal fields waits for the whole record rather than for a
                 # file that exists but is still empty.
-                process_group, descendant = _two_pids_when_ready(
-                    pid_path,
-                    time.monotonic() + 5,
-                )
+                process_group, descendant = _two_pids_when_ready(pid_path)
                 self.assertGreater(descendant, 0)
                 with self.assertRaises(ProcessLookupError):
                     os.killpg(process_group, 0)
