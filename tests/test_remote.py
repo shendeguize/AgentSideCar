@@ -156,13 +156,23 @@ def process_exists(pid):
     return True
 
 
-def read_pid_when_ready(path, deadline):
+# A child that has to start an interpreter before recording its own pid can
+# lose seconds to a loaded host, and no test here is about how fast that
+# record appears: every caller's subject is what happens once it exists. A
+# generous budget therefore costs nothing on the happy path and only bounds
+# how long a genuinely broken case takes to fail.
+PID_WAIT_SECONDS = 30
+
+
+def read_pid_when_ready(path, deadline=None):
     """Return the pid a child recorded, waiting for content and not the file.
 
     A child creates its pid file and then writes to it, so a reader that waits
     only for existence can still read an empty file on a loaded host.
     """
 
+    if deadline is None:
+        deadline = time.monotonic() + PID_WAIT_SECONDS
     while time.monotonic() < deadline:
         try:
             payload = path.read_text(encoding="ascii").strip()
@@ -2109,9 +2119,8 @@ class EmbeddedBootstrapTests(unittest.TestCase):
                 {"ok": False, "code": "timeout"},
                 json.loads(result.stdout),
             )
-            deadline = time.monotonic() + 5
-            pid = read_pid_when_ready(root / "child.pid", deadline)
-            grandchild_pid = read_pid_when_ready(root / "grandchild.pid", deadline)
+            pid = read_pid_when_ready(root / "child.pid")
+            grandchild_pid = read_pid_when_ready(root / "grandchild.pid")
             deadline = time.monotonic() + 1.0
             while time.monotonic() < deadline and (
                 process_exists(pid) or process_exists(grandchild_pid)
@@ -2179,7 +2188,7 @@ class BoundedTransportTests(unittest.TestCase):
         # The child may still be starting when the bounded call returns, so
         # wait for the pid it promised rather than reading an absent file and
         # failing on a precondition instead of on the reaping under test.
-        return read_pid_when_ready(path, time.monotonic() + 5)
+        return read_pid_when_ready(path)
 
     @mock.patch.object(remote_transport, "_run_bounded")
     def test_remote_wrapper_keeps_thirty_second_timeout_ceiling(self, run_bounded):
@@ -2314,9 +2323,8 @@ class AggregationTests(unittest.TestCase):
             child_pid = None
             descendant_pid = None
             try:
-                deadline = time.monotonic() + 3
-                child_pid = read_pid_when_ready(child_pid_path, deadline)
-                descendant_pid = read_pid_when_ready(descendant_pid_path, deadline)
+                child_pid = read_pid_when_ready(child_pid_path)
+                descendant_pid = read_pid_when_ready(descendant_pid_path)
 
                 started = time.monotonic()
                 os.kill(parent.pid, exit_signal)
