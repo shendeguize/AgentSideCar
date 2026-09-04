@@ -8,6 +8,7 @@ import shutil
 import stat
 import tempfile
 import time
+import traceback
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -40,6 +41,22 @@ def _marker_path(home, runtime):
     )
 
 
+def _worker_error(error):
+    """Report a worker's failure so the next occurrence can be located.
+
+    A contention test that reports only `error:audit_corrupt` says a worker
+    lost the race in a way the contract forbids, but not where — and these
+    interleavings are rare enough that the run which caught one is the only
+    evidence there will be for a while. The traceback rides along with the
+    code, and only when a worker actually fails.
+    """
+
+    return "error:{}\n{}".format(
+        getattr(error, "code", error.__class__.__name__),
+        traceback.format_exc(),
+    )
+
+
 def _reserve_in_process(
     runtime,
     identity,
@@ -58,7 +75,7 @@ def _reserve_in_process(
         receipt = SendAuditStore(runtime).reserve(request_id, identity)
         output.put("reserved" if receipt is None else receipt.outcome)
     except BaseException as error:
-        output.put("error:" + getattr(error, "code", error.__class__.__name__))
+        output.put(_worker_error(error))
     finally:
         release.set()
 
@@ -86,7 +103,7 @@ def _retained_namespace_worker(
             else:
                 output.put(receipt.outcome)
     except BaseException as error:
-        output.put("error:" + getattr(error, "code", error.__class__.__name__))
+        output.put(_worker_error(error))
 
 
 def _active_namespace_worker(
@@ -104,7 +121,7 @@ def _active_namespace_worker(
             release.wait(5.0)
         output.put("closed")
     except BaseException as error:
-        output.put("error:" + getattr(error, "code", error.__class__.__name__))
+        output.put(_worker_error(error))
 
 
 def _long_send_worker(runtime, identity, ready, release, output):
@@ -129,7 +146,7 @@ def _long_send_worker(runtime, identity, ready, release, output):
             )
         output.put("completed")
     except BaseException as error:
-        output.put("error:" + getattr(error, "code", error.__class__.__name__))
+        output.put(_worker_error(error))
 
 
 class SendAuditStoreTests(unittest.TestCase):
