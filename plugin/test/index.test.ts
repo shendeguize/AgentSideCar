@@ -2221,4 +2221,44 @@ describe('settings wiring (M2 review F-1)', () => {
     expect(finalExecute.status).toBe(403)
     expect(finalExecute.json.reason).toBe('inject_disabled')
   })
+
+  it('names the settings keys it bakes at apply time instead of ignoring them', async () => {
+    // The daemon/sidecar/stream values are read once, while assembling the
+    // client and supervisor. A settings edit to those never takes effect —
+    // not even after a plugin reload, since the reload reads the entry config
+    // again — so the plugin has to say which keys it dropped and where they
+    // do belong, rather than accept an edit that does nothing.
+    const settings = makeFakeSettings()
+    const fake = createFakeCtx({ settings: settings.service })
+    const runtimeDir = await tempRuntimeDir()
+    const entry = Config({ daemon: { policy: 'off' }, sidecar: { runtimeDir } })
+    apply(fake.ctx, entry)
+    cleanups.push(() => fake.disposeAll())
+
+    const before = fake.logs.length
+    settings.commit(Config({ ...entry, inject: { enabled: true } }))
+    expect(fake.logs.slice(before).join('\n')).not.toMatch(/apply time/)
+
+    settings.commit(
+      Config({
+        daemon: { policy: 'adopt-only', backoffLimit: 7 },
+        sidecar: { runtimeDir: `${runtimeDir}-elsewhere`, command: ['other-sidecar'] },
+        stream: { reconcileIdleMs: 30000 },
+      }),
+    )
+    const warned = fake.logs.slice(before).join('\n')
+    expect(warned).toMatch(/apply time/)
+    for (const key of [
+      'daemon.policy',
+      'daemon.backoffLimit',
+      'sidecar.command',
+      'sidecar.runtimeDir',
+      'stream.reconcileIdleMs',
+    ]) {
+      expect(warned).toContain(key)
+    }
+    // The live keys are honoured, so naming them here would be the opposite
+    // mistake: telling a user an edit was dropped when it was applied.
+    expect(warned).not.toContain('inject.enabled')
+  })
 })

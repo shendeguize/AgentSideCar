@@ -460,6 +460,20 @@ var AnalysisEngine = class {
 *
 * @module
 */
+/**
+* Keys the host half reads once, while assembling the client, reconciler and
+* supervisor. A settings-document edit to these cannot take effect — a plugin
+* reload re-reads the profile entry config, not the settings document — so
+* they are named here to be reported rather than silently dropped.
+*/
+const BAKED_AT_APPLY = [
+	["daemon.policy", (config) => config.daemon.policy],
+	["daemon.backoffLimit", (config) => config.daemon.backoffLimit],
+	["sidecar.command", (config) => config.sidecar.command],
+	["sidecar.runtimeDir", (config) => config.sidecar.runtimeDir],
+	["stream.reconcileActiveMs", (config) => config.stream.reconcileActiveMs],
+	["stream.reconcileIdleMs", (config) => config.stream.reconcileIdleMs]
+];
 const Config = z.object({
 	daemon: z.object({
 		policy: z.union([
@@ -496,6 +510,26 @@ const Config = z.object({
 	}).description("自动归档策略"),
 	skill: z.object({ provide: z.boolean().default(true).description("是否经 registerProvider 内嵌提供 agent-sidecar skill(设计 §6 默认开;文件系统已装的同名 skill 自动优先;改动需重载插件生效)") }).description("skill 模式")
 });
+/**
+* Return the dotted names of apply-time keys a resolved config changes.
+*
+* Comparison is by JSON shape so an array value (`sidecar.command`) is
+* compared by content, and an unreadable value simply counts as different
+* rather than throwing on the reporting path.
+*/
+function bakedConfigDrift(baked, resolved) {
+	const drifted = [];
+	for (const [name, read] of BAKED_AT_APPLY) {
+		let same;
+		try {
+			same = JSON.stringify(read(baked)) === JSON.stringify(read(resolved));
+		} catch {
+			same = false;
+		}
+		if (!same) drifted.push(name);
+	}
+	return drifted;
+}
 //#endregion
 //#region src/inject-eligibility.ts
 const ELIGIBLE = Object.freeze({
@@ -6233,8 +6267,15 @@ function apply(ctx, config) {
 				applies: "live"
 			});
 			effective = scope.get();
+			const reportBakedDrift = (next) => {
+				const drifted = bakedConfigDrift(config, next);
+				if (drifted.length === 0) return;
+				log("warn", `settings values read at apply time were not applied: ${drifted.join(", ")}; set these in the profile's cordis patch for the 'agent-sidecar' row, since a plugin reload reads the entry config rather than the settings document`);
+			};
+			reportBakedDrift(effective);
 			const unwatch = scope.watch((next) => {
 				effective = next;
+				reportBakedDrift(next);
 			});
 			sctx.effect(() => () => {
 				unwatch();

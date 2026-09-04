@@ -95,6 +95,21 @@ export interface SkillConfig {
   provide: boolean
 }
 
+/**
+ * Keys the host half reads once, while assembling the client, reconciler and
+ * supervisor. A settings-document edit to these cannot take effect — a plugin
+ * reload re-reads the profile entry config, not the settings document — so
+ * they are named here to be reported rather than silently dropped.
+ */
+const BAKED_AT_APPLY: ReadonlyArray<readonly [string, (config: Config) => unknown]> = [
+  ['daemon.policy', (config) => config.daemon.policy],
+  ['daemon.backoffLimit', (config) => config.daemon.backoffLimit],
+  ['sidecar.command', (config) => config.sidecar.command],
+  ['sidecar.runtimeDir', (config) => config.sidecar.runtimeDir],
+  ['stream.reconcileActiveMs', (config) => config.stream.reconcileActiveMs],
+  ['stream.reconcileIdleMs', (config) => config.stream.reconcileIdleMs],
+]
+
 /** Validated composition config (all defaults filled by the schema). */
 export interface Config {
   daemon: DaemonConfig
@@ -224,3 +239,24 @@ export const Config: z<Config> = z.object({
     })
     .description('skill 模式'),
 })
+
+/**
+ * Return the dotted names of apply-time keys a resolved config changes.
+ *
+ * Comparison is by JSON shape so an array value (`sidecar.command`) is
+ * compared by content, and an unreadable value simply counts as different
+ * rather than throwing on the reporting path.
+ */
+export function bakedConfigDrift(baked: Config, resolved: Config): string[] {
+  const drifted: string[] = []
+  for (const [name, read] of BAKED_AT_APPLY) {
+    let same: boolean
+    try {
+      same = JSON.stringify(read(baked)) === JSON.stringify(read(resolved))
+    } catch {
+      same = false
+    }
+    if (!same) drifted.push(name)
+  }
+  return drifted
+}
