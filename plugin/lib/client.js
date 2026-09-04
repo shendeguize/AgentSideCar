@@ -549,6 +549,9 @@ window.__ModuleLoader__.load({
 			"board.stream.degraded": "实时流重连中",
 			"board.stream.unknown": "实时流未建立",
 			"board.banner.daemonFailed": "sidecar 离线:看板显示最后一次快照,数据不再更新",
+			"board.banner.daemonFailedSpawn": "sidecar 离线:daemon 启动不起来({detail});看板显示最后一次快照",
+			"board.banner.daemonFailedExit": "sidecar 离线:daemon 还没应答就退出了(退出码 {code});看板显示最后一次快照",
+			"board.banner.daemonFailedTimeout": "sidecar 离线:daemon 在就绪窗口内一直没有应答;看板显示最后一次快照",
 			"board.banner.daemonStale": "daemon 仍在跑旧代码(运行 v{running},磁盘已是 v{installed});本页数据来自旧版本,重启 daemon 后才会生效",
 			"board.banner.daemonStaleCode": "daemon 启动后代码已被改动(版本号仍是 v{running});本页数据来自启动时那份代码,重启 daemon 后才会生效",
 			"board.banner.streamDegraded": "实时流重连中,数据可能滞后",
@@ -1072,6 +1075,9 @@ window.__ModuleLoader__.load({
 			"board.stream.degraded": "Live stream reconnecting",
 			"board.stream.unknown": "Live stream not connected",
 			"board.banner.daemonFailed": "sidecar is offline: the board shows the last snapshot and will not update",
+			"board.banner.daemonFailedSpawn": "sidecar is offline: the daemon could not be started ({detail}); the board shows the last snapshot",
+			"board.banner.daemonFailedExit": "sidecar is offline: the daemon exited before answering (exit code {code}); the board shows the last snapshot",
+			"board.banner.daemonFailedTimeout": "sidecar is offline: the daemon stayed silent past its readiness window; the board shows the last snapshot",
 			"board.banner.daemonStale": "The daemon is still running old code (running v{running}, installed v{installed}); this page reflects the old version until the daemon restarts",
 			"board.banner.daemonStaleCode": "The installed code changed after the daemon started (still v{running}); this page reflects the code it loaded until the daemon restarts",
 			"board.banner.streamDegraded": "The live stream is reconnecting; data may be stale",
@@ -1681,6 +1687,9 @@ window.__ModuleLoader__.load({
 			},
 			banner: {
 				daemonFailed: "board.banner.daemonFailed",
+				daemonFailedSpawn: "board.banner.daemonFailedSpawn",
+				daemonFailedExit: "board.banner.daemonFailedExit",
+				daemonFailedTimeout: "board.banner.daemonFailedTimeout",
 				daemonStale: "board.banner.daemonStale",
 				daemonStaleCode: "board.banner.daemonStaleCode",
 				streamDegraded: "board.banner.streamDegraded"
@@ -2179,6 +2188,20 @@ window.__ModuleLoader__.load({
 			return "neutral";
 		}
 		/**
+		* The cause behind a FAILED daemon, as the host reports it. A host that never
+		* sends one (older plugin, or a failure it could not attribute) leaves this
+		* null, and the banner then says only what it can stand behind.
+		*/
+		function daemonFailureText(failure) {
+			if (failure === null) return BOARD_STRINGS.banner.daemonFailed;
+			switch (failure.reason) {
+				case "spawn-error": return failure.detail === null || failure.detail === "" ? BOARD_STRINGS.banner.daemonFailed : formatTemplate$2(BOARD_STRINGS.banner.daemonFailedSpawn, { detail: failure.detail });
+				case "daemon-exit": return failure.exitCode === null ? BOARD_STRINGS.banner.daemonFailed : formatTemplate$2(BOARD_STRINGS.banner.daemonFailedExit, { code: failure.exitCode });
+				case "ready-timeout": return BOARD_STRINGS.banner.daemonFailedTimeout;
+				default: return BOARD_STRINGS.banner.daemonFailed;
+			}
+		}
+		/**
 		* Top banner: daemon FAILED (red, last-snapshot notice) outranks version
 		* drift, which in turn outranks a degraded stream — a lagging stream
 		* delivers the truth late, while a stale daemon delivers a different
@@ -2187,10 +2210,10 @@ window.__ModuleLoader__.load({
 		* pre-first-connect startup state and a warning bar on every mount would
 		* be noise.
 		*/
-		function deriveBanner(daemonState, streamHealth, drift = null) {
+		function deriveBanner(daemonState, streamHealth, drift = null, failure = null) {
 			if (daemonState === "failed") return {
 				tone: "danger",
-				text: BOARD_STRINGS.banner.daemonFailed
+				text: daemonFailureText(failure)
 			};
 			if (drift !== null) return {
 				tone: "warn",
@@ -2304,7 +2327,7 @@ window.__ModuleLoader__.load({
 		}
 		/** filter → group → per-card derive; the one call Board.tsx renders from. */
 		function buildBoardViewModel(input) {
-			const { sessions, filters, daemonState, streamHealth, daemonDrift, lastReconcileAtMs, nowMs } = input;
+			const { sessions, filters, daemonState, streamHealth, daemonDrift, daemonFailure, lastReconcileAtMs, nowMs } = input;
 			const visible = filterSessions(sessions, filters, nowMs);
 			return {
 				groups: groupSessions(visible.map((session) => ({
@@ -2315,7 +2338,7 @@ window.__ModuleLoader__.load({
 					relativeTime: formatRelativeTime$1(session.updatedAtMs, nowMs),
 					hoverTitle: badgeHoverTitle(session.status, lastReconcileAtMs, nowMs)
 				}))),
-				banner: deriveBanner(daemonState, streamHealth, daemonDrift ?? null),
+				banner: deriveBanner(daemonState, streamHealth, daemonDrift ?? null, daemonFailure ?? null),
 				emptyState: deriveEmptyState(daemonState, visible.length, sessions.length),
 				daemonBadge: deriveDaemonBadge(daemonState),
 				streamLabel: BOARD_STRINGS.stream[streamHealth],
@@ -3020,6 +3043,7 @@ window.__ModuleLoader__.load({
 				lastPing: null,
 				daemonDetail: void 0,
 				daemonDrift: null,
+				daemonFailure: null,
 				streamHealth: "unknown",
 				streamStatus: "connecting",
 				lastReconcileAtMs: null,
@@ -3117,6 +3141,7 @@ window.__ModuleLoader__.load({
 				lastPing: snapshot.daemon.lastPing,
 				daemonDetail: daemonDetailOf(snapshot.daemon.lastPing),
 				daemonDrift: daemonVersionDriftOf(snapshot.daemon.lastPing),
+				daemonFailure: snapshot.daemon.failure ?? null,
 				streamHealth: combineStreamHealth(snapshot.board.streamHealth, browserStatus, true),
 				streamStatus: browserStatus,
 				lastReconcileAtMs: snapshot.board.lastReconcileAt,
@@ -4345,6 +4370,7 @@ window.__ModuleLoader__.load({
 				daemonState: props.daemonState,
 				streamHealth: props.streamHealth,
 				daemonDrift: props.daemonDrift ?? null,
+				daemonFailure: props.daemonFailure ?? null,
 				lastReconcileAtMs: props.lastReconcileAtMs,
 				nowMs
 			});
@@ -11386,6 +11412,7 @@ window.__ModuleLoader__.load({
 					daemonState: state.daemonState,
 					...state.daemonDetail !== void 0 ? { daemonDetail: state.daemonDetail } : {},
 					daemonDrift: state.daemonDrift,
+					daemonFailure: state.daemonFailure,
 					streamHealth: state.streamHealth,
 					lastReconcileAtMs: state.lastReconcileAtMs,
 					hasSnapshot: state.hasSnapshot,

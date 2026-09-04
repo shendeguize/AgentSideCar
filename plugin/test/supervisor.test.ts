@@ -28,18 +28,24 @@ interface FakeProc {
   handle: DaemonProcess
   terminate: ReturnType<typeof vi.fn>
   exit: (code: number | null) => void
+  /** dsh's subprocess rejects `done` when the child cannot be launched. */
+  unlaunchable: (error: Error) => void
 }
 
 function createFakeProc(): FakeProc {
   let resolveExit: (code: number | null) => void = () => {}
-  const exited = new Promise<number | null>((resolve) => {
+  let rejectExit: (error: Error) => void = () => {}
+  const exited = new Promise<number | null>((resolve, reject) => {
     resolveExit = resolve
+    rejectExit = reject
   })
+  exited.catch(() => {})
   const terminate = vi.fn(async () => {})
   return {
     handle: { exited, terminate },
     terminate,
     exit: (code) => resolveExit(code),
+    unlaunchable: (error) => rejectExit(error),
   }
 }
 
@@ -198,6 +204,56 @@ describe('DaemonSupervisor', () => {
     await flush()
     expect(h.sup.state).toBe('backoff')
     expect(h.procs[0]!.terminate).not.toHaveBeenCalled()
+  })
+
+  it('keeps why hosting failed, so a board can say more than "offline"', async () => {
+    // A missing executable is the failure a user cannot guess from the state
+    // token alone, and the log the supervisor writes is not readable from the
+    // page the failure is reported on.
+    const h = createHarness({ backoffLimit: 1 })
+    h.sup.start()
+    await flush()
+    h.procs[0]!.unlaunchable(new Error('spawn /nowhere/agent-sidecar ENOENT'))
+    await flush()
+
+    expect(h.sup.state).toBe('failed')
+    expect(h.sup.lastFailure).toEqual({
+      reason: 'spawn-error',
+      exitCode: null,
+      detail: 'spawn /nowhere/agent-sidecar ENOENT',
+    })
+  })
+
+  it('distinguishes an early exit and a silent readiness window by cause', async () => {
+    const exitHarness = createHarness({ backoffLimit: 1 })
+    exitHarness.sup.start()
+    await flush()
+    exitHarness.procs[0]!.exit(3)
+    await flush()
+    expect(exitHarness.sup.lastFailure)
+      .toEqual({ reason: 'daemon-exit', exitCode: 3, detail: null })
+
+    const timeoutHarness = createHarness({ backoffLimit: 1, hostReadyTimeoutMs: 5000 })
+    timeoutHarness.sup.start()
+    await flush()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(timeoutHarness.sup.lastFailure)
+      .toEqual({ reason: 'ready-timeout', exitCode: null, detail: null })
+  })
+
+  it('drops the recorded failure once a daemon answers again', async () => {
+    const h = createHarness({ backoffLimit: 1 })
+    h.sup.start()
+    await flush()
+    h.procs[0]!.exit(1)
+    await flush()
+    expect(h.sup.lastFailure).not.toBeNull()
+
+    h.setPing(PING)
+    h.sup.retry()
+    await flush()
+    expect(h.sup.state).toBe('adopted')
+    expect(h.sup.lastFailure).toBeNull()
   })
 
   it('hosted daemon crash → backoff with a fresh failure budget → re-host', async () => {

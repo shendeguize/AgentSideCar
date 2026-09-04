@@ -391,6 +391,37 @@ describe('top bar / banner / empty state', () => {
     expect(deriveBanner('probe', 'unknown')).toBeNull()
   })
 
+  it('banner: names the cause of an outage when the host reported one', () => {
+    // "sidecar offline" is what the reader already sees; the actionable part
+    // is which command failed, and that only exists in the host's payload.
+    expect(deriveBanner('failed', 'degraded', null, {
+      reason: 'spawn-error',
+      exitCode: null,
+      detail: 'spawn agent-sidecar ENOENT',
+    })).toEqual({
+      tone: 'danger',
+      text: formatTemplate(BOARD_STRINGS.banner.daemonFailedSpawn, {
+        detail: 'spawn agent-sidecar ENOENT',
+      }),
+    })
+
+    expect(deriveBanner('failed', 'degraded', null, {
+      reason: 'daemon-exit',
+      exitCode: 3,
+      detail: null,
+    })?.text).toBe(formatTemplate(BOARD_STRINGS.banner.daemonFailedExit, { code: 3 }))
+
+    expect(deriveBanner('failed', 'degraded', null, {
+      reason: 'ready-timeout',
+      exitCode: null,
+      detail: null,
+    })?.text).toBe(BOARD_STRINGS.banner.daemonFailedTimeout)
+
+    // An unreported cause keeps the plain wording rather than inventing one.
+    expect(deriveBanner('failed', 'degraded', null, null)?.text)
+      .toBe(BOARD_STRINGS.banner.daemonFailed)
+  })
+
   it('banner: names a daemon still serving code the disk has replaced', () => {
     // The badge stays green while a stale daemon answers pings normally, so
     // nothing on the page would otherwise contradict a board built from

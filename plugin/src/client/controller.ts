@@ -36,13 +36,14 @@ import {
   normalizeAgentFilter,
   type ArchivedCardVM,
   type BoardFilterState,
+  type DaemonFailure,
   type DaemonStateToken,
   type DaemonVersionDrift,
   type SessionCardVM,
   type StreamHealthToken,
 } from './board/logic.ts'
 
-export type { ArchivedCardVM, DaemonVersionDrift }
+export type { ArchivedCardVM, DaemonFailure, DaemonVersionDrift }
 
 /**
  * Package name, used as the localStorage key prefix and the style-tag owner
@@ -67,6 +68,8 @@ export interface SidecarViewState {
   daemonDetail: string | undefined
   /** Set only when the daemon is behind the code now on disk. */
   daemonDrift: DaemonVersionDrift | null
+  /** Cause of a FAILED daemon as the host reported it, else null. */
+  daemonFailure: DaemonFailure | null
   /** Composite health: browser stream status folded over host-reported health. */
   streamHealth: StreamHealthToken
   /** Raw browser-side stream status. */
@@ -101,6 +104,7 @@ export function initialViewState(): SidecarViewState {
     lastPing: null,
     daemonDetail: undefined,
     daemonDrift: null,
+    daemonFailure: null,
     streamHealth: 'unknown',
     streamStatus: 'connecting',
     lastReconcileAtMs: null,
@@ -213,6 +217,7 @@ export function mapSnapshot(
     lastPing: snapshot.daemon.lastPing,
     daemonDetail: daemonDetailOf(snapshot.daemon.lastPing),
     daemonDrift: daemonVersionDriftOf(snapshot.daemon.lastPing),
+    daemonFailure: snapshot.daemon.failure ?? null,
     streamHealth: combineStreamHealth(snapshot.board.streamHealth, browserStatus, true),
     streamStatus: browserStatus,
     lastReconcileAtMs: snapshot.board.lastReconcileAt,

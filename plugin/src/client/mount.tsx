@@ -461,6 +461,7 @@ function createBoardContent(
               daemonState={state.daemonState}
               {...state.daemonDetail !== undefined ? { daemonDetail: state.daemonDetail } : {}}
               daemonDrift={state.daemonDrift}
+              daemonFailure={state.daemonFailure}
               streamHealth={state.streamHealth}
               lastReconcileAtMs={state.lastReconcileAtMs}
               hasSnapshot={state.hasSnapshot}
