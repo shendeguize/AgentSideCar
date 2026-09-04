@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `cluster` now applies its recency window whichever source answers. It passed
+  the window to the remote half but grouped the local half straight from the
+  daemon's whole index, so `--all` was a no-op, `--recent-seconds` was ignored,
+  and the same command answered differently depending on whether the daemon
+  happened to be answering: 155 groups with a live daemon against 11 from the
+  direct-scan fallback on the same machine, with no warning and exit code 0
+  either way.
 - The DSH plugin now says which settings keys it read at apply time instead of
   accepting an edit that does nothing. `daemon.*`, `sidecar.*` and `stream.*`
   are read once, while the client, reconciler and supervisor are assembled, so
