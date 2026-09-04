@@ -23,6 +23,28 @@ const INJECT_CSS = readFileSync(
   new URL('../src/client/inject/inject.module.css', import.meta.url),
   'utf8',
 )
+const BOARD_CSS = readFileSync(
+  new URL('../src/client/board/board.module.css', import.meta.url),
+  'utf8',
+)
+const PROJECT_VIEW_CSS = readFileSync(
+  new URL('../src/client/board/project-view.module.css', import.meta.url),
+  'utf8',
+)
+const DSH_TOOLS_CSS = readFileSync(
+  new URL('../src/client/dsh-tools/dsh-tools.module.css', import.meta.url),
+  'utf8',
+)
+
+// Every surface that reports a failure in the danger tone. DSW ships no
+// error-tertiary, and in the dark theme error-secondary equals the
+// error-primary these once used as text, so a fill built from the text's own
+// token renders the message invisible rather than merely loud.
+const DANGER_NOTICES = [
+  { name: 'board banner', source: BOARD_CSS, selector: ".banner[data-tone='danger']" },
+  { name: 'project view banner', source: PROJECT_VIEW_CSS, selector: ".banner[data-tone='danger']" },
+  { name: 'dsh tools error card', source: DSH_TOOLS_CSS, selector: '.errorCard' },
+] as const
 
 const THEME_CSS = [
   {
@@ -82,16 +104,22 @@ type HostTokenFixture = Record<string, string>
 // Resolved from dsh-client-ui-theme's default official-tokens-v1 light/dark themes.
 const HOST_TOKEN_FIXTURES: Record<'light' | 'dark', HostTokenFixture> = {
   light: {
+    '--dsw-alias-bg-layer-1': '#ffffff',
     '--dsw-alias-bg-layer-3': '#ffffff',
     '--dsw-alias-label-primary': '#0f1115',
     '--dsw-alias-label-secondary': '#61666b',
     '--dsw-alias-interactive-bg-hover-danger': '#ec13130d',
+    '--dsw-alias-state-error-primary': '#ec1313',
+    '--dsw-alias-state-error-secondary': '#f25a5a',
   },
   dark: {
+    '--dsw-alias-bg-layer-1': '#232324',
     '--dsw-alias-bg-layer-3': '#353638',
     '--dsw-alias-label-primary': '#f9fafb',
     '--dsw-alias-label-secondary': '#cfd3d6',
     '--dsw-alias-interactive-bg-hover-danger': '#f25a5a26',
+    '--dsw-alias-state-error-primary': '#f25a5a',
+    '--dsw-alias-state-error-secondary': '#f25a5a',
   },
 }
 
@@ -110,7 +138,24 @@ function cssDeclaration(source: string, selector: string, property: string): str
   throw new Error(`Missing ${property} declaration for ${selector}`)
 }
 
+function mix(from: Rgba, into: Rgba, weight: number): Rgba {
+  const channel = (index: 0 | 1 | 2 | 3): number => (
+    from[index] * weight + into[index] * (1 - weight)
+  )
+  return [channel(0), channel(1), channel(2), channel(3)]
+}
+
 function resolveColor(value: string, fixture: HostTokenFixture): Rgba {
+  const blend = /^color-mix\(\s*in srgb\s*,\s*(var\(--[a-z0-9-]+\))\s+([\d.]+)%\s*,\s*(var\(--[a-z0-9-]+\))\s*\)$/i
+    .exec(value)
+  if (blend !== null) {
+    return mix(
+      resolveColor(blend[1] ?? '', fixture),
+      resolveColor(blend[3] ?? '', fixture),
+      Number.parseFloat(blend[2] ?? '0') / 100,
+    )
+  }
+
   const token = /^var\((--[a-z0-9-]+)\)$/i.exec(value)?.[1]
   if (token !== undefined) {
     const resolved = token.startsWith('--agsc-')
@@ -271,6 +316,23 @@ describe('Agent Sidecar surface contract', () => {
         expect(
           computedContrast(colors.foreground, colors.background, raisedSurface, fixture),
           state,
+        ).toBeGreaterThanOrEqual(4.5)
+      }
+    },
+  )
+
+  it.each(Object.entries(HOST_TOKEN_FIXTURES))(
+    'keeps the %s danger notices legible instead of red text on a red fill',
+    (_theme, fixture) => {
+      for (const notice of DANGER_NOTICES) {
+        expect(
+          computedContrast(
+            cssDeclaration(notice.source, notice.selector, 'color'),
+            cssDeclaration(notice.source, notice.selector, 'background'),
+            'var(--agsc-bg)',
+            fixture,
+          ),
+          notice.name,
         ).toBeGreaterThanOrEqual(4.5)
       }
     },
