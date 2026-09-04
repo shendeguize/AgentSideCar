@@ -1487,6 +1487,10 @@ def _run_cluster(
         client=client,
         stderr=stderr,
     )
+    # Only the direct-scan fallback narrows itself; the daemon hands back its
+    # whole index. Applying the window here is what makes --all mean something
+    # and keeps the answer the same whether or not the daemon was answering.
+    local_rows = _recent_rows(local_rows, _cluster_recent_seconds(args))
     local_values: List[Mapping[str, Any]] = []
     for session in local_rows:
         row = dict(_as_dict(session))

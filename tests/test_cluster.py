@@ -1,6 +1,7 @@
 import argparse
 import io
 import json
+import time
 import unittest
 from unittest import mock
 
@@ -155,6 +156,103 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(2, code)
         self.assertIn("remote: inventory", stderr.getvalue())
 
+    def _recency_args(self, **overrides):
+        base = dict(
+            all=False,
+            recent_seconds=None,
+            window_seconds=60,
+            remote=False,
+            host=[],
+            remote_python_candidates=None,
+            semantic=False,
+            semantic_rules=("largest", "recent"),
+            semantic_max_groups=100,
+            json=True,
+        )
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def _cluster_projects(self, args, rows, *, from_daemon):
+        scanner = mock.Mock()
+        scanner.errors = []
+        client = mock.Mock()
+        if from_daemon:
+            client.status.return_value = rows
+            client.scan_errors = []
+            client.tail_errors = []
+            scanner.scan.return_value = []
+        else:
+            client.status.side_effect = cli.SidecarClientError("offline")
+            # The scanner is what applies the window on this path, so it is
+            # asked for the same rows and filters them itself.
+            scanner.scan.side_effect = lambda recent_seconds=None: [
+                row
+                for row in rows
+                if recent_seconds is None
+                or row["updated_at"] >= self._now - recent_seconds
+            ]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        code = cli._run_cluster(
+            args,
+            scanner=scanner,
+            client=client,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        self.assertEqual(0, code, stderr.getvalue())
+        return sorted(
+            group["project"] for group in json.loads(stdout.getvalue())
+        )
+
+    def test_cluster_recency_window_holds_whichever_source_answers(self):
+        # cluster passes _cluster_recent_seconds to the remote half but grouped
+        # the local half straight from the daemon's index, so --all was a no-op
+        # and the same command answered differently depending on whether the
+        # daemon happened to be answering.
+        self._now = 1_000_000.0
+        rows = [
+            {
+                "agent": "dsh",
+                "session_id": "fresh",
+                "project": "/work/fresh",
+                "updated_at": self._now - 60.0,
+            },
+            {
+                "agent": "dsh",
+                "session_id": "ancient",
+                "project": "/work/ancient",
+                "updated_at": self._now - (cli.RECENT_SECONDS + 3600.0),
+            },
+        ]
+
+        with mock.patch.object(cli.time, "time", return_value=self._now):
+            for source in (True, False):
+                with self.subTest(source="daemon" if source else "scan"):
+                    self.assertEqual(
+                        ["/work/fresh"],
+                        self._cluster_projects(
+                            self._recency_args(),
+                            rows,
+                            from_daemon=source,
+                        ),
+                    )
+                    self.assertEqual(
+                        ["/work/ancient", "/work/fresh"],
+                        self._cluster_projects(
+                            self._recency_args(all=True),
+                            rows,
+                            from_daemon=source,
+                        ),
+                    )
+                    self.assertEqual(
+                        ["/work/fresh"],
+                        self._cluster_projects(
+                            self._recency_args(recent_seconds=300.0),
+                            rows,
+                            from_daemon=source,
+                        ),
+                    )
+
     def test_cluster_cli_prints_rows_and_reports_semantic_fallback(self):
         args = argparse.Namespace(
             all=True,
@@ -214,7 +312,10 @@ class ClusterTests(unittest.TestCase):
             "agent": "dsh",
             "session_id": "local-session",
             "project": "/work/local",
-            "updated_at": 100.0,
+            # A recent session: this test is about reporting remote failures
+            # before local rows, so the row has to be one the default recency
+            # window keeps rather than one only an unfiltering mock preserved.
+            "updated_at": time.time(),
         }]
         client = mock.Mock()
         client.status.side_effect = cli.SidecarClientError("offline")
