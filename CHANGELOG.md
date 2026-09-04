@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The DSH plugin's danger notices are readable again instead of being red text
+  on a red fill. They took their text from `--dsw-alias-state-error-primary`
+  and their background from `--dsw-alias-state-error-secondary`, and the dark
+  theme resolves both to the same `#f25a5a`: contrast 1.0, so the board's
+  offline banner rendered as an empty red bar that said nothing at all (1.37
+  in the light theme). The error family has no tertiary fill the way the warn
+  family does, so danger surfaces now dilute the official token into the
+  surface the way the host's own error panels do, and carry label-colored
+  text: 12.4 in the dark theme, 15.9 in the light one. Affects the board
+  banner, the project-view banner, and the DSH tools error card.
+
 ## [0.11.4] - 2026-09-04
 
 ### Fixed

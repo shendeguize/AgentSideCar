@@ -21,6 +21,14 @@
   --agsc-ok: var(--dsw-alias-state-success-primary);
   --agsc-warn: var(--dsw-alias-state-warn-primary);
   --agsc-err: var(--dsw-alias-state-error-primary);
+  /*
+   * The warn family has an official tertiary fill; the error family stops at
+   * secondary, which the dark theme resolves to the very color --agsc-err
+   * uses for text. A danger notice therefore cannot fill itself from its own
+   * token without erasing its message, so it dilutes that token into the
+   * surface the way the host's own error panels do.
+   */
+  --agsc-err-fill: color-mix(in srgb, var(--dsw-alias-state-error-secondary) 15%, var(--agsc-bg));
   --agsc-radius-card: 12px;
   --agsc-radius-control: 8px;
   --agsc-shadow-card: var(--dsw-shadow-lv2);
