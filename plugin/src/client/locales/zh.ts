@@ -276,6 +276,12 @@ export const zh = {
   'board.stream.degraded': '实时流重连中',
   'board.stream.unknown': '实时流未建立',
   'board.banner.daemonFailed': 'sidecar 离线:看板显示最后一次快照,数据不再更新',
+  'board.banner.daemonFailedSpawn':
+    'sidecar 离线:daemon 启动不起来({detail});看板显示最后一次快照',
+  'board.banner.daemonFailedExit':
+    'sidecar 离线:daemon 还没应答就退出了(退出码 {code});看板显示最后一次快照',
+  'board.banner.daemonFailedTimeout':
+    'sidecar 离线:daemon 在就绪窗口内一直没有应答;看板显示最后一次快照',
   'board.banner.daemonStale':
     'daemon 仍在跑旧代码(运行 v{running},磁盘已是 v{installed});本页数据来自旧版本,重启 daemon 后才会生效',
   'board.banner.daemonStaleCode':

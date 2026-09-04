@@ -93,7 +93,12 @@ import type { DshDisposeApi } from './dsh-dispose.ts'
 import type { FusionQuery, TimelineCursor, TimelinePage } from './fusion.ts'
 import type { InjectGateway } from './inject-gateway.ts'
 import type { BoardState, SessionStore } from './session-store.ts'
-import type { DaemonSupervisor, PingInfo, SupervisorState } from './supervisor.ts'
+import type {
+  DaemonSupervisor,
+  PingInfo,
+  SupervisorFailure,
+  SupervisorState,
+} from './supervisor.ts'
 
 /** dsh webServer route handler shape (see module doc for the evidence). */
 export type WebRouteHandler = (
@@ -251,7 +256,16 @@ export interface RoutesOptions {
 
 /** Body of `GET state` and of every SSE `state` event (full snapshot). */
 export interface StateSnapshot {
-  daemon: { state: SupervisorState; lastPing: PingInfo | null }
+  daemon: {
+    state: SupervisorState
+    lastPing: PingInfo | null
+    /**
+     * Why hosting last failed, or null while a daemon answers. The host's log
+     * is unreachable from the page reporting the outage, so the cause travels
+     * with the state or not at all.
+     */
+    failure: SupervisorFailure | null
+  }
   board: BoardState
   capabilities: {
     inject: boolean
@@ -576,7 +590,11 @@ export function createRoutes(deps: RoutesDeps, opts: RoutesOptions = {}): Routes
   let disposed = false
 
   const buildSnapshot = (): StateSnapshot => ({
-    daemon: { state: deps.supervisor.state, lastPing: deps.supervisor.lastPing },
+    daemon: {
+      state: deps.supervisor.state,
+      lastPing: deps.supervisor.lastPing,
+      failure: deps.supervisor.lastFailure,
+    },
     board: deps.store.getBoardState(),
     capabilities: {
       inject: deps.guardOptions.allowWriteActions(),

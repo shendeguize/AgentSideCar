@@ -38,6 +38,14 @@ export type DaemonStateToken =
   | 'backoff'
   | 'failed'
 
+/** Mirror of the host's SupervisorFailure (kept local by design). */
+export interface DaemonFailure {
+  /** Open at this boundary: an unknown token falls back to the plain wording. */
+  reason: string
+  exitCode: number | null
+  detail: string | null
+}
+
 /** Color-token buckets the CSS maps to `--dsw-alias-state-*` variables. */
 export type BadgeTone = 'success' | 'warn' | 'neutral' | 'muted' | 'danger'
 
@@ -175,6 +183,8 @@ export interface BoardComputeInput {
   streamHealth: StreamHealthToken
   /** Set only when the daemon is behind the code now on disk. */
   daemonDrift?: DaemonVersionDrift | null
+  /** Cause of a FAILED daemon as the host reported it, else null. */
+  daemonFailure?: DaemonFailure | null
   /** Epoch ms of the last authoritative snapshot reconcile, or null. */
   lastReconcileAtMs: number | null
   /** Clock injection (epoch ms) for deterministic derivation. */
@@ -703,6 +713,29 @@ export function streamHealthTone(health: StreamHealthToken): BadgeTone {
 }
 
 /**
+ * The cause behind a FAILED daemon, as the host reports it. A host that never
+ * sends one (older plugin, or a failure it could not attribute) leaves this
+ * null, and the banner then says only what it can stand behind.
+ */
+export function daemonFailureText(failure: DaemonFailure | null): string {
+  if (failure === null) return BOARD_STRINGS.banner.daemonFailed
+  switch (failure.reason) {
+    case 'spawn-error':
+      return failure.detail === null || failure.detail === ''
+        ? BOARD_STRINGS.banner.daemonFailed
+        : formatTemplate(BOARD_STRINGS.banner.daemonFailedSpawn, { detail: failure.detail })
+    case 'daemon-exit':
+      return failure.exitCode === null
+        ? BOARD_STRINGS.banner.daemonFailed
+        : formatTemplate(BOARD_STRINGS.banner.daemonFailedExit, { code: failure.exitCode })
+    case 'ready-timeout':
+      return BOARD_STRINGS.banner.daemonFailedTimeout
+    default:
+      return BOARD_STRINGS.banner.daemonFailed
+  }
+}
+
+/**
  * Top banner: daemon FAILED (red, last-snapshot notice) outranks version
  * drift, which in turn outranks a degraded stream — a lagging stream
  * delivers the truth late, while a stale daemon delivers a different
@@ -715,9 +748,10 @@ export function deriveBanner(
   daemonState: DaemonStateToken,
   streamHealth: StreamHealthToken,
   drift: DaemonVersionDrift | null = null,
+  failure: DaemonFailure | null = null,
 ): BoardBannerVM | null {
   if (daemonState === 'failed') {
-    return { tone: 'danger', text: BOARD_STRINGS.banner.daemonFailed }
+    return { tone: 'danger', text: daemonFailureText(failure) }
   }
   if (drift !== null) {
     // Two matching version numbers would make the drift banner read as a
@@ -898,6 +932,7 @@ export function buildBoardViewModel(input: BoardComputeInput): BoardViewModel {
     daemonState,
     streamHealth,
     daemonDrift,
+    daemonFailure,
     lastReconcileAtMs,
     nowMs,
   } = input
@@ -912,7 +947,7 @@ export function buildBoardViewModel(input: BoardComputeInput): BoardViewModel {
   }))
   return {
     groups: groupSessions(derived),
-    banner: deriveBanner(daemonState, streamHealth, daemonDrift ?? null),
+    banner: deriveBanner(daemonState, streamHealth, daemonDrift ?? null, daemonFailure ?? null),
     emptyState: deriveEmptyState(daemonState, visible.length, sessions.length),
     daemonBadge: deriveDaemonBadge(daemonState),
     streamLabel: BOARD_STRINGS.stream[streamHealth],

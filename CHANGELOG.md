@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surface the way the host's own error panels do, and carry label-colored
   text: 12.4 in the dark theme, 15.9 in the light one. Affects the board
   banner, the project-view banner, and the DSH tools error card.
+- The DSH plugin's board now says why the daemon is down, not only that it is.
+  The supervisor knew the cause of every hosting failure and wrote it to the
+  host's log, but `GET state` carried `{ state, lastPing }` alone, and the log
+  is unreachable from the page reporting the outage — on a remote instance the
+  board is the only surface a reader has, and the remote instance's own log
+  holds nothing but its startup banner. A host with no `agent-sidecar` on
+  `PATH` therefore reported plain "sidecar offline", and the empty-state hint
+  told the reader to run the very command that was missing. The state payload
+  now carries the cause (`spawn-error` with the bounded error text,
+  `daemon-exit` with the exit code, or `ready-timeout`), the banner names it,
+  and an unattributed failure still falls back to the plain wording rather
+  than inventing one. A daemon that answers clears it.
 
 ## [0.11.4] - 2026-09-04
 

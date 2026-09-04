@@ -52,6 +52,17 @@ export interface PingInfo {
   http: { enabled: boolean; host?: string; port?: number }
 }
 
+/**
+ * Why the host's last hosting attempt failed (host: supervisor.ts).
+ * `reason` stays a string here so an unrecognized cause degrades to the
+ * plain offline wording instead of breaking the page.
+ */
+export interface DaemonFailure {
+  reason: string
+  exitCode: number | null
+  detail: string | null
+}
+
 /** Compact most-recent-event summary per session (host: session-store.ts). */
 export interface SessionEventSummary {
   ts: string
@@ -200,7 +211,12 @@ export interface BoardState {
 
 /** Body of `GET state` and of every SSE `state` event (host: routes.ts). */
 export interface StateSnapshot {
-  daemon: { state: SupervisorState; lastPing: PingInfo | null }
+  daemon: {
+    state: SupervisorState
+    lastPing: PingInfo | null
+    /** Cause of a FAILED daemon; absent on older hosts, null when healthy. */
+    failure?: DaemonFailure | null
+  }
   board: BoardState
   capabilities: {
     inject: boolean

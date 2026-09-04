@@ -270,6 +270,12 @@ export const en = {
   'board.stream.unknown': 'Live stream not connected',
   'board.banner.daemonFailed':
     'sidecar is offline: the board shows the last snapshot and will not update',
+  'board.banner.daemonFailedSpawn':
+    'sidecar is offline: the daemon could not be started ({detail}); the board shows the last snapshot',
+  'board.banner.daemonFailedExit':
+    'sidecar is offline: the daemon exited before answering (exit code {code}); the board shows the last snapshot',
+  'board.banner.daemonFailedTimeout':
+    'sidecar is offline: the daemon stayed silent past its readiness window; the board shows the last snapshot',
   'board.banner.daemonStale':
     'The daemon is still running old code (running v{running}, installed v{installed}); this page reflects the old version until the daemon restarts',
   'board.banner.daemonStaleCode':

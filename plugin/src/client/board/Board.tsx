@@ -37,6 +37,7 @@ import {
   type BoardFilterState,
   type BoardStatusFilter,
   type DaemonStateToken,
+  type DaemonFailure,
   type DaemonVersionDrift,
   type DerivedSessionCardVM,
   type ProjectGroupVM,
@@ -75,6 +76,8 @@ export interface BoardProps {
   daemonDetail?: string
   /** Set only when the daemon is behind the code now on disk. */
   daemonDrift?: DaemonVersionDrift | null
+  /** Cause of a FAILED daemon as the host reported it, else null. */
+  daemonFailure?: DaemonFailure | null
   streamHealth: StreamHealthToken
   /** Epoch ms of the last authoritative snapshot reconcile, or null. */
   lastReconcileAtMs: number | null
@@ -375,6 +378,7 @@ export function Board(props: BoardProps): ReactElement {
     daemonState: props.daemonState,
     streamHealth: props.streamHealth,
     daemonDrift: props.daemonDrift ?? null,
+    daemonFailure: props.daemonFailure ?? null,
     lastReconcileAtMs: props.lastReconcileAtMs,
     nowMs,
   })

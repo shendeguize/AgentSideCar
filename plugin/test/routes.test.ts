@@ -80,12 +80,31 @@ interface Fixture {
   logs: LogEntry[]
 }
 
+/**
+ * Real supervisor driven into FAILED by an unspawnable command, the shape a
+ * host without the sidecar CLI installed reports.
+ */
+function makeFailedSupervisor(): DaemonSupervisor {
+  return new DaemonSupervisor(
+    {
+      ping: async () => null,
+      spawnDaemon: () => {
+        throw new Error('spawn /nowhere/agent-sidecar ENOENT')
+      },
+      detectLaunchAgent: async () => false,
+      log: () => {},
+    },
+    { policy: 'adopt-or-host', backoffLimit: 1 },
+  )
+}
+
 function makeFixture(
   opts: RoutesOptions = {},
   injectGateway?: InjectGatewayApi,
+  override?: DaemonSupervisor,
 ): Fixture {
   const store = new SessionStore()
-  const supervisor = makeSupervisor()
+  const supervisor = override ?? makeSupervisor()
   const inject = { enabled: false }
   const logs: LogEntry[] = []
   const routes = createRoutes(
@@ -123,8 +142,9 @@ afterEach(async () => {
 async function startHarness(
   opts: RoutesOptions = {},
   injectGateway?: InjectGatewayApi,
+  supervisor?: DaemonSupervisor,
 ): Promise<Harness> {
-  const fixture = makeFixture(opts, injectGateway)
+  const fixture = makeFixture(opts, injectGateway, supervisor)
   // Carrier shape of the dsh webServer: dispatch, catch, 400.
   const server = createServer((req, res) => {
     fixture.routes.handle(req, res).catch(() => {
@@ -493,7 +513,7 @@ describe('GET state', () => {
     expect(reply.status).toBe(200)
     expect(reply.headers['content-type']).toContain('application/json')
     const body = JSON.parse(reply.body)
-    expect(body.daemon).toEqual({ state: 'probe', lastPing: null })
+    expect(body.daemon).toEqual({ state: 'probe', lastPing: null, failure: null })
     expect(body.board.sessions.map((s: any) => s.session_id)).toEqual(['newer', 'older'])
     expect(body.board.streamHealth).toBe('unknown')
     expect(typeof body.board.lastReconcileAt).toBe('number')
@@ -504,6 +524,26 @@ describe('GET state', () => {
     harness.inject.enabled = true
     const flipped = JSON.parse((await request(harness.base, `${API_PREFIX}/state`)).body)
     expect(flipped.capabilities).toEqual({ inject: true, dispose: false })
+  })
+
+  it('tells the page why the daemon is down, not only that it is', async () => {
+    // The board is the only surface a remote user has: the supervisor's log
+    // lives on the host, so a bare 'failed' leaves a missing CLI unknowable.
+    const supervisor = makeFailedSupervisor()
+    const harness = await startHarness({}, undefined, supervisor)
+    supervisor.start()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    const body = JSON.parse((await request(harness.base, `${API_PREFIX}/state`)).body)
+    expect(body.daemon).toEqual({
+      state: 'failed',
+      lastPing: null,
+      failure: {
+        reason: 'spawn-error',
+        exitCode: null,
+        detail: 'spawn /nowhere/agent-sidecar ENOENT',
+      },
+    })
   })
 
   it('projects only the derived verdict and never raw extra or parent topology', async () => {
@@ -610,7 +650,7 @@ describe('GET stream (SSE)', () => {
 
     const sse = await openStream(harness)
     const initial = await sse.nextState()
-    expect(initial.daemon).toEqual({ state: 'probe', lastPing: null })
+    expect(initial.daemon).toEqual({ state: 'probe', lastPing: null, failure: null })
     expect(initial.board.sessions.map((s: any) => s.session_id)).toEqual(['s1'])
     expect(initial.capabilities).toEqual({ inject: false, dispose: false })
 

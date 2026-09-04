@@ -3876,7 +3876,8 @@ function createRoutes(deps, opts = {}) {
 	const buildSnapshot = () => ({
 		daemon: {
 			state: deps.supervisor.state,
-			lastPing: deps.supervisor.lastPing
+			lastPing: deps.supervisor.lastPing,
+			failure: deps.supervisor.lastFailure
 		},
 		board: deps.store.getBoardState(),
 		capabilities: {
@@ -5162,6 +5163,8 @@ function registerSidecarSkillProvider(deps) {
 }
 //#endregion
 //#region src/supervisor.ts
+/** Enough to name a command and its errno; short enough for one banner. */
+const FAILURE_DETAIL_MAX = 200;
 const defaultSetTimeout = (fn, ms) => globalThis.setTimeout(fn, ms);
 const defaultClearTimeout = (handle) => {
 	globalThis.clearTimeout(handle);
@@ -5172,6 +5175,7 @@ var DaemonSupervisor = class {
 	opts;
 	_state = "probe";
 	_lastPing = null;
+	_lastFailure = null;
 	listeners = /* @__PURE__ */ new Set();
 	timers = /* @__PURE__ */ new Set();
 	/** Only ever non-null for a process this supervisor spawned itself. */
@@ -5208,6 +5212,10 @@ var DaemonSupervisor = class {
 	/** Last successful ping payload; null until the daemon answered once. */
 	get lastPing() {
 		return this._lastPing;
+	}
+	/** Cause of the last hosting failure; null whenever a daemon is answering. */
+	get lastFailure() {
+		return this._lastFailure;
 	}
 	/** Subscribe to state transitions; returns an unsubscribe function. */
 	onStateChange(listener) {
@@ -5291,6 +5299,7 @@ var DaemonSupervisor = class {
 	enterAdopted(info) {
 		this.clearAllTimers();
 		this._lastPing = info;
+		this._lastFailure = null;
 		this.pingFailures = 0;
 		this.hostFailures = 0;
 		this.deps.log("info", "adopted existing daemon", {
@@ -5358,7 +5367,7 @@ var DaemonSupervisor = class {
 			proc = this.deps.spawnDaemon();
 		} catch (error) {
 			this.deps.log("error", "failed to spawn daemon", { error: describeError(error) });
-			this.enterBackoff("spawn-error", null);
+			this.enterBackoff("spawn-error", null, describeError(error));
 			return;
 		}
 		this.proc = proc;
@@ -5374,7 +5383,7 @@ var DaemonSupervisor = class {
 			if (this.invalidated(ep)) return;
 			this.proc = null;
 			this.deps.log("warn", "hosted daemon exit watch failed", { error: describeError(error) });
-			this.enterBackoff("daemon-exit", null);
+			this.enterBackoff("spawn-error", null, describeError(error));
 		});
 		this.schedule(this.opts.hostReadyTimeoutMs, () => {
 			if (this.invalidated(ep)) return;
@@ -5402,6 +5411,7 @@ var DaemonSupervisor = class {
 	enterHosted(info) {
 		this.clearAllTimers();
 		this._lastPing = info;
+		this._lastFailure = null;
 		this.hostFailures = 0;
 		this.pingFailures = 0;
 		this.deps.log("info", "hosted daemon ready", {
@@ -5410,10 +5420,15 @@ var DaemonSupervisor = class {
 		});
 		this.setState("hosted");
 	}
-	enterBackoff(reason, code) {
+	enterBackoff(reason, code, detail = null) {
 		this.epoch += 1;
 		this.clearAllTimers();
 		this.hostFailures += 1;
+		this._lastFailure = {
+			reason,
+			exitCode: code,
+			detail: detail === null ? null : detail.slice(0, FAILURE_DETAIL_MAX)
+		};
 		this.setState("backoff");
 		if (this.hostFailures >= this.opts.backoffLimit) {
 			this.deps.log("error", "hosting failure budget exhausted; giving up", {

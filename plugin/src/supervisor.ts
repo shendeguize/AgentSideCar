@@ -93,6 +93,33 @@ export interface SupervisorOptions {
 
 export type StateListener = (state: SupervisorState, previous: SupervisorState) => void
 
+/** Why the last hosting attempt failed. */
+export type FailureReason =
+  /** The child never ran — a missing or unexecutable command lands here. */
+  | 'spawn-error'
+  /** The child ran and left before answering. */
+  | 'daemon-exit'
+  /** The child stayed silent past the readiness window. */
+  | 'ready-timeout'
+
+/**
+ * The cause behind BACKOFF/FAILED, kept so a surface can report it.
+ *
+ * The supervisor logs every failure, but a remote board reads a socket and an
+ * HTTP payload, not the host's log: without this the page can only say the
+ * daemon is offline, which is the one thing the reader already knows.
+ */
+export interface SupervisorFailure {
+  readonly reason: FailureReason
+  /** Exit code when the child ran and left, else null. */
+  readonly exitCode: number | null
+  /** Bounded error text (e.g. `spawn agent-sidecar ENOENT`), else null. */
+  readonly detail: string | null
+}
+
+/** Enough to name a command and its errno; short enough for one banner. */
+const FAILURE_DETAIL_MAX = 200
+
 const defaultSetTimeout = (fn: () => void, ms: number): TimerHandle =>
   globalThis.setTimeout(fn, ms)
 
@@ -109,6 +136,7 @@ export class DaemonSupervisor {
 
   private _state: SupervisorState = 'probe'
   private _lastPing: PingInfo | null = null
+  private _lastFailure: SupervisorFailure | null = null
   private readonly listeners = new Set<StateListener>()
   private readonly timers = new Set<TimerHandle>()
   /** Only ever non-null for a process this supervisor spawned itself. */
@@ -148,6 +176,11 @@ export class DaemonSupervisor {
   /** Last successful ping payload; null until the daemon answered once. */
   get lastPing(): PingInfo | null {
     return this._lastPing
+  }
+
+  /** Cause of the last hosting failure; null whenever a daemon is answering. */
+  get lastFailure(): SupervisorFailure | null {
+    return this._lastFailure
   }
 
   /** Subscribe to state transitions; returns an unsubscribe function. */
@@ -245,6 +278,7 @@ export class DaemonSupervisor {
   private enterAdopted(info: PingInfo): void {
     this.clearAllTimers()
     this._lastPing = info
+    this._lastFailure = null
     this.pingFailures = 0
     this.hostFailures = 0
     this.deps.log('info', 'adopted existing daemon', { pid: info.pid, version: info.version })
@@ -319,7 +353,7 @@ export class DaemonSupervisor {
       proc = this.deps.spawnDaemon()
     } catch (error) {
       this.deps.log('error', 'failed to spawn daemon', { error: describeError(error) })
-      this.enterBackoff('spawn-error', null)
+      this.enterBackoff('spawn-error', null, describeError(error))
       return
     }
     this.proc = proc
@@ -335,8 +369,10 @@ export class DaemonSupervisor {
       (error: unknown) => {
         if (this.invalidated(ep)) return
         this.proc = null
+        // The host rejects this promise when the child could not be launched
+        // at all, which is a different thing to report than an exit code.
         this.deps.log('warn', 'hosted daemon exit watch failed', { error: describeError(error) })
-        this.enterBackoff('daemon-exit', null)
+        this.enterBackoff('spawn-error', null, describeError(error))
       },
     )
     this.schedule(this.opts.hostReadyTimeoutMs, () => {
@@ -372,6 +408,7 @@ export class DaemonSupervisor {
     // must stay attached so a crash in HOSTED still lands in BACKOFF.
     this.clearAllTimers()
     this._lastPing = info
+    this._lastFailure = null
     this.hostFailures = 0
     this.pingFailures = 0
     this.deps.log('info', 'hosted daemon ready', { pid: info.pid, version: info.version })
@@ -380,10 +417,19 @@ export class DaemonSupervisor {
 
   // -------------------------------------------------------------- backoff
 
-  private enterBackoff(reason: string, code: number | null): void {
+  private enterBackoff(
+    reason: FailureReason,
+    code: number | null,
+    detail: string | null = null,
+  ): void {
     this.epoch += 1
     this.clearAllTimers()
     this.hostFailures += 1
+    this._lastFailure = {
+      reason,
+      exitCode: code,
+      detail: detail === null ? null : detail.slice(0, FAILURE_DETAIL_MAX),
+    }
     this.setState('backoff')
     if (this.hostFailures >= this.opts.backoffLimit) {
       this.deps.log('error', 'hosting failure budget exhausted; giving up', {
