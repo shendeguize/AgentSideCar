@@ -2,6 +2,6 @@
 
 from sidecar.model import Event, Session, Status
 
-__version__ = "0.11.3"
+__version__ = "0.11.4"
 
 __all__ = ["Event", "Session", "Status", "__version__"]
