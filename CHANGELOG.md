@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The DSH plugin now says which settings keys it read at apply time instead of
+  accepting an edit that does nothing. `daemon.*`, `sidecar.*` and `stream.*`
+  are read once, while the client, reconciler and supervisor are assembled, so
+  a settings-document edit to them never took effect — not even after a plugin
+  reload, which re-reads the profile entry config rather than the settings
+  document. Pointing `sidecar.runtimeDir` at another runtime that held a live
+  daemon still adopted the daemon on the default runtime, silently. The plugin
+  now names the dropped keys and points at the profile's cordis patch row,
+  which is the surface that can set them.
+
 ## [0.11.3] - 2026-09-03
 
 ### Fixed
